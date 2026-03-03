@@ -49,6 +49,9 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.agentDid) {
+      body.agent_did = params.agentDid;
+    }
 
     const data = await this.post<{
       access_token: string;
@@ -57,6 +60,7 @@ export class Cred {
       service: string;
       scopes: string[];
       delegation_id: string;
+      receipt?: string;
     }>('/api/v1/delegate', body);
 
     return {
@@ -66,6 +70,7 @@ export class Cred {
       service: data.service,
       scopes: data.scopes,
       delegationId: data.delegation_id,
+      receipt: data.receipt,
     };
   }
 

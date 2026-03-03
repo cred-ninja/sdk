@@ -16,6 +16,8 @@ export interface DelegationResult {
   service: string;
   scopes: string[];
   delegationId: string;
+  /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
+  receipt?: string;
 }
 
 export interface Connection {
@@ -35,6 +37,8 @@ export interface DelegateParams {
    */
   appClientId: string;
   scopes?: string[];
+  /** Agent's DID (did:key:...). If provided, Cred returns a signed receipt. */
+  agentDid?: string;
 }
 
 export interface GetConsentUrlParams {
