@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cred-openai-agents"
+version = "0.1.0"
+description = "Cred OpenAI Agents SDK integration — credential delegation FunctionTool"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Cred", email = "hello@cred.ninja" }]
+keywords = ["cred", "openai", "agents", "oauth", "delegation", "ai-agents"]
+dependencies = [
+    "cred-auth>=0.1.0",
+    "openai-agents>=0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["cred_openai_agents"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
