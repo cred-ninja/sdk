@@ -16,6 +16,7 @@ class DelegationResult:
     scopes: list[str]
     delegation_id: str
     expires_in: Optional[int] = None
+    receipt: Optional[str] = None
 
 
 @dataclass
