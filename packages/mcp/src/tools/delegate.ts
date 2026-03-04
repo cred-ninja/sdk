@@ -1,114 +1,115 @@
-# Security Audits
+/**
+ * cred_delegate Tool
+ *
+ * Request a delegated access token for a service on behalf of a user.
+ */
 
-This document is a running log of security reviews conducted on the packages in this repository. We publish our security posture before launch — not after. If you find something we missed, see [SECURITY.md](./SECURITY.md).
+import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Cred, ConsentRequiredError } from '@credninja/sdk';
+import { TokenCache } from '../token-cache.js';
 
----
+export const DELEGATE_TOOL_NAME = 'cred_delegate';
 
-## Audit 1 — SDK Static Analysis
-**Date:** 2026-03-03
-**Scope:** `packages/sdk`, `packages/sdk-python`, `packages/integrations/*`
-**Method:** Static analysis
+export const DELEGATE_TOOL_DEFINITION = {
+  name: DELEGATE_TOOL_NAME,
+  description:
+    'Request delegated OAuth2 access for a service on behalf of a user. ' +
+    'Returns a delegation handle (not the raw token) if consent has been granted, ' +
+    'or a consent URL if the user needs to authorize. ' +
+    'Pass the handle to cred_use to make authenticated API calls.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      user_id: {
+        type: 'string',
+        description: 'The user to delegate for',
+      },
+      service: {
+        type: 'string',
+        description: 'Service name: google, github, slack, notion, salesforce',
+      },
+      scopes: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'OAuth scopes to request',
+      },
+    },
+    required: ['user_id', 'service'],
+  },
+};
 
-### Summary
-No vulnerabilities found.
+export interface DelegateToolInput {
+  user_id: string;
+  service: string;
+  scopes?: string[];
+}
 
-### What was verified
+export interface DelegateToolContext {
+  cred: Cred;
+  appClientId: string;
+  tokenCache: TokenCache;
+}
 
-**Credential handling**
-- Agent tokens are never logged, included in error messages, or exposed in stack traces
-- `ConsentRequiredError` surfaces only `consentUrl` and `code` — no internal state
-- SDK is stateless between calls
-- All HTTP calls require HTTPS — no plaintext fallback
+export async function handleDelegate(
+  input: DelegateToolInput,
+  context: DelegateToolContext,
+): Promise<CallToolResult> {
+  try {
+    const result = await context.cred.delegate({
+      userId: input.user_id,
+      service: input.service,
+      appClientId: context.appClientId,
+      scopes: input.scopes,
+    });
 
-**Dependency surface**
-- TypeScript SDK: zero runtime dependencies (Node.js built-in `fetch` only)
-- Python SDK: single dependency (`httpx`) — no transitive credential handling
-- Integration packages: depend only on their respective frameworks plus the Python SDK
+    // Store the token in the local cache — never return the raw token to the LLM.
+    // The LLM gets a delegation handle only. It passes this to cred_use to make
+    // actual API calls. This prevents prompt injection from extracting the token.
+    const now = Date.now();
+    const expiresIn = result.expiresIn ?? 3600;
+    const delegationId = context.tokenCache.store({
+      accessToken: result.accessToken,
+      service: input.service,
+      userId: input.user_id,
+      expiresAt: now + expiresIn * 1000,
+    });
 
-**Import isolation**
-- No SDK package imports from proprietary infrastructure
-- All packages are fully self-contained
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            delegationId,
+            service: result.service,
+            expiresIn,
+            note: 'Pass delegationId to cred_use to make authenticated API calls.',
+          }),
+        },
+      ],
+    };
+  } catch (error) {
+    // Handle consent required — return consent URL, don't throw
+    if (error instanceof ConsentRequiredError) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `User needs to authorize. Send them to: ${error.consentUrl}`,
+          },
+        ],
+      };
+    }
 
----
-
-## Audit 2 — Transport Security
-**Date:** 2026-03-03
-**Scope:** `packages/sdk/src/cred.ts`, `packages/sdk-python/cred/client.py`, `packages/mcp/src/config.ts`
-
-### Summary
-One finding identified and resolved.
-
-### Findings
-
-#### ✅ Resolved — Base URL validation
-All three packages now validate the configured base URL at construction time. Non-HTTPS URLs are rejected with an explicit error before any network request is made.
-
-Affected files: `sdk/src/cred.ts`, `sdk-python/cred/client.py`, `mcp/src/config.ts`
-
----
-
-## Audit 3 — MCP Server Security
-**Date:** 2026-03-03
-**Scope:** `packages/mcp/src/`
-**Method:** Threat modeling and code review
-
-### Summary
-Four findings identified, all resolved.
-
-### Findings
-
-#### ✅ Resolved — Token handling in tool results
-MCP tool responses are now constructed to avoid including sensitive credential material. The `cred_delegate` tool returns a short-lived delegation handle; the `cred_use` tool exchanges the handle server-side and returns only the upstream API response.
-
-#### ✅ Resolved — Outbound request validation
-`cred_use` validates the target URL against a per-service allowlist before making any outbound request. Requests to URLs outside the known API surface for a given service are rejected.
-
-| Service | Allowed origins |
-|---------|----------------|
-| Google | 8 specific `*.googleapis.com` API bases |
-| GitHub | `https://api.github.com/` |
-| Slack | `https://slack.com/api/` |
-| Notion | `https://api.notion.com/` |
-| Salesforce | `*.salesforce.com`, `*.force.com` |
-
-#### ✅ Resolved — Header sanitization
-The `Authorization` header cannot be overridden via caller-supplied extra headers. The server-side credential is always used.
-
-#### ✅ Resolved — Response size control
-Upstream API responses are truncated at 32KB. Oversized responses include a `truncated: true` field.
-
----
-
-## Audit 4 — DID Agent Identity
-**Date:** 2026-03-03
-**Scope:** `packages/sdk/src/identity.ts`, `packages/sdk-python/cred/identity.py`
-**Method:** Cryptographic correctness review
-
-### Summary
-No vulnerabilities found.
-
-### What was verified
-
-- `did:key` encoding follows spec — multicodec prefix `0xed01` correct for Ed25519, Base58btc alphabet verified identical in both implementations
-- Both implementations produce identical DIDs for the same key material
-- Key material is copied on read — callers cannot mutate stored keys
-- `verifyDelegationReceipt()` throws if called with the pre-launch placeholder key — no silent acceptance or rejection
-
----
-
-## Known Limitations
-
-| Item | Status | Notes |
-|------|--------|-------|
-| `CRED_PUBLIC_KEY_HEX` | Pre-launch placeholder | Will be replaced with real key before npm/PyPI publish. Throws on use until replaced. |
-| Delegation receipt signing | Pending (API-side) | `receipt` in `DelegationResult` is `undefined` until the Cred API implements server-side signing. |
-| Automated dependency scanning | Pending | `npm audit` / `pip audit` not yet in OSS CI. |
-| Independent third-party audit | Pending | Pre-launch audits are self-conducted. Independent audit planned before v1.0 GA. |
-
----
-
-## Responsible Disclosure
-
-Found something? Email **security@cred.ninja** — do not open a public issue.
-
-We follow coordinated disclosure with a 90-day window. Details in [SECURITY.md](./SECURITY.md).
+    // Handle other errors — return error message, don't crash
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Error: ${message}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+}

