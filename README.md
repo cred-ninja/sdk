@@ -40,6 +40,7 @@ try {
 | [`cred-langchain`](./packages/integrations/langchain) | Python / LangChain | `pip install cred-langchain` |
 | [`cred-crewai`](./packages/integrations/crewai) | Python / CrewAI | `pip install cred-crewai` |
 | [`cred-openai-agents`](./packages/integrations/openai-agents) | Python / OpenAI Agents SDK | `pip install cred-openai-agents` |
+| [`@credninja/mcp`](./packages/mcp) | MCP Server (Claude Desktop) | `npx @credninja/mcp` |
 
 ## Quickstart
 

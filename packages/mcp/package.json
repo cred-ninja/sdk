@@ -1,0 +1,37 @@
+{
+  "name": "@credninja/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Cred — OAuth2 credential delegation for AI agents",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "cred-mcp": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": ["cred", "mcp", "oauth", "delegation", "ai-agents", "credentials"],
+  "author": "Cred",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@credninja/sdk": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.10.6",
+    "tsx": "^4.7.0"
+  }
+}

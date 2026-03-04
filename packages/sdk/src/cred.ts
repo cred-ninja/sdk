@@ -25,7 +25,25 @@ export class Cred {
       throw new CredError('agentToken is required', 'invalid_config', 0);
     }
     this.agentToken = config.agentToken;
-    this.baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    const rawBaseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
+    this.baseUrl = Cred.validateBaseUrl(rawBaseUrl);
+  }
+
+  private static validateBaseUrl(url: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new CredError(`Invalid baseUrl: "${url}" — must be a valid HTTPS URL`, 'invalid_config', 0);
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new CredError(
+        `Invalid baseUrl: must use HTTPS — HTTP is not permitted (agent tokens would be sent in plaintext)`,
+        'invalid_config',
+        0,
+      );
+    }
+    return url.replace(/\/$/, '');
   }
 
   // ── Core methods ────────────────────────────────────────────────────────────

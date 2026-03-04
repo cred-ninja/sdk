@@ -42,6 +42,21 @@ class Cred:
             redirect_user_to(e.consent_url)
     """
 
+    @staticmethod
+    def _validate_base_url(url: str) -> str:
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            raise CredError(f'Invalid base_url: "{url}" — must be a valid HTTPS URL', "invalid_config", 0)
+        if parsed.scheme != "https":
+            raise CredError(
+                "Invalid base_url: must use HTTPS — HTTP is not permitted (agent tokens would be sent in plaintext)",
+                "invalid_config",
+                0,
+            )
+        return url.rstrip("/")
+
     def __init__(
         self,
         agent_token: str,
@@ -50,7 +65,7 @@ class Cred:
         if not agent_token:
             raise CredError("agent_token is required", "invalid_config", 0)
         self._agent_token = agent_token
-        self._base_url = base_url.rstrip("/")
+        self._base_url = self._validate_base_url(base_url)
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._auth_headers(),
@@ -72,6 +87,7 @@ class Cred:
         user_id: str,
         app_client_id: str,
         scopes: Optional[list[str]] = None,
+        agent_did: Optional[str] = None,
     ) -> DelegationResult:
         """Get a delegated access token for a service on behalf of a user.
 
@@ -79,6 +95,13 @@ class Cred:
         deployment config — agents always know which app they belong to.
         User-facing consent flows without app context belong in the portal,
         not the SDK.
+
+        Args:
+            service: The service slug (e.g., "google", "github").
+            user_id: The user ID to delegate on behalf of.
+            app_client_id: The app client ID.
+            scopes: Optional list of scopes to request.
+            agent_did: Optional agent DID for receipt generation.
 
         Raises:
             ConsentRequiredError: User has not yet connected this service.
@@ -92,6 +115,8 @@ class Cred:
         }
         if scopes:
             body["scopes"] = scopes
+        if agent_did:
+            body["agent_did"] = agent_did
 
         data = self._post("/api/v1/delegate", body)
         return DelegationResult(
@@ -101,6 +126,7 @@ class Cred:
             service=data["service"],
             scopes=data["scopes"],
             delegation_id=data["delegation_id"],
+            receipt=data.get("receipt"),
         )
 
     def get_user_connections(

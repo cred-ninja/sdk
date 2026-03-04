@@ -8,7 +8,8 @@
     "packages/sdk-python",
     "packages/integrations/langchain",
     "packages/integrations/crewai",
-    "packages/integrations/openai-agents"
+    "packages/integrations/openai-agents",
+    "packages/mcp"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
