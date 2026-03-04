@@ -8,6 +8,7 @@
 
 export { createCredMcpServer, startServer } from './server.js';
 export { loadConfig, CredMcpConfig } from './config.js';
+export { TokenCache, TokenEntry } from './token-cache.js';
 export {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,
@@ -15,6 +16,13 @@ export {
   DelegateToolInput,
   DelegateToolContext,
 } from './tools/delegate.js';
+export {
+  USE_TOOL_NAME,
+  USE_TOOL_DEFINITION,
+  handleUse,
+  UseToolInput,
+  UseToolContext,
+} from './tools/use.js';
 export {
   STATUS_TOOL_NAME,
   STATUS_TOOL_DEFINITION,

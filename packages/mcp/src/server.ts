@@ -13,6 +13,7 @@ import {
 import { Cred } from '@credninja/sdk';
 
 import { CredMcpConfig } from './config.js';
+import { TokenCache } from './token-cache.js';
 import {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,
@@ -31,6 +32,12 @@ import {
   handleRevoke,
   RevokeToolInput,
 } from './tools/revoke.js';
+import {
+  USE_TOOL_NAME,
+  USE_TOOL_DEFINITION,
+  handleUse,
+  UseToolInput,
+} from './tools/use.js';
 
 /**
  * Create and configure the Cred MCP server.
@@ -42,10 +49,14 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     baseUrl: config.baseUrl,
   });
 
+  // In-process token cache — tokens never leave this process
+  const tokenCache = new TokenCache();
+
   // Tool context passed to all handlers
   const toolContext = {
     cred,
     appClientId: config.appClientId,
+    tokenCache,
   };
 
   const server = new Server(
@@ -65,6 +76,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     return {
       tools: [
         DELEGATE_TOOL_DEFINITION,
+        USE_TOOL_DEFINITION,
         STATUS_TOOL_DEFINITION,
         REVOKE_TOOL_DEFINITION,
       ],
@@ -85,6 +97,9 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
       case REVOKE_TOOL_NAME:
         return handleRevoke(args as unknown as RevokeToolInput, toolContext);
 
+      case USE_TOOL_NAME:
+        return handleUse(args as unknown as UseToolInput, toolContext);
+
       default:
         return {
           content: [
@@ -103,13 +118,54 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
 
 /**
  * Start the MCP server with stdio transport.
+ * Handles SIGTERM/SIGINT for graceful shutdown and cache cleanup.
  */
 export async function startServer(config: CredMcpConfig): Promise<void> {
-  const server = createCredMcpServer(config);
+  const cred = new Cred({
+    agentToken: config.agentToken,
+    baseUrl: config.baseUrl,
+  });
+
+  const tokenCache = new TokenCache();
+
+  const toolContext = {
+    cred,
+    appClientId: config.appClientId,
+    tokenCache,
+  };
+
+  const server = new Server(
+    { name: 'cred-mcp', version: '0.1.0' },
+    { capabilities: { tools: {} } },
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [DELEGATE_TOOL_DEFINITION, USE_TOOL_DEFINITION, STATUS_TOOL_DEFINITION, REVOKE_TOOL_DEFINITION],
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    switch (name) {
+      case DELEGATE_TOOL_NAME: return handleDelegate(args as unknown as DelegateToolInput, toolContext);
+      case USE_TOOL_NAME:      return handleUse(args as unknown as UseToolInput, toolContext);
+      case STATUS_TOOL_NAME:   return handleStatus(args as unknown as StatusToolInput, toolContext);
+      case REVOKE_TOOL_NAME:   return handleRevoke(args as unknown as RevokeToolInput, toolContext);
+      default:
+        return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
+    }
+  });
+
   const transport = new StdioServerTransport();
 
-  await server.connect(transport);
+  const shutdown = async () => {
+    tokenCache.destroy();
+    await server.close();
+    process.exit(0);
+  };
 
-  // Log to stderr so it doesn't interfere with stdio transport
-  console.error('Cred MCP server started');
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+
+  await server.connect(transport);
+  console.error('Cred MCP server started (token-proxy mode: tokens never enter LLM context)');
 }
