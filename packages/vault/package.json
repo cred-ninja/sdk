@@ -1,0 +1,51 @@
+{
+  "name": "@credninja/vault",
+  "version": "0.1.0",
+  "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
+  "license": "MIT",
+  "author": "Cred",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/cjs/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2"
+  },
+  "peerDependencies": {
+    "@credninja/oauth": "*"
+  },
+  "peerDependenciesMeta": {
+    "@credninja/oauth": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20.11.5",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -4,6 +4,8 @@
   "description": "OAuth2 credential delegation for AI agents",
   "private": true,
   "workspaces": [
+    "packages/oauth",
+    "packages/vault",
     "packages/sdk",
     "packages/sdk-python",
     "packages/integrations/langchain",
