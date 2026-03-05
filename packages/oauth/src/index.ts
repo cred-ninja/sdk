@@ -38,6 +38,7 @@ export {
   SALESFORCE_SANDBOX,
 } from './adapters/salesforce.js';
 export { LinearAdapter } from './adapters/linear.js';
+export { HubSpotAdapter } from './adapters/hubspot.js';
 
 // Factory
 export { createAdapter } from './adapters/index.js';

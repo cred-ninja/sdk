@@ -251,6 +251,7 @@ describe('SalesforceAdapter', () => {
 // ── Linear ────────────────────────────────────────────────────────────────────
 
 import { LinearAdapter } from '../adapters/linear.js';
+import { HubSpotAdapter } from '../adapters/hubspot.js';
 
 describe('LinearAdapter', () => {
   it('uses comma-separated scopes', () => {
@@ -347,5 +348,123 @@ describe('LinearAdapter', () => {
 
   it('slug is linear', () => {
     expect(new LinearAdapter().slug).toBe('linear');
+  });
+});
+
+// ── HubSpot ───────────────────────────────────────────────────────────────────
+
+describe('HubSpotAdapter', () => {
+  it('uses space-separated scopes', () => {
+    const adapter = new HubSpotAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read', 'crm.objects.contacts.write', 'content'],
+    }));
+    const scope = url.searchParams.get('scope')!;
+    expect(scope).toBe('crm.objects.contacts.read crm.objects.contacts.write content');
+  });
+
+  it('does not support PKCE', () => {
+    expect(new HubSpotAdapter().supportsPkce).toBe(false);
+  });
+
+  it('ignores codeChallenge even if provided', () => {
+    const adapter = new HubSpotAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read'],
+      codeChallenge: 'should-be-ignored',
+    }));
+    expect(url.searchParams.has('code_challenge')).toBe(false);
+    expect(url.searchParams.has('code_challenge_method')).toBe(false);
+  });
+
+  it('supports token refresh', () => {
+    expect(new HubSpotAdapter().supportsRefresh).toBe(true);
+  });
+
+  it('uses correct authorization URL', () => {
+    const adapter = new HubSpotAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read'],
+    }));
+    expect(url.origin + url.pathname).toBe('https://app.hubspot.com/oauth/authorize');
+  });
+
+  it('uses correct token URL', () => {
+    expect(new HubSpotAdapter().tokenUrl).toBe('https://api.hubapi.com/oauth/v1/token');
+  });
+
+  it('uses account-specific auth URL when accountId is provided', () => {
+    const adapter = new HubSpotAdapter('12345678');
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read'],
+    }));
+    expect(url.origin + url.pathname).toBe('https://app.hubspot.com/oauth/12345678/authorize');
+  });
+
+  it('includes optional_scope when provided', () => {
+    const adapter = new HubSpotAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read'],
+      optionalScope: ['automation', 'content'],
+    } as Parameters<typeof adapter.buildAuthorizationUrl>[0]));
+    expect(url.searchParams.get('optional_scope')).toBe('automation content');
+  });
+
+  it('does not include optional_scope param when not provided', () => {
+    const adapter = new HubSpotAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['crm.objects.contacts.read'],
+    }));
+    expect(url.searchParams.has('optional_scope')).toBe(false);
+  });
+
+  it('exchanges code for tokens', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      access_token: 'hs_tok_123',
+      token_type: 'Bearer',
+      expires_in: 1800,
+      refresh_token: 'hs_refresh_456',
+    }));
+    const adapter = new HubSpotAdapter();
+    const tokens = await adapter.exchangeCodeForTokens({ ...BASE_PARAMS, code: 'auth-code' });
+    expect(tokens.access_token).toBe('hs_tok_123');
+    expect(tokens.refresh_token).toBe('hs_refresh_456');
+    expect(tokens.expires_in).toBe(1800);
+    vi.unstubAllGlobals();
+  });
+
+  it('refreshes tokens', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      access_token: 'hs_new_tok',
+      expires_in: 1800,
+      refresh_token: 'hs_new_refresh',
+    }));
+    const adapter = new HubSpotAdapter();
+    const result = await adapter.refreshAccessToken({
+      refreshToken: 'old_refresh', clientId: 'cid', clientSecret: 'sec',
+    });
+    expect(result.access_token).toBe('hs_new_tok');
+    expect(result.refresh_token).toBe('hs_new_refresh');
+    vi.unstubAllGlobals();
+  });
+
+  it('revokes token via DELETE to refresh-tokens endpoint', async () => {
+    vi.stubGlobal('fetch', mockFetch({}, 204));
+    const adapter = new HubSpotAdapter();
+    await adapter.revokeToken({ token: 'hs_refresh_tok', clientId: 'cid', clientSecret: 'sec' });
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.method).toBe('DELETE');
+    expect(url).toContain('/oauth/v1/refresh-tokens/hs_refresh_tok');
+    vi.unstubAllGlobals();
+  });
+
+  it('slug is hubspot', () => {
+    expect(new HubSpotAdapter().slug).toBe('hubspot');
   });
 });

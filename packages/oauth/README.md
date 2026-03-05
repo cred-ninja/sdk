@@ -2,7 +2,7 @@
 
 **Standalone OAuth2 middleware toolkit for Node.js.** Zero runtime dependencies. TypeScript-first. Works standalone with zero cloud dependency.
 
-Six battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce, Linear. Each with provider-specific quirks handled correctly out of the box.
+Seven battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce, Linear, HubSpot. Each with provider-specific quirks handled correctly out of the box.
 
 ---
 
@@ -181,6 +181,81 @@ const tokens = await client.exchangeCode({ code: '...' });
 - `instance_url` returned in token response (required for Salesforce API calls)
 - Full PKCE support (S256)
 - Sandbox config available via `SALESFORCE_SANDBOX`
+
+### Linear
+
+```typescript
+import { OAuthClient, LinearAdapter } from '@credninja/oauth';
+
+// Default: user actor
+const client = new OAuthClient({
+  adapter: new LinearAdapter(),
+  clientId: '...',
+  clientSecret: '...',
+  redirectUri: '...',
+});
+
+// Agent/service account mode
+const agentClient = new OAuthClient({
+  adapter: new LinearAdapter('app'),
+  clientId: '...',
+  clientSecret: '...',
+  redirectUri: '...',
+});
+
+const { url } = await client.getAuthorizationUrl({
+  scopes: ['read', 'write', 'issues:create'],
+});
+```
+
+**Quirks handled:**
+- Scopes are comma-separated
+- Full PKCE support (S256)
+- Refresh tokens supported (access tokens expire in 24 hours)
+- `actor=app` param added for agent/service account flows
+
+---
+
+### HubSpot
+
+```typescript
+import { OAuthClient, HubSpotAdapter } from '@credninja/oauth';
+
+// Standard (any portal)
+const client = new OAuthClient({
+  adapter: new HubSpotAdapter(),
+  clientId: '...',
+  clientSecret: '...',
+  redirectUri: '...',
+});
+
+// Scoped to a specific HubSpot portal/account
+const portalClient = new OAuthClient({
+  adapter: new HubSpotAdapter('12345678'),
+  clientId: '...',
+  clientSecret: '...',
+  redirectUri: '...',
+});
+
+const { url } = await client.getAuthorizationUrl({
+  scopes: ['crm.objects.contacts.read', 'crm.objects.contacts.write'],
+  optionalScope: ['automation', 'content'], // HubSpot-specific: nice-to-have scopes
+});
+
+const tokens = await client.exchangeCode({ code: '...' });
+// tokens.expires_in: 1800 (30 minutes)
+
+// Refresh before expiry
+const refreshed = await client.refreshToken(tokens.refresh_token!);
+```
+
+**Quirks handled:**
+- Scopes are space-separated
+- No PKCE support
+- Refresh tokens supported (access tokens expire in 30 minutes)
+- Account-specific auth URLs via optional `accountId` constructor param
+- `optional_scope` parameter for nice-to-have permissions
+- Revocation via `DELETE /oauth/v1/refresh-tokens/:token` (not POST)
 
 ---
 
