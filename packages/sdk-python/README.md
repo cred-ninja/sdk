@@ -1,6 +1,6 @@
 # cred-auth
 
-Python SDK for [Cred](https://cred.ninja) — credential delegation for AI agents.
+Python SDK for [Cred](https://cred.ninja). OAuth2 credential delegation for AI agents. Tokens are brokered, never exposed.
 
 ## Install
 
@@ -45,7 +45,7 @@ List all active service connections for a user.
 
 ### `get_consent_url(service, user_id, app_client_id, scopes, redirect_uri) → str`
 
-Build a consent URL. Pure URL construction — no HTTP call.
+Build a consent URL. Pure URL construction, no HTTP call.
 
 ### `revoke(service, user_id, app_client_id=None) → None`
 
@@ -57,3 +57,7 @@ Revoke a user's connection to a service.
 with Cred(agent_token=token) as cred:
     result = cred.delegate(service="github", user_id="u1", app_client_id="app1")
 ```
+
+## Upgrade to Cred Cloud
+
+Need managed token refresh, multi-tenant storage, and audit logs? Sign up at [cred.ninja](https://cred.ninja). Free tier available.
