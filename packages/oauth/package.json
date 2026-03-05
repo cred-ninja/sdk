@@ -1,0 +1,47 @@
+{
+  "name": "@credninja/oauth",
+  "version": "0.1.0",
+  "description": "Zero-dependency OAuth2 client for AI agents. 5 provider adapters, PKCE, Express middleware",
+  "license": "MIT",
+  "author": "CredNinja",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/types/index.d.ts"
+    },
+    "./express": {
+      "import": "./dist/esm/middleware/express.js",
+      "require": "./dist/cjs/middleware/express.js",
+      "types": "./dist/types/middleware/express.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm && npm run build:types",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:types": "tsc -p tsconfig.json --declaration --declarationDir dist/types --emitDeclarationOnly",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
