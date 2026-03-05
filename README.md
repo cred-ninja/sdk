@@ -104,7 +104,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 
 | Package | Description | Install |
 |---------|-------------|---------|
-| [`@credninja/oauth`](./packages/oauth) | Zero-dep OAuth2 client. 6 adapters, PKCE, Express middleware | `npm i @credninja/oauth` |
+| [`@credninja/oauth`](./packages/oauth) | Zero-dep OAuth2 client. 7 adapters, PKCE, Express middleware | `npm i @credninja/oauth` |
 | [`@credninja/vault`](./packages/vault) | Encrypted local token vault. AES-256-GCM, SQLite/file | `npm i @credninja/vault` |
 | [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK. Cloud + standalone | `npm i @credninja/sdk` |
 | [`@credninja/mcp`](./packages/mcp) | MCP server for Claude Desktop | `npx @credninja/mcp` |
@@ -123,6 +123,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 | Notion | read_content, update_content, all Notion OAuth scopes | |
 | Salesforce | api, refresh_token, all Salesforce OAuth scopes | ✅ S256 |
 | Linear | read, write, issues:create, comments:create, admin | ✅ S256 |
+| HubSpot | crm.objects.contacts.read/write, content, automation, and all HubSpot OAuth scopes | |
 
 ## Security
 
