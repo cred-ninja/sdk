@@ -1,11 +1,14 @@
 /**
  * Cred SDK — Main client class
  *
- * Uses fetch (Node 18+ built-in). Zero runtime dependencies.
+ * Cloud mode: Uses fetch (Node 18+ built-in). Zero runtime dependencies.
+ * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
 import {
   CredConfig,
+  CredCloudConfig,
+  CredLocalConfig,
   DelegateParams,
   DelegationResult,
   Connection,
@@ -16,17 +19,88 @@ import { CredError, ConsentRequiredError } from './errors';
 
 const DEFAULT_BASE_URL = 'https://api.cred.ninja';
 
+/**
+ * Type helpers for dynamic imports (avoids requiring these at module load).
+ */
+interface VaultModule {
+  CredVault: new (opts: { passphrase: string; storage: 'sqlite' | 'file'; path: string }) => VaultInstance;
+}
+
+interface VaultInstance {
+  init(): Promise<void>;
+  get(input: {
+    provider: string;
+    userId: string;
+    adapter?: unknown;
+    clientId?: string;
+    clientSecret?: string;
+  }): Promise<{
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: Date;
+    scopes?: string[];
+    provider: string;
+    userId: string;
+  } | null>;
+  store(input: {
+    provider: string;
+    userId: string;
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: Date;
+    scopes?: string[];
+  }): Promise<void>;
+  list(input: { userId: string }): Promise<Array<{
+    provider: string;
+    userId: string;
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: Date;
+    scopes?: string[];
+  }>>;
+  delete(input: { provider: string; userId: string }): Promise<void>;
+}
+
+interface OAuthModule {
+  createAdapter(name: string): { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> };
+}
+
+function isLocalConfig(config: CredConfig): config is CredLocalConfig {
+  return (config as CredLocalConfig).mode === 'local';
+}
+
 export class Cred {
-  private readonly agentToken: string;
-  private readonly baseUrl: string;
+  // ── Cloud mode fields ───────────────────────────────────────────────────────
+  private readonly agentToken?: string;
+  private readonly baseUrl?: string;
+
+  // ── Local mode fields ───────────────────────────────────────────────────────
+  private readonly localConfig?: CredLocalConfig;
+  private vault?: VaultInstance;
+  private vaultInitPromise?: Promise<void>;
+  private readonly isLocal: boolean;
 
   constructor(config: CredConfig) {
-    if (!config.agentToken) {
-      throw new CredError('agentToken is required', 'invalid_config', 0);
+    if (isLocalConfig(config)) {
+      // ── Local mode ──────────────────────────────────────────────────────────
+      this.isLocal = true;
+      this.localConfig = config;
+      if (!config.vault?.passphrase) {
+        throw new CredError('vault.passphrase is required for local mode', 'invalid_config', 0);
+      }
+      if (!config.vault?.path) {
+        throw new CredError('vault.path is required for local mode', 'invalid_config', 0);
+      }
+    } else {
+      // ── Cloud mode (existing behavior — ZERO changes) ───────────────────────
+      this.isLocal = false;
+      if (!config.agentToken) {
+        throw new CredError('agentToken is required', 'invalid_config', 0);
+      }
+      this.agentToken = config.agentToken;
+      const rawBaseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
+      this.baseUrl = Cred.validateBaseUrl(rawBaseUrl);
     }
-    this.agentToken = config.agentToken;
-    const rawBaseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
-    this.baseUrl = Cred.validateBaseUrl(rawBaseUrl);
   }
 
   private static validateBaseUrl(url: string): string {
@@ -46,19 +120,126 @@ export class Cred {
     return url.replace(/\/$/, '');
   }
 
+  // ── Local mode: lazy vault initialization ───────────────────────────────────
+
+  private async ensureVault(): Promise<VaultInstance> {
+    if (this.vault) return this.vault;
+
+    if (this.vaultInitPromise) {
+      await this.vaultInitPromise;
+      return this.vault!;
+    }
+
+    this.vaultInitPromise = this.initVault();
+    await this.vaultInitPromise;
+    return this.vault!;
+  }
+
+  private async initVault(): Promise<void> {
+    const config = this.localConfig!;
+
+    let vaultModule: VaultModule;
+    try {
+      vaultModule = await import('@credninja/vault') as unknown as VaultModule;
+    } catch {
+      throw new CredError(
+        'Local mode requires @credninja/vault. Install it: npm install @credninja/vault',
+        'missing_dependency',
+        0,
+      );
+    }
+
+    const vault = new vaultModule.CredVault({
+      passphrase: config.vault.passphrase,
+      storage: config.vault.storage ?? 'file',
+      path: config.vault.path,
+    });
+    await vault.init();
+    this.vault = vault;
+  }
+
+  private async getAdapter(service: string): Promise<{ refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> }> {
+    let oauthModule: OAuthModule;
+    try {
+      oauthModule = await import('@credninja/oauth') as unknown as OAuthModule;
+    } catch {
+      throw new CredError(
+        'Local mode requires @credninja/oauth. Install it: npm install @credninja/oauth',
+        'missing_dependency',
+        0,
+      );
+    }
+    return oauthModule.createAdapter(service);
+  }
+
   // ── Core methods ────────────────────────────────────────────────────────────
 
   /**
    * Get a delegated access token for a service on behalf of a user.
    *
-   * `appClientId` is required and should be baked into the agent's deployment
-   * config — agents always know which app they belong to. User-facing consent
-   * flows that don't have app context belong in the portal, not the SDK.
+   * Cloud mode: Calls the Cred API. `appClientId` is required.
+   * Local mode: Reads from the local vault. Auto-refreshes if expired.
    *
    * Throws ConsentRequiredError (with `consentUrl`) if the user hasn't
-   * connected the service yet.
+   * connected the service yet (cloud mode only).
    */
   async delegate(params: DelegateParams): Promise<DelegationResult> {
+    if (this.isLocal) {
+      return this.delegateLocal(params);
+    }
+    return this.delegateCloud(params);
+  }
+
+  private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
+    const vault = await this.ensureVault();
+    const config = this.localConfig!;
+    const providerConfig = config.providers[params.service];
+
+    let adapter: { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> } | undefined;
+    let clientId: string | undefined;
+    let clientSecret: string | undefined;
+
+    if (providerConfig) {
+      adapter = await this.getAdapter(params.service);
+      clientId = providerConfig.clientId;
+      clientSecret = providerConfig.clientSecret;
+    }
+
+    const entry = await vault.get({
+      provider: params.service,
+      userId: params.userId,
+      adapter,
+      clientId,
+      clientSecret,
+    });
+
+    if (!entry) {
+      throw new CredError(
+        `No credentials found for ${params.service}/${params.userId} in local vault. ` +
+        `Store tokens first using @credninja/vault before delegating.`,
+        'not_found',
+        404,
+      );
+    }
+
+    const expiresIn = entry.expiresAt
+      ? Math.max(0, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+      : undefined;
+
+    return {
+      accessToken: entry.accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      service: params.service,
+      scopes: entry.scopes ?? [],
+      delegationId: `local_${params.service}_${params.userId}`,
+    };
+  }
+
+  private async delegateCloud(params: DelegateParams): Promise<DelegationResult> {
+    if (!params.appClientId) {
+      throw new CredError('appClientId is required for cloud mode delegation', 'invalid_config', 0);
+    }
     const body: Record<string, unknown> = {
       service: params.service,
       user_id: params.userId,
@@ -94,8 +275,22 @@ export class Cred {
 
   /**
    * List all services a user has actively connected.
+   *
+   * Cloud mode: Calls the Cred API.
+   * Local mode: Lists from the local vault.
    */
   async getUserConnections(userId: string, appClientId?: string): Promise<Connection[]> {
+    if (this.isLocal) {
+      const vault = await this.ensureVault();
+      const entries = await vault.list({ userId });
+      return entries.map((e) => ({
+        slug: e.provider,
+        scopesGranted: e.scopes ?? [],
+        consentedAt: null,
+        appClientId: null,
+      }));
+    }
+
     const params = new URLSearchParams({ user_id: userId });
     if (appClientId) params.set('app_client_id', appClientId);
 
@@ -108,27 +303,43 @@ export class Cred {
   /**
    * Build a consent URL to redirect a user to connect a service.
    * Pure URL construction — no HTTP call.
+   * Only available in cloud mode.
    */
   getConsentUrl(params: GetConsentUrlParams): string {
+    if (this.isLocal) {
+      throw new CredError(
+        'getConsentUrl() is not available in local mode. Use @credninja/oauth directly for OAuth flows.',
+        'not_supported',
+        0,
+      );
+    }
     const url = new URL(`${this.baseUrl}/api/connect/${params.service}/authorize`);
     url.searchParams.set('app_client_id', params.appClientId);
     url.searchParams.set('scopes', params.scopes.join(','));
     url.searchParams.set('redirect_uri', params.redirectUri);
-    // state is generated server-side when user hits the authorize endpoint
     return url.toString();
   }
 
   /**
    * Revoke a user's connection to a service.
+   *
+   * Cloud mode: Calls the Cred API.
+   * Local mode: Deletes from the local vault.
    */
   async revoke(params: RevokeParams): Promise<void> {
+    if (this.isLocal) {
+      const vault = await this.ensureVault();
+      await vault.delete({ provider: params.service, userId: params.userId });
+      return;
+    }
+
     const query = new URLSearchParams({ user_id: params.userId });
     if (params.appClientId) query.set('app_client_id', params.appClientId);
 
     await this.delete(`/api/v1/connections/${params.service}?${query.toString()}`);
   }
 
-  // ── Private HTTP helpers ────────────────────────────────────────────────────
+  // ── Private HTTP helpers (cloud mode only) ──────────────────────────────────
 
   private headers(): Record<string, string> {
     return {

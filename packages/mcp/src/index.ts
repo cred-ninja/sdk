@@ -7,7 +7,8 @@
  */
 
 export { createCredMcpServer, startServer } from './server.js';
-export { loadConfig, CredMcpConfig } from './config.js';
+export { loadConfig } from './config.js';
+export type { CredMcpConfig, CredMcpCloudConfig, CredMcpLocalConfig } from './config.js';
 export { TokenCache, TokenEntry } from './token-cache.js';
 export {
   DELEGATE_TOOL_NAME,

