@@ -11,6 +11,9 @@
     "packages/integrations/langchain",
     "packages/integrations/crewai",
     "packages/integrations/openai-agents",
+    "packages/integrations/autogen",
+    "packages/integrations/semantic-kernel",
+    "packages/integrations/vercel-ai",
     "packages/mcp"
   ],
   "scripts": {

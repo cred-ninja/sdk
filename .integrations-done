@@ -1,0 +1,33 @@
+COMPLETE
+
+## Built 3 new framework integrations
+
+### 1. AutoGen (Microsoft) - packages/integrations/autogen/
+- Package: cred-autogen v1.0.0
+- Factory function: cred_delegate_tool() returns autogen_core.tools.FunctionTool
+- Uses Annotated type hints for parameter descriptions (AutoGen pattern)
+- Pre-configured with agent_token, user_id, app_client_id
+- Agent provides service + scopes at runtime
+- Returns JSON with access_token, token_type, expires_in, service, scopes, delegation_id
+
+### 2. Semantic Kernel (Microsoft) - packages/integrations/semantic-kernel/
+- Package: cred-semantic-kernel v1.0.0
+- CredPlugin class with @kernel_function decorated delegate method
+- Scopes passed as comma-separated string (Semantic Kernel convention for simple params)
+- Pre-configured with agent_token, user_id, app_client_id
+- Returns JSON string with delegation result
+
+### 3. Vercel AI SDK - packages/integrations/vercel-ai/
+- Package: @credninja/ai v1.0.0 (TypeScript/npm)
+- credDelegateTool() factory returns Vercel AI SDK tool()
+- Uses zod schema for service + scopes parameters
+- Uses @credninja/sdk (TS SDK) for delegation
+- CJS + ESM dual build (matching existing SDK pattern)
+- 8/8 vitest tests passing
+
+### Updates
+- Root package.json workspaces updated with all 3 new packages
+- Each package has: pyproject.toml/package.json, README, tests, MIT license
+- READMEs follow existing pattern: install, quickstart, handling consent, Cred Cloud waitlist CTA
+- No em dashes in any copy
+- All tests mock the SDK (no real API calls)
