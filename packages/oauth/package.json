@@ -1,6 +1,6 @@
 {
   "name": "@credninja/oauth",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Zero-dependency OAuth2 client for AI agents. 5 provider adapters, PKCE, Express middleware",
   "license": "MIT",
   "author": "CredNinja",

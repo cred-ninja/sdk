@@ -1,6 +1,6 @@
 {
   "name": "@credninja/vault",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
   "license": "MIT",
   "author": "Cred",
