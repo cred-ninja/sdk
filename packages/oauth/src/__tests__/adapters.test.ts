@@ -247,3 +247,105 @@ describe('SalesforceAdapter', () => {
     expect(adapter.authorizationUrl).toContain('login.salesforce.com');
   });
 });
+
+// ── Linear ────────────────────────────────────────────────────────────────────
+
+import { LinearAdapter } from '../adapters/linear.js';
+
+describe('LinearAdapter', () => {
+  it('uses comma-separated scopes', () => {
+    const adapter = new LinearAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['read', 'write', 'issues:create'],
+    }));
+    const scope = url.searchParams.get('scope')!;
+    expect(scope).toBe('read,write,issues:create');
+  });
+
+  it('supports PKCE (S256)', () => {
+    const adapter = new LinearAdapter();
+    expect(adapter.supportsPkce).toBe(true);
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['read'],
+      codeChallenge: 'test-challenge-123',
+    }));
+    expect(url.searchParams.get('code_challenge')).toBe('test-challenge-123');
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+  });
+
+  it('supports token refresh', () => {
+    expect(new LinearAdapter().supportsRefresh).toBe(true);
+  });
+
+  it('uses correct authorization URL', () => {
+    const adapter = new LinearAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['read'],
+    }));
+    expect(url.origin + url.pathname).toBe('https://linear.app/oauth/authorize');
+  });
+
+  it('uses correct token URL', () => {
+    expect(new LinearAdapter().tokenUrl).toBe('https://api.linear.app/oauth/token');
+  });
+
+  it('has revocation URL', () => {
+    expect(new LinearAdapter().revocationUrl).toBe('https://api.linear.app/oauth/revoke');
+  });
+
+  it('defaults to user actor (no actor param)', () => {
+    const adapter = new LinearAdapter();
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['read'],
+    }));
+    expect(url.searchParams.has('actor')).toBe(false);
+  });
+
+  it('sets actor=app for agent mode', () => {
+    const adapter = new LinearAdapter('app');
+    const url = new URL(adapter.buildAuthorizationUrl({
+      ...BASE_PARAMS,
+      scopes: ['read', 'write'],
+    }));
+    expect(url.searchParams.get('actor')).toBe('app');
+  });
+
+  it('exchanges code for tokens', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      access_token: 'lin_tok_123',
+      token_type: 'Bearer',
+      expires_in: 86399,
+      scope: 'read write',
+      refresh_token: 'lin_refresh_456',
+    }));
+    const adapter = new LinearAdapter();
+    const tokens = await adapter.exchangeCodeForTokens({ ...BASE_PARAMS, code: 'auth-code' });
+    expect(tokens.access_token).toBe('lin_tok_123');
+    expect(tokens.refresh_token).toBe('lin_refresh_456');
+    expect(tokens.expires_in).toBe(86399);
+    vi.unstubAllGlobals();
+  });
+
+  it('refreshes tokens', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      access_token: 'lin_new_tok',
+      expires_in: 86399,
+      refresh_token: 'lin_new_refresh',
+    }));
+    const adapter = new LinearAdapter();
+    const result = await adapter.refreshAccessToken({
+      refreshToken: 'old_refresh', clientId: 'cid', clientSecret: 'sec',
+    });
+    expect(result.access_token).toBe('lin_new_tok');
+    expect(result.refresh_token).toBe('lin_new_refresh');
+    vi.unstubAllGlobals();
+  });
+
+  it('slug is linear', () => {
+    expect(new LinearAdapter().slug).toBe('linear');
+  });
+});

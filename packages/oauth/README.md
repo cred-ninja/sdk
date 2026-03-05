@@ -2,7 +2,7 @@
 
 **Standalone OAuth2 middleware toolkit for Node.js.** Zero runtime dependencies. TypeScript-first. Works standalone with zero cloud dependency.
 
-Five battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce. Each with provider-specific quirks handled correctly out of the box.
+Six battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce, Linear. Each with provider-specific quirks handled correctly out of the box.
 
 ---
 
@@ -186,7 +186,7 @@ const tokens = await client.exchangeCode({ code: '...' });
 
 ## PKCE
 
-PKCE (Proof Key for Code Exchange, RFC 7636) is generated automatically for adapters that support it (Google, Salesforce). You can also use the helpers directly:
+PKCE (Proof Key for Code Exchange, RFC 7636) is generated automatically for adapters that support it (Google, Salesforce, Linear). You can also use the helpers directly:
 
 ```typescript
 import { generatePKCE, generateVerifier, computeChallenge } from '@credninja/oauth';
