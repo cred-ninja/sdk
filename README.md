@@ -3,6 +3,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![npm](https://img.shields.io/npm/v/@credninja/sdk)](https://www.npmjs.com/package/@credninja/sdk)
 [![GitHub stars](https://img.shields.io/github/stars/cred-ninja/sdk)](https://github.com/cred-ninja/sdk)
+[![Website](https://img.shields.io/badge/website-cred.ninja-00ff88)](https://cred.ninja)
 
 **OAuth2 credential delegation for AI agents. Tokens are brokered, never exposed.**
 
