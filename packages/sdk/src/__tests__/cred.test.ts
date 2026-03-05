@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Cred, CredError, ConsentRequiredError } from '../index';
 
 // Mock global fetch
@@ -43,14 +43,14 @@ describe('Cred constructor', () => {
   });
 
   it('accepts custom baseUrl and strips trailing slash', async () => {
-    const custom = new Cred({ agentToken: TOKEN, baseUrl: 'http://localhost:3001/' });
+    const custom = new Cred({ agentToken: TOKEN, baseUrl: 'https://custom.cred.ninja:3001/' });
     mockFetch.mockResolvedValue(mockResponse(200, {
       access_token: 'at', token_type: 'Bearer', service: 'google',
       scopes: [], delegation_id: 'del_1',
     }));
     await custom.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
     expect(mockFetch).toHaveBeenCalledWith(
-      'http://localhost:3001/api/v1/delegate',
+      'https://custom.cred.ninja:3001/api/v1/delegate',
       expect.any(Object),
     );
   });
@@ -240,5 +240,49 @@ describe('Error hierarchy', () => {
     const err = new CredError('test', 'some_code', 400);
     expect(err.name).toBe('CredError');
     expect(err.message).toBe('test');
+  });
+});
+
+// ── Local mode ────────────────────────────────────────────────────────────────
+
+describe('Cred local mode', () => {
+  it('throws when vault.passphrase is missing', () => {
+    expect(() => new Cred({
+      mode: 'local',
+      vault: { passphrase: '', path: '/tmp/test-vault.json' },
+      providers: {},
+    })).toThrow('vault.passphrase is required');
+  });
+
+  it('throws when vault.path is missing', () => {
+    expect(() => new Cred({
+      mode: 'local',
+      vault: { passphrase: 'test', path: '' },
+      providers: {},
+    })).toThrow('vault.path is required');
+  });
+
+  it('constructs without error when config is valid', () => {
+    const local = new Cred({
+      mode: 'local',
+      vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json' },
+      providers: { google: { clientId: 'cid', clientSecret: 'csec' } },
+    });
+    expect(local).toBeInstanceOf(Cred);
+  });
+
+  it('getConsentUrl throws in local mode', () => {
+    const local = new Cred({
+      mode: 'local',
+      vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json' },
+      providers: {},
+    });
+    expect(() => local.getConsentUrl({
+      service: 'google',
+      userId: 'u1',
+      appClientId: 'app1',
+      scopes: ['cal'],
+      redirectUri: 'https://example.com/cb',
+    })).toThrow('not available in local mode');
   });
 });

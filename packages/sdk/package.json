@@ -1,7 +1,7 @@
 {
   "name": "@credninja/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for Cred — credential delegation for AI agents",
+  "description": "OAuth2 credential delegation SDK for AI agents. Works standalone or with Cred Cloud",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
   "types": "dist/cjs/index.d.ts",
@@ -21,7 +21,13 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["cred", "oauth", "delegation", "ai-agents", "credentials"],
+  "keywords": [
+    "cred",
+    "oauth",
+    "delegation",
+    "ai-agents",
+    "credentials"
+  ],
   "author": "Cred",
   "license": "MIT",
   "publishConfig": {
@@ -29,6 +35,18 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@credninja/oauth": "^0.1.0",
+    "@credninja/vault": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@credninja/oauth": {
+      "optional": true
+    },
+    "@credninja/vault": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^20.10.6",

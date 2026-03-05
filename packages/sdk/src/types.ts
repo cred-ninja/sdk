@@ -2,12 +2,47 @@
  * Cred SDK — Type definitions
  */
 
-export interface CredConfig {
+// ── Cloud mode config (existing) ─────────────────────────────────────────────
+
+export interface CredCloudConfig {
   /** Agent token issued by Cred (starts with cred_at_) */
   agentToken: string;
   /** Override the API base URL. Defaults to https://api.cred.ninja */
   baseUrl?: string;
+  mode?: never;
 }
+
+// ── Local mode config (new) ──────────────────────────────────────────────────
+
+export interface CredLocalVaultConfig {
+  /** Passphrase for AES-256-GCM vault encryption */
+  passphrase: string;
+  /** Path to the vault file (e.g. './cred-vault.db') */
+  path: string;
+  /** Storage backend: 'sqlite' or 'file'. Defaults to 'file'. */
+  storage?: 'sqlite' | 'file';
+}
+
+export interface CredProviderConfig {
+  clientId: string;
+  clientSecret: string;
+}
+
+export interface CredLocalConfig {
+  mode: 'local';
+  vault: CredLocalVaultConfig;
+  providers: Record<string, CredProviderConfig>;
+}
+
+// ── Union config ─────────────────────────────────────────────────────────────
+
+/**
+ * Backwards-compatible: existing `{ agentToken }` usage still works.
+ * New local mode: `{ mode: 'local', vault: {...}, providers: {...} }`.
+ */
+export type CredConfig = CredCloudConfig | CredLocalConfig;
+
+// ── Shared types (unchanged) ─────────────────────────────────────────────────
 
 export interface DelegationResult {
   accessToken: string;
@@ -31,11 +66,10 @@ export interface DelegateParams {
   service: string;
   userId: string;
   /**
-   * Your Cred app's client ID. Agents always know this — it's baked into the
-   * agent's deployment config alongside the agent token. User-facing consent
-   * flows without a specific app context are a portal concern, not SDK concern.
+   * Your Cred app's client ID. Required for cloud mode.
+   * Ignored in local mode (provider credentials are set in the constructor).
    */
-  appClientId: string;
+  appClientId?: string;
   scopes?: string[];
   /** Agent's DID (did:key:...). If provided, Cred returns a signed receipt. */
   agentDid?: string;

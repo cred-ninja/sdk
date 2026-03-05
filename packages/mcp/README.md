@@ -1,10 +1,15 @@
 # @credninja/mcp
 
-Model Context Protocol (MCP) server for Cred — OAuth2 credential delegation for AI agents.
+MCP server for OAuth2 credential delegation. Secure token brokering for Claude Desktop and AI agents.
+
+**Your MCP config should be shareable. Credentials shouldn't be in it.**
 
 ## Overview
 
-This MCP server enables AI agents running in Claude Desktop (or any MCP-compatible runtime) to request delegated OAuth2 access tokens through Cred. Zero infrastructure — runs locally on the developer's machine, calls the hosted Cred API.
+This MCP server enables AI agents running in Claude Desktop (or any MCP-compatible runtime) to request delegated OAuth2 access tokens through Cred. Works in two modes:
+
+- **Cloud mode:** calls the hosted Cred API for managed delegation, multi-tenant storage, and audit trails
+- **Local mode:** uses `@credninja/oauth` + `@credninja/vault` for fully offline, self-contained credential management
 
 ## Installation
 
@@ -28,12 +33,14 @@ Add to your Claude Desktop configuration:
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
+### Cloud Mode
+
 ```json
 {
   "mcpServers": {
     "cred": {
       "command": "npx",
-      "args": ["@credninja/mcp"],
+      "args": ["-y", "@credninja/mcp"],
       "env": {
         "CRED_AGENT_TOKEN": "your_agent_token",
         "CRED_APP_CLIENT_ID": "your_app_client_id"
@@ -45,13 +52,47 @@ Add to your Claude Desktop configuration:
 
 Get your `CRED_AGENT_TOKEN` and `CRED_APP_CLIENT_ID` from the [Cred Dashboard](https://cred.ninja/dashboard).
 
+### Local Mode
+
+No Cred account needed. Tokens are stored in an encrypted local vault:
+
+```json
+{
+  "mcpServers": {
+    "cred": {
+      "command": "npx",
+      "args": ["-y", "@credninja/mcp"],
+      "env": {
+        "CRED_MODE": "local",
+        "VAULT_PASSPHRASE": "your-passphrase",
+        "GOOGLE_CLIENT_ID": "...",
+        "GOOGLE_CLIENT_SECRET": "..."
+      }
+    }
+  }
+}
+```
+
+When Claude needs your calendar, you approve interactively. The token is brokered at runtime, never in your config file.
+
 ## Environment Variables
+
+### Cloud Mode
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CRED_AGENT_TOKEN` | Yes | — | Agent token from Cred dashboard |
-| `CRED_APP_CLIENT_ID` | Yes | — | App client ID from Cred dashboard |
+| `CRED_AGENT_TOKEN` | Yes | | Agent token from Cred dashboard |
+| `CRED_APP_CLIENT_ID` | Yes | | App client ID from Cred dashboard |
 | `CRED_BASE_URL` | No | `https://api.cred.ninja` | Cred API base URL |
+
+### Local Mode
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CRED_MODE` | Yes | | Set to `local` |
+| `VAULT_PASSPHRASE` | Yes | | Passphrase for encrypted local vault |
+| `{PROVIDER}_CLIENT_ID` | Yes | | OAuth client ID per provider |
+| `{PROVIDER}_CLIENT_SECRET` | Yes | | OAuth client secret per provider |
 
 ## What the Agent Can Do
 
@@ -63,7 +104,7 @@ Get an OAuth access token for a user's connected service.
 
 **Input:**
 - `user_id` (string, required): The user to delegate for
-- `service` (string, required): Service name — `google`, `github`, `slack`, `notion`, `salesforce`
+- `service` (string, required): Service name. One of `google`, `github`, `slack`, `notion`, `salesforce`.
 - `scopes` (string[], optional): OAuth scopes to request
 
 **Returns:** Access token and expiry, or a consent URL if the user hasn't authorized yet.
@@ -160,8 +201,13 @@ const server = createCredMcpServer(config);
 
 - Agent tokens are scoped to your app and can only access users who have consented
 - Access tokens are short-lived and scoped to the requested permissions
-- The MCP server runs locally — credentials never leave your machine except to call APIs
+- The MCP server runs locally. Credentials never leave your machine except to call APIs.
 - Refresh tokens are never exposed to agents
+- Local mode: AES-256-GCM encryption with PBKDF2 key derivation for vault storage
+
+## Upgrade to Cred Cloud
+
+Local mode is perfect for single-user setups and development. When you need multi-tenant storage, managed token refresh, audit logs, and enterprise-grade isolation, check out [cred.ninja](https://cred.ninja). Same MCP server, managed infrastructure.
 
 ## License
 

@@ -15,6 +15,10 @@ export type {
 } from './identity';
 export type {
   CredConfig,
+  CredCloudConfig,
+  CredLocalConfig,
+  CredLocalVaultConfig,
+  CredProviderConfig,
   DelegationResult,
   Connection,
   DelegateParams,

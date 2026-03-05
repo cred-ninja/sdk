@@ -2,6 +2,7 @@
  * Cred MCP Server
  *
  * Model Context Protocol server that wraps Cred's delegation API.
+ * Supports cloud mode (hosted Cred API) and local mode (local vault).
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -12,7 +13,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 
-import { CredMcpConfig } from './config.js';
+import { CredMcpConfig, CredMcpCloudConfig, CredMcpLocalConfig } from './config.js';
 import { TokenCache } from './token-cache.js';
 import {
   DELEGATE_TOOL_NAME,
@@ -39,15 +40,29 @@ import {
   UseToolInput,
 } from './tools/use.js';
 
+function createCredClient(config: CredMcpConfig): Cred {
+  if (config.mode === 'local') {
+    return new Cred({
+      mode: 'local',
+      vault: {
+        passphrase: config.vaultPassphrase,
+        path: config.vaultPath,
+        storage: config.vaultStorage,
+      },
+      providers: config.providers,
+    });
+  }
+  return new Cred({
+    agentToken: config.agentToken,
+    baseUrl: config.baseUrl,
+  });
+}
+
 /**
  * Create and configure the Cred MCP server.
  */
 export function createCredMcpServer(config: CredMcpConfig): Server {
-  // Create Cred client from config
-  const cred = new Cred({
-    agentToken: config.agentToken,
-    baseUrl: config.baseUrl,
-  });
+  const cred = createCredClient(config);
 
   // In-process token cache — tokens never leave this process
   const tokenCache = new TokenCache();
@@ -55,7 +70,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
   // Tool context passed to all handlers
   const toolContext = {
     cred,
-    appClientId: config.appClientId,
+    appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     tokenCache,
   };
 
@@ -121,16 +136,13 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
  * Handles SIGTERM/SIGINT for graceful shutdown and cache cleanup.
  */
 export async function startServer(config: CredMcpConfig): Promise<void> {
-  const cred = new Cred({
-    agentToken: config.agentToken,
-    baseUrl: config.baseUrl,
-  });
+  const cred = createCredClient(config);
 
   const tokenCache = new TokenCache();
 
   const toolContext = {
     cred,
-    appClientId: config.appClientId,
+    appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     tokenCache,
   };
 
@@ -167,5 +179,6 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
   process.once('SIGINT', shutdown);
 
   await server.connect(transport);
-  console.error('Cred MCP server started (token-proxy mode: tokens never enter LLM context)');
+  const modeLabel = config.mode === 'local' ? 'local vault' : 'cloud API';
+  console.error(`Cred MCP server started in ${modeLabel} mode (tokens never enter LLM context)`);
 }
