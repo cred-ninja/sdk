@@ -1,6 +1,6 @@
 # cred-openai-agents
 
-OpenAI Agents SDK integration for [Cred](https://cred.ninja). OAuth2 credential delegation for AI agents.
+OpenAI Agents SDK integration for Cred. OAuth2 credential delegation for AI agents.
 
 ## Install
 
@@ -43,6 +43,6 @@ The `cred_delegate` tool matches the Cred MCP tool spec:
 When the user hasn't connected the service, the tool raises `ConsentRequiredError`.
 The error's `consent_url` attribute contains the URL to redirect the user.
 
-## Cred Cloud
+## Cred Cloud (Coming Soon)
 
-Managed token refresh, multi-tenant storage, and audit logs → [cred.ninja](https://cred.ninja).
+Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).

@@ -1,6 +1,6 @@
 # cred-auth
 
-Python SDK for [Cred](https://cred.ninja). OAuth2 credential delegation for AI agents. Tokens are brokered, never exposed.
+Python SDK for Cred. OAuth2 credential delegation for AI agents. Tokens are brokered, never exposed.
 
 ## Install
 
@@ -58,6 +58,6 @@ with Cred(agent_token=token) as cred:
     result = cred.delegate(service="github", user_id="u1", app_client_id="app1")
 ```
 
-## Upgrade to Cred Cloud
+## Cred Cloud (Coming Soon)
 
-Need managed token refresh, multi-tenant storage, and audit logs? Sign up at [cred.ninja](https://cred.ninja). Free tier available.
+Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).

@@ -1,6 +1,6 @@
 # cred-crewai
 
-CrewAI integration for [Cred](https://cred.ninja). OAuth2 credential delegation for AI agents.
+CrewAI integration for Cred. OAuth2 credential delegation for AI agents.
 
 ## Install
 
@@ -50,6 +50,6 @@ One `CredTool` per service per agent = clearer intent, smaller decision space fo
 When a user hasn't connected the service yet, `_run()` raises `ConsentRequiredError`.
 Catch it and redirect the user to `e.consent_url` to complete the OAuth flow.
 
-## Cred Cloud
+## Cred Cloud (Coming Soon)
 
-Managed token refresh, multi-tenant storage, and audit logs → [cred.ninja](https://cred.ninja).
+Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).

@@ -1,6 +1,6 @@
 # cred-langchain
 
-LangChain integration for [Cred](https://cred.ninja). OAuth2 credential delegation for AI agents.
+LangChain integration for Cred. OAuth2 credential delegation for AI agents.
 
 ## Install
 
@@ -40,6 +40,6 @@ agent = AgentExecutor(agent=..., tools=tools)
 When a user hasn't connected a service yet, `CredDelegateTool` raises `ConsentRequiredError`.
 Catch it and redirect the user to `e.consent_url` to complete the OAuth flow.
 
-## Cred Cloud
+## Cred Cloud (Coming Soon)
 
-Managed token refresh, multi-tenant storage, and audit logs → [cred.ninja](https://cred.ninja).
+Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
