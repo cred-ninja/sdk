@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Test @credninja/oauth
+        run: npm test --workspace=packages/oauth
+
+      - name: Test @credninja/vault
+        run: npm test --workspace=packages/vault
+
+      - name: Test @credninja/sdk
+        run: npm test --workspace=packages/sdk
+
+      - name: Test @credninja/mcp
+        run: npm test --workspace=packages/mcp
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Build @credninja/oauth
+        run: npm run build --workspace=packages/oauth
+
+      - name: Build @credninja/vault
+        run: npm run build --workspace=packages/vault
+
+      - name: Build @credninja/sdk
+        run: npm run build --workspace=packages/sdk
+
+      - name: Build @credninja/mcp
+        run: npm run build --workspace=packages/mcp
