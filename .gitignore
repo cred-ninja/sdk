@@ -1,6 +1,23 @@
 node_modules/
 dist/
 build/
+
+# Sprint artifacts
+.sprint-*
+.rewire-done
+.content-rewrite-done
+.validation-report.md
+.sprint-logs/
+run-sprint.sh
+validate.sh
+
+# Internal planning docs (not for public repo)
+CLAUDE.md
+PLAN.md
+HANDOFF.md
+VALIDATION.md
+MARKETING-VALIDATION.md
+FINAL-SUBMISSION-VALIDATION.md
 .next/
 out/
 coverage/
@@ -22,3 +39,4 @@ __pycache__/
 venv/
 dist/
 *.dist-info/
+packages/sdk-python/.venv/

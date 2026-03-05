@@ -1,0 +1,44 @@
+COMPLETE
+
+## What was built: @credninja/vault
+
+### Package
+- `packages/vault/package.json` — @credninja/vault@0.1.0, MIT, engines node>=18
+  - dependencies: better-sqlite3@^12.6.2
+  - peerDependencies: @credninja/oauth (optional)
+  - devDependencies: typescript, vitest, @types/better-sqlite3, @types/node
+
+### TypeScript Config
+- `tsconfig.json` — base config
+- `tsconfig.cjs.json` — CommonJS output to dist/cjs/
+- `tsconfig.esm.json` — ESM output to dist/esm/
+
+### Source Modules
+- `src/types.ts` — all type definitions (VaultEntry, StoreInput, GetInput, StoredRow, EncryptedPayload, RefreshAdapter, etc.)
+- `src/crypto.ts` — AES-256-GCM encrypt/decrypt, PBKDF2-SHA256 key derivation (100,000 iterations), random salt generation, random IV per encryption
+- `src/storage/interface.ts` — StorageBackend interface (init, store, get, delete, list)
+- `src/storage/sqlite.ts` — SQLite backend via better-sqlite3, auto-creates table, upsert on store, null-safe get, idempotent delete
+- `src/storage/file.ts` — Encrypted JSON file backend, zero deps, atomic writes (temp+rename), per-value encryption
+- `src/vault.ts` — CredVault class + createVault factory, auto-refresh on expired tokens, passphrase never stored
+- `src/index.ts` — public API barrel exports
+
+### Tests (55 passing)
+- `src/__tests__/crypto.test.ts` — 14 tests: round-trip, wrong passphrase rejection, wrong salt, empty string, unicode, IV uniqueness, hex encoding, GCM tag length
+- `src/__tests__/sqlite.test.ts` — 10 tests: CRUD, upsert, null for missing, idempotent delete, list by userId
+- `src/__tests__/file.test.ts` — 13 tests: CRUD, lazy file creation, atomic writes, no plaintext in file, idempotent delete, list
+- `src/__tests__/vault.test.ts` — 18 tests: SQLite+File backends, unicode tokens, empty string tokens, wrong passphrase throws, auto-refresh with mock adapter, no-refresh for valid tokens, pre-init guard
+
+### README
+- ~6000 chars, covers: installation, quickstart, both backends, auto-refresh, security model, API reference, custom backends, Cred Cloud CTA
+
+### Root workspace
+- Added "packages/vault" to root package.json workspaces array
+
+### Security Constraints Met
+- AES-256-GCM only (crypto.createCipheriv('aes-256-gcm', ...))
+- PBKDF2-SHA256 with 100,000 iterations
+- Never logs tokens, passphrases, or decrypted values
+- Wrong passphrase throws — never returns real data
+- Token values individually encrypted (not just file-level)
+- SQLite: token columns store ciphertext only
+- Passphrase never stored (only derived key in memory during vault lifetime)
