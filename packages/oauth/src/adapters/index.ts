@@ -14,12 +14,14 @@ export {
   SALESFORCE_SANDBOX,
 } from './salesforce.js';
 export type { SalesforceTokenResponse } from './salesforce.js';
+export { LinearAdapter } from './linear.js';
 
 import { GoogleAdapter } from './google.js';
 import { GitHubAdapter } from './github.js';
 import { SlackAdapter } from './slack.js';
 import { NotionAdapter } from './notion.js';
 import { SalesforceAdapter, SALESFORCE_PRODUCTION, SALESFORCE_SANDBOX } from './salesforce.js';
+import { LinearAdapter } from './linear.js';
 import type { ServiceAdapter } from './base.js';
 
 /** Built-in adapter slugs */
@@ -29,7 +31,8 @@ export type BuiltinAdapterSlug =
   | 'slack'
   | 'notion'
   | 'salesforce'
-  | 'salesforce-sandbox';
+  | 'salesforce-sandbox'
+  | 'linear';
 
 /**
  * Create a built-in adapter by slug.
@@ -49,6 +52,8 @@ export function createAdapter(slug: BuiltinAdapterSlug): ServiceAdapter {
       return new SalesforceAdapter(SALESFORCE_PRODUCTION);
     case 'salesforce-sandbox':
       return new SalesforceAdapter(SALESFORCE_SANDBOX);
+    case 'linear':
+      return new LinearAdapter();
     default: {
       const _exhaustive: never = slug;
       throw new Error(`Unknown adapter slug: ${String(_exhaustive)}`);

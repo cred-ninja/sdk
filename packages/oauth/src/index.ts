@@ -37,6 +37,7 @@ export {
   SALESFORCE_PRODUCTION,
   SALESFORCE_SANDBOX,
 } from './adapters/salesforce.js';
+export { LinearAdapter } from './adapters/linear.js';
 
 // Factory
 export { createAdapter } from './adapters/index.js';
