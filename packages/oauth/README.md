@@ -1,6 +1,6 @@
 # @credninja/oauth
 
-**Standalone OAuth2 middleware toolkit for Node.js.** Zero runtime dependencies. TypeScript-first. Works standalone or as part of [Cred Cloud](https://cred.ninja).
+**Standalone OAuth2 middleware toolkit for Node.js.** Zero runtime dependencies. TypeScript-first. Works standalone with zero cloud dependency.
 
 Five battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce. Each with provider-specific quirks handled correctly out of the box.
 
@@ -280,13 +280,13 @@ export class MyProviderAdapter extends BaseServiceAdapter {
 
 ---
 
-## Upgrade to Cred Cloud
+## Cred Cloud (Coming Soon)
 
 Need managed token refresh, multi-tenant storage, audit logs, or AI agent delegation?
 
-→ [cred.ninja](https://cred.ninja). OAuth tokens for AI agents, managed in the cloud.
+Managed multi-tenant credential delegation is coming.
 
-`@credninja/oauth` is the open-source foundation. Cred Cloud adds the production-grade layer on top.
+[Join the waitlist](https://cred.ninja/waitlist) for early access.
 
 ---
 

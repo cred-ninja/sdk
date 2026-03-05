@@ -194,7 +194,7 @@ class RedisBackend implements StorageBackend {
 
 ---
 
-## Upgrade to Cred Cloud
+## Cred Cloud (Coming Soon)
 
 `@credninja/vault` is great for single-machine and CLI use. When you need:
 
@@ -204,7 +204,7 @@ class RedisBackend implements StorageBackend {
 - **Enterprise audit logging**
 - **TEE-grade secret storage**
 
-→ Check out [Cred Cloud](https://cred.ninja). Same API, managed infrastructure.
+Managed cloud vault is coming. [Join the waitlist](https://cred.ninja/waitlist).
 
 ---
 

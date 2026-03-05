@@ -1,6 +1,6 @@
 # @credninja/sdk
 
-OAuth2 credential delegation SDK for AI agents. Works standalone or with [Cred Cloud](https://cred.ninja).
+OAuth2 credential delegation SDK for AI agents. Open-source OAuth2 credential delegation for AI agents.
 
 ## Install
 
@@ -220,8 +220,8 @@ try {
 - Node.js 18+ (uses built-in `fetch`)
 - Zero runtime dependencies
 
-## Works Standalone or With Cred Cloud
+## Standalone First
 
-`@credninja/sdk` connects to Cred Cloud for managed delegation. For fully local operation, use [`@credninja/oauth`](../oauth) + [`@credninja/vault`](../vault). No account needed, no cloud dependency.
+For fully local operation, use [`@credninja/oauth`](../oauth) + [`@credninja/vault`](../vault). No account needed, no cloud dependency.
 
-When you're ready for managed token refresh, multi-tenant storage, and audit logs: [cred.ninja](https://cred.ninja).
+Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).

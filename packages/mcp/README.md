@@ -50,7 +50,7 @@ Add to your Claude Desktop configuration:
 }
 ```
 
-Get your `CRED_AGENT_TOKEN` and `CRED_APP_CLIENT_ID` from the [Cred Dashboard](https://cred.ninja/dashboard).
+Cloud mode requires a Cred account (coming soon). For now, use local mode.
 
 ### Local Mode
 
@@ -205,9 +205,9 @@ const server = createCredMcpServer(config);
 - Refresh tokens are never exposed to agents
 - Local mode: AES-256-GCM encryption with PBKDF2 key derivation for vault storage
 
-## Upgrade to Cred Cloud
+## Cred Cloud (Coming Soon)
 
-Local mode is perfect for single-user setups and development. When you need multi-tenant storage, managed token refresh, audit logs, and enterprise-grade isolation, check out [cred.ninja](https://cred.ninja). Same MCP server, managed infrastructure.
+Local mode is perfect for single-user setups and development. Managed multi-tenant delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
 
 ## License
 

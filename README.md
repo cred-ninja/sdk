@@ -32,39 +32,7 @@ Cred is the missing layer: a credential delegation broker that handles OAuth tok
 
 ## Quickstart
 
-### ☁️ Cloud Mode (Cred Cloud)
-
-Sign up at [cred.ninja](https://cred.ninja), get an agent token, delegate:
-
-```typescript
-import { Cred } from '@credninja/sdk';
-
-const cred = new Cred({ agentToken: process.env.CRED_AGENT_TOKEN });
-
-const { accessToken } = await cred.delegate({
-  userId: 'user_123',
-  appClientId: 'your_app_id',
-  service: 'google',
-  scopes: ['calendar.readonly'],
-});
-// Use accessToken with Google Calendar API. It expires; your agent never stores it.
-```
-
-```python
-from cred_auth import Cred
-
-cred = Cred(agent_token=os.environ["CRED_AGENT_TOKEN"])
-
-result = cred.delegate(
-    user_id="user_123",
-    app_client_id="your_app_id",
-    service="google",
-    scopes=["calendar.readonly"],
-)
-# result.access_token: short-lived, never persisted
-```
-
-### 🏠 Local / Standalone Mode
+### 🏠 Local / Standalone
 
 No account needed. Run OAuth + encrypted vault on your own machine:
 
@@ -107,7 +75,6 @@ const creds = await vault.get({ provider: 'google', userId: 'user-123' });
 
 Your MCP config should be shareable. Credentials shouldn't be in it.
 
-**Cloud mode:**
 ```json
 {
   "mcpServers": {
@@ -115,26 +82,9 @@ Your MCP config should be shareable. Credentials shouldn't be in it.
       "command": "npx",
       "args": ["-y", "@credninja/mcp"],
       "env": {
-        "CRED_AGENT_TOKEN": "your_agent_token",
-        "CRED_APP_CLIENT_ID": "your_app_client_id"
-      }
-    }
-  }
-}
-```
-
-**Local mode:**
-```json
-{
-  "mcpServers": {
-    "cred": {
-      "command": "npx",
-      "args": ["-y", "@credninja/mcp"],
-      "env": {
-        "CRED_MODE": "local",
         "VAULT_PASSPHRASE": "your-passphrase",
-        "GOOGLE_CLIENT_ID": "...",
-        "GOOGLE_CLIENT_SECRET": "..."
+        "GOOGLE_CLIENT_ID": "your-google-client-id",
+        "GOOGLE_CLIENT_SECRET": "your-google-client-secret"
       }
     }
   }
@@ -188,20 +138,15 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 - **Not a vault/secret manager.** HashiCorp Vault manages infrastructure secrets (DB passwords, API keys you own). Cred manages user-delegated OAuth tokens: credentials users grant to your agent.
 - **Not an API proxy.** Cred is not in the hot path of API calls. The agent calls the service directly with the brokered token. (Token proxy mode is optional for maximum security.)
 
-## Works Standalone or With Cred Cloud
+## Standalone First
 
-**Standalone:** Use `@credninja/oauth` + `@credninja/vault` for full local control. No account, no cloud dependency. MIT licensed.
+Use `@credninja/oauth` + `@credninja/vault` for full local control. No account needed, no cloud dependency. MIT licensed. Your credentials stay on your machine.
 
-**Cred Cloud:** Managed token refresh, multi-tenant storage, audit logs, and the full 7-step delegation pipeline. Sign up at [cred.ninja](https://cred.ninja). Free tier available.
-
-Same packages. Your choice of infrastructure.
+**Cred Cloud (waitlist):** Managed multi-tenant credential delegation is coming. [Join the waitlist](https://cred.ninja/waitlist) to get early access.
 
 ## Self-Hosting
 
-This repo (MIT) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. Use them with:
-
-- **Cred Cloud** at [cred.ninja](https://cred.ninja): managed vault, consent flows, OAuth provider management
-- **Your own deployment:** the standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run locally
+This repo (MIT) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. The standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run credential delegation locally or on your own infrastructure.
 
 ## Contributing
 
@@ -219,4 +164,4 @@ MIT. See [LICENSE](./LICENSE).
 
 ⭐ **Star this repo** if credential delegation for AI agents matters to you.
 
-[Sign up for Cred Cloud](https://cred.ninja) · [Read the docs](https://cred.ninja/docs) · [View the roadmap](https://cred.ninja/roadmap)
+[Join the Cloud waitlist](https://cred.ninja/waitlist) · [Read the docs](https://cred.ninja/docs) · [View the roadmap](https://cred.ninja/roadmap)
