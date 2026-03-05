@@ -12,23 +12,23 @@ Cred is credential delegation middleware for AI agents. When your agent needs to
 
 ## Why Cred?
 
-The current state of agent credentials is broken:
+AI agents need to access user accounts (Google Calendar, Slack, GitHub, Notion), but there's no standard way to do it securely:
 
-- **2,000+ MCP servers** have hardcoded credentials in plaintext config files
-- **39M secrets leaked on GitHub** in 2024 alone
+- **2,000+ MCP servers** store OAuth tokens in plaintext config files
+- **No standard exists** for agents to request scoped, short-lived user credentials
 - **OWASP ranks Identity & Privilege Abuse** as the #3 agentic AI risk
-- Every AI framework tutorial says `export API_KEY=sk-...` and moves on
+- Users can't see what agents accessed, or revoke access without revoking everything
 
 Existing solutions don't fit:
 
 | Alternative | Problem |
 |-------------|---------|
-| **Hardcoded creds** | Insecure by default. One leaked config = full account access. |
+| **Tokens in config files** | Insecure by default. One leaked config = full account access. No scoping, no expiry. |
 | **HashiCorp Vault** | Built for infrastructure secrets (DB passwords), not user-delegated OAuth tokens. |
 | **Auth0 Token Vault** | Auth0-only, $1,500+/mo, enterprise sales cycle. |
-| **Roll your own** | 2+ months of OAuth plumbing per app. |
+| **Roll your own OAuth** | 2+ months of plumbing per app. Token rotation, PKCE, refresh handling, per-provider quirks. |
 
-Cred is the missing layer: a credential delegation broker that works with any auth provider and ships in minutes, not months.
+Cred is the missing layer: a credential delegation broker that handles OAuth token lifecycle so agents get short-lived access and users stay in control.
 
 ## Quickstart
 
