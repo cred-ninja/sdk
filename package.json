@@ -1,6 +1,6 @@
 {
   "name": "@cred-ninja/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "OAuth2 credential delegation for AI agents",
   "private": true,
   "workspaces": [
