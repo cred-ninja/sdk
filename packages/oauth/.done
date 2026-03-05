@@ -1,0 +1,46 @@
+COMPLETE
+
+## What was built: @credninja/oauth v0.1.0
+
+### Package structure
+packages/oauth/
+├── src/
+│   ├── index.ts              ← Public API barrel (all exports)
+│   ├── client.ts             ← OAuthClient class
+│   ├── types.ts              ← All TypeScript types + ServiceAdapter interface
+│   ├── pkce.ts               ← generatePKCE, generateVerifier, computeChallenge
+│   ├── adapters/
+│   │   ├── base.ts           ← BaseServiceAdapter (fetch-based, no axios)
+│   │   ├── google.ts         ← GoogleAdapter (access_type=offline, scope prefix, PKCE)
+│   │   ├── github.ts         ← GitHubAdapter (Accept: json, comma scopes, DELETE revoke)
+│   │   ├── slack.ts          ← SlackAdapter (comma scopes, authed_user, Bearer revoke)
+│   │   ├── notion.ts         ← NotionAdapter (Basic auth exchange, no-op revoke)
+│   │   ├── salesforce.ts     ← SalesforceAdapter (instance_url, sandbox config)
+│   │   └── index.ts          ← Barrel + createAdapter() factory
+│   └── middleware/
+│       └── express.ts        ← credOAuth() Express middleware
+└── src/__tests__/
+    ├── pkce.test.ts          ← 10 tests
+    ├── adapters.test.ts      ← 25 tests
+    ├── client.test.ts        ← 13 tests
+    └── middleware.test.ts    ← 6 tests
+
+### Results
+- 54 tests passing, 0 failing
+- Dual CJS + ESM output in dist/
+- TypeScript declarations in dist/types/
+- Zero runtime dependencies (fetch + crypto built-ins only)
+- state = crypto.randomBytes(32).toString('hex')
+- PKCE = base64url(sha256(verifier)), method S256
+
+### Key constraints met
+- ZERO runtime deps ✓
+- state uses crypto.randomBytes ✓
+- Google: access_type=offline, prompt=consent, scope prefix normalization ✓
+- Slack: comma scopes, no PKCE, no refresh (throws), nested authed_user, Bearer revocation ✓
+- Notion: Basic auth header, no PKCE, no refresh (throws), no-op revoke ✓
+- GitHub: Accept: application/json, comma scopes, DELETE+Basic revoke, 404=success ✓
+- Salesforce: instance_url in response, PKCE, sandbox config ✓
+- Express middleware with CSRF state validation ✓
+- README > 1000 chars ✓
+- packages/oauth added to root workspaces ✓
