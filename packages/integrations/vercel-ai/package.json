@@ -1,0 +1,53 @@
+{
+  "name": "@credninja/ai",
+  "version": "1.0.0",
+  "description": "Cred Vercel AI SDK integration — credential delegation tool for Vercel AI agents",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/cjs/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "cred",
+    "vercel",
+    "ai-sdk",
+    "oauth",
+    "delegation",
+    "ai-agents"
+  ],
+  "author": "Cred",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@credninja/sdk": "^1.0.0",
+    "ai": ">=3.0.0",
+    "zod": ">=3.0.0"
+  },
+  "devDependencies": {
+    "@credninja/sdk": "^1.0.0",
+    "@types/node": "^20.10.6",
+    "ai": "^4.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18",
+    "zod": "^3.22.0"
+  }
+}
