@@ -75,6 +75,44 @@ All configuration via environment variables (or `.env` file):
 | `SLACK_CLIENT_SECRET` | No | Slack OAuth client secret |
 | ... | No | Same pattern for NOTION, SALESFORCE, LINEAR, HUBSPOT |
 
+## Docker Deployment (Production)
+
+```bash
+cd packages/server
+cp .env.example .env
+# Edit .env with your credentials
+
+# Build and run
+docker compose up -d
+
+# Verify
+curl http://localhost:3456/health
+```
+
+The vault is stored in a named Docker volume (`cred-data`) — survives container restarts and rebuilds.
+
+### HTTPS with Caddy
+
+For production with automatic TLS:
+
+1. Point your domain's DNS to the server
+2. Edit `Caddyfile` — replace `cred.yourdomain.com` with your domain
+3. Uncomment the `caddy` service in `docker-compose.yml`
+4. Run `docker compose up -d`
+
+Caddy auto-provisions Let's Encrypt certificates. Agents connect via `https://cred.yourdomain.com`.
+
+### Updating
+
+```bash
+cd packages/server
+git pull
+docker compose build
+docker compose up -d
+```
+
+Vault data is in the named volume and survives rebuilds.
+
 ## Two-Machine Setup (Production)
 
 For true credential isolation, run the server on a separate host from your agents:

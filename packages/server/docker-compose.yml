@@ -1,0 +1,46 @@
+# Cred Server — Docker Compose
+#
+# Usage:
+#   cp .env.example .env   # edit with your credentials
+#   docker compose up -d
+#
+# For HTTPS (production):
+#   Set CRED_DOMAIN in .env, uncomment the caddy service below.
+
+services:
+  cred:
+    build:
+      context: ../..
+      dockerfile: packages/server/Dockerfile
+    container_name: cred-server
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3456}:3456"
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3456
+      - VAULT_PATH=/app/data/vault.json
+    volumes:
+      - cred-data:/app/data
+
+  # ── Uncomment for automatic HTTPS ──────────────────────────────────────────
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: cred-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     - cred
+
+volumes:
+  cred-data:
+  # caddy-data:
+  # caddy-config:
