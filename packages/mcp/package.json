@@ -37,8 +37,8 @@
     "@credninja/sdk": "*"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^0.1.0",
-    "@credninja/vault": "^0.1.0"
+    "@credninja/oauth": "^1.0.0",
+    "@credninja/vault": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {
