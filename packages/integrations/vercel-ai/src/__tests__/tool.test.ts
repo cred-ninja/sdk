@@ -182,7 +182,7 @@ describe('credDelegateTool execute', () => {
   it('propagates ConsentRequiredError', async () => {
     const err = new (ConsentRequiredError as any)(
       'User has not consented',
-      'https://api.cred.ninja/api/connect/google/authorize?app_client_id=app_1',
+      'https://cred.example.com/api/connect/google/authorize?app_client_id=app_1',
     );
     mockDelegate.mockRejectedValue(err);
 

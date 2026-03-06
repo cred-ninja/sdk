@@ -1,21 +1,38 @@
 // Demonstrates: agent receives a scoped Google access token via Cred.
 // Raw OAuth credentials never touch the agent host.
 //
-// The agent delegates authentication to Cred, which returns a short-lived
-// access token. The agent uses it to call the Google Drive REST API directly.
+// Prerequisites:
+//   1. A running Cred server (npx @credninja/server) with Google configured
+//   2. Google connected via the server's /connect/google endpoint
+//   3. CRED_SERVER_URL and CRED_AGENT_TOKEN environment variables set
+//
+// Run: npx tsx examples/google-drive-agent.ts
 
-import { CredClient } from "@credninja/sdk";
+import { Cred } from "@credninja/sdk";
 
 async function main() {
-  const client = new CredClient({
-    serverUrl: process.env.CRED_SERVER_URL ?? "http://localhost:3000",
-    agentToken: process.env.CRED_AGENT_TOKEN!,
+  const serverUrl = process.env.CRED_SERVER_URL;
+  if (!serverUrl) {
+    throw new Error("Set CRED_SERVER_URL to your Cred server (e.g. http://localhost:3456)");
+  }
+
+  const agentToken = process.env.CRED_AGENT_TOKEN;
+  if (!agentToken) {
+    throw new Error("Set CRED_AGENT_TOKEN to your agent token (starts with cred_at_)");
+  }
+
+  const cred = new Cred({
+    baseUrl: serverUrl,
+    agentToken,
   });
 
-  // Delegate to Google — Cred handles the OAuth flow and returns a scoped token
-  const credential = await client.delegate("google");
+  // Delegate to Google — Cred handles the token retrieval + refresh
+  const credential = await cred.delegate({
+    service: "google",
+    userId: "default",
+  });
 
-  console.log(`✓ Got Google token (expires ${credential.expiresAt})`);
+  console.log(`✓ Got Google token (expires in ${credential.expiresIn}s)`);
   console.log(`  Scopes: ${credential.scopes.join(", ")}`);
 
   // Use the delegated token to list Drive files
@@ -38,9 +55,6 @@ async function main() {
   for (const file of data.files ?? []) {
     console.log(`  ${file.name} (${file.mimeType})`);
   }
-
-  // CLI equivalent:
-  // GOOGLE_WORKSPACE_CLI_TOKEN=<token> gws drive files list
 }
 
 main().catch((err) => {

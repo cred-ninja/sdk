@@ -83,7 +83,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 |----------|----------|---------|-------------|
 | `CRED_AGENT_TOKEN` | Yes | | Agent token from Cred dashboard |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID from Cred dashboard |
-| `CRED_BASE_URL` | No | `https://api.cred.ninja` | Cred API base URL |
+| `CRED_BASE_URL` | Yes (cloud mode) | — | Your Cred server URL |
 
 ### Local Mode
 
@@ -172,7 +172,7 @@ Claude: I'll need access to your Google Calendar.
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  Claude Desktop │────▶│  @credninja/mcp │────▶│   Cred API      │
-│                 │     │  (local server) │     │ (api.cred.ninja)│
+│                 │     │  (local server) │     │ (your server)   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                                │
                                ▼

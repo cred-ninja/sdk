@@ -14,32 +14,33 @@ function mockResponse(status: number, body: unknown) {
 }
 
 const TOKEN = 'cred_at_test_token';
-const BASE_URL = 'https://api.cred.ninja';
+const BASE_URL = 'https://cred.example.com';
 
 let cred: Cred;
 
 beforeEach(() => {
   vi.resetAllMocks();
-  cred = new Cred({ agentToken: TOKEN });
+  cred = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
 });
 
 // ── constructor ───────────────────────────────────────────────────────────────
 
 describe('Cred constructor', () => {
   it('throws CredError when agentToken is missing', () => {
-    expect(() => new Cred({ agentToken: '' })).toThrow(CredError);
+    expect(() => new Cred({ agentToken: '', baseUrl: BASE_URL })).toThrow(CredError);
   });
 
-  it('uses default baseUrl', () => {
-    mockFetch.mockResolvedValue(mockResponse(200, {
-      access_token: 'at', token_type: 'Bearer', service: 'google',
-      scopes: [], delegation_id: 'del_1',
-    }));
-    cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
-    expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining(BASE_URL),
-      expect.any(Object),
-    );
+  it('throws CredError when baseUrl is missing', () => {
+    expect(() => new Cred({ agentToken: TOKEN } as any)).toThrow('baseUrl is required');
+  });
+
+  it('allows HTTP for localhost', () => {
+    const local = new Cred({ agentToken: TOKEN, baseUrl: 'http://localhost:3456' });
+    expect(local).toBeInstanceOf(Cred);
+  });
+
+  it('rejects HTTP for non-localhost', () => {
+    expect(() => new Cred({ agentToken: TOKEN, baseUrl: 'http://remote.example.com' })).toThrow('HTTPS');
   });
 
   it('accepts custom baseUrl and strips trailing slash', async () => {
@@ -97,7 +98,7 @@ describe('Cred.delegate()', () => {
     mockFetch.mockResolvedValue(mockResponse(403, {
       error: 'consent_required',
       message: 'User has not consented',
-      consent_url: 'https://api.cred.ninja/api/connect/google/authorize?app_client_id=app1',
+      consent_url: 'https://cred.example.com/api/connect/google/authorize?app_client_id=app1',
     }));
 
     await expect(
