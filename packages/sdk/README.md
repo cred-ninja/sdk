@@ -83,7 +83,7 @@ See [`@credninja/oauth`](../oauth) and [`@credninja/vault`](../vault) for full s
 ```typescript
 const cred = new Cred({
   agentToken: 'your_agent_token',   // required, from Cred dashboard
-  baseUrl: 'https://api.cred.ninja', // optional, this is the default
+  baseUrl: 'https://cred.example.com', // your Cred server URL (required)
 });
 ```
 

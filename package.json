@@ -14,7 +14,8 @@
     "packages/integrations/autogen",
     "packages/integrations/semantic-kernel",
     "packages/integrations/vercel-ai",
-    "packages/mcp"
+    "packages/mcp",
+    "packages/server"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

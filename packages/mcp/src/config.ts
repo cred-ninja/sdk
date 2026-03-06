@@ -11,7 +11,7 @@ export interface CredMcpCloudConfig {
   agentToken: string;
   /** Your Cred app's client ID */
   appClientId: string;
-  /** Override the API base URL. Defaults to https://api.cred.ninja */
+  /** Your Cred server URL (e.g. https://cred.example.com) */
   baseUrl: string;
 }
 
@@ -29,7 +29,7 @@ export interface CredMcpLocalConfig {
 
 export type CredMcpConfig = CredMcpCloudConfig | CredMcpLocalConfig;
 
-const DEFAULT_BASE_URL = 'https://api.cred.ninja';
+// No default — users must provide their server URL
 
 function validateBaseUrl(url: string): string {
   let parsed: URL;
@@ -98,7 +98,10 @@ export function loadConfig(args?: string[]): CredMcpConfig {
   // Cloud mode (existing behavior)
   const agentToken = process.env.CRED_AGENT_TOKEN;
   const appClientId = process.env.CRED_APP_CLIENT_ID;
-  const rawBaseUrl = process.env.CRED_BASE_URL ?? DEFAULT_BASE_URL;
+  const rawBaseUrl = process.env.CRED_BASE_URL;
+  if (!rawBaseUrl) {
+    throw new Error('CRED_BASE_URL environment variable is required. Set it to your Cred server URL (e.g. https://cred.example.com)');
+  }
 
   if (!agentToken) {
     throw new Error('CRED_AGENT_TOKEN environment variable is required');

@@ -8,7 +8,7 @@
  * Cloud mode (default):
  *   CRED_AGENT_TOKEN   - Agent token for Cred API authentication
  *   CRED_APP_CLIENT_ID - App client ID for delegation requests
- *   CRED_BASE_URL      - Override API base URL (default: https://api.cred.ninja)
+ *   CRED_BASE_URL      - Your Cred server URL (required for cloud mode)
  *
  * Local mode (--local flag or CRED_MODE=local):
  *   CRED_VAULT_PASSPHRASE - Passphrase for vault encryption
