@@ -11,6 +11,7 @@ export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
   clientId: string;
   clientSecret: string;
+  defaultScopes: string[];
 }
 
 export interface ServerConfig {
@@ -72,7 +73,11 @@ export function loadConfig(): ServerConfig {
     const clientId = process.env[`${env}_CLIENT_ID`];
     const clientSecret = process.env[`${env}_CLIENT_SECRET`];
     if (clientId && clientSecret) {
-      providers.push({ slug, clientId, clientSecret });
+      const defaultScopesRaw = process.env[`${env}_DEFAULT_SCOPES`] ?? '';
+      const defaultScopes = defaultScopesRaw
+        ? defaultScopesRaw.split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      providers.push({ slug, clientId, clientSecret, defaultScopes });
     }
   }
 
