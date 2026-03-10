@@ -143,6 +143,247 @@ export function createServer(config: ServerConfig) {
   });
 
   /**
+   * GET /connect — Admin UI for managing provider connections
+   *
+   * Lists all configured providers with connection status, scope selection,
+   * and connect/disconnect buttons.
+   */
+  app.get('/connect', async (_req: Request, res: Response) => {
+    try {
+      const entries = await vault.list({ userId: 'default' });
+      const connected = new Map(entries.map((e) => [e.provider, e]));
+
+      const COMMON_SCOPES: Record<string, { label: string; value: string }[]> = {
+        google: [
+          { label: 'OpenID', value: 'openid' },
+          { label: 'Email', value: 'email' },
+          { label: 'Profile', value: 'profile' },
+          { label: 'Gmail (read)', value: 'gmail.readonly' },
+          { label: 'Gmail (send)', value: 'gmail.send' },
+          { label: 'Gmail (compose)', value: 'gmail.compose' },
+          { label: 'Calendar (read)', value: 'calendar.readonly' },
+          { label: 'Calendar (events)', value: 'calendar.events' },
+          { label: 'Drive (read)', value: 'drive.readonly' },
+          { label: 'Drive (full)', value: 'drive' },
+          { label: 'Sheets', value: 'spreadsheets' },
+          { label: 'Docs', value: 'documents' },
+        ],
+        github: [
+          { label: 'Repos (public)', value: 'public_repo' },
+          { label: 'Repos (all)', value: 'repo' },
+          { label: 'User', value: 'user' },
+          { label: 'Gists', value: 'gist' },
+          { label: 'Notifications', value: 'notifications' },
+          { label: 'Workflow', value: 'workflow' },
+        ],
+        slack: [
+          { label: 'Chat (write)', value: 'chat:write' },
+          { label: 'Channels (read)', value: 'channels:read' },
+          { label: 'Users (read)', value: 'users:read' },
+          { label: 'Files (write)', value: 'files:write' },
+        ],
+        notion: [
+          { label: 'Read content', value: 'read_content' },
+          { label: 'Update content', value: 'update_content' },
+          { label: 'Insert content', value: 'insert_content' },
+        ],
+        salesforce: [
+          { label: 'API', value: 'api' },
+          { label: 'Refresh token', value: 'refresh_token' },
+        ],
+        linear: [
+          { label: 'Read', value: 'read' },
+          { label: 'Write', value: 'write' },
+          { label: 'Issues (create)', value: 'issues:create' },
+        ],
+        hubspot: [
+          { label: 'CRM (objects)', value: 'crm.objects.contacts.read' },
+          { label: 'CRM (write)', value: 'crm.objects.contacts.write' },
+        ],
+      };
+
+      const providerCards = config.providers.map((p) => {
+        const conn = connected.get(p.slug);
+        const isConnected = !!conn;
+        const scopes = COMMON_SCOPES[p.slug] ?? [];
+        const defaultChecked = p.defaultScopes;
+
+        return `
+          <div class="provider-card ${isConnected ? 'connected' : ''}">
+            <div class="provider-header">
+              <h3>${p.slug}</h3>
+              <span class="status ${isConnected ? 'status-ok' : 'status-none'}">
+                ${isConnected ? '● Connected' : '○ Not connected'}
+              </span>
+            </div>
+            ${isConnected && conn?.scopes?.length ? `<div class="current-scopes">Current scopes: <code>${conn.scopes.join(', ')}</code></div>` : ''}
+            <form class="scope-form" action="/connect/${p.slug}" method="GET" onsubmit="buildScopes(event, '${p.slug}')">
+              <div class="scope-grid">
+                ${scopes.map((s) => `
+                  <label class="scope-item">
+                    <input type="checkbox" name="scope" value="${s.value}"
+                      ${defaultChecked.includes(s.value) ? 'checked' : ''}>
+                    <span class="scope-label">${s.label}</span>
+                    <code class="scope-value">${s.value}</code>
+                  </label>
+                `).join('')}
+              </div>
+              <div class="custom-scope">
+                <input type="text" name="customScopes" placeholder="Additional scopes (comma-separated)">
+              </div>
+              <div class="actions">
+                <button type="submit" class="btn btn-connect">${isConnected ? 'Reconnect' : 'Connect'}</button>
+                ${isConnected ? `<button type="button" class="btn btn-revoke" onclick="revoke('${p.slug}')">Revoke</button>` : ''}
+              </div>
+            </form>
+          </div>
+        `;
+      }).join('');
+
+      res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cred — Provider Connections</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    padding: 32px 24px;
+    min-height: 100vh;
+  }
+  .container { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+  .provider-card {
+    background: #141414;
+    border: 1px solid #222;
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+    transition: border-color 0.2s;
+  }
+  .provider-card.connected { border-color: #1a3a2a; }
+  .provider-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .provider-header h3 {
+    font-size: 18px;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+  .status { font-size: 13px; font-family: monospace; }
+  .status-ok { color: #4ade80; }
+  .status-none { color: #666; }
+  .current-scopes {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 16px;
+    padding: 8px 12px;
+    background: #0d0d0d;
+    border-radius: 6px;
+  }
+  .current-scopes code { color: #d4a73a; font-size: 11px; }
+  .scope-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .scope-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #1a1a1a;
+    border: 1px solid #252525;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 13px;
+  }
+  .scope-item:hover { border-color: #444; background: #1f1f1f; }
+  .scope-item input[type="checkbox"] { accent-color: #4ade80; }
+  .scope-label { flex: 1; }
+  .scope-value { font-size: 10px; color: #555; }
+  .custom-scope { margin-bottom: 16px; }
+  .custom-scope input {
+    width: 100%;
+    padding: 8px 12px;
+    background: #1a1a1a;
+    border: 1px solid #252525;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 13px;
+    font-family: monospace;
+  }
+  .custom-scope input:focus { outline: none; border-color: #4ade80; }
+  .custom-scope input::placeholder { color: #444; }
+  .actions { display: flex; gap: 10px; }
+  .btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-connect { background: #166534; color: #fff; }
+  .btn-connect:hover { background: #15803d; }
+  .btn-revoke { background: #1a1a1a; color: #f87171; border: 1px solid #7f1d1d; }
+  .btn-revoke:hover { background: #2a1010; }
+  .health { font-size: 12px; color: #444; text-align: center; margin-top: 32px; font-family: monospace; }
+  .health a { color: #555; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Cred</h1>
+  <p class="subtitle">Credential delegation for AI agents</p>
+  ${providerCards}
+  <p class="health"><a href="/health">/health</a> · <a href="/providers">/providers</a></p>
+</div>
+<script>
+function buildScopes(e, provider) {
+  e.preventDefault();
+  const form = e.target;
+  const checked = [...form.querySelectorAll('input[name="scope"]:checked')].map(i => i.value);
+  const custom = form.querySelector('input[name="customScopes"]').value;
+  if (custom) checked.push(...custom.split(',').map(s => s.trim()).filter(Boolean));
+  if (checked.length === 0) {
+    alert('Select at least one scope');
+    return;
+  }
+  window.location.href = '/connect/' + provider + '?scopes=' + encodeURIComponent(checked.join(','));
+}
+async function revoke(provider) {
+  if (!confirm('Revoke ' + provider + ' credentials?')) return;
+  const token = prompt('Enter agent token to confirm revocation:');
+  if (!token) return;
+  const res = await fetch('/api/token/' + provider, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + token }
+  });
+  if (res.ok) { alert('Revoked'); location.reload(); }
+  else { alert('Failed: ' + res.status); }
+}
+</script>
+</body>
+</html>`);
+    } catch (err) {
+      console.error('[/connect] Error:', err);
+      res.status(500).json({ error: 'Failed to render admin UI' });
+    }
+  });
+
+  /**
    * GET /connect/:provider — start OAuth flow
    *
    * Opens in a browser. Redirects to the provider's authorization page.
@@ -159,9 +400,11 @@ export function createServer(config: ServerConfig) {
 
       const client = makeOAuthClient(providerConfig);
 
-      // Parse scopes from query string, or use a sensible empty array
+      // Parse scopes from query string, fall back to provider's default scopes from config
       const scopesParam = req.query.scopes as string | undefined;
-      const scopes = scopesParam ? scopesParam.split(',').map((s) => s.trim()) : [];
+      const scopes = scopesParam
+        ? scopesParam.split(',').map((s) => s.trim())
+        : providerConfig.defaultScopes;
 
       const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes });
 
