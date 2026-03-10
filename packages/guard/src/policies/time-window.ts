@@ -73,7 +73,9 @@ export class TimeWindowPolicy implements CredPolicy {
       const hourPart = parts.find((p) => p.type === 'hour');
       const weekdayPart = parts.find((p) => p.type === 'weekday');
 
-      const hour = hourPart ? parseInt(hourPart.value, 10) : date.getUTCHours();
+      // Some ICU/Node versions return "24" for midnight with hour12:false — normalize
+      const rawHour = hourPart ? parseInt(hourPart.value, 10) : date.getUTCHours();
+      const hour = rawHour % 24;
 
       // Map weekday names to numbers (0=Sunday)
       const weekdayMap: Record<string, number> = {
@@ -98,6 +100,8 @@ export class TimeWindowPolicy implements CredPolicy {
   }
 
   private isHourInWindow(hour: number, start: number, end: number): boolean {
+    // Full day window (0-24) is always open
+    if (start === 0 && end === 24) return true;
     // Handle wrap-around (e.g., 22-6 for overnight window)
     if (start <= end) {
       // Normal case: 9-17 means 9:00 to 16:59
