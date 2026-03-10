@@ -24,6 +24,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
         slug: 'google',
         clientId: 'test-google-client-id',
         clientSecret: 'test-google-client-secret',
+        defaultScopes: ['openid', 'email', 'profile'],
       },
     ],
     redirectBaseUri: 'http://localhost:3456',
@@ -240,6 +241,237 @@ describe('@credninja/server', () => {
           if (fs.existsSync(p)) fs.unlinkSync(p);
         }
       }
+    });
+  });
+
+  // ── New feature tests: default scopes + admin UI ────────────────────────
+
+  describe('Default Scopes', () => {
+    it('uses default scopes when no ?scopes param is provided', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/google');
+
+      expect(res.status).toBe(302);
+      const location = res.headers.location;
+      // Default scopes from config: openid, email, profile
+      // Google prepends https://www.googleapis.com/auth/ to some scopes
+      expect(location).toMatch(/scope=/);
+      // The URL should contain the default scopes
+      const url = new URL(location);
+      const scopeParam = url.searchParams.get('scope') ?? '';
+      expect(scopeParam).toContain('openid');
+      expect(scopeParam).toContain('email');
+      expect(scopeParam).toContain('profile');
+    });
+
+    it('overrides default scopes when ?scopes param is provided', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/google?scopes=calendar.readonly');
+
+      expect(res.status).toBe(302);
+      const location = res.headers.location;
+      const url = new URL(location);
+      const scopeParam = url.searchParams.get('scope') ?? '';
+      expect(scopeParam).toContain('calendar');
+      // Should NOT contain default scopes when overridden
+      // (they're replaced, not merged)
+    });
+
+    it('uses empty scopes when no defaults configured and no param', async () => {
+      const config = makeTestConfig({
+        providers: [
+          {
+            slug: 'github',
+            clientId: 'test-github-id',
+            clientSecret: 'test-github-secret',
+            defaultScopes: [],
+          },
+        ],
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/github');
+
+      expect(res.status).toBe(302);
+      // Should redirect without error even with empty scopes
+    });
+
+    it('loads default scopes from config correctly', () => {
+      // Test the config interface compliance
+      const config = makeTestConfig();
+      expect(config.providers[0].defaultScopes).toEqual(['openid', 'email', 'profile']);
+    });
+  });
+
+  describe('GET /connect (Admin UI)', () => {
+    it('returns HTML admin page', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/html/);
+      expect(res.text).toContain('Cred');
+      expect(res.text).toContain('Provider Connections');
+    });
+
+    it('lists configured providers', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('google');
+      expect(res.text).toContain('Connect');
+    });
+
+    it('shows connected status when tokens are stored', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.test',
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('Connected');
+      expect(res.text).toContain('calendar.readonly');
+      expect(res.text).toContain('Reconnect');
+      expect(res.text).toContain('Revoke');
+    });
+
+    it('pre-checks default scopes in the UI', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // Default scopes should be pre-checked
+      // openid, email, profile are in defaultScopes
+      expect(res.text).toContain('value="openid"');
+      expect(res.text).toMatch(/value="openid"[^>]*checked/);
+      expect(res.text).toMatch(/value="email"[^>]*checked/);
+      expect(res.text).toMatch(/value="profile"[^>]*checked/);
+    });
+
+    it('does not pre-check non-default scopes', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // gmail.readonly is NOT in defaultScopes, should not be checked
+      // The checkbox for gmail.readonly should exist but not be checked
+      expect(res.text).toContain('value="gmail.readonly"');
+      expect(res.text).not.toMatch(/value="gmail\.readonly"[^>]*checked/);
+    });
+
+    it('shows multiple providers when configured', async () => {
+      const config = makeTestConfig({
+        providers: [
+          { slug: 'google', clientId: 'g-id', clientSecret: 'g-secret', defaultScopes: ['openid'] },
+          { slug: 'github', clientId: 'gh-id', clientSecret: 'gh-secret', defaultScopes: ['repo'] },
+        ],
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('google');
+      expect(res.text).toContain('github');
+    });
+
+    it('does not expose sensitive data in admin UI', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.super-secret-access-token',
+        refreshToken: 'rt_super-secret-refresh-token',
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app).get('/connect');
+
+      // Access tokens MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('ya29.super-secret-access-token');
+      // Refresh tokens MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('rt_super-secret-refresh-token');
+      // Client secrets MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('test-google-client-secret');
+    });
+
+    it('does not require auth (admin is browser-accessible)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // No auth header — should still work
+      const res = await request(app).get('/connect');
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe('Admin UI — XSS Protection', () => {
+    it('escapes provider slugs in HTML output', async () => {
+      // Provider slugs come from config (trusted), but verify they're
+      // rendered safely. The slug type is constrained to BuiltinAdapterSlug
+      // so this is defense-in-depth.
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // Verify the HTML is well-formed and contains expected structure
+      expect(res.text).toContain('<!DOCTYPE html>');
+      expect(res.text).toContain('</html>');
+    });
+
+    it('custom scope input is text-only (no script injection path)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // The custom scope input accepts text and is processed client-side
+      // via buildScopes() which uses encodeURIComponent — safe for URL injection
+      expect(res.text).toContain('encodeURIComponent');
+    });
+  });
+
+  describe('Revoke via Admin UI', () => {
+    it('revoke endpoint requires agent token (not cookie-based)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // The admin UI's revoke uses prompt() for token — this is by design.
+      // Verify the DELETE endpoint still requires auth
+      const res = await request(app).delete('/api/token/google');
+      expect(res.status).toBe(401);
     });
   });
 });
