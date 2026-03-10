@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -472,6 +473,224 @@ describe('@credninja/server', () => {
       // Verify the DELETE endpoint still requires auth
       const res = await request(app).delete('/api/token/google');
       expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Guard integration tests ─────────────────────────────────────────────
+
+  describe('Guard integration', () => {
+    it('works without guard configured (no guard = no policy enforcement)', async () => {
+      const config = makeTestConfig();
+      // No guard in config — default behavior
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.no-guard-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.accessToken).toBe('ya29.no-guard-test');
+      // No guard field when guard is not configured
+      expect(res.body.guard).toBeUndefined();
+    });
+
+    it('allows requests that pass all guard policies', async () => {
+      const guard = new CredGuard({
+        policies: [
+          scopeFilterPolicy({
+            allowedScopes: {
+              google: ['calendar.readonly', 'gmail.readonly'],
+            },
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.guard-allow',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google?scopes=calendar.readonly')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.accessToken).toBe('ya29.guard-allow');
+      // Guard metadata is present
+      expect(res.body.guard).toBeDefined();
+      expect(res.body.guard.allowed).toBe(true);
+      expect(res.body.guard.policies).toHaveLength(1);
+      expect(res.body.guard.policies[0].name).toBe('scope-filter');
+      expect(res.body.guard.policies[0].decision).toBe('ALLOW');
+    });
+
+    it('denies requests that fail guard policies with 403', async () => {
+      const guard = new CredGuard({
+        policies: [
+          scopeFilterPolicy({
+            allowedScopes: {
+              google: ['calendar.readonly'],
+            },
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.guard-deny',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['gmail.send'],
+      });
+
+      // Request a scope that isn't allowed
+      const res = await request(app)
+        .get('/api/token/google?scopes=gmail.send')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/denied by guard policy/);
+      expect(res.body.policy).toBe('scope-filter');
+      // Access token must NOT leak on denial
+      expect(JSON.stringify(res.body)).not.toContain('ya29');
+    });
+
+    it('enforces rate limits across requests', async () => {
+      const guard = new CredGuard({
+        policies: [
+          rateLimitPolicy({
+            maxRequests: 2,
+            windowMs: 60_000,
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.rate-limit-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      // First two requests should pass
+      const res1 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res1.status).toBe(200);
+
+      const res2 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res2.status).toBe(200);
+
+      // Third request should be rate-limited
+      const res3 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res3.status).toBe(403);
+      expect(res3.body.policy).toBe('rate-limit');
+    });
+
+    it('guard runs after auth — unauthenticated requests never reach guard', async () => {
+      let guardCalled = false;
+      const guard = new CredGuard({
+        policies: [{
+          name: 'spy-policy',
+          evaluate: () => {
+            guardCalled = true;
+            return { decision: 'ALLOW', policy: 'spy-policy' };
+          },
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', 'Bearer cred_at_wrong_token');
+
+      expect(res.status).toBe(401);
+      expect(guardCalled).toBe(false);
+    });
+
+    it('guard does not affect non-token routes', async () => {
+      const guard = new CredGuard({
+        policies: [{
+          name: 'deny-all',
+          evaluate: () => ({ decision: 'DENY' as const, policy: 'deny-all', reason: 'blocked' }),
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // Health and providers should still work
+      const healthRes = await request(app).get('/health');
+      expect(healthRes.status).toBe(200);
+
+      const providersRes = await request(app).get('/providers');
+      expect(providersRes.status).toBe(200);
+    });
+
+    it('guard denial does not leak access tokens', async () => {
+      const guard = new CredGuard({
+        policies: [{
+          name: 'deny-all',
+          evaluate: () => ({ decision: 'DENY' as const, policy: 'deny-all', reason: 'no access' }),
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.secret-should-not-leak',
+        refreshToken: 'rt_also-secret',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(403);
+      const body = JSON.stringify(res.body);
+      expect(body).not.toContain('ya29');
+      expect(body).not.toContain('rt_');
+      expect(body).not.toContain('accessToken');
+      expect(body).not.toContain('refreshToken');
     });
   });
 });

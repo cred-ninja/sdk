@@ -6,6 +6,7 @@
  */
 
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
+import type { CredGuard } from '@credninja/guard';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -31,6 +32,10 @@ export interface ServerConfig {
 
   // Redirect base URI (e.g. http://localhost:3456 or https://cred.example.com)
   redirectBaseUri: string;
+
+  // Guard — optional policy engine for credential delegation guardrails
+  // When provided, evaluates policies before serving delegated tokens.
+  guard?: CredGuard;
 }
 
 const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
