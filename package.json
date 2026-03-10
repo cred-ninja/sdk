@@ -16,7 +16,8 @@
     "packages/integrations/vercel-ai",
     "packages/mcp",
     "packages/server",
-    "packages/create-cred-app"
+    "packages/create-cred-app",
+    "packages/guard"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
