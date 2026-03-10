@@ -130,6 +130,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 | [`@credninja/vault`](./packages/vault) | Encrypted local token vault. AES-256-GCM, SQLite or file storage | `npm i @credninja/vault` |
 | [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK. Cloud + standalone | `npm i @credninja/sdk` |
 | [`@credninja/server`](./packages/server) | Self-hosted credential server. Express, Docker, admin UI | `npm i @credninja/server` |
+| [`@credninja/guard`](./packages/guard) | Policy engine for delegation guardrails. Rate limits, scope filtering, time windows, URL allowlists | `npm i @credninja/guard` |
 | [`@credninja/mcp`](./packages/mcp) | MCP server for Claude Desktop and MCP-compatible runtimes | `npx @credninja/mcp` |
 | [`create-cred-app`](./packages/create-cred-app) | Scaffold a self-hosted Cred server in seconds | `npx create-cred-app` |
 | [`cred-auth`](./packages/sdk-python) | Python SDK | `pip install cred-auth` |
@@ -168,6 +169,37 @@ Need a provider that's not listed? [Adding an adapter](./CONTRIBUTING.md#adding-
 - **Per-account isolation.** Cross-account access requires possession of the account DEK.
 - **Zero runtime dependencies.** TypeScript SDK and OAuth package use only Node.js built-ins.
 - **Pre-launch audits.** 6 security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
+
+## Guard — Policy Engine
+
+[`@credninja/guard`](./packages/guard) adds runtime guardrails to credential delegation. Composable policies that run before any token is issued.
+
+```typescript
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy, timeWindowPolicy } from '@credninja/guard';
+
+const guard = new CredGuard({
+  policies: [
+    rateLimitPolicy({ maxRequests: 10, windowMs: 60_000 }),
+    scopeFilterPolicy({
+      allowedScopes: {
+        google: ['calendar.readonly', 'gmail.readonly'],
+        github: ['repo', 'read:user'],
+      },
+    }),
+    timeWindowPolicy({ allowedHours: { start: 9, end: 17 }, timezone: 'America/New_York' }),
+  ],
+});
+
+// Wire into @credninja/server
+const { app } = createServer({ ...config, guard });
+
+// Or wrap MCP tool handlers
+const guardedHandler = guard.wrapMcpTool(handleUse);
+```
+
+**Built-in policies:** rate limiting (per agent per provider), scope filtering (deny-by-default), time windows (IANA timezone), URL allowlists (prefix + regex), max TTL caps. Write custom policies with a single `evaluate()` method.
+
+**Policy chain:** first DENY short-circuits, no policies = ALLOW (opt-in), errors = DENY (fail-closed). Every decision produces an Ed25519-compatible audit event.
 
 ## What Cred Is NOT
 
