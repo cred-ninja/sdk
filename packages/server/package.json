@@ -41,6 +41,9 @@
     "@credninja/vault": "^1.0.0",
     "express": "^4.21.0"
   },
+  "optionalDependencies": {
+    "@credninja/guard": "^0.1.0"
+  },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.6",

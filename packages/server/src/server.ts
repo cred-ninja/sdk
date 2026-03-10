@@ -22,6 +22,7 @@ import { CredVault } from '@credninja/vault';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import { ServerConfig, ProviderConfig } from './config.js';
+import { createExpressMiddleware } from '@credninja/guard';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -499,15 +500,44 @@ async function revoke(provider) {
     }
   });
 
+  // ── Guard middleware (optional) ─────────────────────────────────────────
+
+  /**
+   * If a CredGuard instance is provided in config, mount its express middleware
+   * on the token delegation route. Guard runs after agent auth, before token
+   * retrieval. Denied requests get 403 with policy details.
+   */
+  const guardMiddleware = config.guard
+    ? createExpressMiddleware(config.guard, {
+        onDeny: (_req, res, decision) => {
+          // Log guard denials for audit
+          console.warn(
+            `[guard] DENIED — policy: ${decision.deniedBy?.policy}, reason: ${decision.deniedBy?.reason}`
+          );
+          res.status(403).json({
+            error: 'Request denied by guard policy',
+            policy: decision.deniedBy?.policy,
+            reason: decision.deniedBy?.reason,
+          });
+        },
+      })
+    : null;
+
   /**
    * GET /api/token/:provider — Delegation endpoint (agent-facing)
    *
    * Returns a valid access token for the requested provider.
    * Auto-refreshes expired tokens using the stored refresh token.
+   * When guard is configured, policies are evaluated before token retrieval.
    *
    * Auth: Bearer cred_at_<token>
    */
-  app.get('/api/token/:provider', requireAgentAuth, async (req: Request, res: Response) => {
+  const tokenRouteHandlers: Array<express.RequestHandler> = [requireAgentAuth];
+  if (guardMiddleware) {
+    tokenRouteHandlers.push(guardMiddleware);
+  }
+
+  app.get('/api/token/:provider', ...tokenRouteHandlers, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
       const providerConfig = getProviderConfig(slug);
@@ -550,11 +580,24 @@ async function revoke(provider) {
       }
 
       // Return the delegated token — never the refresh token
+      const guardDecision = (req as any).guardDecision;
+      const effectiveScopes = guardDecision?.effectiveScopes ?? entry.scopes ?? [];
+
       res.json({
         provider: slug,
         accessToken: entry.accessToken,
         expiresAt: entry.expiresAt?.toISOString() ?? null,
-        scopes: entry.scopes ?? [],
+        scopes: effectiveScopes,
+        ...(guardDecision && {
+          guard: {
+            allowed: guardDecision.allowed,
+            evaluationMs: guardDecision.evaluationMs,
+            policies: guardDecision.results.map((r: any) => ({
+              name: r.policy,
+              decision: r.decision,
+            })),
+          },
+        }),
       });
     } catch (err) {
       console.error(`[/api/token/${req.params.provider}] Error:`, err);
