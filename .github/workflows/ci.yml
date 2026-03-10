@@ -37,11 +37,17 @@ jobs:
       - name: Build @credninja/vault
         run: npm run build --workspace=packages/vault
 
+      - name: Build @credninja/guard
+        run: npm run build --workspace=packages/guard
+
       - name: Test @credninja/oauth
         run: npm test --workspace=packages/oauth
 
       - name: Test @credninja/vault
         run: npm test --workspace=packages/vault
+
+      - name: Test @credninja/guard
+        run: npm test --workspace=packages/guard
 
       - name: Test @credninja/sdk
         run: npm test --workspace=packages/sdk
@@ -65,6 +71,9 @@ jobs:
 
       - name: Build @credninja/vault
         run: npm run build --workspace=packages/vault
+
+      - name: Build @credninja/guard
+        run: npm run build --workspace=packages/guard
 
       - name: Build @credninja/sdk
         run: npm run build --workspace=packages/sdk
