@@ -30,6 +30,13 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
+      # Build dependencies first — SDK and server tests import vault/oauth at runtime
+      - name: Build @credninja/oauth
+        run: npm run build --workspace=packages/oauth
+
+      - name: Build @credninja/vault
+        run: npm run build --workspace=packages/vault
+
       - name: Test @credninja/oauth
         run: npm test --workspace=packages/oauth
 
@@ -39,8 +46,8 @@ jobs:
       - name: Test @credninja/sdk
         run: npm test --workspace=packages/sdk
 
-      - name: Test @credninja/mcp
-        run: npm test --workspace=packages/mcp
+      - name: Test @credninja/server
+        run: npm test --workspace=packages/server
 
   build:
     name: Build
