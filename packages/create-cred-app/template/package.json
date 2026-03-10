@@ -1,0 +1,13 @@
+{
+  "name": "my-cred-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "cred-server",
+    "dev": "cred-server"
+  },
+  "dependencies": {
+    "@credninja/server": "^1.0.0"
+  }
+}
