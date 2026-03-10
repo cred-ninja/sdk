@@ -33,9 +33,28 @@ Cred is the missing layer: a credential delegation broker that handles OAuth tok
 
 ## Quickstart
 
-### 🏠 Local / Standalone
+### 1. Fastest: Create an App
 
-No account needed. Run OAuth + encrypted vault on your own machine:
+```bash
+npx create-cred-app my-cred-server
+cd my-cred-server
+npm start
+```
+
+Open [http://localhost:3456/connect](http://localhost:3456/connect) to connect OAuth providers. Give your agent the token from `.env`.
+
+### 2. Self-Hosted Server
+
+```bash
+npm install @credninja/server
+npx cred-server
+```
+
+Configure providers via environment variables. See the [server docs](./packages/server) for Docker, HTTPS, and two-machine production setups.
+
+### 3. Local OAuth + Vault
+
+No server needed. Run OAuth + encrypted vault in your own process:
 
 ```typescript
 import { OAuthClient, GoogleAdapter } from '@credninja/oauth';
@@ -72,7 +91,7 @@ await vault.store({
 const creds = await vault.get({ provider: 'google', userId: 'user-123' });
 ```
 
-### 🔌 MCP Server (Claude Desktop)
+### 4. MCP Server (Claude Desktop)
 
 Your MCP config should be shareable. Credentials shouldn't be in it.
 
@@ -103,28 +122,42 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 
 ## Packages
 
+### Core
+
 | Package | Description | Install |
 |---------|-------------|---------|
-| [`@credninja/oauth`](./packages/oauth) | Zero-dep OAuth2 client. 7 adapters, PKCE, Express middleware | `npm i @credninja/oauth` |
-| [`@credninja/vault`](./packages/vault) | Encrypted local token vault. AES-256-GCM, SQLite/file | `npm i @credninja/vault` |
+| [`@credninja/oauth`](./packages/oauth) | Zero-dep OAuth2 client. 7 provider adapters, PKCE, Express middleware | `npm i @credninja/oauth` |
+| [`@credninja/vault`](./packages/vault) | Encrypted local token vault. AES-256-GCM, SQLite or file storage | `npm i @credninja/vault` |
 | [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK. Cloud + standalone | `npm i @credninja/sdk` |
-| [`@credninja/mcp`](./packages/mcp) | MCP server for Claude Desktop | `npx @credninja/mcp` |
+| [`@credninja/server`](./packages/server) | Self-hosted credential server. Express, Docker, admin UI | `npm i @credninja/server` |
+| [`@credninja/mcp`](./packages/mcp) | MCP server for Claude Desktop and MCP-compatible runtimes | `npx @credninja/mcp` |
+| [`create-cred-app`](./packages/create-cred-app) | Scaffold a self-hosted Cred server in seconds | `npx create-cred-app` |
 | [`cred-auth`](./packages/sdk-python) | Python SDK | `pip install cred-auth` |
-| [`cred-langchain`](./packages/integrations/langchain) | LangChain integration | `pip install cred-langchain` |
-| [`cred-crewai`](./packages/integrations/crewai) | CrewAI integration | `pip install cred-crewai` |
-| [`cred-openai-agents`](./packages/integrations/openai-agents) | OpenAI Agents SDK integration | `pip install cred-openai-agents` |
+
+### Framework Integrations
+
+| Package | Framework | Install |
+|---------|-----------|---------|
+| [`@credninja/ai`](./packages/integrations/vercel-ai) | Vercel AI SDK | `npm i @credninja/ai` |
+| [`cred-langchain`](./packages/integrations/langchain) | LangChain | `pip install cred-langchain` |
+| [`cred-crewai`](./packages/integrations/crewai) | CrewAI | `pip install cred-crewai` |
+| [`cred-openai-agents`](./packages/integrations/openai-agents) | OpenAI Agents SDK | `pip install cred-openai-agents` |
+| [`cred-autogen`](./packages/integrations/autogen) | Microsoft AutoGen | `pip install cred-autogen` |
+| [`cred-semantic-kernel`](./packages/integrations/semantic-kernel) | Microsoft Semantic Kernel | `pip install cred-semantic-kernel` |
 
 ## Supported Services
 
 | Service | Scopes | PKCE |
 |---------|--------|------|
-| Google | Gmail, Calendar, Drive, all Google OAuth scopes | ✅ S256 |
+| Google | Gmail, Calendar, Drive, all Google OAuth scopes | S256 |
 | GitHub | repo, read:user, all GitHub OAuth scopes | |
 | Slack | channels:read, chat:write, all Slack OAuth scopes | |
 | Notion | read_content, update_content, all Notion OAuth scopes | |
-| Salesforce | api, refresh_token, all Salesforce OAuth scopes | ✅ S256 |
-| Linear | read, write, issues:create, comments:create, admin | ✅ S256 |
-| HubSpot | crm.objects.contacts.read/write, content, automation, and all HubSpot OAuth scopes | |
+| Salesforce | api, refresh_token, all Salesforce OAuth scopes | S256 |
+| Linear | read, write, issues:create, comments:create, admin | S256 |
+| HubSpot | crm.objects.contacts.read/write, content, automation, all HubSpot OAuth scopes | |
+
+Need a provider that's not listed? [Adding an adapter](./CONTRIBUTING.md#adding-an-oauth-provider-adapter) is the most common contribution.
 
 ## Security
 
@@ -134,6 +167,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 - **Append-only audit trail.** Cryptographic delegation receipts (Ed25519 JWS).
 - **Per-account isolation.** Cross-account access requires possession of the account DEK.
 - **Zero runtime dependencies.** TypeScript SDK and OAuth package use only Node.js built-ins.
+- **Pre-launch audits.** 6 security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
 
 ## What Cred Is NOT
 
@@ -150,6 +184,8 @@ Use `@credninja/oauth` + `@credninja/vault` for full local control. No account n
 ## Self-Hosting
 
 This repo (MIT) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. The standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run credential delegation locally or on your own infrastructure.
+
+For production deployments, [`@credninja/server`](./packages/server) includes Docker Compose, Caddy HTTPS, and two-machine isolation guides.
 
 ## Contributing
 
