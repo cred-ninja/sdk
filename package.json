@@ -15,7 +15,8 @@
     "packages/integrations/semantic-kernel",
     "packages/integrations/vercel-ai",
     "packages/mcp",
-    "packages/server"
+    "packages/server",
+    "packages/create-cred-app"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

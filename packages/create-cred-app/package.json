@@ -1,0 +1,29 @@
+{
+  "name": "create-cred-app",
+  "version": "0.1.0",
+  "description": "Scaffold a self-hosted Cred server in seconds",
+  "bin": {
+    "create-cred-app": "./bin/create.mjs"
+  },
+  "files": [
+    "bin",
+    "template"
+  ],
+  "keywords": [
+    "cred",
+    "oauth",
+    "delegation",
+    "ai-agents",
+    "credentials",
+    "create",
+    "scaffold"
+  ],
+  "author": "Cred",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
