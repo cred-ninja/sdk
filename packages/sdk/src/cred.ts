@@ -14,6 +14,8 @@ import {
   Connection,
   GetConsentUrlParams,
   RevokeParams,
+  TofuDelegateParams,
+  TofuDelegationResult,
 } from './types';
 import { CredError, ConsentRequiredError } from './errors';
 
@@ -337,6 +339,53 @@ export class Cred {
     if (params.appClientId) query.set('app_client_id', params.appClientId);
 
     await this.delete(`/api/v1/connections/${params.service}?${query.toString()}`);
+  }
+
+  // ── TOFU delegation ──────────────────────────────────────────────────────────
+
+  /**
+   * TOFU (Trust-On-First-Use) delegation for agents that have not yet been claimed.
+   *
+   * The agent signs a payload with its Ed25519 private key. The server verifies
+   * the signature against the registered fingerprint and returns a short-lived token.
+   *
+   * Cloud mode only — throws CredError in local mode.
+   */
+  async tofuDelegate(params: TofuDelegateParams): Promise<TofuDelegationResult> {
+    if (this.isLocal) {
+      throw new CredError(
+        'tofuDelegate() is not available in local mode. TOFU delegation requires the Cred API.',
+        'not_supported',
+        0,
+      );
+    }
+
+    const body = {
+      fingerprint: params.fingerprint,
+      payload: Buffer.from(params.payload).toString('base64'),
+      signature: Buffer.from(params.signature).toString('base64'),
+      requestedScopes: params.requestedScopes ?? [],
+    };
+
+    const data = await this.post<{
+      agent_id: string;
+      fingerprint: string;
+      status: 'unclaimed' | 'claimed';
+      owner_user_id: string | null;
+      token: string;
+      token_expires_at: string;
+      granted_scopes: string[];
+    }>('/api/v1/tofu/delegate', body);
+
+    return {
+      agentId: data.agent_id,
+      fingerprint: data.fingerprint,
+      status: data.status,
+      ownerUserId: data.owner_user_id,
+      token: data.token,
+      tokenExpiresAt: data.token_expires_at,
+      grantedScopes: data.granted_scopes,
+    };
   }
 
   // ── Private HTTP helpers (cloud mode only) ──────────────────────────────────

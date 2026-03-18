@@ -1,4 +1,4 @@
-import type { StorageBackend } from './interface.js';
+import type { StorageBackend, AgentIdentityStoredRow } from './interface.js';
 import type { StoredRow } from '../types.js';
 
 /**
@@ -36,6 +36,20 @@ export class SQLiteBackend implements StorageBackend {
         created_at         TEXT NOT NULL,
         updated_at         TEXT NOT NULL,
         PRIMARY KEY (provider, user_id)
+      )
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_agent_identities (
+        agent_id       TEXT NOT NULL PRIMARY KEY,
+        public_key     TEXT NOT NULL,
+        fingerprint    TEXT NOT NULL UNIQUE,
+        status         TEXT NOT NULL DEFAULT 'unclaimed',
+        owner_user_id  TEXT,
+        initial_scopes TEXT NOT NULL DEFAULT '[]',
+        metadata       TEXT NOT NULL DEFAULT '{}',
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
       )
     `);
   }
@@ -144,5 +158,84 @@ export class SQLiteBackend implements StorageBackend {
     `).all(userId) as StoredRow[];
 
     return rows;
+  }
+
+  // ── Agent Identity (TOFU) ──────────────────────────────────────────────────
+
+  registerAgent(row: AgentIdentityStoredRow): void {
+    const db = this.ensureDb();
+
+    db.prepare(`
+      INSERT INTO vault_agent_identities (
+        agent_id, public_key, fingerprint, status,
+        owner_user_id, initial_scopes, metadata,
+        created_at, updated_at
+      ) VALUES (
+        @agentId, @publicKey, @fingerprint, @status,
+        @ownerUserId, @initialScopes, @metadata,
+        @createdAt, @updatedAt
+      )
+    `).run({
+      agentId: row.agentId,
+      publicKey: row.publicKey,
+      fingerprint: row.fingerprint,
+      status: row.status,
+      ownerUserId: row.ownerUserId,
+      initialScopes: row.initialScopes,
+      metadata: row.metadata,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
+  getAgent(fingerprint: string): AgentIdentityStoredRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        agent_id       AS agentId,
+        public_key     AS publicKey,
+        fingerprint,
+        status,
+        owner_user_id  AS ownerUserId,
+        initial_scopes AS initialScopes,
+        metadata,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt
+      FROM vault_agent_identities
+      WHERE fingerprint = ?
+    `).get(fingerprint) as AgentIdentityStoredRow | undefined;
+
+    return row ?? null;
+  }
+
+  claimAgent(fingerprint: string, ownerUserId: string, updatedAt: string): void {
+    const db = this.ensureDb();
+
+    db.prepare(`
+      UPDATE vault_agent_identities
+      SET status = 'claimed', owner_user_id = ?, updated_at = ?
+      WHERE fingerprint = ?
+    `).run(ownerUserId, updatedAt, fingerprint);
+  }
+
+  listAgents(ownerUserId: string): AgentIdentityStoredRow[] {
+    const db = this.ensureDb();
+
+    return db.prepare(`
+      SELECT
+        agent_id       AS agentId,
+        public_key     AS publicKey,
+        fingerprint,
+        status,
+        owner_user_id  AS ownerUserId,
+        initial_scopes AS initialScopes,
+        metadata,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt
+      FROM vault_agent_identities
+      WHERE owner_user_id = ?
+      ORDER BY created_at ASC
+    `).all(ownerUserId) as AgentIdentityStoredRow[];
   }
 }

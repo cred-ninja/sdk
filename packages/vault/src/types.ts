@@ -109,3 +109,40 @@ export interface EncryptedPayload {
   iv: string;
   tag: string;
 }
+
+// ── Agent Identity (TOFU) ───────────────────────────────────────────────────
+
+/**
+ * Agent identity row as returned from the vault (deserialized).
+ */
+export interface AgentIdentityRow {
+  agentId: string;
+  /** Hex-encoded 32-byte Ed25519 public key (NOT encrypted — public keys are not secret) */
+  publicKey: string;
+  /** SHA-256 of publicKey hex, hex-encoded (used as lookup key) */
+  fingerprint: string;
+  status: 'unclaimed' | 'claimed';
+  ownerUserId: string | null;
+  initialScopes: string[];
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Input for registering a new agent identity.
+ */
+export interface RegisterAgentInput {
+  /** Raw 32-byte Ed25519 public key */
+  publicKey: Uint8Array;
+  initialScopes?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Input for claiming an agent identity.
+ */
+export interface ClaimAgentInput {
+  fingerprint: string;
+  ownerUserId: string;
+}

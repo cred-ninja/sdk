@@ -88,3 +88,34 @@ export interface RevokeParams {
   userId: string;
   appClientId?: string;
 }
+
+// ── TOFU Agent Identity ─────────────────────────────────────────────────────
+
+/**
+ * Parameters for TOFU (Trust-On-First-Use) delegation.
+ */
+export interface TofuDelegateParams {
+  /** Agent fingerprint (SHA-256 of hex-encoded Ed25519 public key) */
+  fingerprint: string;
+  /** The request payload that was signed */
+  payload: Buffer | Uint8Array;
+  /** Ed25519 signature over payload */
+  signature: Buffer | Uint8Array;
+  /** Scopes the agent is requesting */
+  requestedScopes?: string[];
+}
+
+/**
+ * Result of a TOFU delegation request.
+ */
+export interface TofuDelegationResult {
+  agentId: string;
+  fingerprint: string;
+  status: 'unclaimed' | 'claimed';
+  ownerUserId: string | null;
+  /** Short-lived signed token for unclaimed agents (30 min) */
+  token: string;
+  /** ISO string */
+  tokenExpiresAt: string;
+  grantedScopes: string[];
+}

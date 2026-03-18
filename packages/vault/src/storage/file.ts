@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { StorageBackend } from './interface.js';
+import type { StorageBackend, AgentIdentityStoredRow } from './interface.js';
 import type { StoredRow } from '../types.js';
 
 /**
@@ -31,21 +31,28 @@ export class FileBackend implements StorageBackend {
     // File itself is created on first store() — nothing to do here
   }
 
-  private readAll(): Record<string, StoredRow> {
+  private readAll(): { credentials: Record<string, StoredRow>; agents: Record<string, AgentIdentityStoredRow> } {
     if (!fs.existsSync(this.filePath)) {
-      return {};
+      return { credentials: {}, agents: {} };
     }
 
     try {
       const raw = fs.readFileSync(this.filePath, 'utf8');
-      return JSON.parse(raw) as Record<string, StoredRow>;
+      const parsed: unknown = JSON.parse(raw);
+
+      // Backwards compatibility: old files are flat Record<string, StoredRow>
+      if (parsed !== null && typeof parsed === 'object' && !('credentials' in (parsed as Record<string, unknown>))) {
+        return { credentials: parsed as Record<string, StoredRow>, agents: {} };
+      }
+
+      const data = parsed as { credentials: Record<string, StoredRow>; agents?: Record<string, AgentIdentityStoredRow> };
+      return { credentials: data.credentials, agents: data.agents ?? {} };
     } catch {
-      // Corrupted file — treat as empty (don't silently leak)
       throw new Error(`Failed to read vault file at ${this.filePath} — file may be corrupted`);
     }
   }
 
-  private writeAll(data: Record<string, StoredRow>): void {
+  private writeAll(data: { credentials: Record<string, StoredRow>; agents: Record<string, AgentIdentityStoredRow> }): void {
     const json = JSON.stringify(data, null, 2);
 
     // Atomic write: write to temp file, then rename
@@ -58,8 +65,8 @@ export class FileBackend implements StorageBackend {
   }
 
   store(row: StoredRow): void {
-    const data = fs.existsSync(this.filePath) ? this.readAll() : {};
-    data[this.rowKey(row.provider, row.userId)] = row;
+    const data = this.readAll();
+    data.credentials[this.rowKey(row.provider, row.userId)] = row;
     this.writeAll(data);
   }
 
@@ -69,7 +76,7 @@ export class FileBackend implements StorageBackend {
     }
 
     const data = this.readAll();
-    return data[this.rowKey(provider, userId)] ?? null;
+    return data.credentials[this.rowKey(provider, userId)] ?? null;
   }
 
   delete(provider: string, userId: string): void {
@@ -78,7 +85,7 @@ export class FileBackend implements StorageBackend {
     }
 
     const data = this.readAll();
-    delete data[this.rowKey(provider, userId)];
+    delete data.credentials[this.rowKey(provider, userId)];
     this.writeAll(data);
   }
 
@@ -88,6 +95,43 @@ export class FileBackend implements StorageBackend {
     }
 
     const data = this.readAll();
-    return Object.values(data).filter((row) => row.userId === userId);
+    return Object.values(data.credentials).filter((row) => row.userId === userId);
+  }
+
+  // ── Agent Identity (TOFU) ──────────────────────────────────────────────────
+
+  registerAgent(row: AgentIdentityStoredRow): void {
+    const data = this.readAll();
+    data.agents[row.fingerprint] = row;
+    this.writeAll(data);
+  }
+
+  getAgent(fingerprint: string): AgentIdentityStoredRow | null {
+    if (!fs.existsSync(this.filePath)) {
+      return null;
+    }
+
+    const data = this.readAll();
+    return data.agents[fingerprint] ?? null;
+  }
+
+  claimAgent(fingerprint: string, ownerUserId: string, updatedAt: string): void {
+    const data = this.readAll();
+    const agent = data.agents[fingerprint];
+    if (agent) {
+      agent.status = 'claimed';
+      agent.ownerUserId = ownerUserId;
+      agent.updatedAt = updatedAt;
+      this.writeAll(data);
+    }
+  }
+
+  listAgents(ownerUserId: string): AgentIdentityStoredRow[] {
+    if (!fs.existsSync(this.filePath)) {
+      return [];
+    }
+
+    const data = this.readAll();
+    return Object.values(data.agents).filter((row) => row.ownerUserId === ownerUserId);
   }
 }
