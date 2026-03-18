@@ -10,7 +10,7 @@
     "cred-mcp": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npx tsc",
     "dev": "tsx src/cli.ts"
   },
   "files": [
