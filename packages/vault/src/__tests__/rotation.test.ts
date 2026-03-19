@@ -300,6 +300,21 @@ describe('RotationEngine.runDueRotations()', () => {
     expect(updated!.state).toBe('failed');
     expect(updated!.failureCount).toBe(1);
   });
+
+  it('can fail stuck rotations without running the due scheduler', async () => {
+    const rotation = await engine.startRotation(CONNECTION_ID, 'dual_active');
+    await engine.advanceToTesting(rotation.id, 'pending-v2');
+
+    await backend.updateRotation(rotation.id, {
+      updated_at: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
+    });
+
+    await engine.failStuckRotations();
+
+    const updated = await engine.getRotationById(rotation.id);
+    expect(updated!.state).toBe('failed');
+    expect(updated!.failureCount).toBe(1);
+  });
 });
 
 describe('RotationEngine — state machine transitions', () => {

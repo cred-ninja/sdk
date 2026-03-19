@@ -117,7 +117,7 @@ interface AuditEventInput {
   actor: { type: 'agent' | 'user' | 'system'; id: string; fingerprint?: string };
   action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
   resource: { type: 'connection' | 'token' | 'agent' | 'permission' | 'rotation'; id: string };
-  outcome: 'success' | 'denied' | 'error';
+  outcome: 'pending' | 'success' | 'denied' | 'error';
   scopesRequested?: string[];
   scopesGranted?: string[];
   correlationId: string;
@@ -259,10 +259,11 @@ export class Cred {
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
+    let agentRecord: { status: string; scopeCeiling: string[] } | null = null;
 
     // Check agent status and scope ceiling before delegation
     if (params.agentDid && vault.getAgentByDid) {
-      const agentRecord = await vault.getAgentByDid(params.agentDid);
+      agentRecord = await vault.getAgentByDid(params.agentDid);
       if (agentRecord) {
         if (agentRecord.status === 'revoked') {
           this.writeAuditEvent({
@@ -337,6 +338,17 @@ export class Cred {
       clientSecret = providerConfig.clientSecret;
     }
 
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.userId, fingerprint: params.agentDid },
+      action: 'delegate',
+      resource: { type: 'token', id: `${params.service}/${params.userId}` },
+      outcome: 'pending',
+      scopesRequested: params.scopes ?? [],
+      correlationId,
+    });
+
     const entry = await vault.get({
       provider: params.service,
       userId: params.userId,
@@ -402,6 +414,12 @@ export class Cred {
     }
 
     const delegationId = `local_${params.service}_${params.userId}`;
+    const grantedScopes = entry.scopes ?? [];
+    const delegatedScopes = agentRecord
+      && agentRecord.scopeCeiling.length > 0
+      && (!params.scopes || params.scopes.length === 0)
+      ? grantedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
+      : grantedScopes;
 
     // Build HMAC of token for audit (raw token never stored)
     const sensitiveFieldsHmac = this.auditHmacSecret
@@ -417,7 +435,7 @@ export class Cred {
       resource: { type: 'token', id: delegationId },
       outcome: 'success',
       scopesRequested: params.scopes ?? [],
-      scopesGranted: entry.scopes ?? [],
+      scopesGranted: delegatedScopes,
       correlationId,
       sensitiveFieldsHmac,
     });
@@ -428,7 +446,7 @@ export class Cred {
       expiresIn,
       expiresAt,
       service: params.service,
-      scopes: entry.scopes ?? [],
+      scopes: delegatedScopes,
       delegationId,
     };
   }

@@ -30,7 +30,7 @@ export interface AuditEvent {
   actor: AuditActor;
   action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
   resource: AuditResource;
-  outcome: 'success' | 'denied' | 'error';
+  outcome: 'pending' | 'success' | 'denied' | 'error';
   delegationChain?: Array<{ delegatorId: string; delegateeId: string; scopes: string[] }>;
   scopesRequested?: string[];
   scopesGranted?: string[];
