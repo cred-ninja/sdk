@@ -208,7 +208,6 @@ describe('Local mode delegate()', () => {
       mockVault.get.mock.invocationCallOrder[0],
     );
   });
-
   it('works without provider config (no auto-refresh)', async () => {
     const local = makeLocalCred({}); // no providers configured
 

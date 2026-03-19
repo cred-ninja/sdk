@@ -312,6 +312,13 @@ export class RotationEngine {
     return rotation;
   }
 
+  private requireUpdateRotation(): NonNullable<StorageBackend['updateRotation']> {
+    if (!this.storage.updateRotation) {
+      throw new Error('Storage backend does not support rotation (updateRotation not implemented)');
+    }
+    return this.storage.updateRotation.bind(this.storage);
+  }
+
   private async claimDueRotation(
     rotationId: string,
     dueAt: Date,
