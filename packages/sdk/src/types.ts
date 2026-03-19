@@ -47,7 +47,10 @@ export type CredConfig = CredCloudConfig | CredLocalConfig;
 export interface DelegationResult {
   accessToken: string;
   tokenType: string;
-  expiresIn?: number;
+  /** Seconds until token expires. Always set — defaults to 900 (15 min). */
+  expiresIn: number;
+  /** Absolute expiry timestamp. Always set. */
+  expiresAt: Date;
   service: string;
   scopes: string[];
   delegationId: string;

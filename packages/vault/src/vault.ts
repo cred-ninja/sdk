@@ -200,8 +200,14 @@ export class CredVault {
           updatedAt: new Date(),
         };
       } catch {
-        // Refresh failed — return the stale entry so caller can handle it
+        // Refresh failed — token is expired and unrecoverable
+        return null;
       }
+    }
+
+    // If token is expired and no refresh was attempted, return null
+    if (isExpired) {
+      return null;
     }
 
     return {

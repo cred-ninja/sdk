@@ -407,6 +407,8 @@ describe('Type definitions', () => {
     const result: DelegationResult = {
       accessToken: 'token',
       tokenType: 'Bearer',
+      expiresIn: 900,
+      expiresAt: new Date(Date.now() + 900_000),
       service: 'google',
       scopes: [],
       delegationId: 'del_1',
@@ -419,6 +421,8 @@ describe('Type definitions', () => {
     const result: DelegationResult = {
       accessToken: 'token',
       tokenType: 'Bearer',
+      expiresIn: 900,
+      expiresAt: new Date(Date.now() + 900_000),
       service: 'google',
       scopes: [],
       delegationId: 'del_1',

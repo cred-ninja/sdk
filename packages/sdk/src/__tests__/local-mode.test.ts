@@ -236,3 +236,73 @@ describe('Local mode revoke()', () => {
     });
   });
 });
+
+describe('Local mode TTL enforcement', () => {
+  it('DelegationResult.expiresIn is always a number', async () => {
+    const local = makeLocalCred({ google: { clientId: 'cid', clientSecret: 'csec' } });
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      expiresAt: new Date(Date.now() + 3600_000),
+      scopes: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({ service: 'google', userId: 'user-1' });
+    expect(typeof result.expiresIn).toBe('number');
+    expect(result.expiresIn).toBeGreaterThan(0);
+  });
+
+  it('DelegationResult.expiresAt is always a Date', async () => {
+    const local = makeLocalCred({ google: { clientId: 'cid', clientSecret: 'csec' } });
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      expiresAt: new Date(Date.now() + 3600_000),
+      scopes: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({ service: 'google', userId: 'user-1' });
+    expect(result.expiresAt).toBeInstanceOf(Date);
+    expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('defaults expiresIn to 900 when no expiry info from vault', async () => {
+    const local = makeLocalCred({});
+
+    mockVault.get.mockResolvedValue({
+      provider: 'custom',
+      userId: 'u1',
+      accessToken: 'static-token',
+      // No expiresAt
+      scopes: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({ service: 'custom', userId: 'u1' });
+    expect(result.expiresIn).toBe(900);
+    expect(result.expiresAt).toBeInstanceOf(Date);
+    // Should be approximately 15 minutes from now
+    const expectedMs = Date.now() + 900 * 1000;
+    expect(Math.abs(result.expiresAt.getTime() - expectedMs)).toBeLessThan(1000);
+  });
+
+  it('throws token_expired when vault returns null (expired) and no refresh possible', async () => {
+    const local = makeLocalCred({}); // no providers = no refresh
+
+    // Vault returns null for expired entries
+    mockVault.get.mockResolvedValue(null);
+
+    await expect(
+      local.delegate({ service: 'google', userId: 'user-1' }),
+    ).rejects.toThrow(CredError);
+  });
+});

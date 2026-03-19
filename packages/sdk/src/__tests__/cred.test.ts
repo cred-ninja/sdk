@@ -79,6 +79,8 @@ describe('Cred.delegate()', () => {
     expect(result.accessToken).toBe('ya29.mock');
     expect(result.tokenType).toBe('Bearer');
     expect(result.expiresIn).toBe(3600);
+    expect(result.expiresAt).toBeInstanceOf(Date);
+    expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
     expect(result.delegationId).toBe('del_abc');
     expect(result.scopes).toContain('calendar.readonly');
   });
@@ -128,6 +130,17 @@ describe('Cred.delegate()', () => {
     await expect(
       cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' }),
     ).rejects.toThrow(CredError);
+  });
+
+  it('defaults expiresIn to 900 when API omits expires_in', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'at', token_type: 'Bearer', service: 'google',
+      scopes: [], delegation_id: 'del_1',
+      // no expires_in
+    }));
+    const result = await cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
+    expect(result.expiresIn).toBe(900);
+    expect(result.expiresAt).toBeInstanceOf(Date);
   });
 
   it('omits scopes from body when not provided', async () => {
