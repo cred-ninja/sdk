@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
 
@@ -12,10 +13,11 @@ class DelegationResult:
 
     access_token: str
     token_type: str
+    expires_in: int
+    expires_at: datetime
     service: str
     scopes: list[str]
     delegation_id: str
-    expires_in: Optional[int] = None
     receipt: Optional[str] = None
 
 

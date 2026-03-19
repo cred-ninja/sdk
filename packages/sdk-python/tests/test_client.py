@@ -3,11 +3,22 @@
 Uses respx to mock httpx requests. No real network calls.
 """
 
+import asyncio
+from datetime import datetime, timezone
+
+import httpx
 import pytest
 import respx
-import httpx
 
-from cred import Cred, CredError, ConsentRequiredError, DelegationResult, Connection
+from cred import (
+    AsyncCred,
+    Connection,
+    ConsentRequiredError,
+    Cred,
+    CredError,
+    DelegationResult,
+)
+from cred.exceptions import AgentRevokedException, RateLimitException, ScopeCeilingException
 
 BASE_URL = "https://api.cred.ninja"
 TOKEN = "cred_at_test_token"
@@ -16,6 +27,10 @@ TOKEN = "cred_at_test_token"
 @pytest.fixture
 def cred():
     return Cred(agent_token=TOKEN)
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 # ── constructor ───────────────────────────────────────────────────────────────
@@ -48,6 +63,7 @@ class TestDelegate:
                 "access_token": "ya29.mock",
                 "token_type": "Bearer",
                 "expires_in": 3600,
+                "expires_at": "2026-03-20T00:00:00Z",
                 "service": "google",
                 "scopes": ["calendar.readonly"],
                 "delegation_id": "del_abc",
@@ -65,6 +81,7 @@ class TestDelegate:
         assert result.access_token == "ya29.mock"
         assert result.token_type == "Bearer"
         assert result.expires_in == 3600
+        assert result.expires_at == datetime(2026, 3, 20, 0, 0, tzinfo=timezone.utc)
         assert result.delegation_id == "del_abc"
         assert result.scopes == ["calendar.readonly"]
 
@@ -148,6 +165,23 @@ class TestDelegate:
         parsed = json.loads(body)
         assert "scopes" not in parsed
 
+    @respx.mock
+    def test_defaults_expires_in_and_expires_at_when_missing(self, cred):
+        respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "at",
+                "token_type": "Bearer",
+                "service": "google",
+                "scopes": [],
+                "delegation_id": "del_1",
+            },
+        ))
+
+        result = cred.delegate(service="google", user_id="u1", app_client_id="app1")
+        assert result.expires_in == 900
+        assert isinstance(result.expires_at, datetime)
+
 
 # ── get_user_connections() ────────────────────────────────────────────────────
 
@@ -184,6 +218,21 @@ class TestGetUserConnections:
         url = str(route.calls[0].request.url)
         assert "user_id=user_1" in url
         assert "app_client_id=app1" in url
+
+
+class TestListConnections:
+    @respx.mock
+    def test_returns_raw_connection_payloads(self, cred):
+        respx.get(url__startswith=f"{BASE_URL}/api/v1/connections").mock(
+            return_value=httpx.Response(200, json={
+                "connections": [
+                    {"slug": "google", "scopesGranted": ["calendar.readonly"]},
+                ],
+            })
+        )
+
+        connections = cred.list_connections("user_1")
+        assert connections == [{"slug": "google", "scopesGranted": ["calendar.readonly"]}]
 
 
 # ── get_consent_url() ─────────────────────────────────────────────────────────
@@ -249,6 +298,17 @@ class TestRevoke:
         assert exc_info.value.status_code == 404
 
 
+class TestRevokeAgent:
+    @respx.mock
+    def test_posts_to_revoke_all_endpoint(self, cred):
+        route = respx.post(f"{BASE_URL}/api/v1/agents/agt_1/revoke-all").mock(
+            return_value=httpx.Response(204)
+        )
+
+        cred.revoke_agent("agt_1")
+        assert route.called
+
+
 # ── error hierarchy ───────────────────────────────────────────────────────────
 
 class TestErrorHierarchy:
@@ -265,3 +325,60 @@ class TestErrorHierarchy:
         assert str(err) == "something failed"
         assert err.code == "some_code"
         assert err.status_code == 500
+
+    def test_specialized_exceptions_have_expected_codes(self):
+        assert AgentRevokedException("revoked").code == "agent_revoked"
+        assert ScopeCeilingException("scope").code == "scope_ceiling_exceeded"
+        assert RateLimitException("rate").code == "rate_limited"
+
+
+class TestAsyncCred:
+    @respx.mock
+    def test_delegate_returns_delegation_result(self):
+        respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.async",
+                "token_type": "Bearer",
+                "expires_in": 1200,
+                "expires_at": "2026-03-20T00:20:00Z",
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_async",
+            },
+        ))
+
+        async def scenario():
+            async with AsyncCred(agent_token=TOKEN) as client:
+                return await client.delegate(service="google", user_id="u1", app_client_id="app1")
+
+        result = run(scenario())
+        assert result.access_token == "ya29.async"
+        assert result.expires_in == 1200
+
+    @respx.mock
+    def test_list_connections_returns_payloads(self):
+        respx.get(url__startswith=f"{BASE_URL}/api/v1/connections").mock(
+            return_value=httpx.Response(200, json={
+                "connections": [{"slug": "github", "scopesGranted": ["repo"]}],
+            })
+        )
+
+        async def scenario():
+            async with AsyncCred(agent_token=TOKEN) as client:
+                return await client.list_connections("u1")
+
+        assert run(scenario()) == [{"slug": "github", "scopesGranted": ["repo"]}]
+
+    @respx.mock
+    def test_revoke_agent_posts_to_revoke_all_endpoint(self):
+        route = respx.post(f"{BASE_URL}/api/v1/agents/agt_1/revoke-all").mock(
+            return_value=httpx.Response(204)
+        )
+
+        async def scenario():
+            async with AsyncCred(agent_token=TOKEN) as client:
+                await client.revoke_agent("agt_1")
+
+        run(scenario())
+        assert route.called
