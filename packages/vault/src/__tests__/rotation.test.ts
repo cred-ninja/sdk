@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { SQLiteBackend } from '../storage/sqlite.js';
 import { RotationEngine } from '../rotation.js';
-import type { Rotation } from '../types.js';
+import type { Rotation, RotationRow } from '../types.js';
 
 function makeBackend(dir: string): SQLiteBackend {
   const backend = new SQLiteBackend(join(dir, 'vault.db'));
@@ -14,6 +14,27 @@ function makeBackend(dir: string): SQLiteBackend {
 
 function makeEngine(backend: SQLiteBackend): RotationEngine {
   return new RotationEngine(backend);
+}
+
+function makeRotationRow(connectionId: string, overrides: Partial<RotationRow> = {}): RotationRow {
+  const now = new Date().toISOString();
+  return {
+    id: `rot_${Math.random().toString(16).slice(2)}`,
+    connection_id: connectionId,
+    strategy: 'dual_active',
+    interval_seconds: 3600,
+    state: 'pending',
+    current_version_id: null,
+    pending_version_id: null,
+    previous_version_id: null,
+    last_rotated_at: null,
+    next_rotation_at: new Date(Date.now() + 3600_000).toISOString(),
+    failure_count: 0,
+    failure_action: 'retry_backoff',
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
 }
 
 const CONNECTION_ID = 'google/user-123';
@@ -85,6 +106,14 @@ describe('RotationEngine.startRotation()', () => {
     const second = await engine.startRotation(CONNECTION_ID, 'dual_active');
     expect(second.id).not.toBe(first.id);
     expect(second.state).toBe('pending');
+  });
+
+  it('enforces one in-progress rotation per connection inside the SQLite transaction', () => {
+    backend.startRotationTransaction(makeRotationRow(CONNECTION_ID));
+
+    expect(() => backend.startRotationTransaction(makeRotationRow(CONNECTION_ID, {
+      id: 'rot_second',
+    }))).toThrow('already in progress');
   });
 });
 
@@ -232,6 +261,22 @@ describe('RotationEngine.runDueRotations()', () => {
     expect(results[0].rotation.state).toBe('pending');
   });
 
+  it('claims each due rotation once when schedulers race', async () => {
+    const rotation = await engine.startRotation(CONNECTION_ID, 'single_swap', 60);
+    await backend.updateRotation(rotation.id, {
+      next_rotation_at: new Date(Date.now() - 1000).toISOString(),
+      state: 'idle',
+    });
+
+    const [first, second] = await Promise.all([
+      engine.runDueRotations(),
+      engine.runDueRotations(),
+    ]);
+
+    expect(first.length + second.length).toBe(1);
+    expect([...first, ...second][0].rotation.id).toBe(rotation.id);
+  });
+
   it('returns empty array when no rotations are due', async () => {
     const rotation = await engine.startRotation(CONNECTION_ID, 'dual_active', 3600);
     // nextRotationAt is in the future — should NOT be picked up
@@ -250,6 +295,21 @@ describe('RotationEngine.runDueRotations()', () => {
     await backend.updateRotation(rotation.id, { updated_at: sixMinutesAgo });
 
     await engine.runDueRotations();
+
+    const updated = await engine.getRotationById(rotation.id);
+    expect(updated!.state).toBe('failed');
+    expect(updated!.failureCount).toBe(1);
+  });
+
+  it('can fail stuck rotations without running the due scheduler', async () => {
+    const rotation = await engine.startRotation(CONNECTION_ID, 'dual_active');
+    await engine.advanceToTesting(rotation.id, 'pending-v2');
+
+    await backend.updateRotation(rotation.id, {
+      updated_at: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
+    });
+
+    await engine.failStuckRotations();
 
     const updated = await engine.getRotationById(rotation.id);
     expect(updated!.state).toBe('failed');

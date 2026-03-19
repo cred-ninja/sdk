@@ -65,7 +65,7 @@ interface VaultInstance {
   }>>;
   delete(input: { provider: string; userId: string }): Promise<void>;
   revokeAgent?(agentId: string): Promise<void>;
-  getAgentByFingerprint?(fingerprint: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
+  getAgentByDid?(did: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
   // Rotation methods (exposed by CredVault, proxied from RotationEngine)
   startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<{
     id: string; connectionId: string; strategy: string; state: string;
@@ -117,7 +117,7 @@ interface AuditEventInput {
   actor: { type: 'agent' | 'user' | 'system'; id: string; fingerprint?: string };
   action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
   resource: { type: 'connection' | 'token' | 'agent' | 'permission' | 'rotation'; id: string };
-  outcome: 'success' | 'denied' | 'error';
+  outcome: 'pending' | 'success' | 'denied' | 'error';
   scopesRequested?: string[];
   scopesGranted?: string[];
   correlationId: string;
@@ -259,10 +259,11 @@ export class Cred {
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
+    let agentRecord: { status: string; scopeCeiling: string[] } | null = null;
 
     // Check agent status and scope ceiling before delegation
-    if (params.agentDid && vault.getAgentByFingerprint) {
-      const agentRecord = await vault.getAgentByFingerprint(params.agentDid);
+    if (params.agentDid && vault.getAgentByDid) {
+      agentRecord = await vault.getAgentByDid(params.agentDid);
       if (agentRecord) {
         if (agentRecord.status === 'revoked') {
           this.writeAuditEvent({
@@ -301,7 +302,8 @@ export class Cred {
           );
         }
         if (agentRecord.scopeCeiling.length > 0 && params.scopes && params.scopes.length > 0) {
-          const unauthorizedScopes = params.scopes.filter(s => !agentRecord.scopeCeiling.includes(s));
+          const scopeCeiling = agentRecord.scopeCeiling;
+          const unauthorizedScopes = params.scopes.filter(s => !scopeCeiling.includes(s));
           if (unauthorizedScopes.length > 0) {
             this.writeAuditEvent({
               id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -336,6 +338,17 @@ export class Cred {
       clientId = providerConfig.clientId;
       clientSecret = providerConfig.clientSecret;
     }
+
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.userId, fingerprint: params.agentDid },
+      action: 'delegate',
+      resource: { type: 'token', id: `${params.service}/${params.userId}` },
+      outcome: 'pending',
+      scopesRequested: params.scopes ?? [],
+      correlationId,
+    });
 
     const entry = await vault.get({
       provider: params.service,
@@ -402,6 +415,12 @@ export class Cred {
     }
 
     const delegationId = `local_${params.service}_${params.userId}`;
+    const grantedScopes = entry.scopes ?? [];
+    const delegatedScopes = agentRecord
+      && agentRecord.scopeCeiling.length > 0
+      && (!params.scopes || params.scopes.length === 0)
+      ? grantedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
+      : grantedScopes;
 
     // Build HMAC of token for audit (raw token never stored)
     const sensitiveFieldsHmac = this.auditHmacSecret
@@ -417,7 +436,7 @@ export class Cred {
       resource: { type: 'token', id: delegationId },
       outcome: 'success',
       scopesRequested: params.scopes ?? [],
-      scopesGranted: entry.scopes ?? [],
+      scopesGranted: delegatedScopes,
       correlationId,
       sensitiveFieldsHmac,
     });
@@ -428,7 +447,7 @@ export class Cred {
       expiresIn,
       expiresAt,
       service: params.service,
-      scopes: entry.scopes ?? [],
+      scopes: delegatedScopes,
       delegationId,
     };
   }
@@ -438,7 +457,16 @@ export class Cred {
    * This is the fail-closed behavior: delegation cannot succeed without a persisted audit record.
    */
   private writeAuditEvent(event: AuditEventInput): void {
-    if (!this.vault?.writeAuditEvent) return; // no audit backend configured (e.g. file mode)
+    if (!this.vault?.writeAuditEvent) {
+      if (this.localConfig?.requireAudit) {
+        throw new CredError(
+          'Audit backend required, but the configured vault storage does not support audit writes',
+          'audit_not_supported',
+          500,
+        );
+      }
+      return;
+    }
     try {
       this.vault.writeAuditEvent(event);
     } catch (err) {

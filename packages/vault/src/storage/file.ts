@@ -85,6 +85,15 @@ export class FileBackend implements StorageBackend {
     return row;
   }
 
+  getForRefresh(provider: string, userId: string): StoredRow | null {
+    if (!fs.existsSync(this.filePath)) {
+      return null;
+    }
+
+    const data = this.readAll();
+    return data[this.rowKey(provider, userId)] ?? null;
+  }
+
   delete(provider: string, userId: string): void {
     if (!fs.existsSync(this.filePath)) {
       return; // idempotent

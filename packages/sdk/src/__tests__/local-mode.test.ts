@@ -10,9 +10,11 @@ import { Cred, CredError } from '../index';
 const mockVault = {
   init: vi.fn().mockResolvedValue(undefined),
   get: vi.fn(),
+  getAgentByDid: undefined as undefined | ReturnType<typeof vi.fn>,
   store: vi.fn(),
   list: vi.fn(),
   delete: vi.fn(),
+  writeAuditEvent: undefined as undefined | ReturnType<typeof vi.fn>,
 };
 
 const mockCreateAdapter = vi.fn().mockReturnValue({
@@ -39,17 +41,23 @@ vi.mock('@credninja/oauth', () => ({
   createAdapter: (...args: unknown[]) => mockCreateAdapter(...args),
 }));
 
-function makeLocalCred(providers: Record<string, { clientId: string; clientSecret: string }> = {}) {
+function makeLocalCred(
+  providers: Record<string, { clientId: string; clientSecret: string }> = {},
+  options: { requireAudit?: boolean } = {},
+) {
   return new Cred({
     mode: 'local',
     vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json', storage: 'file' },
     providers,
+    requireAudit: options.requireAudit,
   });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockVault.init.mockResolvedValue(undefined);
+  mockVault.getAgentByDid = undefined;
+  mockVault.writeAuditEvent = undefined;
   vaultConstructorCalls.length = 0;
 });
 
@@ -111,6 +119,94 @@ describe('Local mode delegate()', () => {
     // adapter should be defined (from createAdapter)
     expect(mockVault.get.mock.calls[0][0].adapter).toBeDefined();
     expect(mockCreateAdapter).toHaveBeenCalledWith('google');
+  });
+
+  it('looks up agent policy by DID when agentDid is provided', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.get.mockResolvedValue({
+      provider: 'github',
+      userId: 'u1',
+      accessToken: 'token',
+      scopes: ['repo'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await local.delegate({
+      service: 'github',
+      userId: 'u1',
+      agentDid: 'did:key:z6MkTestAgent',
+      scopes: ['repo'],
+    });
+
+    expect(mockVault.getAgentByDid).toHaveBeenCalledWith('did:key:z6MkTestAgent');
+  });
+
+  it('writes the pending audit event before reading from the vault', async () => {
+    const local = makeLocalCred({ google: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.writeAuditEvent = vi.fn();
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'u1',
+      accessToken: 'token',
+      scopes: ['calendar.readonly'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await local.delegate({ service: 'google', userId: 'u1' });
+
+    expect(mockVault.writeAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'pending',
+    }));
+    expect(mockVault.writeAuditEvent!.mock.invocationCallOrder[0]).toBeLessThan(
+      mockVault.get.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('attenuates returned scopes to the agent ceiling when scopes are omitted', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.get.mockResolvedValue({
+      provider: 'github',
+      userId: 'u1',
+      accessToken: 'token',
+      scopes: ['repo', 'admin:org'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({
+      service: 'github',
+      userId: 'u1',
+      agentDid: 'did:key:z6MkTestAgent',
+    });
+
+    expect(result.scopes).toEqual(['repo']);
+  });
+
+  it('records the pending audit event even when vault.get throws', async () => {
+    const local = makeLocalCred({ google: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.writeAuditEvent = vi.fn();
+    mockVault.get.mockRejectedValue(new Error('vault unavailable'));
+
+    await expect(
+      local.delegate({ service: 'google', userId: 'u1' }),
+    ).rejects.toThrow('vault unavailable');
+
+    expect(mockVault.writeAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'pending',
+    }));
+    expect(mockVault.writeAuditEvent!.mock.invocationCallOrder[0]).toBeLessThan(
+      mockVault.get.mock.invocationCallOrder[0],
+    );
   });
 
   it('works without provider config (no auto-refresh)', async () => {
@@ -304,5 +400,49 @@ describe('Local mode TTL enforcement', () => {
     await expect(
       local.delegate({ service: 'google', userId: 'user-1' }),
     ).rejects.toThrow(CredError);
+  });
+});
+
+describe('Local mode audit enforcement', () => {
+  it('throws audit_not_supported when requireAudit is true and backend lacks audit support', async () => {
+    const local = makeLocalCred({}, { requireAudit: true });
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      scopes: ['calendar.readonly'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await expect(
+      local.delegate({ service: 'google', userId: 'user-1' }),
+    ).rejects.toMatchObject({ code: 'audit_not_supported' });
+  });
+
+  it('delegates when requireAudit is true and audit support is available', async () => {
+    const local = makeLocalCred({}, { requireAudit: true });
+    mockVault.writeAuditEvent = vi.fn();
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      scopes: ['calendar.readonly'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({ service: 'google', userId: 'user-1' });
+
+    expect(result.accessToken).toBe('ya29.token');
+    expect(mockVault.writeAuditEvent).toHaveBeenCalledTimes(2);
+    expect(mockVault.writeAuditEvent.mock.calls[0][0]).toEqual(expect.objectContaining({
+      outcome: 'pending',
+    }));
+    expect(mockVault.writeAuditEvent.mock.calls[1][0]).toEqual(expect.objectContaining({
+      outcome: 'success',
+    }));
   });
 });

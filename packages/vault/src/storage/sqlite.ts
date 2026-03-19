@@ -2,6 +2,8 @@ import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource } from '../audit.js';
 
+const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
+
 /**
  * SQLite storage backend using better-sqlite3 (synchronous API).
  *
@@ -67,6 +69,7 @@ export class SQLiteBackend implements StorageBackend {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
         id               TEXT PRIMARY KEY,
+        did              TEXT,
         fingerprint      TEXT NOT NULL UNIQUE,
         name             TEXT NOT NULL,
         scope_ceiling    TEXT NOT NULL DEFAULT '[]',
@@ -78,6 +81,13 @@ export class SQLiteBackend implements StorageBackend {
         revoked_at       TEXT
       )
     `);
+
+    const agentColumns = this.db.prepare('PRAGMA table_info(vault_agents)')
+      .all() as Array<{ name: string }>;
+    if (!agentColumns.some((column) => column.name === 'did')) {
+      this.db.exec('ALTER TABLE vault_agents ADD COLUMN did TEXT');
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_did ON vault_agents(did) WHERE did IS NOT NULL');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rotations (
@@ -96,7 +106,7 @@ export class SQLiteBackend implements StorageBackend {
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_rotations_connection ON vault_rotations(connection_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rotations_connection_unique ON vault_rotations(connection_id);
       CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
     `);
   }
@@ -173,8 +183,32 @@ export class SQLiteBackend implements StorageBackend {
       AND (
           expires_at IS NULL
           OR datetime(expires_at) > datetime('now')
-          OR refresh_token_enc IS NOT NULL
         )
+    `);
+
+    const row = stmt.get(provider, userId) as StoredRow | undefined;
+    return row ?? null;
+  }
+
+  getForRefresh(provider: string, userId: string): StoredRow | null {
+    const db = this.ensureDb();
+
+    const stmt = db.prepare(`
+      SELECT
+        provider,
+        user_id            AS userId,
+        access_token_enc   AS accessTokenEnc,
+        access_token_iv    AS accessTokenIv,
+        access_token_tag   AS accessTokenTag,
+        refresh_token_enc  AS refreshTokenEnc,
+        refresh_token_iv   AS refreshTokenIv,
+        refresh_token_tag  AS refreshTokenTag,
+        expires_at         AS expiresAt,
+        scopes,
+        created_at         AS createdAt,
+        updated_at         AS updatedAt
+      FROM vault_credentials
+      WHERE provider = ? AND user_id = ?
     `);
 
     const row = stmt.get(provider, userId) as StoredRow | undefined;
@@ -206,6 +240,10 @@ export class SQLiteBackend implements StorageBackend {
         updated_at         AS updatedAt
       FROM vault_credentials
       WHERE user_id = ?
+        AND (
+          expires_at IS NULL
+          OR datetime(expires_at) > datetime('now')
+        )
       ORDER BY provider ASC
     `).all(userId) as StoredRow[];
 
@@ -219,13 +257,14 @@ export class SQLiteBackend implements StorageBackend {
 
     const stmt = db.prepare(`
       INSERT INTO vault_agents (
-        id, fingerprint, name, scope_ceiling, status,
+        id, did, fingerprint, name, scope_ceiling, status,
         created_by, created_at, updated_at, last_seen_at, revoked_at
       ) VALUES (
-        @id, @fingerprint, @name, @scopeCeiling, @status,
+        @id, @did, @fingerprint, @name, @scopeCeiling, @status,
         @createdBy, @createdAt, @updatedAt, @lastSeenAt, @revokedAt
       )
       ON CONFLICT (id) DO UPDATE SET
+        did           = excluded.did,
         name          = excluded.name,
         scope_ceiling = excluded.scope_ceiling,
         status        = excluded.status,
@@ -236,6 +275,7 @@ export class SQLiteBackend implements StorageBackend {
 
     stmt.run({
       id: row.id,
+      did: row.did ?? null,
       fingerprint: row.fingerprint,
       name: row.name,
       scopeCeiling: row.scopeCeiling,
@@ -254,6 +294,7 @@ export class SQLiteBackend implements StorageBackend {
     const row = db.prepare(`
       SELECT
         id,
+        did,
         fingerprint,
         name,
         scope_ceiling  AS scopeCeiling,
@@ -270,12 +311,36 @@ export class SQLiteBackend implements StorageBackend {
     return row ?? null;
   }
 
+  getAgentByDid(did: string): AgentRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        did,
+        fingerprint,
+        name,
+        scope_ceiling  AS scopeCeiling,
+        status,
+        created_by     AS createdBy,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt,
+        last_seen_at   AS lastSeenAt,
+        revoked_at     AS revokedAt
+      FROM vault_agents
+      WHERE did = ?
+    `).get(did) as AgentRow | undefined;
+
+    return row ?? null;
+  }
+
   getAgentByFingerprint(fingerprint: string): AgentRow | null {
     const db = this.ensureDb();
 
     const row = db.prepare(`
       SELECT
         id,
+        did,
         fingerprint,
         name,
         scope_ceiling  AS scopeCeiling,
@@ -490,6 +555,84 @@ export class SQLiteBackend implements StorageBackend {
     return row ? this.mapRotationRow(row) : null;
   }
 
+  startRotationTransaction(row: RotationRow): Rotation {
+    const db = this.ensureDb();
+    const getByConnection = db.prepare(`
+      SELECT * FROM vault_rotations
+      WHERE connection_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+    const getById = db.prepare('SELECT * FROM vault_rotations WHERE id = ?');
+    const upsert = db.prepare(`
+      INSERT INTO vault_rotations (
+        id, connection_id, strategy, interval_seconds, state,
+        current_version_id, pending_version_id, previous_version_id,
+        last_rotated_at, next_rotation_at, failure_count, failure_action,
+        created_at, updated_at
+      ) VALUES (
+        @id, @connectionId, @strategy, @intervalSeconds, @state,
+        @currentVersionId, @pendingVersionId, @previousVersionId,
+        @lastRotatedAt, @nextRotationAt, @failureCount, @failureAction,
+        @createdAt, @updatedAt
+      )
+      ON CONFLICT (connection_id) DO UPDATE SET
+        id                  = excluded.id,
+        strategy            = excluded.strategy,
+        interval_seconds    = excluded.interval_seconds,
+        state               = excluded.state,
+        current_version_id  = excluded.current_version_id,
+        pending_version_id  = excluded.pending_version_id,
+        previous_version_id = excluded.previous_version_id,
+        last_rotated_at     = excluded.last_rotated_at,
+        next_rotation_at    = excluded.next_rotation_at,
+        failure_count       = excluded.failure_count,
+        failure_action      = excluded.failure_action,
+        created_at          = excluded.created_at,
+        updated_at          = excluded.updated_at
+      WHERE vault_rotations.state NOT IN ('pending', 'testing', 'promoting')
+    `);
+
+    const transaction = db.transaction((rotationRow: RotationRow): Rotation => {
+      const existing = getByConnection.get(rotationRow.connection_id) as RotationRow | undefined;
+      if (existing && IN_PROGRESS_ROTATION_STATES.includes(existing.state as RotationState)) {
+        throw new Error(
+          `Rotation already in progress for connection ${rotationRow.connection_id} (state: ${existing.state})`,
+        );
+      }
+
+      const result = upsert.run({
+        id: rotationRow.id,
+        connectionId: rotationRow.connection_id,
+        strategy: rotationRow.strategy,
+        intervalSeconds: rotationRow.interval_seconds,
+        state: rotationRow.state,
+        currentVersionId: rotationRow.current_version_id ?? null,
+        pendingVersionId: rotationRow.pending_version_id ?? null,
+        previousVersionId: rotationRow.previous_version_id ?? null,
+        lastRotatedAt: rotationRow.last_rotated_at ?? null,
+        nextRotationAt: rotationRow.next_rotation_at ?? null,
+        failureCount: rotationRow.failure_count,
+        failureAction: rotationRow.failure_action,
+        createdAt: rotationRow.created_at,
+        updatedAt: rotationRow.updated_at,
+      });
+
+      if (result.changes === 0) {
+        throw new Error(`Rotation already in progress for connection ${rotationRow.connection_id}`);
+      }
+
+      const created = getById.get(rotationRow.id) as RotationRow | undefined;
+      if (!created) {
+        throw new Error(`Failed to create rotation record ${rotationRow.id}`);
+      }
+
+      return this.mapRotationRow(created);
+    });
+
+    return transaction(row);
+  }
+
   updateRotation(id: string, updates: Partial<RotationRow>): void {
     const db = this.ensureDb();
     const now = updates.updated_at ?? new Date().toISOString();
@@ -507,6 +650,41 @@ export class SQLiteBackend implements StorageBackend {
     if (updates.interval_seconds !== undefined) { fields.push('interval_seconds = @intervalSeconds'); params.intervalSeconds = updates.interval_seconds; }
 
     db.prepare(`UPDATE vault_rotations SET ${fields.join(', ')} WHERE id = @id`).run(params);
+  }
+
+  claimDueRotation(id: string, now: Date, updates: Partial<RotationRow>): Rotation | null {
+    const db = this.ensureDb();
+    const updatedAt = updates.updated_at ?? new Date().toISOString();
+    const fields: string[] = ['updated_at = @updatedAt'];
+    const params: Record<string, unknown> = {
+      id,
+      now: now.toISOString(),
+      updatedAt,
+    };
+
+    if (updates.state !== undefined) { fields.push('state = @state'); params.state = updates.state; }
+    if (updates.current_version_id !== undefined) { fields.push('current_version_id = @currentVersionId'); params.currentVersionId = updates.current_version_id; }
+    if (updates.pending_version_id !== undefined) { fields.push('pending_version_id = @pendingVersionId'); params.pendingVersionId = updates.pending_version_id; }
+    if (updates.previous_version_id !== undefined) { fields.push('previous_version_id = @previousVersionId'); params.previousVersionId = updates.previous_version_id; }
+    if (updates.last_rotated_at !== undefined) { fields.push('last_rotated_at = @lastRotatedAt'); params.lastRotatedAt = updates.last_rotated_at; }
+    if (updates.next_rotation_at !== undefined) { fields.push('next_rotation_at = @nextRotationAt'); params.nextRotationAt = updates.next_rotation_at; }
+    if (updates.failure_count !== undefined) { fields.push('failure_count = @failureCount'); params.failureCount = updates.failure_count; }
+    if (updates.interval_seconds !== undefined) { fields.push('interval_seconds = @intervalSeconds'); params.intervalSeconds = updates.interval_seconds; }
+
+    const result = db.prepare(`
+      UPDATE vault_rotations
+      SET ${fields.join(', ')}
+      WHERE id = @id
+        AND state = 'idle'
+        AND next_rotation_at IS NOT NULL
+        AND datetime(next_rotation_at) <= datetime(@now)
+    `).run(params);
+
+    if (result.changes === 0) {
+      return null;
+    }
+
+    return this.getRotation(id);
   }
 
   listDueRotations(now: Date): Rotation[] {

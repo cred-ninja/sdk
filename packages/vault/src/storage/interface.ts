@@ -26,6 +26,12 @@ export interface StorageBackend {
   get(provider: string, userId: string): StoredRow | null | Promise<StoredRow | null>;
 
   /**
+   * Retrieve a credential row for vault-managed refresh flows.
+   * Unlike get(), this may return expired rows so higher layers can refresh them.
+   */
+  getForRefresh?(provider: string, userId: string): StoredRow | null | Promise<StoredRow | null>;
+
+  /**
    * Delete a credential row by provider + userId.
    * Must be idempotent — safe to call even if entry doesn't exist.
    */
@@ -40,6 +46,7 @@ export interface StorageBackend {
 
   storeAgent?(row: AgentRow): void | Promise<void>;
   getAgent?(id: string): AgentRow | null | Promise<AgentRow | null>;
+  getAgentByDid?(did: string): AgentRow | null | Promise<AgentRow | null>;
   getAgentByFingerprint?(fingerprint: string): AgentRow | null | Promise<AgentRow | null>;
   updateAgentStatus?(id: string, status: string, revokedAt?: string): void | Promise<void>;
 
@@ -54,6 +61,7 @@ export interface StorageBackend {
   getRotation?(id: string): Rotation | null | Promise<Rotation | null>;
   getRotationByConnectionId?(connectionId: string): Rotation | null | Promise<Rotation | null>;
   updateRotation?(id: string, updates: Partial<RotationRow>): void | Promise<void>;
+  claimDueRotation?(id: string, now: Date, updates: Partial<RotationRow>): Rotation | null | Promise<Rotation | null>;
   listDueRotations?(now: Date): Rotation[] | Promise<Rotation[]>;
   listRotations?(): Rotation[] | Promise<Rotation[]>;
 }

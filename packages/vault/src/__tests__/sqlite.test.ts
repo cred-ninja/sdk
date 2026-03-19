@@ -144,7 +144,7 @@ describe('SQLiteBackend', () => {
     expect(result).not.toBeNull();
   });
 
-  it('returns expired row when refresh token is present (needed for auto-refresh)', () => {
+  it('filters expired row even when refresh token is present', () => {
     const past = new Date(Date.now() - 10_000).toISOString();
     const row = makeRow({
       expiresAt: past,
@@ -155,8 +155,41 @@ describe('SQLiteBackend', () => {
     backend.store(row);
 
     const result = backend.get('google', 'user-123');
+    expect(result).toBeNull();
+  });
+
+  it('getForRefresh returns expired row when refresh token is present', () => {
+    const past = new Date(Date.now() - 10_000).toISOString();
+    const row = makeRow({
+      expiresAt: past,
+      refreshTokenEnc: 'refresh-cipher',
+      refreshTokenIv: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      refreshTokenTag: 'cccccccccccccccccccccccccccccccc',
+    });
+    backend.store(row);
+
+    const result = backend.getForRefresh('google', 'user-123');
     expect(result).not.toBeNull();
     expect(result!.refreshTokenEnc).toBe('refresh-cipher');
+  });
+
+  it('list filters expired rows', () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const past = new Date(Date.now() - 10_000).toISOString();
+
+    backend.store(makeRow({ provider: 'google', userId: 'user-abc', expiresAt: future }));
+    backend.store(makeRow({
+      provider: 'github',
+      userId: 'user-abc',
+      expiresAt: past,
+      refreshTokenEnc: 'refresh-cipher',
+      refreshTokenIv: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      refreshTokenTag: 'cccccccccccccccccccccccccccccccc',
+    }));
+
+    const results = backend.list('user-abc');
+    expect(results).toHaveLength(1);
+    expect(results[0].provider).toBe('google');
   });
 });
 
@@ -180,6 +213,7 @@ describe('SQLiteBackend — vault_agents', () => {
     const now = new Date().toISOString();
     return {
       id: 'agt_001',
+      did: 'did:key:z6MkTestAgent',
       fingerprint: 'abc123fingerprint',
       name: 'test-agent',
       scopeCeiling: '["repo","read:org"]',
@@ -199,10 +233,19 @@ describe('SQLiteBackend — vault_agents', () => {
 
     expect(agent).not.toBeNull();
     expect(agent!.id).toBe('agt_001');
+    expect(agent!.did).toBe('did:key:z6MkTestAgent');
     expect(agent!.fingerprint).toBe('abc123fingerprint');
     expect(agent!.name).toBe('test-agent');
     expect(agent!.scopeCeiling).toBe('["repo","read:org"]');
     expect(agent!.status).toBe('active');
+  });
+
+  it('retrieves agent by did', () => {
+    backend.storeAgent(makeAgentRow());
+    const agent = backend.getAgentByDid('did:key:z6MkTestAgent');
+
+    expect(agent).not.toBeNull();
+    expect(agent!.id).toBe('agt_001');
   });
 
   it('retrieves agent by fingerprint', () => {
@@ -215,6 +258,7 @@ describe('SQLiteBackend — vault_agents', () => {
 
   it('returns null for missing agent', () => {
     expect(backend.getAgent('agt_nonexistent')).toBeNull();
+    expect(backend.getAgentByDid('did:key:zMissing')).toBeNull();
     expect(backend.getAgentByFingerprint('nonexistent')).toBeNull();
   });
 
