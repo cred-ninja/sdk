@@ -144,7 +144,7 @@ describe('SQLiteBackend', () => {
     expect(result).not.toBeNull();
   });
 
-  it('returns expired row when refresh token is present (needed for auto-refresh)', () => {
+  it('filters expired row even when refresh token is present', () => {
     const past = new Date(Date.now() - 10_000).toISOString();
     const row = makeRow({
       expiresAt: past,
@@ -155,8 +155,26 @@ describe('SQLiteBackend', () => {
     backend.store(row);
 
     const result = backend.get('google', 'user-123');
-    expect(result).not.toBeNull();
-    expect(result!.refreshTokenEnc).toBe('refresh-cipher');
+    expect(result).toBeNull();
+  });
+
+  it('list filters expired rows', () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const past = new Date(Date.now() - 10_000).toISOString();
+
+    backend.store(makeRow({ provider: 'google', userId: 'user-abc', expiresAt: future }));
+    backend.store(makeRow({
+      provider: 'github',
+      userId: 'user-abc',
+      expiresAt: past,
+      refreshTokenEnc: 'refresh-cipher',
+      refreshTokenIv: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      refreshTokenTag: 'cccccccccccccccccccccccccccccccc',
+    }));
+
+    const results = backend.list('user-abc');
+    expect(results).toHaveLength(1);
+    expect(results[0].provider).toBe('google');
   });
 });
 
