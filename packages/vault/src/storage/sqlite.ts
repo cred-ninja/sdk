@@ -4,6 +4,8 @@ import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } fro
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
 
+const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
+
 /**
  * SQLite storage backend using better-sqlite3 (synchronous API).
  *
