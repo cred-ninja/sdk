@@ -13,6 +13,7 @@ const mockVault = {
   store: vi.fn(),
   list: vi.fn(),
   delete: vi.fn(),
+  writeAuditEvent: undefined as undefined | ReturnType<typeof vi.fn>,
 };
 
 const mockCreateAdapter = vi.fn().mockReturnValue({
@@ -39,17 +40,22 @@ vi.mock('@credninja/oauth', () => ({
   createAdapter: (...args: unknown[]) => mockCreateAdapter(...args),
 }));
 
-function makeLocalCred(providers: Record<string, { clientId: string; clientSecret: string }> = {}) {
+function makeLocalCred(
+  providers: Record<string, { clientId: string; clientSecret: string }> = {},
+  options: { requireAudit?: boolean } = {},
+) {
   return new Cred({
     mode: 'local',
     vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json', storage: 'file' },
     providers,
+    requireAudit: options.requireAudit,
   });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockVault.init.mockResolvedValue(undefined);
+  mockVault.writeAuditEvent = undefined;
   vaultConstructorCalls.length = 0;
 });
 
@@ -304,5 +310,43 @@ describe('Local mode TTL enforcement', () => {
     await expect(
       local.delegate({ service: 'google', userId: 'user-1' }),
     ).rejects.toThrow(CredError);
+  });
+});
+
+describe('Local mode audit enforcement', () => {
+  it('throws audit_not_supported when requireAudit is true and backend lacks audit support', async () => {
+    const local = makeLocalCred({}, { requireAudit: true });
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      scopes: ['calendar.readonly'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await expect(
+      local.delegate({ service: 'google', userId: 'user-1' }),
+    ).rejects.toMatchObject({ code: 'audit_not_supported' });
+  });
+
+  it('delegates when requireAudit is true and audit support is available', async () => {
+    const local = makeLocalCred({}, { requireAudit: true });
+    mockVault.writeAuditEvent = vi.fn();
+
+    mockVault.get.mockResolvedValue({
+      provider: 'google',
+      userId: 'user-1',
+      accessToken: 'ya29.token',
+      scopes: ['calendar.readonly'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({ service: 'google', userId: 'user-1' });
+
+    expect(result.accessToken).toBe('ya29.token');
+    expect(mockVault.writeAuditEvent).toHaveBeenCalledTimes(1);
   });
 });

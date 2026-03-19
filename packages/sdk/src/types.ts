@@ -32,6 +32,8 @@ export interface CredLocalConfig {
   mode: 'local';
   vault: CredLocalVaultConfig;
   providers: Record<string, CredProviderConfig>;
+  /** Require the configured local vault backend to persist audit events. */
+  requireAudit?: boolean;
 }
 
 // ── Union config ─────────────────────────────────────────────────────────────

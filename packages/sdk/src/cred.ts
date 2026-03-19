@@ -438,7 +438,16 @@ export class Cred {
    * This is the fail-closed behavior: delegation cannot succeed without a persisted audit record.
    */
   private writeAuditEvent(event: AuditEventInput): void {
-    if (!this.vault?.writeAuditEvent) return; // no audit backend configured (e.g. file mode)
+    if (!this.vault?.writeAuditEvent) {
+      if (this.localConfig?.requireAudit) {
+        throw new CredError(
+          'Audit backend required, but the configured vault storage does not support audit writes',
+          'audit_not_supported',
+          500,
+        );
+      }
+      return;
+    }
     try {
       this.vault.writeAuditEvent(event);
     } catch (err) {
