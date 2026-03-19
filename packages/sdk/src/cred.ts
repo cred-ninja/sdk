@@ -80,8 +80,26 @@ interface VaultInstance {
     scopes?: string[];
   }>>;
   delete(input: { provider: string; userId: string }): Promise<void>;
+  getPermission?(agentId: string, connectionId: string): Promise<{
+    id: string;
+    allowedScopes: string[];
+    rateLimit?: { maxRequests: number; windowMs: number };
+    ttlOverride?: number;
+    requiresApproval: boolean;
+    delegatable: boolean;
+    maxDelegationDepth: number;
+    createdAt: Date;
+    expiresAt?: Date;
+    createdBy: string;
+  } | null>;
+  checkPermissionRateLimit?(
+    permissionId: string,
+    maxRequests: number,
+    windowMs: number,
+    now?: Date,
+  ): Promise<boolean>;
   revokeAgent?(agentId: string): Promise<void>;
-  getAgentByDid?(did: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
+  getAgentByDid?(did: string): Promise<{ id: string; status: string; scopeCeiling: string[] } | null>;
   // Rotation methods (exposed by CredVault, proxied from RotationEngine)
   startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<VaultRotationResult>;
   promoteRotation?(rotationId: string): Promise<VaultRotationResult>;
@@ -269,7 +287,19 @@ export class Cred {
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
-    let agentRecord: { status: string; scopeCeiling: string[] } | null = null;
+    let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
+    let permission: {
+      id: string;
+      allowedScopes: string[];
+      rateLimit?: { maxRequests: number; windowMs: number };
+      ttlOverride?: number;
+      requiresApproval: boolean;
+      delegatable: boolean;
+      maxDelegationDepth: number;
+      createdAt: Date;
+      expiresAt?: Date;
+      createdBy: string;
+    } | null = null;
 
     // Check agent status and scope ceiling before delegation
     if (params.agentDid && vault.getAgentByDid) {
@@ -332,6 +362,65 @@ export class Cred {
               403,
             );
           }
+        }
+      }
+    }
+
+    if (agentRecord) {
+      permission = await vault.getPermission?.(agentRecord.id, params.service) ?? null;
+      if (!permission) {
+        this.writeAuditEvent({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: params.agentDid ?? agentRecord.id },
+          action: 'deny',
+          resource: { type: 'permission', id: `${agentRecord.id}/${params.service}` },
+          outcome: 'denied',
+          scopesRequested: params.scopes ?? [],
+          correlationId,
+          errorMessage: 'no_permission',
+        });
+        throw new CredError(
+          `Agent ${params.agentDid ?? agentRecord.id} has no permission for ${params.service}`,
+          'no_permission',
+          403,
+        );
+      }
+
+      if (permission.expiresAt && permission.expiresAt.getTime() < Date.now()) {
+        this.writeAuditEvent({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: params.agentDid ?? agentRecord.id },
+          action: 'deny',
+          resource: { type: 'permission', id: permission.id },
+          outcome: 'denied',
+          scopesRequested: params.scopes ?? [],
+          correlationId,
+          errorMessage: 'permission_expired',
+        });
+        throw new CredError('Permission has expired', 'permission_expired', 403);
+      }
+
+      if (permission.rateLimit) {
+        const allowed = await vault.checkPermissionRateLimit?.(
+          permission.id,
+          permission.rateLimit.maxRequests,
+          permission.rateLimit.windowMs,
+        );
+        if (!allowed) {
+          this.writeAuditEvent({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: params.agentDid ?? agentRecord.id },
+            action: 'deny',
+            resource: { type: 'permission', id: permission.id },
+            outcome: 'denied',
+            scopesRequested: params.scopes ?? [],
+            correlationId,
+            errorMessage: 'rate_limited',
+          });
+          throw new CredError('Agent rate limit exceeded', 'rate_limited', 429);
         }
       }
     }
@@ -426,11 +515,20 @@ export class Cred {
 
     const delegationId = `local_${params.service}_${params.userId}`;
     const grantedScopes = entry.scopes ?? [];
-    const delegatedScopes = agentRecord
-      && agentRecord.scopeCeiling.length > 0
-      && (!params.scopes || params.scopes.length === 0)
-      ? grantedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
-      : grantedScopes;
+    let delegatedScopes = grantedScopes;
+
+    if (permission) {
+      delegatedScopes = delegatedScopes.filter((scope) => permission!.allowedScopes.includes(scope));
+    }
+
+    if (params.scopes && params.scopes.length > 0) {
+      const permittedRequestedScopes = permission
+        ? params.scopes.filter((scope) => permission!.allowedScopes.includes(scope))
+        : params.scopes;
+      delegatedScopes = delegatedScopes.filter((scope) => permittedRequestedScopes.includes(scope));
+    } else if (agentRecord && agentRecord.scopeCeiling.length > 0) {
+      delegatedScopes = delegatedScopes.filter((scope) => agentRecord.scopeCeiling.includes(scope));
+    }
 
     // Build HMAC of token for audit (raw token never stored)
     const sensitiveFieldsHmac = this.auditHmacSecret

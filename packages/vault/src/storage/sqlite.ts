@@ -1,5 +1,5 @@
 import type { StorageBackend } from './interface.js';
-import type { StoredRow, AgentRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
+import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
@@ -89,6 +89,36 @@ export class SQLiteBackend implements StorageBackend {
       this.db.exec('ALTER TABLE vault_agents ADD COLUMN did TEXT');
     }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_did ON vault_agents(did) WHERE did IS NOT NULL');
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_permissions (
+        id                   TEXT PRIMARY KEY,
+        agent_id             TEXT NOT NULL,
+        connection_id        TEXT NOT NULL,
+        allowed_scopes       TEXT NOT NULL,
+        rate_limit_max       INTEGER,
+        rate_limit_window_ms INTEGER,
+        ttl_override         INTEGER,
+        requires_approval    INTEGER NOT NULL DEFAULT 0,
+        delegatable          INTEGER NOT NULL DEFAULT 0,
+        max_delegation_depth INTEGER NOT NULL DEFAULT 1,
+        expires_at           TEXT,
+        created_at           TEXT NOT NULL,
+        created_by           TEXT NOT NULL,
+        UNIQUE(agent_id, connection_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_permissions_agent ON vault_permissions(agent_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_permissions_connection ON vault_permissions(connection_id);
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_rate_limit_counters (
+        permission_id TEXT NOT NULL,
+        window_start  TEXT NOT NULL,
+        request_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (permission_id, window_start)
+      )
+    `);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rotations (
@@ -367,6 +397,139 @@ export class SQLiteBackend implements StorageBackend {
       SET status = ?, updated_at = ?, revoked_at = ?
       WHERE id = ?
     `).run(status, now, revokedAt ?? null, id);
+  }
+
+  // ── Permission methods ──────────────────────────────────────────────────
+
+  storePermission(row: PermissionRow): void {
+    const db = this.ensureDb();
+
+    db.prepare(`
+      INSERT INTO vault_permissions (
+        id, agent_id, connection_id, allowed_scopes,
+        rate_limit_max, rate_limit_window_ms, ttl_override,
+        requires_approval, delegatable, max_delegation_depth,
+        expires_at, created_at, created_by
+      ) VALUES (
+        @id, @agent_id, @connection_id, @allowed_scopes,
+        @rate_limit_max, @rate_limit_window_ms, @ttl_override,
+        @requires_approval, @delegatable, @max_delegation_depth,
+        @expires_at, @created_at, @created_by
+      )
+      ON CONFLICT(agent_id, connection_id) DO UPDATE SET
+        id                   = excluded.id,
+        allowed_scopes       = excluded.allowed_scopes,
+        rate_limit_max       = excluded.rate_limit_max,
+        rate_limit_window_ms = excluded.rate_limit_window_ms,
+        ttl_override         = excluded.ttl_override,
+        requires_approval    = excluded.requires_approval,
+        delegatable          = excluded.delegatable,
+        max_delegation_depth = excluded.max_delegation_depth,
+        expires_at           = excluded.expires_at,
+        created_by           = excluded.created_by
+    `).run(row);
+  }
+
+  getPermission(agentId: string, connectionId: string): PermissionRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        agent_id,
+        connection_id,
+        allowed_scopes,
+        rate_limit_max,
+        rate_limit_window_ms,
+        ttl_override,
+        requires_approval,
+        delegatable,
+        max_delegation_depth,
+        expires_at,
+        created_at,
+        created_by
+      FROM vault_permissions
+      WHERE agent_id = ? AND connection_id = ?
+    `).get(agentId, connectionId) as PermissionRow | undefined;
+
+    return row ?? null;
+  }
+
+  listPermissions(agentId: string): PermissionRow[] {
+    const db = this.ensureDb();
+
+    return db.prepare(`
+      SELECT
+        id,
+        agent_id,
+        connection_id,
+        allowed_scopes,
+        rate_limit_max,
+        rate_limit_window_ms,
+        ttl_override,
+        requires_approval,
+        delegatable,
+        max_delegation_depth,
+        expires_at,
+        created_at,
+        created_by
+      FROM vault_permissions
+      WHERE agent_id = ?
+      ORDER BY created_at DESC
+    `).all(agentId) as PermissionRow[];
+  }
+
+  revokePermission(permissionId: string): void {
+    const db = this.ensureDb();
+
+    const revoke = db.transaction((id: string) => {
+      db.prepare('DELETE FROM vault_rate_limit_counters WHERE permission_id = ?').run(id);
+      db.prepare('DELETE FROM vault_permissions WHERE id = ?').run(id);
+    });
+
+    revoke(permissionId);
+  }
+
+  checkPermissionRateLimit(
+    permissionId: string,
+    maxRequests: number,
+    windowMs: number,
+    now = new Date(),
+  ): boolean {
+    const db = this.ensureDb();
+    const windowStart = new Date(
+      Math.floor(now.getTime() / windowMs) * windowMs,
+    ).toISOString();
+
+    const check = db.transaction((id: string, start: string) => {
+      const current = db.prepare(`
+        SELECT request_count AS requestCount
+        FROM vault_rate_limit_counters
+        WHERE permission_id = ? AND window_start = ?
+      `).get(id, start) as { requestCount: number } | undefined;
+
+      if (!current) {
+        db.prepare(`
+          INSERT INTO vault_rate_limit_counters (permission_id, window_start, request_count)
+          VALUES (?, ?, 1)
+        `).run(id, start);
+        return true;
+      }
+
+      if (current.requestCount >= maxRequests) {
+        return false;
+      }
+
+      db.prepare(`
+        UPDATE vault_rate_limit_counters
+        SET request_count = request_count + 1
+        WHERE permission_id = ? AND window_start = ?
+      `).run(id, start);
+
+      return true;
+    });
+
+    return check(permissionId, windowStart);
   }
 
   // ── Audit event methods ─────────────────────────────────────────────────────

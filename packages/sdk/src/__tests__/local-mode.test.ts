@@ -11,6 +11,8 @@ const mockVault = {
   init: vi.fn().mockResolvedValue(undefined),
   get: vi.fn(),
   getAgentByDid: undefined as undefined | ReturnType<typeof vi.fn>,
+  getPermission: undefined as undefined | ReturnType<typeof vi.fn>,
+  checkPermissionRateLimit: undefined as undefined | ReturnType<typeof vi.fn>,
   store: vi.fn(),
   list: vi.fn(),
   delete: vi.fn(),
@@ -57,6 +59,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockVault.init.mockResolvedValue(undefined);
   mockVault.getAgentByDid = undefined;
+  mockVault.getPermission = undefined;
+  mockVault.checkPermissionRateLimit = undefined;
   mockVault.writeAuditEvent = undefined;
   vaultConstructorCalls.length = 0;
 });
@@ -124,8 +128,18 @@ describe('Local mode delegate()', () => {
   it('looks up agent policy by DID when agentDid is provided', async () => {
     const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
     mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
       status: 'active',
       scopeCeiling: ['repo'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_1',
+      allowedScopes: ['repo'],
+      requiresApproval: false,
+      delegatable: true,
+      maxDelegationDepth: 1,
+      createdAt: new Date(),
+      createdBy: 'user_1',
     });
     mockVault.get.mockResolvedValue({
       provider: 'github',
@@ -144,6 +158,79 @@ describe('Local mode delegate()', () => {
     });
 
     expect(mockVault.getAgentByDid).toHaveBeenCalledWith('did:key:z6MkTestAgent');
+  });
+
+  it('throws no_permission when the agent lacks a permission record', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue(null);
+
+    await expect(
+      local.delegate({
+        service: 'github',
+        userId: 'u1',
+        agentDid: 'did:key:z6MkTestAgent',
+      }),
+    ).rejects.toMatchObject({ code: 'no_permission', statusCode: 403 });
+  });
+
+  it('throws permission_expired when the permission has expired', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_1',
+      allowedScopes: ['repo'],
+      expiresAt: new Date(Date.now() - 5_000),
+      requiresApproval: false,
+      delegatable: true,
+      maxDelegationDepth: 1,
+      createdAt: new Date(),
+      createdBy: 'user_1',
+    });
+
+    await expect(
+      local.delegate({
+        service: 'github',
+        userId: 'u1',
+        agentDid: 'did:key:z6MkTestAgent',
+      }),
+    ).rejects.toMatchObject({ code: 'permission_expired', statusCode: 403 });
+  });
+
+  it('throws rate_limited when the permission rate limit is exceeded', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_1',
+      allowedScopes: ['repo'],
+      rateLimit: { maxRequests: 1, windowMs: 60_000 },
+      requiresApproval: false,
+      delegatable: true,
+      maxDelegationDepth: 1,
+      createdAt: new Date(),
+      createdBy: 'user_1',
+    });
+    mockVault.checkPermissionRateLimit = vi.fn().mockResolvedValue(false);
+
+    await expect(
+      local.delegate({
+        service: 'github',
+        userId: 'u1',
+        agentDid: 'did:key:z6MkTestAgent',
+      }),
+    ).rejects.toMatchObject({ code: 'rate_limited', statusCode: 429 });
   });
 
   it('writes the pending audit event before reading from the vault', async () => {
@@ -171,8 +258,18 @@ describe('Local mode delegate()', () => {
   it('attenuates returned scopes to the agent ceiling when scopes are omitted', async () => {
     const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
     mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
       status: 'active',
       scopeCeiling: ['repo'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_1',
+      allowedScopes: ['repo', 'admin:org'],
+      requiresApproval: false,
+      delegatable: true,
+      maxDelegationDepth: 1,
+      createdAt: new Date(),
+      createdBy: 'user_1',
     });
     mockVault.get.mockResolvedValue({
       provider: 'github',
@@ -187,6 +284,41 @@ describe('Local mode delegate()', () => {
       service: 'github',
       userId: 'u1',
       agentDid: 'did:key:z6MkTestAgent',
+    });
+
+    expect(result.scopes).toEqual(['repo']);
+  });
+
+  it('attenuates explicitly requested scopes to the permission allowed scopes', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      id: 'agt_1',
+      status: 'active',
+      scopeCeiling: ['repo', 'admin:org'],
+    });
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_1',
+      allowedScopes: ['repo'],
+      requiresApproval: false,
+      delegatable: true,
+      maxDelegationDepth: 1,
+      createdAt: new Date(),
+      createdBy: 'user_1',
+    });
+    mockVault.get.mockResolvedValue({
+      provider: 'github',
+      userId: 'u1',
+      accessToken: 'token',
+      scopes: ['repo', 'admin:org'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await local.delegate({
+      service: 'github',
+      userId: 'u1',
+      agentDid: 'did:key:z6MkTestAgent',
+      scopes: ['repo', 'admin:org'],
     });
 
     expect(result.scopes).toEqual(['repo']);

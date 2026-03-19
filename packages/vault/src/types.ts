@@ -24,6 +24,29 @@ export interface StoreInput {
   scopes?: string[];
 }
 
+export interface PermissionRateLimit {
+  maxRequests: number;
+  windowMs: number;
+}
+
+/**
+ * Permission granted to an agent for a given connection.
+ */
+export interface Permission {
+  id: string;
+  agentId: string;
+  connectionId: string;
+  allowedScopes: string[];
+  rateLimit?: PermissionRateLimit;
+  ttlOverride?: number;
+  requiresApproval: boolean;
+  delegatable: boolean;
+  maxDelegationDepth: number;
+  createdAt: Date;
+  expiresAt?: Date;
+  createdBy: string;
+}
+
 /**
  * Minimal OAuth adapter interface that vault uses for auto-refresh.
  * Compatible with @credninja/oauth ServiceAdapter.
@@ -99,6 +122,25 @@ export interface StoredRow {
   scopes?: string; // JSON array string
   createdAt: string; // ISO string
   updatedAt: string; // ISO string
+}
+
+/**
+ * Raw DB row for vault_permissions.
+ */
+export interface PermissionRow {
+  id: string;
+  agent_id: string;
+  connection_id: string;
+  allowed_scopes: string;
+  rate_limit_max: number | null;
+  rate_limit_window_ms: number | null;
+  ttl_override: number | null;
+  requires_approval: number;
+  delegatable: number;
+  max_delegation_depth: number;
+  expires_at: string | null;
+  created_at: string;
+  created_by: string;
 }
 
 /**
