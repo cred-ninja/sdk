@@ -222,14 +222,34 @@ export class Cred {
       );
     }
 
-    const expiresIn = entry.expiresAt
-      ? Math.max(0, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-      : undefined;
+    // Check if token is expired (vault.get returns null for expired, but check anyway
+    // in case vault returned an entry without expiry enforcement)
+    if (entry.expiresAt && entry.expiresAt.getTime() <= Date.now()) {
+      throw new CredError(
+        `Token for ${params.service}/${params.userId} has expired and could not be refreshed.`,
+        'token_expired',
+        401,
+      );
+    }
+
+    // Always set a TTL — default 900s (15 min) if no expiry info
+    const DEFAULT_TTL_SECONDS = 900;
+    let expiresIn: number;
+    let expiresAt: Date;
+
+    if (entry.expiresAt) {
+      expiresIn = Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000));
+      expiresAt = entry.expiresAt;
+    } else {
+      expiresIn = DEFAULT_TTL_SECONDS;
+      expiresAt = new Date(Date.now() + DEFAULT_TTL_SECONDS * 1000);
+    }
 
     return {
       accessToken: entry.accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      expiresAt,
       service: params.service,
       scopes: entry.scopes ?? [],
       delegationId: `local_${params.service}_${params.userId}`,
@@ -262,10 +282,15 @@ export class Cred {
       receipt?: string;
     }>('/api/v1/delegate', body);
 
+    const DEFAULT_TTL_SECONDS = 900;
+    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    const expiresAt = new Date(Date.now() + expiresIn * 1000);
+
     return {
       accessToken: data.access_token,
       tokenType: data.token_type,
-      expiresIn: data.expires_in,
+      expiresIn,
+      expiresAt,
       service: data.service,
       scopes: data.scopes,
       delegationId: data.delegation_id,

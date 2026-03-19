@@ -69,7 +69,20 @@ export class FileBackend implements StorageBackend {
     }
 
     const data = this.readAll();
-    return data[this.rowKey(provider, userId)] ?? null;
+    const row = data[this.rowKey(provider, userId)] ?? null;
+    if (!row) return null;
+
+    // Filter out expired rows that have no refresh token
+    // (expired rows with refresh tokens are kept so vault can attempt auto-refresh)
+    if (row.expiresAt) {
+      const expiresAt = new Date(row.expiresAt);
+      const hasRefreshToken = !!row.refreshTokenEnc;
+      if (!isNaN(expiresAt.getTime()) && expiresAt <= new Date() && !hasRefreshToken) {
+        return null;
+      }
+    }
+
+    return row;
   }
 
   delete(provider: string, userId: string): void {
