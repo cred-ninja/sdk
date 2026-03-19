@@ -23,3 +23,24 @@ class ConsentRequiredError(CredError):
     def __init__(self, message: str, consent_url: str) -> None:
         super().__init__(message, "consent_required", 403)
         self.consent_url = consent_url
+
+
+class AgentRevokedException(CredError):
+    """Raised when the agent token has been revoked server-side."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "agent_revoked", 403)
+
+
+class ScopeCeilingException(CredError):
+    """Raised when requested scopes exceed the agent's ceiling."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "scope_ceiling_exceeded", 403)
+
+
+class RateLimitException(CredError):
+    """Raised when the API rate limits the request."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "rate_limited", 429)
