@@ -2,6 +2,8 @@ import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource } from '../audit.js';
 
+const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
+
 /**
  * SQLite storage backend using better-sqlite3 (synchronous API).
  *
@@ -96,7 +98,7 @@ export class SQLiteBackend implements StorageBackend {
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_rotations_connection ON vault_rotations(connection_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rotations_connection_unique ON vault_rotations(connection_id);
       CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
     `);
   }
@@ -488,6 +490,84 @@ export class SQLiteBackend implements StorageBackend {
     const db = this.ensureDb();
     const row = db.prepare('SELECT * FROM vault_rotations WHERE connection_id = ? ORDER BY created_at DESC LIMIT 1').get(connectionId) as RotationRow | undefined;
     return row ? this.mapRotationRow(row) : null;
+  }
+
+  startRotationTransaction(row: RotationRow): Rotation {
+    const db = this.ensureDb();
+    const getByConnection = db.prepare(`
+      SELECT * FROM vault_rotations
+      WHERE connection_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+    const getById = db.prepare('SELECT * FROM vault_rotations WHERE id = ?');
+    const upsert = db.prepare(`
+      INSERT INTO vault_rotations (
+        id, connection_id, strategy, interval_seconds, state,
+        current_version_id, pending_version_id, previous_version_id,
+        last_rotated_at, next_rotation_at, failure_count, failure_action,
+        created_at, updated_at
+      ) VALUES (
+        @id, @connectionId, @strategy, @intervalSeconds, @state,
+        @currentVersionId, @pendingVersionId, @previousVersionId,
+        @lastRotatedAt, @nextRotationAt, @failureCount, @failureAction,
+        @createdAt, @updatedAt
+      )
+      ON CONFLICT (connection_id) DO UPDATE SET
+        id                  = excluded.id,
+        strategy            = excluded.strategy,
+        interval_seconds    = excluded.interval_seconds,
+        state               = excluded.state,
+        current_version_id  = excluded.current_version_id,
+        pending_version_id  = excluded.pending_version_id,
+        previous_version_id = excluded.previous_version_id,
+        last_rotated_at     = excluded.last_rotated_at,
+        next_rotation_at    = excluded.next_rotation_at,
+        failure_count       = excluded.failure_count,
+        failure_action      = excluded.failure_action,
+        created_at          = excluded.created_at,
+        updated_at          = excluded.updated_at
+      WHERE vault_rotations.state NOT IN ('pending', 'testing', 'promoting')
+    `);
+
+    const transaction = db.transaction((rotationRow: RotationRow): Rotation => {
+      const existing = getByConnection.get(rotationRow.connection_id) as RotationRow | undefined;
+      if (existing && IN_PROGRESS_ROTATION_STATES.includes(existing.state as RotationState)) {
+        throw new Error(
+          `Rotation already in progress for connection ${rotationRow.connection_id} (state: ${existing.state})`,
+        );
+      }
+
+      const result = upsert.run({
+        id: rotationRow.id,
+        connectionId: rotationRow.connection_id,
+        strategy: rotationRow.strategy,
+        intervalSeconds: rotationRow.interval_seconds,
+        state: rotationRow.state,
+        currentVersionId: rotationRow.current_version_id ?? null,
+        pendingVersionId: rotationRow.pending_version_id ?? null,
+        previousVersionId: rotationRow.previous_version_id ?? null,
+        lastRotatedAt: rotationRow.last_rotated_at ?? null,
+        nextRotationAt: rotationRow.next_rotation_at ?? null,
+        failureCount: rotationRow.failure_count,
+        failureAction: rotationRow.failure_action,
+        createdAt: rotationRow.created_at,
+        updatedAt: rotationRow.updated_at,
+      });
+
+      if (result.changes === 0) {
+        throw new Error(`Rotation already in progress for connection ${rotationRow.connection_id}`);
+      }
+
+      const created = getById.get(rotationRow.id) as RotationRow | undefined;
+      if (!created) {
+        throw new Error(`Failed to create rotation record ${rotationRow.id}`);
+      }
+
+      return this.mapRotationRow(created);
+    });
+
+    return transaction(row);
   }
 
   updateRotation(id: string, updates: Partial<RotationRow>): void {

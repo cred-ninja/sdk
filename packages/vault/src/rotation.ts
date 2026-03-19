@@ -20,6 +20,10 @@ import type {
   RotationState,
 } from './types.js';
 
+type TransactionalRotationStorage = StorageBackend & {
+  startRotationTransaction?: (row: RotationRow) => Rotation | Promise<Rotation>;
+};
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 export interface RotationResult {
@@ -74,11 +78,6 @@ export class RotationEngine {
     strategy: RotationStrategy,
     intervalSeconds = 86400,
   ): Promise<Rotation> {
-    const existing = await this.storage.getRotationByConnectionId?.(connectionId);
-    if (existing && (existing.state === 'pending' || existing.state === 'testing' || existing.state === 'promoting')) {
-      throw new Error(`Rotation already in progress for connection ${connectionId} (state: ${existing.state})`);
-    }
-
     const id = this.generateRotationId();
     const now = this.now();
     const nextRotationAt = new Date(Date.now() + intervalSeconds * 1000).toISOString();
@@ -99,6 +98,16 @@ export class RotationEngine {
       created_at: now,
       updated_at: now,
     };
+
+    const transactionalStorage = this.storage as TransactionalRotationStorage;
+    if (transactionalStorage.startRotationTransaction) {
+      return transactionalStorage.startRotationTransaction(row);
+    }
+
+    const existing = await this.storage.getRotationByConnectionId?.(connectionId);
+    if (existing && (existing.state === 'pending' || existing.state === 'testing' || existing.state === 'promoting')) {
+      throw new Error(`Rotation already in progress for connection ${connectionId} (state: ${existing.state})`);
+    }
 
     if (!this.storage.storeRotation) {
       throw new Error('Storage backend does not support rotation (storeRotation not implemented)');
