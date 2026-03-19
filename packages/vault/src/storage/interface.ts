@@ -26,6 +26,12 @@ export interface StorageBackend {
   get(provider: string, userId: string): StoredRow | null | Promise<StoredRow | null>;
 
   /**
+   * Retrieve a credential row for vault-managed refresh flows.
+   * Unlike get(), this may return expired rows so higher layers can refresh them.
+   */
+  getForRefresh?(provider: string, userId: string): StoredRow | null | Promise<StoredRow | null>;
+
+  /**
    * Delete a credential row by provider + userId.
    * Must be idempotent — safe to call even if entry doesn't exist.
    */

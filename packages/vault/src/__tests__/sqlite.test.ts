@@ -158,6 +158,21 @@ describe('SQLiteBackend', () => {
     expect(result).toBeNull();
   });
 
+  it('getForRefresh returns expired row when refresh token is present', () => {
+    const past = new Date(Date.now() - 10_000).toISOString();
+    const row = makeRow({
+      expiresAt: past,
+      refreshTokenEnc: 'refresh-cipher',
+      refreshTokenIv: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      refreshTokenTag: 'cccccccccccccccccccccccccccccccc',
+    });
+    backend.store(row);
+
+    const result = backend.getForRefresh('google', 'user-123');
+    expect(result).not.toBeNull();
+    expect(result!.refreshTokenEnc).toBe('refresh-cipher');
+  });
+
   it('list filters expired rows', () => {
     const future = new Date(Date.now() + 3600_000).toISOString();
     const past = new Date(Date.now() - 10_000).toISOString();

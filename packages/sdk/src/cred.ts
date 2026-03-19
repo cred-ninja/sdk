@@ -302,7 +302,8 @@ export class Cred {
           );
         }
         if (agentRecord.scopeCeiling.length > 0 && params.scopes && params.scopes.length > 0) {
-          const unauthorizedScopes = params.scopes.filter(s => !agentRecord.scopeCeiling.includes(s));
+          const scopeCeiling = agentRecord.scopeCeiling;
+          const unauthorizedScopes = params.scopes.filter(s => !scopeCeiling.includes(s));
           if (unauthorizedScopes.length > 0) {
             this.writeAuditEvent({
               id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,

@@ -190,6 +190,31 @@ export class SQLiteBackend implements StorageBackend {
     return row ?? null;
   }
 
+  getForRefresh(provider: string, userId: string): StoredRow | null {
+    const db = this.ensureDb();
+
+    const stmt = db.prepare(`
+      SELECT
+        provider,
+        user_id            AS userId,
+        access_token_enc   AS accessTokenEnc,
+        access_token_iv    AS accessTokenIv,
+        access_token_tag   AS accessTokenTag,
+        refresh_token_enc  AS refreshTokenEnc,
+        refresh_token_iv   AS refreshTokenIv,
+        refresh_token_tag  AS refreshTokenTag,
+        expires_at         AS expiresAt,
+        scopes,
+        created_at         AS createdAt,
+        updated_at         AS updatedAt
+      FROM vault_credentials
+      WHERE provider = ? AND user_id = ?
+    `);
+
+    const row = stmt.get(provider, userId) as StoredRow | undefined;
+    return row ?? null;
+  }
+
   delete(provider: string, userId: string): void {
     const db = this.ensureDb();
     db.prepare('DELETE FROM vault_credentials WHERE provider = ? AND user_id = ?')

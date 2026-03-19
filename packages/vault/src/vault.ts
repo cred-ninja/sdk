@@ -144,7 +144,10 @@ export class CredVault {
    */
   async get(input: GetInput): Promise<VaultEntry | null> {
     await this.ensureInit();
-    const row = await this.backend.get(input.provider, input.userId);
+    let row = await this.backend.get(input.provider, input.userId);
+    if (!row && input.adapter && input.clientId && input.clientSecret && this.backend.getForRefresh) {
+      row = await this.backend.getForRefresh(input.provider, input.userId);
+    }
     if (!row) return null;
 
     const key = this.ensureKey();
