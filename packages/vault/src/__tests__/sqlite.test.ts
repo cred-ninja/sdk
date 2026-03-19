@@ -105,15 +105,57 @@ describe('SQLiteBackend', () => {
   });
 
   it('preserves expiresAt and scopes', () => {
-    const now = new Date().toISOString();
+    const future = new Date(Date.now() + 3600_000).toISOString();
     const row = makeRow({
-      expiresAt: now,
+      expiresAt: future,
       scopes: '["calendar","email"]',
     });
     backend.store(row);
 
     const result = backend.get('google', 'user-123');
-    expect(result!.expiresAt).toBe(now);
+    expect(result!.expiresAt).toBe(future);
     expect(result!.scopes).toBe('["calendar","email"]');
+  });
+
+  it('returns null for expired row without refresh token', () => {
+    const past = new Date(Date.now() - 10_000).toISOString(); // 10 seconds ago
+    const row = makeRow({ expiresAt: past });
+    backend.store(row);
+
+    const result = backend.get('google', 'user-123');
+    expect(result).toBeNull();
+  });
+
+  it('returns row when expires_at is in the future', () => {
+    const future = new Date(Date.now() + 3600_000).toISOString(); // 1 hour from now
+    const row = makeRow({ expiresAt: future });
+    backend.store(row);
+
+    const result = backend.get('google', 'user-123');
+    expect(result).not.toBeNull();
+    expect(result!.accessTokenEnc).toBe(row.accessTokenEnc);
+  });
+
+  it('returns row when expires_at is null (no expiry — non-expiring creds)', () => {
+    const row = makeRow({ expiresAt: undefined });
+    backend.store(row);
+
+    const result = backend.get('google', 'user-123');
+    expect(result).not.toBeNull();
+  });
+
+  it('returns expired row when refresh token is present (needed for auto-refresh)', () => {
+    const past = new Date(Date.now() - 10_000).toISOString();
+    const row = makeRow({
+      expiresAt: past,
+      refreshTokenEnc: 'refresh-cipher',
+      refreshTokenIv: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      refreshTokenTag: 'cccccccccccccccccccccccccccccccc',
+    });
+    backend.store(row);
+
+    const result = backend.get('google', 'user-123');
+    expect(result).not.toBeNull();
+    expect(result!.refreshTokenEnc).toBe('refresh-cipher');
   });
 });
