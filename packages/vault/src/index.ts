@@ -10,6 +10,8 @@ export { SQLiteAuditBackend, NoopAuditBackend, hmacAuditField } from './audit.js
 export type { AuditEvent, AuditActor, AuditResource, AuditBackend, AuditFilter } from './audit.js';
 export { RotationEngine } from './rotation.js';
 export type { RotationResult as RotationEngineResult, RefreshAdapter as RotationRefreshAdapter } from './rotation.js';
+export { PermissionStore } from './permissions.js';
+export type { CreatePermissionInput } from './permissions.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 
@@ -30,6 +32,9 @@ export type {
   AgentRecord,
   AgentRow,
   AgentStatus,
+  Permission,
+  PermissionRateLimit,
+  PermissionRow,
   Rotation,
   RotationRow,
   RotationStrategy,

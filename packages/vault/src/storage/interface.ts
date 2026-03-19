@@ -1,4 +1,4 @@
-import type { StoredRow, AgentRow, Rotation, RotationRow } from '../types.js';
+import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter } from '../audit.js';
 
 /**
@@ -49,6 +49,19 @@ export interface StorageBackend {
   getAgentByDid?(did: string): AgentRow | null | Promise<AgentRow | null>;
   getAgentByFingerprint?(fingerprint: string): AgentRow | null | Promise<AgentRow | null>;
   updateAgentStatus?(id: string, status: string, revokedAt?: string): void | Promise<void>;
+
+  // ── Permission methods (optional — not all backends need these) ───────────
+
+  storePermission?(row: PermissionRow): void | Promise<void>;
+  getPermission?(agentId: string, connectionId: string): PermissionRow | null | Promise<PermissionRow | null>;
+  listPermissions?(agentId: string): PermissionRow[] | Promise<PermissionRow[]>;
+  revokePermission?(permissionId: string): void | Promise<void>;
+  checkPermissionRateLimit?(
+    permissionId: string,
+    maxRequests: number,
+    windowMs: number,
+    now?: Date,
+  ): boolean | Promise<boolean>;
 
   // ── Audit methods (optional — not all backends need these) ─────────────────
 

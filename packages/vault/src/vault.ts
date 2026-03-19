@@ -14,12 +14,14 @@ import type {
   EncryptedPayload,
   AgentRecord,
   AgentRow,
+  Permission,
   Rotation,
   RotationStrategy,
   RotationFailureAction,
 } from './types.js';
 import type { AuditEvent, AuditFilter } from './audit.js';
 import { RotationEngine } from './rotation.js';
+import { PermissionStore, type CreatePermissionInput } from './permissions.js';
 
 /**
  * CredVault — local-first encrypted token vault.
@@ -39,6 +41,7 @@ export class CredVault {
   private derivedKey: Buffer | null = null;
   private initPromise: Promise<void> | null = null;
   private rotationEngine: RotationEngine | null = null;
+  private permissionStore: PermissionStore | null = null;
 
   constructor(options: VaultOptions) {
     this.passphrase = options.passphrase;
@@ -338,6 +341,38 @@ export class CredVault {
     await this.backend.updateAgentStatus(agentId, 'revoked', now);
   }
 
+  // ── Permission methods ───────────────────────────────────────────────────
+
+  async createPermission(permission: CreatePermissionInput): Promise<Permission> {
+    await this.ensureInit();
+    return this.getPermissionStore().create(permission);
+  }
+
+  async getPermission(agentId: string, connectionId: string): Promise<Permission | null> {
+    await this.ensureInit();
+    return this.getPermissionStore().get(agentId, connectionId);
+  }
+
+  async listPermissions(agentId: string): Promise<Permission[]> {
+    await this.ensureInit();
+    return this.getPermissionStore().list(agentId);
+  }
+
+  async revokePermission(permissionId: string): Promise<void> {
+    await this.ensureInit();
+    await this.getPermissionStore().revoke(permissionId);
+  }
+
+  async checkPermissionRateLimit(
+    permissionId: string,
+    maxRequests: number,
+    windowMs: number,
+    now?: Date,
+  ): Promise<boolean> {
+    await this.ensureInit();
+    return this.getPermissionStore().checkRateLimit(permissionId, maxRequests, windowMs, now);
+  }
+
   // ── Audit event methods ──────────────────────────────────────────────────
 
   /**
@@ -434,6 +469,13 @@ export class CredVault {
       this.rotationEngine = new RotationEngine(this.backend);
     }
     return this.rotationEngine;
+  }
+
+  private getPermissionStore(): PermissionStore {
+    if (!this.permissionStore) {
+      this.permissionStore = new PermissionStore(this.backend);
+    }
+    return this.permissionStore;
   }
 
   private decryptField(payload: EncryptedPayload, key: Buffer): string {
