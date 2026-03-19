@@ -10,7 +10,7 @@
     "cred-mcp": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npx tsc",
     "dev": "tsx src/cli.ts"
   },
   "files": [
@@ -37,8 +37,8 @@
     "@credninja/sdk": "*"
   },
   "peerDependencies": {
-    "@credninja/oauth": "*",
-    "@credninja/vault": "*"
+    "@credninja/oauth": "^1.0.0",
+    "@credninja/vault": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

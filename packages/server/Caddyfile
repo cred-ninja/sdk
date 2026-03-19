@@ -1,0 +1,10 @@
+# Caddyfile for Cred Server
+#
+# Replace cred.yourdomain.com with your actual domain.
+# Caddy auto-provisions Let's Encrypt TLS certificates.
+#
+# DNS must point to this server before starting.
+
+{$CRED_DOMAIN:cred.yourdomain.com} {
+    reverse_proxy cred:3456
+}

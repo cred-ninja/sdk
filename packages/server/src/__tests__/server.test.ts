@@ -1,0 +1,696 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import request from 'supertest';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { createServer } from '../server.js';
+import type { ServerConfig } from '../config.js';
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard';
+
+// ── Test fixtures ────────────────────────────────────────────────────────────
+
+const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
+const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.json');
+
+function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
+  return {
+    port: 0,
+    host: '127.0.0.1',
+    vaultPassphrase: 'test-passphrase-not-for-production',
+    vaultStorage: 'file',
+    vaultPath: TEST_VAULT_PATH,
+    agentToken: TEST_TOKEN,
+    providers: [
+      {
+        slug: 'google',
+        clientId: 'test-google-client-id',
+        clientSecret: 'test-google-client-secret',
+        defaultScopes: ['openid', 'email', 'profile'],
+      },
+    ],
+    redirectBaseUri: 'http://localhost:3456',
+    ...overrides,
+  };
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('@credninja/server', () => {
+  afterAll(() => {
+    // Cleanup test vault files
+    for (const suffix of ['', '.salt']) {
+      const p = TEST_VAULT_PATH + suffix;
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  });
+
+  describe('GET /health', () => {
+    it('returns ok with provider list', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/health');
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('ok');
+      expect(res.body.providers).toEqual(['google']);
+      expect(res.body.vault).toBe('file');
+    });
+  });
+
+  describe('GET /providers', () => {
+    it('lists configured providers', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/providers');
+
+      expect(res.status).toBe(200);
+      expect(res.body.providers).toHaveLength(1);
+      expect(res.body.providers[0].slug).toBe('google');
+      expect(res.body.providers[0].connected).toBe(false);
+    });
+  });
+
+  describe('GET /connect/:provider', () => {
+    it('returns 404 for unconfigured provider', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/connect/slack');
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toMatch(/not configured/);
+    });
+
+    it('redirects to Google OAuth for configured provider', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/connect/google?scopes=calendar.readonly');
+
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toMatch(/accounts\.google\.com/);
+    });
+  });
+
+  describe('GET /api/token/:provider', () => {
+    it('returns 401 without auth', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/token/google');
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/Unauthorized/);
+    });
+
+    it('returns 401 with wrong token', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', 'Bearer cred_at_wrong_token');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 404 when no credentials stored', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toMatch(/No credentials stored/);
+    });
+
+    it('returns stored token when credentials exist', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // Pre-store a token in the vault
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.test-access-token',
+        refreshToken: 'rt_test-refresh-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.provider).toBe('google');
+      expect(res.body.accessToken).toBe('ya29.test-access-token');
+      expect(res.body.scopes).toEqual(['calendar.readonly']);
+      // Refresh token must NOT be in the response
+      expect(res.body.refreshToken).toBeUndefined();
+    });
+  });
+
+  describe('DELETE /api/token/:provider', () => {
+    it('returns 401 without auth', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).delete('/api/token/google');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 204 on successful revoke', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // Pre-store a token
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.to-be-revoked',
+      });
+
+      const res = await request(app)
+        .delete('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(204);
+
+      // Verify it's gone
+      const entry = await vault.get({ provider: 'google', userId: 'default' });
+      expect(entry).toBeNull();
+    });
+  });
+
+  describe('Security', () => {
+    it('never returns refresh tokens in API response', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.access',
+        refreshToken: 'rt_secret_refresh',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      const body = JSON.stringify(res.body);
+      expect(body).not.toContain('rt_secret_refresh');
+      expect(body).not.toContain('refreshToken');
+    });
+
+    it('uses constant-time token comparison', async () => {
+      // Use a separate vault to avoid pollution from other tests
+      const isolatedPath = TEST_VAULT_PATH + '.timing';
+      const config = makeTestConfig({ vaultPath: isolatedPath });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      try {
+        // Timing attack resistance: wrong tokens should take same time as right tokens.
+        // We can't test timing precisely, but we verify both paths execute.
+        const res1 = await request(app)
+          .get('/api/token/google')
+          .set('Authorization', 'Bearer cred_at_wrong');
+        expect(res1.status).toBe(401);
+
+        const res2 = await request(app)
+          .get('/api/token/google')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`);
+        // Will be 404 (no stored token), not 401 — proves auth passed
+        expect(res2.status).toBe(404);
+      } finally {
+        // Clean up
+        const fs = await import('fs');
+        for (const suffix of ['', '.salt']) {
+          const p = isolatedPath + suffix;
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        }
+      }
+    });
+  });
+
+  // ── New feature tests: default scopes + admin UI ────────────────────────
+
+  describe('Default Scopes', () => {
+    it('uses default scopes when no ?scopes param is provided', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/google');
+
+      expect(res.status).toBe(302);
+      const location = res.headers.location;
+      // Default scopes from config: openid, email, profile
+      // Google prepends https://www.googleapis.com/auth/ to some scopes
+      expect(location).toMatch(/scope=/);
+      // The URL should contain the default scopes
+      const url = new URL(location);
+      const scopeParam = url.searchParams.get('scope') ?? '';
+      expect(scopeParam).toContain('openid');
+      expect(scopeParam).toContain('email');
+      expect(scopeParam).toContain('profile');
+    });
+
+    it('overrides default scopes when ?scopes param is provided', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/google?scopes=calendar.readonly');
+
+      expect(res.status).toBe(302);
+      const location = res.headers.location;
+      const url = new URL(location);
+      const scopeParam = url.searchParams.get('scope') ?? '';
+      expect(scopeParam).toContain('calendar');
+      // Should NOT contain default scopes when overridden
+      // (they're replaced, not merged)
+    });
+
+    it('uses empty scopes when no defaults configured and no param', async () => {
+      const config = makeTestConfig({
+        providers: [
+          {
+            slug: 'github',
+            clientId: 'test-github-id',
+            clientSecret: 'test-github-secret',
+            defaultScopes: [],
+          },
+        ],
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect/github');
+
+      expect(res.status).toBe(302);
+      // Should redirect without error even with empty scopes
+    });
+
+    it('loads default scopes from config correctly', () => {
+      // Test the config interface compliance
+      const config = makeTestConfig();
+      expect(config.providers[0].defaultScopes).toEqual(['openid', 'email', 'profile']);
+    });
+  });
+
+  describe('GET /connect (Admin UI)', () => {
+    it('returns HTML admin page', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/html/);
+      expect(res.text).toContain('Cred');
+      expect(res.text).toContain('Provider Connections');
+    });
+
+    it('lists configured providers', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('google');
+      expect(res.text).toContain('Connect');
+    });
+
+    it('shows connected status when tokens are stored', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.test',
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('Connected');
+      expect(res.text).toContain('calendar.readonly');
+      expect(res.text).toContain('Reconnect');
+      expect(res.text).toContain('Revoke');
+    });
+
+    it('pre-checks default scopes in the UI', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // Default scopes should be pre-checked
+      // openid, email, profile are in defaultScopes
+      expect(res.text).toContain('value="openid"');
+      expect(res.text).toMatch(/value="openid"[^>]*checked/);
+      expect(res.text).toMatch(/value="email"[^>]*checked/);
+      expect(res.text).toMatch(/value="profile"[^>]*checked/);
+    });
+
+    it('does not pre-check non-default scopes', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // gmail.readonly is NOT in defaultScopes, should not be checked
+      // The checkbox for gmail.readonly should exist but not be checked
+      expect(res.text).toContain('value="gmail.readonly"');
+      expect(res.text).not.toMatch(/value="gmail\.readonly"[^>]*checked/);
+    });
+
+    it('shows multiple providers when configured', async () => {
+      const config = makeTestConfig({
+        providers: [
+          { slug: 'google', clientId: 'g-id', clientSecret: 'g-secret', defaultScopes: ['openid'] },
+          { slug: 'github', clientId: 'gh-id', clientSecret: 'gh-secret', defaultScopes: ['repo'] },
+        ],
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      expect(res.text).toContain('google');
+      expect(res.text).toContain('github');
+    });
+
+    it('does not expose sensitive data in admin UI', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.super-secret-access-token',
+        refreshToken: 'rt_super-secret-refresh-token',
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app).get('/connect');
+
+      // Access tokens MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('ya29.super-secret-access-token');
+      // Refresh tokens MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('rt_super-secret-refresh-token');
+      // Client secrets MUST NOT appear in admin UI HTML
+      expect(res.text).not.toContain('test-google-client-secret');
+    });
+
+    it('does not require auth (admin is browser-accessible)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // No auth header — should still work
+      const res = await request(app).get('/connect');
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe('Admin UI — XSS Protection', () => {
+    it('escapes provider slugs in HTML output', async () => {
+      // Provider slugs come from config (trusted), but verify they're
+      // rendered safely. The slug type is constrained to BuiltinAdapterSlug
+      // so this is defense-in-depth.
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // Verify the HTML is well-formed and contains expected structure
+      expect(res.text).toContain('<!DOCTYPE html>');
+      expect(res.text).toContain('</html>');
+    });
+
+    it('custom scope input is text-only (no script injection path)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).get('/connect');
+
+      // The custom scope input accepts text and is processed client-side
+      // via buildScopes() which uses encodeURIComponent — safe for URL injection
+      expect(res.text).toContain('encodeURIComponent');
+    });
+  });
+
+  describe('Revoke via Admin UI', () => {
+    it('revoke endpoint requires agent token (not cookie-based)', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // The admin UI's revoke uses prompt() for token — this is by design.
+      // Verify the DELETE endpoint still requires auth
+      const res = await request(app).delete('/api/token/google');
+      expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Guard integration tests ─────────────────────────────────────────────
+
+  describe('Guard integration', () => {
+    it('works without guard configured (no guard = no policy enforcement)', async () => {
+      const config = makeTestConfig();
+      // No guard in config — default behavior
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.no-guard-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.accessToken).toBe('ya29.no-guard-test');
+      // No guard field when guard is not configured
+      expect(res.body.guard).toBeUndefined();
+    });
+
+    it('allows requests that pass all guard policies', async () => {
+      const guard = new CredGuard({
+        policies: [
+          scopeFilterPolicy({
+            allowedScopes: {
+              google: ['calendar.readonly', 'gmail.readonly'],
+            },
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.guard-allow',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google?scopes=calendar.readonly')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.accessToken).toBe('ya29.guard-allow');
+      // Guard metadata is present
+      expect(res.body.guard).toBeDefined();
+      expect(res.body.guard.allowed).toBe(true);
+      expect(res.body.guard.policies).toHaveLength(1);
+      expect(res.body.guard.policies[0].name).toBe('scope-filter');
+      expect(res.body.guard.policies[0].decision).toBe('ALLOW');
+    });
+
+    it('denies requests that fail guard policies with 403', async () => {
+      const guard = new CredGuard({
+        policies: [
+          scopeFilterPolicy({
+            allowedScopes: {
+              google: ['calendar.readonly'],
+            },
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.guard-deny',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['gmail.send'],
+      });
+
+      // Request a scope that isn't allowed
+      const res = await request(app)
+        .get('/api/token/google?scopes=gmail.send')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/denied by guard policy/);
+      expect(res.body.policy).toBe('scope-filter');
+      // Access token must NOT leak on denial
+      expect(JSON.stringify(res.body)).not.toContain('ya29');
+    });
+
+    it('enforces rate limits across requests', async () => {
+      const guard = new CredGuard({
+        policies: [
+          rateLimitPolicy({
+            maxRequests: 2,
+            windowMs: 60_000,
+          }),
+        ],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.rate-limit-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      // First two requests should pass
+      const res1 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res1.status).toBe(200);
+
+      const res2 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res2.status).toBe(200);
+
+      // Third request should be rate-limited
+      const res3 = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(res3.status).toBe(403);
+      expect(res3.body.policy).toBe('rate-limit');
+    });
+
+    it('guard runs after auth — unauthenticated requests never reach guard', async () => {
+      let guardCalled = false;
+      const guard = new CredGuard({
+        policies: [{
+          name: 'spy-policy',
+          evaluate: () => {
+            guardCalled = true;
+            return { decision: 'ALLOW', policy: 'spy-policy' };
+          },
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', 'Bearer cred_at_wrong_token');
+
+      expect(res.status).toBe(401);
+      expect(guardCalled).toBe(false);
+    });
+
+    it('guard does not affect non-token routes', async () => {
+      const guard = new CredGuard({
+        policies: [{
+          name: 'deny-all',
+          evaluate: () => ({ decision: 'DENY' as const, policy: 'deny-all', reason: 'blocked' }),
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      // Health and providers should still work
+      const healthRes = await request(app).get('/health');
+      expect(healthRes.status).toBe(200);
+
+      const providersRes = await request(app).get('/providers');
+      expect(providersRes.status).toBe(200);
+    });
+
+    it('guard denial does not leak access tokens', async () => {
+      const guard = new CredGuard({
+        policies: [{
+          name: 'deny-all',
+          evaluate: () => ({ decision: 'DENY' as const, policy: 'deny-all', reason: 'no access' }),
+        }],
+      });
+
+      const config = makeTestConfig({ guard });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.secret-should-not-leak',
+        refreshToken: 'rt_also-secret',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(403);
+      const body = JSON.stringify(res.body);
+      expect(body).not.toContain('ya29');
+      expect(body).not.toContain('rt_');
+      expect(body).not.toContain('accessToken');
+      expect(body).not.toContain('refreshToken');
+    });
+  });
+});

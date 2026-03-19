@@ -7,8 +7,8 @@
 export interface CredCloudConfig {
   /** Agent token issued by Cred (starts with cred_at_) */
   agentToken: string;
-  /** Override the API base URL. Defaults to https://api.cred.ninja */
-  baseUrl?: string;
+  /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
+  baseUrl: string;
   mode?: never;
 }
 

@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json",
+    "build": "npx tsc -p tsconfig.cjs.json && npx tsc -p tsconfig.esm.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
@@ -37,8 +37,8 @@
     "node": ">=18.0.0"
   },
   "peerDependencies": {
-    "@credninja/oauth": "*",
-    "@credninja/vault": "*"
+    "@credninja/oauth": "^1.0.0",
+    "@credninja/vault": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

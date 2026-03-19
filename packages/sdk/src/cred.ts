@@ -22,7 +22,7 @@ import {
 import { CredError, ConsentRequiredError } from './errors';
 import crypto from 'crypto';
 
-const DEFAULT_BASE_URL = 'https://api.cred.ninja';
+// No default base URL — users must explicitly set their server URL.
 
 /**
  * Type helpers for dynamic imports (avoids requiring these at module load).
@@ -156,9 +156,15 @@ export class Cred {
       if (!config.agentToken) {
         throw new CredError('agentToken is required', 'invalid_config', 0);
       }
+      if (!config.baseUrl) {
+        throw new CredError(
+          'baseUrl is required. Set it to your Cred server URL (e.g. https://cred.example.com or http://localhost:3456 for local dev).',
+          'invalid_config',
+          0,
+        );
+      }
       this.agentToken = config.agentToken;
-      const rawBaseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
-      this.baseUrl = Cred.validateBaseUrl(rawBaseUrl);
+      this.baseUrl = Cred.validateBaseUrl(config.baseUrl);
     }
   }
 
@@ -167,11 +173,19 @@ export class Cred {
     try {
       parsed = new URL(url);
     } catch {
-      throw new CredError(`Invalid baseUrl: "${url}" — must be a valid HTTPS URL`, 'invalid_config', 0);
+      throw new CredError(`Invalid baseUrl: "${url}" — must be a valid URL`, 'invalid_config', 0);
     }
-    if (parsed.protocol !== 'https:') {
+    // Allow HTTP for localhost/127.0.0.1 (standard secure context),
+    // require HTTPS for all other hosts.
+    const isLocalhost =
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '::1';
+
+    if (parsed.protocol !== 'https:' && !isLocalhost) {
       throw new CredError(
-        `Invalid baseUrl: must use HTTPS — HTTP is not permitted (agent tokens would be sent in plaintext)`,
+        `Invalid baseUrl: must use HTTPS for remote servers — HTTP is only permitted for localhost. ` +
+        `Agent tokens would be sent in plaintext over HTTP.`,
         'invalid_config',
         0,
       );

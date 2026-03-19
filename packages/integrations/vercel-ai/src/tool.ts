@@ -22,7 +22,7 @@ export interface CredDelegateToolOptions {
   userId: string;
   /** The Cred app client ID to delegate for */
   appClientId: string;
-  /** Override the API base URL. Defaults to https://api.cred.ninja */
+  /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl?: string;
 }
 
