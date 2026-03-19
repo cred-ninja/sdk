@@ -292,7 +292,7 @@ export class RotationEngine {
   /**
    * Auto-fail rotations stuck in testing/promoting for >5 minutes.
    */
-  private async failStuckRotations(): Promise<void> {
+  async failStuckRotations(): Promise<void> {
     if (!this.storage.listRotations) return;
 
     const allRotations = await this.storage.listRotations();
