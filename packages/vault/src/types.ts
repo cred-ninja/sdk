@@ -109,3 +109,33 @@ export interface EncryptedPayload {
   iv: string;
   tag: string;
 }
+
+// ── Agent records ───────────────────────────────────────────────────────────
+
+export type AgentStatus = 'active' | 'suspended' | 'revoked';
+
+export interface AgentRecord {
+  id: string;
+  fingerprint: string;
+  name: string;
+  scopeCeiling: string[];
+  status: AgentStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt?: string;
+  revokedAt?: string;
+}
+
+export interface AgentRow {
+  id: string;
+  fingerprint: string;
+  name: string;
+  scopeCeiling: string;
+  status: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+}

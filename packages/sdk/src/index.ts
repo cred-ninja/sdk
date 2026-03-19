@@ -8,6 +8,8 @@ export {
 } from './identity';
 export type {
   AgentIdentity,
+  AgentStatus,
+  GenerateIdentityOptions,
   ExportedIdentity,
   ImportParams,
   VerifyReceiptOptions,
@@ -24,4 +26,6 @@ export type {
   DelegateParams,
   GetConsentUrlParams,
   RevokeParams,
+  RegisterAgentParams,
+  RevokeAgentParams,
 } from './types';

@@ -88,3 +88,16 @@ export interface RevokeParams {
   userId: string;
   appClientId?: string;
 }
+
+// ── Agent scope ceiling & revocation types ──────────────────────────────────
+
+export interface RegisterAgentParams {
+  name: string;
+  fingerprint: string;
+  scopeCeiling?: string[];
+  createdBy: string;
+}
+
+export interface RevokeAgentParams {
+  agentId: string;
+}

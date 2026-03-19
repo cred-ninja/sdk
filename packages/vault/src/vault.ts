@@ -12,6 +12,8 @@ import type {
   VaultEntry,
   StoredRow,
   EncryptedPayload,
+  AgentRecord,
+  AgentRow,
 } from './types.js';
 
 /**
@@ -257,6 +259,72 @@ export class CredVault {
         updatedAt: new Date(row.updatedAt),
       };
     });
+  }
+
+  // ── Agent record methods ──────────────────────────────────────────────────
+
+  async registerAgent(record: AgentRecord): Promise<void> {
+    await this.ensureInit();
+    if (!this.backend.storeAgent) {
+      throw new Error('Agent storage not supported by this backend');
+    }
+    const row: AgentRow = {
+      id: record.id,
+      fingerprint: record.fingerprint,
+      name: record.name,
+      scopeCeiling: JSON.stringify(record.scopeCeiling),
+      status: record.status,
+      createdBy: record.createdBy,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      lastSeenAt: record.lastSeenAt ?? null,
+      revokedAt: record.revokedAt ?? null,
+    };
+    await this.backend.storeAgent(row);
+  }
+
+  async getAgentByFingerprint(fingerprint: string): Promise<AgentRecord | null> {
+    await this.ensureInit();
+    if (!this.backend.getAgentByFingerprint) {
+      return null;
+    }
+    const row = await this.backend.getAgentByFingerprint(fingerprint);
+    if (!row) return null;
+    return this.agentRowToRecord(row);
+  }
+
+  async getAgent(id: string): Promise<AgentRecord | null> {
+    await this.ensureInit();
+    if (!this.backend.getAgent) {
+      return null;
+    }
+    const row = await this.backend.getAgent(id);
+    if (!row) return null;
+    return this.agentRowToRecord(row);
+  }
+
+  async revokeAgent(agentId: string): Promise<void> {
+    await this.ensureInit();
+    if (!this.backend.updateAgentStatus) {
+      throw new Error('Agent storage not supported by this backend');
+    }
+    const now = new Date().toISOString();
+    await this.backend.updateAgentStatus(agentId, 'revoked', now);
+  }
+
+  private agentRowToRecord(row: AgentRow): AgentRecord {
+    return {
+      id: row.id,
+      fingerprint: row.fingerprint,
+      name: row.name,
+      scopeCeiling: JSON.parse(row.scopeCeiling) as string[],
+      status: row.status as AgentRecord['status'],
+      createdBy: row.createdBy,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      lastSeenAt: row.lastSeenAt ?? undefined,
+      revokedAt: row.revokedAt ?? undefined,
+    };
   }
 
   private decryptField(payload: EncryptedPayload, key: Buffer): string {

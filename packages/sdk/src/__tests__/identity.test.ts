@@ -7,6 +7,7 @@ import {
   verifyDelegationReceipt,
   CRED_PUBLIC_KEY_HEX,
   AgentIdentity,
+  AgentStatus,
   DelegateParams,
   DelegationResult,
 } from '../index';
@@ -292,6 +293,81 @@ describe('verifyDelegationReceipt()', () => {
       credPublicKey: credPublicKeyHex,
     });
     expect(result).toBe(false);
+  });
+});
+
+// ── scopeCeiling and status ──────────────────────────────────────────────────
+
+describe('generateAgentIdentity() — scopeCeiling and status', () => {
+  it('defaults to empty scopeCeiling and active status', async () => {
+    const identity = await generateAgentIdentity();
+
+    expect(identity.scopeCeiling).toEqual([]);
+    expect(identity.status).toBe('active');
+  });
+
+  it('accepts custom scopeCeiling', async () => {
+    const identity = await generateAgentIdentity({
+      scopeCeiling: ['repo', 'read:org'],
+    });
+
+    expect(identity.scopeCeiling).toEqual(['repo', 'read:org']);
+    expect(identity.status).toBe('active');
+  });
+
+  it('accepts custom status', async () => {
+    const identity = await generateAgentIdentity({
+      status: 'suspended',
+    });
+
+    expect(identity.scopeCeiling).toEqual([]);
+    expect(identity.status).toBe('suspended');
+  });
+
+  it('accepts both scopeCeiling and status', async () => {
+    const identity = await generateAgentIdentity({
+      scopeCeiling: ['calendar.read'],
+      status: 'revoked',
+    });
+
+    expect(identity.scopeCeiling).toEqual(['calendar.read']);
+    expect(identity.status).toBe('revoked');
+  });
+
+  it('export() includes scopeCeiling and status', async () => {
+    const identity = await generateAgentIdentity({
+      scopeCeiling: ['repo', 'gist'],
+      status: 'active',
+    });
+    const exported = identity.export();
+
+    expect(exported.scopeCeiling).toEqual(['repo', 'gist']);
+    expect(exported.status).toBe('active');
+  });
+
+  it('round-trip preserves scopeCeiling and status', async () => {
+    const original = await generateAgentIdentity({
+      scopeCeiling: ['calendar.read', 'calendar.write'],
+      status: 'suspended',
+    });
+    const exported = original.export();
+    const imported = importAgentIdentity(exported);
+
+    expect(imported.scopeCeiling).toEqual(['calendar.read', 'calendar.write']);
+    expect(imported.status).toBe('suspended');
+    expect(imported.did).toBe(original.did);
+  });
+
+  it('import defaults to empty scopeCeiling and active status when not provided', async () => {
+    const original = await generateAgentIdentity();
+    const exported = original.export();
+    const imported = importAgentIdentity({
+      did: exported.did,
+      privateKeyHex: exported.privateKeyHex,
+    });
+
+    expect(imported.scopeCeiling).toEqual([]);
+    expect(imported.status).toBe('active');
   });
 });
 

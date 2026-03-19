@@ -59,6 +59,8 @@ interface VaultInstance {
     scopes?: string[];
   }>>;
   delete(input: { provider: string; userId: string }): Promise<void>;
+  revokeAgent?(agentId: string): Promise<void>;
+  getAgentByFingerprint?(fingerprint: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
 }
 
 interface OAuthModule {
@@ -192,6 +194,38 @@ export class Cred {
 
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
     const vault = await this.ensureVault();
+
+    // Check agent status and scope ceiling before delegation
+    if (params.agentDid && vault.getAgentByFingerprint) {
+      const agentRecord = await vault.getAgentByFingerprint(params.agentDid);
+      if (agentRecord) {
+        if (agentRecord.status === 'revoked') {
+          throw new CredError(
+            `Agent ${params.agentDid} has been revoked and cannot receive delegations`,
+            'agent_revoked',
+            403,
+          );
+        }
+        if (agentRecord.status === 'suspended') {
+          throw new CredError(
+            `Agent ${params.agentDid} is suspended`,
+            'agent_suspended',
+            403,
+          );
+        }
+        if (agentRecord.scopeCeiling.length > 0 && params.scopes && params.scopes.length > 0) {
+          const unauthorizedScopes = params.scopes.filter(s => !agentRecord.scopeCeiling.includes(s));
+          if (unauthorizedScopes.length > 0) {
+            throw new CredError(
+              `Agent scope ceiling exceeded: ${unauthorizedScopes.join(', ')} not in ceiling`,
+              'scope_ceiling_exceeded',
+              403,
+            );
+          }
+        }
+      }
+    }
+
     const config = this.localConfig!;
     const providerConfig = config.providers[params.service];
 
@@ -337,6 +371,28 @@ export class Cred {
     if (params.appClientId) query.set('app_client_id', params.appClientId);
 
     await this.delete(`/api/v1/connections/${params.service}?${query.toString()}`);
+  }
+
+  /**
+   * Emergency revocation: marks agent as revoked.
+   * After calling this, all subsequent delegate() calls with this agent's fingerprint will throw.
+   * Local mode: updates vault_agents table.
+   * Cloud mode: calls POST /agents/{agentId}/revoke-all.
+   */
+  async revokeAgent(agentId: string): Promise<void> {
+    if (this.isLocal) {
+      const vault = await this.ensureVault();
+      if (!vault.revokeAgent) {
+        throw new CredError(
+          'Agent revocation not supported by this vault backend',
+          'not_supported',
+          0,
+        );
+      }
+      await vault.revokeAgent(agentId);
+      return;
+    }
+    await this.post<void>(`/api/v1/agents/${agentId}/revoke-all`, {});
   }
 
   // ── Private HTTP helpers (cloud mode only) ──────────────────────────────────
