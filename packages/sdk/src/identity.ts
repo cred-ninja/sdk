@@ -14,9 +14,8 @@ const generateKeyPairAsync = promisify(generateKeyPair);
 
 /**
  * Cred's Ed25519 public key for verifying delegation receipts.
- * PLACEHOLDER — will be replaced with real key before launch.
  */
-export const CRED_PUBLIC_KEY_HEX = 'PLACEHOLDER_REPLACE_BEFORE_LAUNCH';
+export const CRED_PUBLIC_KEY_HEX = 'ed50f12caeed3e3054be071c2884fda47752a02b5d98e37dfd79db5fd502699f';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
