@@ -175,7 +175,6 @@ export class SQLiteBackend implements StorageBackend {
       AND (
           expires_at IS NULL
           OR datetime(expires_at) > datetime('now')
-          OR refresh_token_enc IS NOT NULL
         )
     `);
 
@@ -208,6 +207,10 @@ export class SQLiteBackend implements StorageBackend {
         updated_at         AS updatedAt
       FROM vault_credentials
       WHERE user_id = ?
+        AND (
+          expires_at IS NULL
+          OR datetime(expires_at) > datetime('now')
+        )
       ORDER BY provider ASC
     `).all(userId) as StoredRow[];
 
