@@ -57,6 +57,18 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
     agentToken,
     ...(baseUrl ? { baseUrl } : {}),
   });
+  let cachedResult:
+    | {
+        accessToken: string;
+        tokenType: string;
+        expiresIn: number;
+        service: string;
+        scopes: string[];
+        delegationId: string;
+        expiresAtMs: number;
+        cacheKey: string;
+      }
+    | null = null;
 
   return tool({
     description:
@@ -76,12 +88,41 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
         ),
     }),
     execute: async ({ service, scopes }) => {
+      const resolvedScopes = scopes.length > 0 ? scopes : undefined;
+      const cacheKey = JSON.stringify({ service, scopes: resolvedScopes ?? [] });
+      const refreshCutoffMs = Date.now() + 60_000;
+
+      if (cachedResult && cachedResult.cacheKey === cacheKey && cachedResult.expiresAtMs > refreshCutoffMs) {
+        return {
+          accessToken: cachedResult.accessToken,
+          tokenType: cachedResult.tokenType,
+          expiresIn: cachedResult.expiresIn,
+          service: cachedResult.service,
+          scopes: cachedResult.scopes,
+          delegationId: cachedResult.delegationId,
+        };
+      }
+
       const result = await cred.delegate({
         service,
         userId,
         appClientId,
-        scopes: scopes.length > 0 ? scopes : undefined,
+        scopes: resolvedScopes,
       });
+
+      const expiresAtMs = result.expiresAt instanceof Date
+        ? result.expiresAt.getTime()
+        : Date.now() + result.expiresIn * 1000;
+      cachedResult = {
+        accessToken: result.accessToken,
+        tokenType: result.tokenType,
+        expiresIn: result.expiresIn,
+        service: result.service,
+        scopes: result.scopes,
+        delegationId: result.delegationId,
+        expiresAtMs,
+        cacheKey,
+      };
 
       return {
         accessToken: result.accessToken,

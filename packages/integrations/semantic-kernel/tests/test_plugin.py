@@ -6,6 +6,7 @@ output JSON, and error propagation. The Cred client is mocked -- no real HTTP.
 
 import json
 import pytest
+import httpx
 from unittest.mock import MagicMock, patch
 
 from cred import DelegationResult, ConsentRequiredError, CredError
@@ -146,3 +147,28 @@ class TestDelegate:
             plugin.delegate(service="google", scopes="")
 
         assert exc_info.value.status_code == 401
+
+    def test_real_cred_client_delegates_against_mock_server(self):
+        plugin = CredPlugin(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            app_client_id=APP_CLIENT_ID,
+            base_url="https://cred.example.com",
+        )
+
+        with patch("httpx.Client.request", return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.real",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_real",
+            },
+        )) as request_mock:
+            result_str = plugin.delegate(service="google", scopes="calendar.readonly")
+
+        payload = json.loads(result_str)
+        assert payload["access_token"] == "ya29.real"
+        assert request_mock.called
