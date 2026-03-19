@@ -65,7 +65,7 @@ interface VaultInstance {
   }>>;
   delete(input: { provider: string; userId: string }): Promise<void>;
   revokeAgent?(agentId: string): Promise<void>;
-  getAgentByFingerprint?(fingerprint: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
+  getAgentByDid?(did: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
   // Rotation methods (exposed by CredVault, proxied from RotationEngine)
   startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<{
     id: string; connectionId: string; strategy: string; state: string;
@@ -261,8 +261,8 @@ export class Cred {
     const correlationId = crypto.randomUUID();
 
     // Check agent status and scope ceiling before delegation
-    if (params.agentDid && vault.getAgentByFingerprint) {
-      const agentRecord = await vault.getAgentByFingerprint(params.agentDid);
+    if (params.agentDid && vault.getAgentByDid) {
+      const agentRecord = await vault.getAgentByDid(params.agentDid);
       if (agentRecord) {
         if (agentRecord.status === 'revoked') {
           this.writeAuditEvent({

@@ -198,6 +198,7 @@ describe('SQLiteBackend — vault_agents', () => {
     const now = new Date().toISOString();
     return {
       id: 'agt_001',
+      did: 'did:key:z6MkTestAgent',
       fingerprint: 'abc123fingerprint',
       name: 'test-agent',
       scopeCeiling: '["repo","read:org"]',
@@ -217,10 +218,19 @@ describe('SQLiteBackend — vault_agents', () => {
 
     expect(agent).not.toBeNull();
     expect(agent!.id).toBe('agt_001');
+    expect(agent!.did).toBe('did:key:z6MkTestAgent');
     expect(agent!.fingerprint).toBe('abc123fingerprint');
     expect(agent!.name).toBe('test-agent');
     expect(agent!.scopeCeiling).toBe('["repo","read:org"]');
     expect(agent!.status).toBe('active');
+  });
+
+  it('retrieves agent by did', () => {
+    backend.storeAgent(makeAgentRow());
+    const agent = backend.getAgentByDid('did:key:z6MkTestAgent');
+
+    expect(agent).not.toBeNull();
+    expect(agent!.id).toBe('agt_001');
   });
 
   it('retrieves agent by fingerprint', () => {
@@ -233,6 +243,7 @@ describe('SQLiteBackend — vault_agents', () => {
 
   it('returns null for missing agent', () => {
     expect(backend.getAgent('agt_nonexistent')).toBeNull();
+    expect(backend.getAgentByDid('did:key:zMissing')).toBeNull();
     expect(backend.getAgentByFingerprint('nonexistent')).toBeNull();
   });
 
