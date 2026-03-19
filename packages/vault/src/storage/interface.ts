@@ -1,4 +1,4 @@
-import type { StoredRow } from '../types.js';
+import type { StoredRow, AgentRow } from '../types.js';
 
 /**
  * StorageBackend — the interface that all vault storage backends must implement.
@@ -34,4 +34,11 @@ export interface StorageBackend {
    * List all credential rows for a given userId across all providers.
    */
   list(userId: string): StoredRow[] | Promise<StoredRow[]>;
+
+  // ── Agent record methods (optional — not all backends need these) ─────────
+
+  storeAgent?(row: AgentRow): void | Promise<void>;
+  getAgent?(id: string): AgentRow | null | Promise<AgentRow | null>;
+  getAgentByFingerprint?(fingerprint: string): AgentRow | null | Promise<AgentRow | null>;
+  updateAgentStatus?(id: string, status: string, revokedAt?: string): void | Promise<void>;
 }

@@ -20,6 +20,13 @@ export const CRED_PUBLIC_KEY_HEX = 'PLACEHOLDER_REPLACE_BEFORE_LAUNCH';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export type AgentStatus = 'active' | 'suspended' | 'revoked';
+
+export interface GenerateIdentityOptions {
+  scopeCeiling?: string[];
+  status?: AgentStatus;
+}
+
 export interface AgentIdentity {
   /** DID in did:key format: did:key:z6Mk<base58-encoded-public-key> */
   did: string;
@@ -27,6 +34,10 @@ export interface AgentIdentity {
   publicKey: Uint8Array;
   /** Raw 32-byte Ed25519 private key (caller must persist securely) */
   privateKey: Uint8Array;
+  /** Maximum scopes this agent can ever request (empty = uncapped) */
+  scopeCeiling: string[];
+  /** Agent status — revoked agents cannot receive delegations */
+  status: AgentStatus;
   /** Export identity for persistence */
   export(): ExportedIdentity;
 }
@@ -34,11 +45,15 @@ export interface AgentIdentity {
 export interface ExportedIdentity {
   did: string;
   privateKeyHex: string;
+  scopeCeiling: string[];
+  status: AgentStatus;
 }
 
 export interface ImportParams {
   did: string;
   privateKeyHex: string;
+  scopeCeiling?: string[];
+  status?: AgentStatus;
 }
 
 export interface VerifyReceiptOptions {
@@ -174,7 +189,9 @@ const ED25519_MULTICODEC_PREFIX = new Uint8Array([0xed, 0x01]);
  *
  * @returns AgentIdentity with DID, public key, private key, and export function
  */
-export async function generateAgentIdentity(): Promise<AgentIdentity> {
+export async function generateAgentIdentity(
+  opts?: GenerateIdentityOptions,
+): Promise<AgentIdentity> {
   const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
 
   // Extract raw key bytes from KeyObjects
@@ -184,7 +201,10 @@ export async function generateAgentIdentity(): Promise<AgentIdentity> {
   // Build did:key from public key
   const did = publicKeyToDid(publicKeyBytes);
 
-  return createIdentity(did, publicKeyBytes, privateKeyBytes);
+  const scopeCeiling = opts?.scopeCeiling ?? [];
+  const status: AgentStatus = opts?.status ?? 'active';
+
+  return createIdentity(did, publicKeyBytes, privateKeyBytes, scopeCeiling, status);
 }
 
 /**
@@ -194,7 +214,7 @@ export async function generateAgentIdentity(): Promise<AgentIdentity> {
  * @returns AgentIdentity with full key pair
  */
 export function importAgentIdentity(params: ImportParams): AgentIdentity {
-  const { did, privateKeyHex } = params;
+  const { did, privateKeyHex, scopeCeiling, status } = params;
 
   // Validate DID format
   if (!did.startsWith('did:key:z')) {
@@ -227,7 +247,7 @@ export function importAgentIdentity(params: ImportParams): AgentIdentity {
     throw new Error('DID does not match derived public key');
   }
 
-  return createIdentity(did, publicKeyBytes, privateKeyBytes);
+  return createIdentity(did, publicKeyBytes, privateKeyBytes, scopeCeiling ?? [], status ?? 'active');
 }
 
 /**
@@ -311,13 +331,18 @@ function createIdentity(
   did: string,
   publicKey: Uint8Array,
   privateKey: Uint8Array,
+  scopeCeiling: string[],
+  status: AgentStatus,
 ): AgentIdentity {
   // Store copies internally
   const pubKeyCopy = new Uint8Array(publicKey);
   const privKeyCopy = new Uint8Array(privateKey);
+  const ceilCopy = [...scopeCeiling];
 
   return {
     did,
+    scopeCeiling: ceilCopy,
+    status,
     // Return fresh copies to prevent accidental mutation
     get publicKey(): Uint8Array {
       return new Uint8Array(pubKeyCopy);
@@ -329,6 +354,8 @@ function createIdentity(
       return {
         did,
         privateKeyHex: bytesToHex(privKeyCopy),
+        scopeCeiling: [...ceilCopy],
+        status,
       };
     },
   };

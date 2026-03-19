@@ -1,5 +1,5 @@
 import type { StorageBackend } from './interface.js';
-import type { StoredRow } from '../types.js';
+import type { StoredRow, AgentRow } from '../types.js';
 
 /**
  * SQLite storage backend using better-sqlite3 (synchronous API).
@@ -36,6 +36,21 @@ export class SQLiteBackend implements StorageBackend {
         created_at         TEXT NOT NULL,
         updated_at         TEXT NOT NULL,
         PRIMARY KEY (provider, user_id)
+      )
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_agents (
+        id               TEXT PRIMARY KEY,
+        fingerprint      TEXT NOT NULL UNIQUE,
+        name             TEXT NOT NULL,
+        scope_ceiling    TEXT NOT NULL DEFAULT '[]',
+        status           TEXT NOT NULL DEFAULT 'active',
+        created_by       TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        last_seen_at     TEXT,
+        revoked_at       TEXT
       )
     `);
   }
@@ -149,5 +164,96 @@ export class SQLiteBackend implements StorageBackend {
     `).all(userId) as StoredRow[];
 
     return rows;
+  }
+
+  // ── Agent record methods ──────────────────────────────────────────────────
+
+  storeAgent(row: AgentRow): void {
+    const db = this.ensureDb();
+
+    const stmt = db.prepare(`
+      INSERT INTO vault_agents (
+        id, fingerprint, name, scope_ceiling, status,
+        created_by, created_at, updated_at, last_seen_at, revoked_at
+      ) VALUES (
+        @id, @fingerprint, @name, @scopeCeiling, @status,
+        @createdBy, @createdAt, @updatedAt, @lastSeenAt, @revokedAt
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        name          = excluded.name,
+        scope_ceiling = excluded.scope_ceiling,
+        status        = excluded.status,
+        updated_at    = excluded.updated_at,
+        last_seen_at  = excluded.last_seen_at,
+        revoked_at    = excluded.revoked_at
+    `);
+
+    stmt.run({
+      id: row.id,
+      fingerprint: row.fingerprint,
+      name: row.name,
+      scopeCeiling: row.scopeCeiling,
+      status: row.status,
+      createdBy: row.createdBy,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      lastSeenAt: row.lastSeenAt ?? null,
+      revokedAt: row.revokedAt ?? null,
+    });
+  }
+
+  getAgent(id: string): AgentRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        fingerprint,
+        name,
+        scope_ceiling  AS scopeCeiling,
+        status,
+        created_by     AS createdBy,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt,
+        last_seen_at   AS lastSeenAt,
+        revoked_at     AS revokedAt
+      FROM vault_agents
+      WHERE id = ?
+    `).get(id) as AgentRow | undefined;
+
+    return row ?? null;
+  }
+
+  getAgentByFingerprint(fingerprint: string): AgentRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        fingerprint,
+        name,
+        scope_ceiling  AS scopeCeiling,
+        status,
+        created_by     AS createdBy,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt,
+        last_seen_at   AS lastSeenAt,
+        revoked_at     AS revokedAt
+      FROM vault_agents
+      WHERE fingerprint = ?
+    `).get(fingerprint) as AgentRow | undefined;
+
+    return row ?? null;
+  }
+
+  updateAgentStatus(id: string, status: string, revokedAt?: string): void {
+    const db = this.ensureDb();
+    const now = new Date().toISOString();
+
+    db.prepare(`
+      UPDATE vault_agents
+      SET status = ?, updated_at = ?, revoked_at = ?
+      WHERE id = ?
+    `).run(status, now, revokedAt ?? null, id);
   }
 }

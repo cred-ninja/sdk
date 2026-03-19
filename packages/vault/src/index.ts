@@ -23,4 +23,7 @@ export type {
   RefreshAdapter,
   StoredRow,
   EncryptedPayload,
+  AgentRecord,
+  AgentRow,
+  AgentStatus,
 } from './types.js';

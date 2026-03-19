@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SQLiteBackend } from '../storage/sqlite.js';
-import type { StoredRow } from '../types.js';
+import type { StoredRow, AgentRow } from '../types.js';
 
 function makeRow(overrides: Partial<StoredRow> = {}): StoredRow {
   const now = new Date().toISOString();
@@ -157,5 +157,91 @@ describe('SQLiteBackend', () => {
     const result = backend.get('google', 'user-123');
     expect(result).not.toBeNull();
     expect(result!.refreshTokenEnc).toBe('refresh-cipher');
+  });
+});
+
+// ── vault_agents table ───────────────────────────────────────────────────────
+
+describe('SQLiteBackend — vault_agents', () => {
+  let backend: SQLiteBackend;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cred-sqlite-agent-'));
+    backend = new SQLiteBackend(join(tmpDir, 'vault.db'));
+    backend.init();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeAgentRow(overrides: Partial<AgentRow> = {}): AgentRow {
+    const now = new Date().toISOString();
+    return {
+      id: 'agt_001',
+      fingerprint: 'abc123fingerprint',
+      name: 'test-agent',
+      scopeCeiling: '["repo","read:org"]',
+      status: 'active',
+      createdBy: 'user_001',
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: null,
+      revokedAt: null,
+      ...overrides,
+    };
+  }
+
+  it('stores and retrieves an agent by id', () => {
+    backend.storeAgent(makeAgentRow());
+    const agent = backend.getAgent('agt_001');
+
+    expect(agent).not.toBeNull();
+    expect(agent!.id).toBe('agt_001');
+    expect(agent!.fingerprint).toBe('abc123fingerprint');
+    expect(agent!.name).toBe('test-agent');
+    expect(agent!.scopeCeiling).toBe('["repo","read:org"]');
+    expect(agent!.status).toBe('active');
+  });
+
+  it('retrieves agent by fingerprint', () => {
+    backend.storeAgent(makeAgentRow());
+    const agent = backend.getAgentByFingerprint('abc123fingerprint');
+
+    expect(agent).not.toBeNull();
+    expect(agent!.id).toBe('agt_001');
+  });
+
+  it('returns null for missing agent', () => {
+    expect(backend.getAgent('agt_nonexistent')).toBeNull();
+    expect(backend.getAgentByFingerprint('nonexistent')).toBeNull();
+  });
+
+  it('upserts agent on conflict', () => {
+    backend.storeAgent(makeAgentRow());
+    backend.storeAgent(makeAgentRow({ name: 'updated-agent' }));
+
+    const agent = backend.getAgent('agt_001');
+    expect(agent!.name).toBe('updated-agent');
+  });
+
+  it('updates agent status to revoked', () => {
+    backend.storeAgent(makeAgentRow());
+    const revokedAt = new Date().toISOString();
+    backend.updateAgentStatus('agt_001', 'revoked', revokedAt);
+
+    const agent = backend.getAgent('agt_001');
+    expect(agent!.status).toBe('revoked');
+    expect(agent!.revokedAt).toBe(revokedAt);
+  });
+
+  it('updates agent status to suspended without revokedAt', () => {
+    backend.storeAgent(makeAgentRow());
+    backend.updateAgentStatus('agt_001', 'suspended');
+
+    const agent = backend.getAgent('agt_001');
+    expect(agent!.status).toBe('suspended');
+    expect(agent!.revokedAt).toBeNull();
   });
 });
