@@ -54,6 +54,7 @@ export interface StorageBackend {
   getRotation?(id: string): Rotation | null | Promise<Rotation | null>;
   getRotationByConnectionId?(connectionId: string): Rotation | null | Promise<Rotation | null>;
   updateRotation?(id: string, updates: Partial<RotationRow>): void | Promise<void>;
+  claimDueRotation?(id: string, now: Date, updates: Partial<RotationRow>): Rotation | null | Promise<Rotation | null>;
   listDueRotations?(now: Date): Rotation[] | Promise<Rotation[]>;
   listRotations?(): Rotation[] | Promise<Rotation[]>;
 }

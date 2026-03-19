@@ -249,28 +249,29 @@ export class RotationEngine {
   async runDueRotations(): Promise<RotationResult[]> {
     if (!this.storage.listDueRotations) return [];
 
-    const due = await this.storage.listDueRotations(new Date());
+    const dueAt = new Date();
+    const due = await this.storage.listDueRotations(dueAt);
     const results: RotationResult[] = [];
 
     for (const rotation of due) {
       try {
-        // Auto-advance to pending and immediately promote for simple strategies
         if (rotation.strategy === 'single_swap') {
           const now = this.now();
-          await this.storage.updateRotation!(rotation.id, {
+          const claimed = await this.claimDueRotation(rotation.id, dueAt, {
             state: 'pending',
             last_rotated_at: now,
             next_rotation_at: new Date(Date.now() + rotation.intervalSeconds * 1000).toISOString(),
             updated_at: now,
           });
-          results.push({ rotation: await this.getOrThrow(rotation.id), success: true });
+          if (!claimed) continue;
+          results.push({ rotation: claimed, success: true });
         } else {
-          // dual_active and others: mark as pending, awaiting external promoteRotation call
-          await this.storage.updateRotation!(rotation.id, {
+          const claimed = await this.claimDueRotation(rotation.id, dueAt, {
             state: 'pending',
             updated_at: this.now(),
           });
-          results.push({ rotation: await this.getOrThrow(rotation.id), success: true });
+          if (!claimed) continue;
+          results.push({ rotation: claimed, success: true });
         }
       } catch (err) {
         const updated = await this.getOrThrow(rotation.id);
@@ -313,5 +314,23 @@ export class RotationEngine {
     const rotation = await this.storage.getRotation?.(rotationId);
     if (!rotation) throw new Error(`Rotation ${rotationId} not found`);
     return rotation;
+  }
+
+  private async claimDueRotation(
+    rotationId: string,
+    dueAt: Date,
+    updates: Partial<RotationRow>,
+  ): Promise<Rotation | null> {
+    if (this.storage.claimDueRotation) {
+      return this.storage.claimDueRotation(rotationId, dueAt, updates);
+    }
+
+    const rotation = await this.getOrThrow(rotationId);
+    if (rotation.state !== 'idle' || !rotation.nextRotationAt || rotation.nextRotationAt > dueAt) {
+      return null;
+    }
+
+    await this.storage.updateRotation?.(rotationId, updates);
+    return this.getOrThrow(rotationId);
   }
 }
