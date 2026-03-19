@@ -8,6 +8,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import pytest
+import httpx
 from unittest.mock import MagicMock, patch
 
 from cred import DelegationResult, ConsentRequiredError
@@ -210,3 +211,31 @@ class TestLangChainCompatibility:
     def test_is_base_tool(self, tool):
         from langchain_core.tools import BaseTool
         assert isinstance(tool, BaseTool)
+
+
+class TestIntegrationFlow:
+    def test_real_cred_client_delegates_against_mock_server(self):
+        tool = CredTool(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            service="google",
+            app_client_id=APP_CLIENT_ID,
+            scopes=["calendar.readonly"],
+            base_url="https://cred.example.com",
+        )
+
+        with patch("httpx.Client.request", return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.real",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_real",
+            },
+        )) as request_mock:
+            token = tool._run()
+
+        assert token == "ya29.real"
+        assert request_mock.called

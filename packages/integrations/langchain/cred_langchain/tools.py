@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any, Optional, Type
 
 from langchain_core.tools import BaseTool
@@ -48,6 +49,34 @@ class CredDelegateTool(BaseTool):
     # Injected by CredToolkit
     _cred: Any = None
     _user_id: str = ""
+    _cache: dict[tuple[str, str, tuple[str, ...]], tuple[Any, float]] = {}
+
+    def _get_delegation_result(
+        self,
+        service: str,
+        app_client_id: str,
+        scopes: Optional[list[str]],
+    ) -> Any:
+        resolved_scopes = scopes or []
+        cache_key = (service, app_client_id, tuple(resolved_scopes))
+        cached = self._cache.get(cache_key)
+        now = time.monotonic()
+        if cached and cached[1] > now:
+            return cached[0]
+
+        result = self._cred.delegate(
+            service=service,
+            user_id=self._user_id,
+            app_client_id=app_client_id,
+            scopes=resolved_scopes,
+        )
+
+        expires_in = getattr(result, "expires_in", None)
+        refresh_deadline = 0.0
+        if isinstance(expires_in, int) and expires_in > 60:
+            refresh_deadline = now + expires_in - 60
+        self._cache[cache_key] = (result, refresh_deadline)
+        return result
 
     def _run(
         self,
@@ -56,12 +85,7 @@ class CredDelegateTool(BaseTool):
         scopes: Optional[list[str]] = None,
         **kwargs: Any,
     ) -> str:
-        result = self._cred.delegate(
-            service=service,
-            user_id=self._user_id,
-            app_client_id=app_client_id,
-            scopes=scopes or [],
-        )
+        result = self._get_delegation_result(service, app_client_id, scopes)
         return json.dumps({
             "access_token": result.access_token,
             "token_type": result.token_type,

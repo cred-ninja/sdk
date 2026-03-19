@@ -10,6 +10,7 @@ When crewai is installed, pass CredTool instances directly to Agent(tools=[...])
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional, Type
 
 from langchain_core.tools import BaseTool
@@ -59,6 +60,8 @@ class CredTool(BaseTool):
     _service: str = ""
     _app_client_id: str = ""
     _scopes: list[str] = []
+    _cached_token: str | None = None
+    _cache_expires_at: float = 0.0
 
     def __init__(
         self,
@@ -86,10 +89,17 @@ class CredTool(BaseTool):
 
     def _run(self, **kwargs: Any) -> str:
         """Delegate credentials and return the access token string."""
+        now = time.monotonic()
+        if self._cached_token is not None and self._cache_expires_at > now:
+            return self._cached_token
+
         result = self._cred.delegate(
             service=self._service,
             user_id=self._user_id,
             app_client_id=self._app_client_id,
             scopes=self._scopes if self._scopes else None,
         )
+        self._cached_token = result.access_token
+        expires_in = getattr(result, "expires_in", None)
+        self._cache_expires_at = now + expires_in - 60 if isinstance(expires_in, int) and expires_in > 60 else 0.0
         return result.access_token

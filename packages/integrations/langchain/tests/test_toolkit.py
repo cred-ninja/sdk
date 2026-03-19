@@ -9,11 +9,19 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import pytest
+import httpx
 from unittest.mock import MagicMock, patch
 from langchain_core.tools import BaseTool
+from pydantic import SecretStr
 
 from cred import DelegationResult, Connection, ConsentRequiredError
-from cred_langchain import CredToolkit, CredDelegateTool, CredStatusTool, CredRevokeTool
+from cred_langchain import (
+    CredToolkit,
+    CredDelegateTool,
+    CredStatusTool,
+    CredRevokeTool,
+    secret_from_cred,
+)
 
 
 TOKEN = "cred_at_test"
@@ -123,6 +131,35 @@ class TestCredDelegateTool:
         assert "service" in schema["properties"]
         assert "scopes" in schema["properties"]
 
+    def test_real_cred_client_delegates_against_mock_server(self):
+        toolkit = CredToolkit(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            base_url="https://cred.example.com",
+        )
+        delegate = next(t for t in toolkit.get_tools() if t.name == "cred_delegate")
+
+        with patch("httpx.Client.request", return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.real",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_real",
+            },
+        )) as request_mock:
+            result = delegate._run(
+                service="google",
+                app_client_id="app_1",
+                scopes=["calendar.readonly"],
+            )
+
+        payload = json.loads(result)
+        assert payload["access_token"] == "ya29.real"
+        assert request_mock.called
+
 
 # ── CredStatusTool ────────────────────────────────────────────────────────────
 
@@ -193,3 +230,32 @@ class TestCredRevokeTool:
         revoke = next(t for t in tools if t.name == "cred_revoke")
         schema = revoke.args_schema.model_json_schema()
         assert "service" in schema["properties"]
+
+
+class TestSecretFromCred:
+    def test_returns_secret_str_from_real_cred_client(self):
+        from cred import Cred
+
+        cred = Cred(agent_token=TOKEN, base_url="https://cred.example.com")
+
+        with patch("httpx.Client.request", return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.secret",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_secret",
+            },
+        )):
+            secret = secret_from_cred(
+                "google",
+                USER_ID,
+                cred,
+                scopes=["calendar.readonly"],
+                app_client_id="app_1",
+            )
+
+        assert isinstance(secret, SecretStr)
+        assert secret.get_secret_value() == "ya29.secret"

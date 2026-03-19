@@ -179,6 +179,77 @@ describe('credDelegateTool execute', () => {
     });
   });
 
+  it('reuses a cached token until it is within the refresh window', async () => {
+    mockDelegate.mockResolvedValueOnce({
+      accessToken: 'cached-token',
+      tokenType: 'Bearer',
+      expiresIn: 3600,
+      expiresAt: new Date(Date.now() + 3600_000),
+      service: 'google',
+      scopes: ['calendar.readonly'],
+      delegationId: 'del_cached',
+    });
+
+    const t = credDelegateTool({
+      agentToken: TOKEN,
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+    });
+
+    const first = await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
+    );
+    const second = await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_2', messages: [], abortSignal: new AbortController().signal },
+    );
+
+    expect(first.accessToken).toBe('cached-token');
+    expect(second.accessToken).toBe('cached-token');
+    expect(mockDelegate).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes when the cached token is near expiry', async () => {
+    mockDelegate
+      .mockResolvedValueOnce({
+        accessToken: 'stale-token',
+        tokenType: 'Bearer',
+        expiresIn: 30,
+        expiresAt: new Date(Date.now() + 30_000),
+        service: 'google',
+        scopes: ['calendar.readonly'],
+        delegationId: 'del_stale',
+      })
+      .mockResolvedValueOnce({
+        accessToken: 'fresh-token',
+        tokenType: 'Bearer',
+        expiresIn: 3600,
+        expiresAt: new Date(Date.now() + 3600_000),
+        service: 'google',
+        scopes: ['calendar.readonly'],
+        delegationId: 'del_fresh',
+      });
+
+    const t = credDelegateTool({
+      agentToken: TOKEN,
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+    });
+
+    await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
+    );
+    const refreshed = await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_2', messages: [], abortSignal: new AbortController().signal },
+    );
+
+    expect(refreshed.accessToken).toBe('fresh-token');
+    expect(mockDelegate).toHaveBeenCalledTimes(2);
+  });
+
   it('propagates ConsentRequiredError', async () => {
     const err = new (ConsentRequiredError as any)(
       'User has not consented',

@@ -7,12 +7,13 @@ and error propagation. The Cred client is mocked — no real HTTP.
 import asyncio
 import json
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+import httpx
+from unittest.mock import MagicMock, patch
 
 from agents import FunctionTool
 
 from cred import DelegationResult, ConsentRequiredError, CredError
-from cred_openai_agents import cred_delegate_tool
+from cred_openai_agents import cred_delegate_tool, CredTool
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
@@ -78,6 +79,9 @@ class TestFactory:
                 agent_token=TOKEN,
                 base_url="http://localhost:3001",
             )
+
+    def test_exports_cred_tool_alias(self):
+        assert CredTool is cred_delegate_tool
 
 
 # ── on_invoke_tool ────────────────────────────────────────────────────────────
@@ -175,3 +179,31 @@ class TestInvoke:
         run(tool.on_invoke_tool(MagicMock(), args_json))
 
         assert call_count == 1
+
+    def test_real_cred_client_delegates_against_mock_server(self):
+        tool = cred_delegate_tool(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            app_client_id=APP_CLIENT_ID,
+            base_url="https://cred.example.com",
+        )
+
+        with patch("httpx.Client.request", return_value=httpx.Response(
+            200,
+            json={
+                "access_token": "ya29.real",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_real",
+            },
+        )) as request_mock:
+            result_str = run(tool.on_invoke_tool(MagicMock(), json.dumps({
+                "service": "google",
+                "scopes": ["calendar.readonly"],
+            })))
+
+        payload = json.loads(result_str)
+        assert payload["access_token"] == "ya29.real"
+        assert request_mock.called
