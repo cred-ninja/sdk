@@ -190,18 +190,16 @@ describe('verifyDelegationReceipt()', () => {
     expect(result).toBe(false);
   });
 
-  it('throws when using placeholder public key', async () => {
+  it('returns false for invalid signature when using default Cred public key', async () => {
     // Create a minimal valid-looking JWS
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ sub: agentDid })).toString('base64url');
     const receipt = `${header}.${payload}.fakesig`;
 
-    await expect(
-      verifyDelegationReceipt(receipt, {
-        expectedDid: agentDid,
-        // Uses default CRED_PUBLIC_KEY_HEX which is placeholder
-      }),
-    ).rejects.toThrow('CRED_PUBLIC_KEY_HEX is placeholder');
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+    });
+    expect(result).toBe(false);
   });
 
   it('returns false for wrong algorithm in header', async () => {
@@ -374,8 +372,9 @@ describe('generateAgentIdentity() — scopeCeiling and status', () => {
 // ── CRED_PUBLIC_KEY_HEX constant ─────────────────────────────────────────────
 
 describe('CRED_PUBLIC_KEY_HEX', () => {
-  it('is exported as placeholder', () => {
-    expect(CRED_PUBLIC_KEY_HEX).toBe('PLACEHOLDER_REPLACE_BEFORE_LAUNCH');
+  it('is a real Ed25519 public key', () => {
+    expect(CRED_PUBLIC_KEY_HEX).not.toBe('PLACEHOLDER_REPLACE_BEFORE_LAUNCH');
+    expect(CRED_PUBLIC_KEY_HEX).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
