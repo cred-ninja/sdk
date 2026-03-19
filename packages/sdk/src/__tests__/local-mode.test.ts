@@ -10,6 +10,7 @@ import { Cred, CredError } from '../index';
 const mockVault = {
   init: vi.fn().mockResolvedValue(undefined),
   get: vi.fn(),
+  getAgentByDid: undefined as undefined | ReturnType<typeof vi.fn>,
   store: vi.fn(),
   list: vi.fn(),
   delete: vi.fn(),
@@ -55,6 +56,7 @@ function makeLocalCred(
 beforeEach(() => {
   vi.clearAllMocks();
   mockVault.init.mockResolvedValue(undefined);
+  mockVault.getAgentByDid = undefined;
   mockVault.writeAuditEvent = undefined;
   vaultConstructorCalls.length = 0;
 });
@@ -117,6 +119,31 @@ describe('Local mode delegate()', () => {
     // adapter should be defined (from createAdapter)
     expect(mockVault.get.mock.calls[0][0].adapter).toBeDefined();
     expect(mockCreateAdapter).toHaveBeenCalledWith('google');
+  });
+
+  it('looks up agent policy by DID when agentDid is provided', async () => {
+    const local = makeLocalCred({ github: { clientId: 'gid', clientSecret: 'gsec' } });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({
+      status: 'active',
+      scopeCeiling: ['repo'],
+    });
+    mockVault.get.mockResolvedValue({
+      provider: 'github',
+      userId: 'u1',
+      accessToken: 'token',
+      scopes: ['repo'],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await local.delegate({
+      service: 'github',
+      userId: 'u1',
+      agentDid: 'did:key:z6MkTestAgent',
+      scopes: ['repo'],
+    });
+
+    expect(mockVault.getAgentByDid).toHaveBeenCalledWith('did:key:z6MkTestAgent');
   });
 
   it('works without provider config (no auto-refresh)', async () => {

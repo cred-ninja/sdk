@@ -69,6 +69,7 @@ export class SQLiteBackend implements StorageBackend {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
         id               TEXT PRIMARY KEY,
+        did              TEXT,
         fingerprint      TEXT NOT NULL UNIQUE,
         name             TEXT NOT NULL,
         scope_ceiling    TEXT NOT NULL DEFAULT '[]',
@@ -80,6 +81,13 @@ export class SQLiteBackend implements StorageBackend {
         revoked_at       TEXT
       )
     `);
+
+    const agentColumns = this.db.prepare('PRAGMA table_info(vault_agents)')
+      .all() as Array<{ name: string }>;
+    if (!agentColumns.some((column) => column.name === 'did')) {
+      this.db.exec('ALTER TABLE vault_agents ADD COLUMN did TEXT');
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_did ON vault_agents(did) WHERE did IS NOT NULL');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rotations (
@@ -224,13 +232,14 @@ export class SQLiteBackend implements StorageBackend {
 
     const stmt = db.prepare(`
       INSERT INTO vault_agents (
-        id, fingerprint, name, scope_ceiling, status,
+        id, did, fingerprint, name, scope_ceiling, status,
         created_by, created_at, updated_at, last_seen_at, revoked_at
       ) VALUES (
-        @id, @fingerprint, @name, @scopeCeiling, @status,
+        @id, @did, @fingerprint, @name, @scopeCeiling, @status,
         @createdBy, @createdAt, @updatedAt, @lastSeenAt, @revokedAt
       )
       ON CONFLICT (id) DO UPDATE SET
+        did           = excluded.did,
         name          = excluded.name,
         scope_ceiling = excluded.scope_ceiling,
         status        = excluded.status,
@@ -241,6 +250,7 @@ export class SQLiteBackend implements StorageBackend {
 
     stmt.run({
       id: row.id,
+      did: row.did ?? null,
       fingerprint: row.fingerprint,
       name: row.name,
       scopeCeiling: row.scopeCeiling,
@@ -259,6 +269,7 @@ export class SQLiteBackend implements StorageBackend {
     const row = db.prepare(`
       SELECT
         id,
+        did,
         fingerprint,
         name,
         scope_ceiling  AS scopeCeiling,
@@ -275,12 +286,36 @@ export class SQLiteBackend implements StorageBackend {
     return row ?? null;
   }
 
+  getAgentByDid(did: string): AgentRow | null {
+    const db = this.ensureDb();
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        did,
+        fingerprint,
+        name,
+        scope_ceiling  AS scopeCeiling,
+        status,
+        created_by     AS createdBy,
+        created_at     AS createdAt,
+        updated_at     AS updatedAt,
+        last_seen_at   AS lastSeenAt,
+        revoked_at     AS revokedAt
+      FROM vault_agents
+      WHERE did = ?
+    `).get(did) as AgentRow | undefined;
+
+    return row ?? null;
+  }
+
   getAgentByFingerprint(fingerprint: string): AgentRow | null {
     const db = this.ensureDb();
 
     const row = db.prepare(`
       SELECT
         id,
+        did,
         fingerprint,
         name,
         scope_ceiling  AS scopeCeiling,

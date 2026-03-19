@@ -281,6 +281,7 @@ export class CredVault {
     }
     const row: AgentRow = {
       id: record.id,
+      did: record.did ?? null,
       fingerprint: record.fingerprint,
       name: record.name,
       scopeCeiling: JSON.stringify(record.scopeCeiling),
@@ -292,6 +293,16 @@ export class CredVault {
       revokedAt: record.revokedAt ?? null,
     };
     await this.backend.storeAgent(row);
+  }
+
+  async getAgentByDid(did: string): Promise<AgentRecord | null> {
+    await this.ensureInit();
+    if (!this.backend.getAgentByDid) {
+      return null;
+    }
+    const row = await this.backend.getAgentByDid(did);
+    if (!row) return null;
+    return this.agentRowToRecord(row);
   }
 
   async getAgentByFingerprint(fingerprint: string): Promise<AgentRecord | null> {
@@ -404,6 +415,7 @@ export class CredVault {
   private agentRowToRecord(row: AgentRow): AgentRecord {
     return {
       id: row.id,
+      did: row.did ?? undefined,
       fingerprint: row.fingerprint,
       name: row.name,
       scopeCeiling: JSON.parse(row.scopeCeiling) as string[],

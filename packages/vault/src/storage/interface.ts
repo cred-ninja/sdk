@@ -40,6 +40,7 @@ export interface StorageBackend {
 
   storeAgent?(row: AgentRow): void | Promise<void>;
   getAgent?(id: string): AgentRow | null | Promise<AgentRow | null>;
+  getAgentByDid?(did: string): AgentRow | null | Promise<AgentRow | null>;
   getAgentByFingerprint?(fingerprint: string): AgentRow | null | Promise<AgentRow | null>;
   updateAgentStatus?(id: string, status: string, revokedAt?: string): void | Promise<void>;
 

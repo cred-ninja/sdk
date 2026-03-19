@@ -116,6 +116,7 @@ export type AgentStatus = 'active' | 'suspended' | 'revoked';
 
 export interface AgentRecord {
   id: string;
+  did?: string;
   fingerprint: string;
   name: string;
   scopeCeiling: string[];
@@ -129,6 +130,7 @@ export interface AgentRecord {
 
 export interface AgentRow {
   id: string;
+  did: string | null;
   fingerprint: string;
   name: string;
   scopeCeiling: string;
