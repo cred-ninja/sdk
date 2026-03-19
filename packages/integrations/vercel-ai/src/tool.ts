@@ -55,7 +55,7 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
 
   const cred = new Cred({
     agentToken,
-    ...(baseUrl ? { baseUrl } : {}),
+    baseUrl: baseUrl ?? 'https://api.cred.ninja',
   });
   let cachedResult:
     | {
