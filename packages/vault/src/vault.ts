@@ -15,6 +15,7 @@ import type {
   AgentRecord,
   AgentRow,
 } from './types.js';
+import type { AuditEvent, AuditFilter } from './audit.js';
 
 /**
  * CredVault — local-first encrypted token vault.
@@ -316,6 +317,26 @@ export class CredVault {
     }
     const now = new Date().toISOString();
     await this.backend.updateAgentStatus(agentId, 'revoked', now);
+  }
+
+  // ── Audit event methods ──────────────────────────────────────────────────
+
+  /**
+   * Write an audit event. Fail-closed: throws if backend does not support audit
+   * or if the write fails. This ensures no delegation succeeds without an audit record.
+   */
+  writeAuditEvent(event: AuditEvent): void {
+    if (!this.backend.writeAuditEvent) {
+      throw new Error('Audit logging not supported by this storage backend');
+    }
+    this.backend.writeAuditEvent(event);
+  }
+
+  queryAuditEvents(filter: AuditFilter): AuditEvent[] {
+    if (!this.backend.queryAuditEvents) {
+      return [];
+    }
+    return this.backend.queryAuditEvents(filter) as AuditEvent[];
   }
 
   private agentRowToRecord(row: AgentRow): AgentRecord {
