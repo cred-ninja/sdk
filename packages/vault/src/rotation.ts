@@ -134,11 +134,7 @@ export class RotationEngine {
       throw new Error(`Cannot advance rotation ${rotationId} to testing — current state: ${rotation.state}`);
     }
 
-    if (!this.storage.updateRotation) {
-      throw new Error('Storage backend does not support rotation (updateRotation not implemented)');
-    }
-
-    await this.storage.updateRotation(rotationId, {
+    await this.requireUpdateRotation()(rotationId, {
       state: 'testing',
       pending_version_id: pendingVersionId,
       updated_at: this.now(),
@@ -165,7 +161,7 @@ export class RotationEngine {
     }
 
     const now = this.now();
-    await this.storage.updateRotation!(rotationId, {
+    await this.requireUpdateRotation()(rotationId, {
       state: 'idle',
       previous_version_id: rotation.currentVersionId,
       current_version_id: rotation.pendingVersionId,
@@ -194,7 +190,7 @@ export class RotationEngine {
     }
 
     const now = this.now();
-    await this.storage.updateRotation!(rotationId, {
+    await this.requireUpdateRotation()(rotationId, {
       state: 'idle',
       current_version_id: rotation.previousVersionId ?? rotation.currentVersionId,
       pending_version_id: null,
@@ -209,11 +205,10 @@ export class RotationEngine {
   /**
    * Mark a rotation as failed.
    */
-  async failRotation(rotationId: string, reason?: string): Promise<Rotation> {
-    void reason; // reserved for future audit logging
+  async failRotation(rotationId: string): Promise<Rotation> {
     const rotation = await this.getOrThrow(rotationId);
 
-    await this.storage.updateRotation!(rotationId, {
+    await this.requireUpdateRotation()(rotationId, {
       state: 'failed',
       failure_count: rotation.failureCount + 1,
       updated_at: this.now(),
@@ -255,9 +250,17 @@ export class RotationEngine {
 
     for (const rotation of due) {
       try {
+<<<<<<< Updated upstream
         if (rotation.strategy === 'single_swap') {
           const now = this.now();
           const claimed = await this.claimDueRotation(rotation.id, dueAt, {
+=======
+        // Auto-advance to pending and immediately promote for simple strategies
+        const update = this.requireUpdateRotation();
+        if (rotation.strategy === 'single_swap') {
+          const now = this.now();
+          await update(rotation.id, {
+>>>>>>> Stashed changes
             state: 'pending',
             last_rotated_at: now,
             next_rotation_at: new Date(Date.now() + rotation.intervalSeconds * 1000).toISOString(),
@@ -266,7 +269,12 @@ export class RotationEngine {
           if (!claimed) continue;
           results.push({ rotation: claimed, success: true });
         } else {
+<<<<<<< Updated upstream
           const claimed = await this.claimDueRotation(rotation.id, dueAt, {
+=======
+          // dual_active and others: mark as pending, awaiting external promoteRotation call
+          await update(rotation.id, {
+>>>>>>> Stashed changes
             state: 'pending',
             updated_at: this.now(),
           });
@@ -299,9 +307,10 @@ export class RotationEngine {
     const stuckStates: RotationState[] = ['testing', 'promoting'];
     const cutoff = new Date(Date.now() - STUCK_TIMEOUT_MS);
 
+    const update = this.requireUpdateRotation();
     for (const rotation of allRotations) {
       if (stuckStates.includes(rotation.state) && rotation.updatedAt < cutoff) {
-        await this.storage.updateRotation!(rotation.id, {
+        await update(rotation.id, {
           state: 'failed',
           failure_count: rotation.failureCount + 1,
           updated_at: this.now(),
@@ -316,6 +325,7 @@ export class RotationEngine {
     return rotation;
   }
 
+<<<<<<< Updated upstream
   private async claimDueRotation(
     rotationId: string,
     dueAt: Date,
@@ -332,5 +342,12 @@ export class RotationEngine {
 
     await this.storage.updateRotation?.(rotationId, updates);
     return this.getOrThrow(rotationId);
+=======
+  private requireUpdateRotation(): NonNullable<StorageBackend['updateRotation']> {
+    if (!this.storage.updateRotation) {
+      throw new Error('Storage backend does not support rotation (updateRotation not implemented)');
+    }
+    return this.storage.updateRotation.bind(this.storage);
+>>>>>>> Stashed changes
   }
 }

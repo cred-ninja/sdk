@@ -38,6 +38,7 @@ export class CredVault {
   private readonly saltPath: string;
   private derivedKey: Buffer | null = null;
   private initPromise: Promise<void> | null = null;
+  private rotationEngine: RotationEngine | null = null;
 
   constructor(options: VaultOptions) {
     this.passphrase = options.passphrase;
@@ -373,8 +374,7 @@ export class CredVault {
     intervalSeconds?: number,
   ): Promise<Rotation> {
     await this.ensureInit();
-    const engine = new RotationEngine(this.backend);
-    return engine.startRotation(connectionId, strategy, intervalSeconds);
+    return this.getRotationEngine().startRotation(connectionId, strategy, intervalSeconds);
   }
 
   /**
@@ -383,8 +383,7 @@ export class CredVault {
    */
   async promoteRotation(rotationId: string): Promise<Rotation> {
     await this.ensureInit();
-    const engine = new RotationEngine(this.backend);
-    return engine.promoteRotation(rotationId);
+    return this.getRotationEngine().promoteRotation(rotationId);
   }
 
   /**
@@ -392,8 +391,7 @@ export class CredVault {
    */
   async rollbackRotation(rotationId: string): Promise<Rotation> {
     await this.ensureInit();
-    const engine = new RotationEngine(this.backend);
-    return engine.rollbackRotation(rotationId);
+    return this.getRotationEngine().rollbackRotation(rotationId);
   }
 
   /**
@@ -429,6 +427,13 @@ export class CredVault {
       lastSeenAt: row.lastSeenAt ?? undefined,
       revokedAt: row.revokedAt ?? undefined,
     };
+  }
+
+  private getRotationEngine(): RotationEngine {
+    if (!this.rotationEngine) {
+      this.rotationEngine = new RotationEngine(this.backend);
+    }
+    return this.rotationEngine;
   }
 
   private decryptField(payload: EncryptedPayload, key: Buffer): string {

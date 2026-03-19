@@ -1,6 +1,6 @@
 import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
-import type { AuditEvent, AuditFilter, AuditActor, AuditResource } from '../audit.js';
+import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
 
@@ -440,30 +440,12 @@ export class SQLiteBackend implements StorageBackend {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limitClause = filter.limit ? `LIMIT ${filter.limit}` : '';
 
-    interface AuditDbRow {
-      id: string;
-      timestamp: string;
-      actor_type: string;
-      actor_id: string;
-      actor_fingerprint: string | null;
-      action: string;
-      resource_type: string;
-      resource_id: string;
-      outcome: string;
-      delegation_chain: string | null;
-      scopes_requested: string | null;
-      scopes_granted: string | null;
-      correlation_id: string;
-      sensitive_hmac: string | null;
-      error_message: string | null;
-    }
-
     const rows = db.prepare(`
       SELECT * FROM vault_audit_events
       ${whereClause}
       ORDER BY timestamp DESC
       ${limitClause}
-    `).all(params) as AuditDbRow[];
+    `).all(params) as AuditRow[];
 
     return rows.map((row): AuditEvent => ({
       id: row.id,

@@ -27,6 +27,22 @@ const DEFAULT_BASE_URL = 'https://api.cred.ninja';
 /**
  * Type helpers for dynamic imports (avoids requiring these at module load).
  */
+
+/** Rotation shape returned by @credninja/vault (mirrors Rotation but typed locally for dynamic import). */
+interface VaultRotationResult {
+  id: string;
+  connectionId: string;
+  strategy: string;
+  state: string;
+  currentVersionId: string | null;
+  pendingVersionId: string | null;
+  previousVersionId: string | null;
+  lastRotatedAt: Date | null;
+  nextRotationAt: Date | null;
+  failureCount: number;
+  failureAction: string;
+}
+
 interface VaultModule {
   CredVault: new (opts: { passphrase: string; storage: 'sqlite' | 'file'; path: string }) => VaultInstance;
 }
@@ -67,30 +83,10 @@ interface VaultInstance {
   revokeAgent?(agentId: string): Promise<void>;
   getAgentByDid?(did: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
   // Rotation methods (exposed by CredVault, proxied from RotationEngine)
-  startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<{
-    id: string; connectionId: string; strategy: string; state: string;
-    currentVersionId: string | null; pendingVersionId: string | null;
-    previousVersionId: string | null; lastRotatedAt: Date | null;
-    nextRotationAt: Date | null; failureCount: number; failureAction: string;
-  }>;
-  promoteRotation?(rotationId: string): Promise<{
-    id: string; connectionId: string; strategy: string; state: string;
-    currentVersionId: string | null; pendingVersionId: string | null;
-    previousVersionId: string | null; lastRotatedAt: Date | null;
-    nextRotationAt: Date | null; failureCount: number; failureAction: string;
-  }>;
-  rollbackRotation?(rotationId: string): Promise<{
-    id: string; connectionId: string; strategy: string; state: string;
-    currentVersionId: string | null; pendingVersionId: string | null;
-    previousVersionId: string | null; lastRotatedAt: Date | null;
-    nextRotationAt: Date | null; failureCount: number; failureAction: string;
-  }>;
-  getRotationByConnection?(provider: string, userId: string): Promise<{
-    id: string; connectionId: string; strategy: string; state: string;
-    currentVersionId: string | null; pendingVersionId: string | null;
-    previousVersionId: string | null; lastRotatedAt: Date | null;
-    nextRotationAt: Date | null; failureCount: number; failureAction: string;
-  } | null>;
+  startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<VaultRotationResult>;
+  promoteRotation?(rotationId: string): Promise<VaultRotationResult>;
+  rollbackRotation?(rotationId: string): Promise<VaultRotationResult>;
+  getRotationByConnection?(provider: string, userId: string): Promise<VaultRotationResult | null>;
   writeAuditEvent?(event: {
     id: string;
     timestamp: Date;
@@ -783,12 +779,7 @@ export class Cred {
     return this.toRotationStatus(rotation);
   }
 
-  private toRotationStatus(rotation: {
-    id: string; connectionId: string; strategy: string; state: string;
-    currentVersionId: string | null; pendingVersionId: string | null;
-    previousVersionId: string | null; lastRotatedAt: Date | null;
-    nextRotationAt: Date | null; failureCount: number; failureAction: string;
-  }): RotationStatus {
+  private toRotationStatus(rotation: VaultRotationResult): RotationStatus {
     return {
       id: rotation.id,
       connectionId: rotation.connectionId,

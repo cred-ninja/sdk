@@ -76,7 +76,8 @@ export function hmacAuditField(value: string, secret: string): string {
 
 // ── Raw DB row type ───────────────────────────────────────────────────────────
 
-interface AuditRow {
+/** Raw audit_events DB row — used by SQLite backends. */
+export interface AuditRow {
   id: string;
   timestamp: string;
   actor_type: string;
@@ -98,14 +99,14 @@ interface AuditRow {
 // ── SQLite audit backend ──────────────────────────────────────────────────────
 
 export class SQLiteAuditBackend implements AuditBackend {
-  private db: ReturnType<typeof import('better-sqlite3')> | null = null;
+  private db: import('better-sqlite3').Database | null = null;
 
   constructor(private readonly dbPath: string) {}
 
   init(): void {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Database = require('better-sqlite3') as (path: string, opts?: object) => ReturnType<typeof import('better-sqlite3')>;
-    this.db = (new (Database as unknown as new (path: string) => ReturnType<typeof import('better-sqlite3')>)(this.dbPath));
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    this.db = new Database(this.dbPath);
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_audit_events (
@@ -132,7 +133,7 @@ export class SQLiteAuditBackend implements AuditBackend {
     `);
   }
 
-  private ensureDb() {
+  private ensureDb(): import('better-sqlite3').Database {
     if (!this.db) {
       throw new Error('SQLiteAuditBackend not initialized — call init() first');
     }
