@@ -1,4 +1,4 @@
-import type { StoredRow, AgentRow } from '../types.js';
+import type { StoredRow, AgentRow, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter } from '../audit.js';
 
 /**
@@ -47,4 +47,13 @@ export interface StorageBackend {
 
   writeAuditEvent?(event: AuditEvent): void | Promise<void>;
   queryAuditEvents?(filter: AuditFilter): AuditEvent[] | Promise<AuditEvent[]>;
+
+  // ── Rotation methods (optional — not all backends need these) ───────────────
+
+  storeRotation?(row: RotationRow): void | Promise<void>;
+  getRotation?(id: string): Rotation | null | Promise<Rotation | null>;
+  getRotationByConnectionId?(connectionId: string): Rotation | null | Promise<Rotation | null>;
+  updateRotation?(id: string, updates: Partial<RotationRow>): void | Promise<void>;
+  listDueRotations?(now: Date): Rotation[] | Promise<Rotation[]>;
+  listRotations?(): Rotation[] | Promise<Rotation[]>;
 }

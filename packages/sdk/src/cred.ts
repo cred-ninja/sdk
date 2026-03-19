@@ -14,6 +14,10 @@ import {
   Connection,
   GetConsentUrlParams,
   RevokeParams,
+  RotateParams,
+  ScheduleRotationParams,
+  RotationStatus,
+  RotationStrategy,
 } from './types';
 import { CredError, ConsentRequiredError } from './errors';
 import crypto from 'crypto';
@@ -62,6 +66,31 @@ interface VaultInstance {
   delete(input: { provider: string; userId: string }): Promise<void>;
   revokeAgent?(agentId: string): Promise<void>;
   getAgentByFingerprint?(fingerprint: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
+  // Rotation methods (exposed by CredVault, proxied from RotationEngine)
+  startRotation?(connectionId: string, strategy: string, intervalSeconds?: number): Promise<{
+    id: string; connectionId: string; strategy: string; state: string;
+    currentVersionId: string | null; pendingVersionId: string | null;
+    previousVersionId: string | null; lastRotatedAt: Date | null;
+    nextRotationAt: Date | null; failureCount: number; failureAction: string;
+  }>;
+  promoteRotation?(rotationId: string): Promise<{
+    id: string; connectionId: string; strategy: string; state: string;
+    currentVersionId: string | null; pendingVersionId: string | null;
+    previousVersionId: string | null; lastRotatedAt: Date | null;
+    nextRotationAt: Date | null; failureCount: number; failureAction: string;
+  }>;
+  rollbackRotation?(rotationId: string): Promise<{
+    id: string; connectionId: string; strategy: string; state: string;
+    currentVersionId: string | null; pendingVersionId: string | null;
+    previousVersionId: string | null; lastRotatedAt: Date | null;
+    nextRotationAt: Date | null; failureCount: number; failureAction: string;
+  }>;
+  getRotationByConnection?(provider: string, userId: string): Promise<{
+    id: string; connectionId: string; strategy: string; state: string;
+    currentVersionId: string | null; pendingVersionId: string | null;
+    previousVersionId: string | null; lastRotatedAt: Date | null;
+    nextRotationAt: Date | null; failureCount: number; failureAction: string;
+  } | null>;
   writeAuditEvent?(event: {
     id: string;
     timestamp: Date;
@@ -626,5 +655,124 @@ export class Cred {
     }
 
     throw new CredError(message, String(body.error ?? 'unknown'), res.status);
+  }
+
+  // ── Rotation ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Start a credential rotation for a connection.
+   * Local mode: Creates a vault_rotations record via RotationEngine (through vault).
+   * Cloud mode: Not yet implemented on the cloud API.
+   *
+   * @returns RotationStatus with the new rotation ID and initial state
+   */
+  async rotate(params: RotateParams): Promise<RotationStatus> {
+    if (!this.isLocal) {
+      throw new CredError(
+        'rotate() is only supported in local mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const vault = await this.ensureVault();
+    const strategy: RotationStrategy = params.strategy ?? 'dual_active';
+
+    if (!vault.startRotation) {
+      throw new CredError(
+        'Vault backend does not support rotation. Use SQLite storage backend.',
+        'not_supported',
+        501,
+      );
+    }
+
+    const rotation = await vault.startRotation(params.connectionId, strategy, params.intervalSeconds);
+    return this.toRotationStatus(rotation);
+  }
+
+  /**
+   * Schedule an automatic rotation for a connection.
+   * Equivalent to rotate() — creates a rotation with the given interval.
+   */
+  async scheduleRotation(params: ScheduleRotationParams): Promise<RotationStatus> {
+    return this.rotate({
+      connectionId: params.connectionId,
+      strategy: params.strategy,
+      intervalSeconds: params.intervalSeconds,
+    });
+  }
+
+  /**
+   * Promote the pending rotation to current.
+   * Dual-active: pending → current, old current → previous.
+   * Local mode only.
+   */
+  async promoteRotation(rotationId: string): Promise<RotationStatus> {
+    if (!this.isLocal) {
+      throw new CredError(
+        'promoteRotation() is only supported in local mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const vault = await this.ensureVault();
+    if (!vault.promoteRotation) {
+      throw new CredError(
+        'Vault backend does not support rotation. Use SQLite storage backend.',
+        'not_supported',
+        501,
+      );
+    }
+
+    const rotation = await vault.promoteRotation(rotationId);
+    return this.toRotationStatus(rotation);
+  }
+
+  /**
+   * Roll back a rotation — revert to previous version.
+   * Local mode only.
+   */
+  async rollbackRotation(rotationId: string): Promise<RotationStatus> {
+    if (!this.isLocal) {
+      throw new CredError(
+        'rollbackRotation() is only supported in local mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const vault = await this.ensureVault();
+    if (!vault.rollbackRotation) {
+      throw new CredError(
+        'Vault backend does not support rotation. Use SQLite storage backend.',
+        'not_supported',
+        501,
+      );
+    }
+
+    const rotation = await vault.rollbackRotation(rotationId);
+    return this.toRotationStatus(rotation);
+  }
+
+  private toRotationStatus(rotation: {
+    id: string; connectionId: string; strategy: string; state: string;
+    currentVersionId: string | null; pendingVersionId: string | null;
+    previousVersionId: string | null; lastRotatedAt: Date | null;
+    nextRotationAt: Date | null; failureCount: number; failureAction: string;
+  }): RotationStatus {
+    return {
+      id: rotation.id,
+      connectionId: rotation.connectionId,
+      strategy: rotation.strategy as RotationStrategy,
+      state: rotation.state,
+      currentVersionId: rotation.currentVersionId,
+      pendingVersionId: rotation.pendingVersionId,
+      previousVersionId: rotation.previousVersionId,
+      lastRotatedAt: rotation.lastRotatedAt,
+      nextRotationAt: rotation.nextRotationAt,
+      failureCount: rotation.failureCount,
+      failureAction: rotation.failureAction,
+    };
   }
 }

@@ -8,6 +8,8 @@
 export { CredVault, createVault } from './vault.js';
 export { SQLiteAuditBackend, NoopAuditBackend, hmacAuditField } from './audit.js';
 export type { AuditEvent, AuditActor, AuditResource, AuditBackend, AuditFilter } from './audit.js';
+export { RotationEngine } from './rotation.js';
+export type { RotationResult as RotationEngineResult, RefreshAdapter as RotationRefreshAdapter } from './rotation.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 
@@ -28,4 +30,9 @@ export type {
   AgentRecord,
   AgentRow,
   AgentStatus,
+  Rotation,
+  RotationRow,
+  RotationStrategy,
+  RotationState,
+  RotationFailureAction,
 } from './types.js';
