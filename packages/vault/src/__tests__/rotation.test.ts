@@ -261,6 +261,22 @@ describe('RotationEngine.runDueRotations()', () => {
     expect(results[0].rotation.state).toBe('pending');
   });
 
+  it('claims each due rotation once when schedulers race', async () => {
+    const rotation = await engine.startRotation(CONNECTION_ID, 'single_swap', 60);
+    await backend.updateRotation(rotation.id, {
+      next_rotation_at: new Date(Date.now() - 1000).toISOString(),
+      state: 'idle',
+    });
+
+    const [first, second] = await Promise.all([
+      engine.runDueRotations(),
+      engine.runDueRotations(),
+    ]);
+
+    expect(first.length + second.length).toBe(1);
+    expect([...first, ...second][0].rotation.id).toBe(rotation.id);
+  });
+
   it('returns empty array when no rotations are due', async () => {
     const rotation = await engine.startRotation(CONNECTION_ID, 'dual_active', 3600);
     // nextRotationAt is in the future — should NOT be picked up

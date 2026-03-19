@@ -589,6 +589,41 @@ export class SQLiteBackend implements StorageBackend {
     db.prepare(`UPDATE vault_rotations SET ${fields.join(', ')} WHERE id = @id`).run(params);
   }
 
+  claimDueRotation(id: string, now: Date, updates: Partial<RotationRow>): Rotation | null {
+    const db = this.ensureDb();
+    const updatedAt = updates.updated_at ?? new Date().toISOString();
+    const fields: string[] = ['updated_at = @updatedAt'];
+    const params: Record<string, unknown> = {
+      id,
+      now: now.toISOString(),
+      updatedAt,
+    };
+
+    if (updates.state !== undefined) { fields.push('state = @state'); params.state = updates.state; }
+    if (updates.current_version_id !== undefined) { fields.push('current_version_id = @currentVersionId'); params.currentVersionId = updates.current_version_id; }
+    if (updates.pending_version_id !== undefined) { fields.push('pending_version_id = @pendingVersionId'); params.pendingVersionId = updates.pending_version_id; }
+    if (updates.previous_version_id !== undefined) { fields.push('previous_version_id = @previousVersionId'); params.previousVersionId = updates.previous_version_id; }
+    if (updates.last_rotated_at !== undefined) { fields.push('last_rotated_at = @lastRotatedAt'); params.lastRotatedAt = updates.last_rotated_at; }
+    if (updates.next_rotation_at !== undefined) { fields.push('next_rotation_at = @nextRotationAt'); params.nextRotationAt = updates.next_rotation_at; }
+    if (updates.failure_count !== undefined) { fields.push('failure_count = @failureCount'); params.failureCount = updates.failure_count; }
+    if (updates.interval_seconds !== undefined) { fields.push('interval_seconds = @intervalSeconds'); params.intervalSeconds = updates.interval_seconds; }
+
+    const result = db.prepare(`
+      UPDATE vault_rotations
+      SET ${fields.join(', ')}
+      WHERE id = @id
+        AND state = 'idle'
+        AND next_rotation_at IS NOT NULL
+        AND datetime(next_rotation_at) <= datetime(@now)
+    `).run(params);
+
+    if (result.changes === 0) {
+      return null;
+    }
+
+    return this.getRotation(id);
+  }
+
   listDueRotations(now: Date): Rotation[] {
     const db = this.ensureDb();
     const rows = db.prepare(`
