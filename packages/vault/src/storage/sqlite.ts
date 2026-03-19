@@ -1,5 +1,5 @@
 import type { StorageBackend } from './interface.js';
-import type { StoredRow, AgentRow } from '../types.js';
+import type { StoredRow, AgentRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource } from '../audit.js';
 
 /**
@@ -77,6 +77,27 @@ export class SQLiteBackend implements StorageBackend {
         last_seen_at     TEXT,
         revoked_at       TEXT
       )
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_rotations (
+        id                  TEXT PRIMARY KEY,
+        connection_id       TEXT NOT NULL,
+        strategy            TEXT NOT NULL,
+        interval_seconds    INTEGER NOT NULL,
+        state               TEXT NOT NULL DEFAULT 'idle',
+        current_version_id  TEXT,
+        pending_version_id  TEXT,
+        previous_version_id TEXT,
+        last_rotated_at     TEXT,
+        next_rotation_at    TEXT,
+        failure_count       INTEGER NOT NULL DEFAULT 0,
+        failure_action      TEXT NOT NULL DEFAULT 'retry_backoff',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_rotations_connection ON vault_rotations(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
     `);
   }
 
@@ -408,5 +429,119 @@ export class SQLiteBackend implements StorageBackend {
         : undefined,
       errorMessage: row.error_message ?? undefined,
     }));
+  }
+
+  // ── Rotation methods ──────────────────────────────────────────────────────
+
+  storeRotation(row: RotationRow): void {
+    const db = this.ensureDb();
+
+    db.prepare(`
+      INSERT INTO vault_rotations (
+        id, connection_id, strategy, interval_seconds, state,
+        current_version_id, pending_version_id, previous_version_id,
+        last_rotated_at, next_rotation_at, failure_count, failure_action,
+        created_at, updated_at
+      ) VALUES (
+        @id, @connectionId, @strategy, @intervalSeconds, @state,
+        @currentVersionId, @pendingVersionId, @previousVersionId,
+        @lastRotatedAt, @nextRotationAt, @failureCount, @failureAction,
+        @createdAt, @updatedAt
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        strategy            = excluded.strategy,
+        interval_seconds    = excluded.interval_seconds,
+        state               = excluded.state,
+        current_version_id  = excluded.current_version_id,
+        pending_version_id  = excluded.pending_version_id,
+        previous_version_id = excluded.previous_version_id,
+        last_rotated_at     = excluded.last_rotated_at,
+        next_rotation_at    = excluded.next_rotation_at,
+        failure_count       = excluded.failure_count,
+        failure_action      = excluded.failure_action,
+        updated_at          = excluded.updated_at
+    `).run({
+      id: row.id,
+      connectionId: row.connection_id,
+      strategy: row.strategy,
+      intervalSeconds: row.interval_seconds,
+      state: row.state,
+      currentVersionId: row.current_version_id ?? null,
+      pendingVersionId: row.pending_version_id ?? null,
+      previousVersionId: row.previous_version_id ?? null,
+      lastRotatedAt: row.last_rotated_at ?? null,
+      nextRotationAt: row.next_rotation_at ?? null,
+      failureCount: row.failure_count,
+      failureAction: row.failure_action,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+  }
+
+  getRotation(id: string): Rotation | null {
+    const db = this.ensureDb();
+    const row = db.prepare('SELECT * FROM vault_rotations WHERE id = ?').get(id) as RotationRow | undefined;
+    return row ? this.mapRotationRow(row) : null;
+  }
+
+  getRotationByConnectionId(connectionId: string): Rotation | null {
+    const db = this.ensureDb();
+    const row = db.prepare('SELECT * FROM vault_rotations WHERE connection_id = ? ORDER BY created_at DESC LIMIT 1').get(connectionId) as RotationRow | undefined;
+    return row ? this.mapRotationRow(row) : null;
+  }
+
+  updateRotation(id: string, updates: Partial<RotationRow>): void {
+    const db = this.ensureDb();
+    const now = updates.updated_at ?? new Date().toISOString();
+
+    const fields: string[] = ['updated_at = @updatedAt'];
+    const params: Record<string, unknown> = { id, updatedAt: now };
+
+    if (updates.state !== undefined) { fields.push('state = @state'); params.state = updates.state; }
+    if (updates.current_version_id !== undefined) { fields.push('current_version_id = @currentVersionId'); params.currentVersionId = updates.current_version_id; }
+    if (updates.pending_version_id !== undefined) { fields.push('pending_version_id = @pendingVersionId'); params.pendingVersionId = updates.pending_version_id; }
+    if (updates.previous_version_id !== undefined) { fields.push('previous_version_id = @previousVersionId'); params.previousVersionId = updates.previous_version_id; }
+    if (updates.last_rotated_at !== undefined) { fields.push('last_rotated_at = @lastRotatedAt'); params.lastRotatedAt = updates.last_rotated_at; }
+    if (updates.next_rotation_at !== undefined) { fields.push('next_rotation_at = @nextRotationAt'); params.nextRotationAt = updates.next_rotation_at; }
+    if (updates.failure_count !== undefined) { fields.push('failure_count = @failureCount'); params.failureCount = updates.failure_count; }
+    if (updates.interval_seconds !== undefined) { fields.push('interval_seconds = @intervalSeconds'); params.intervalSeconds = updates.interval_seconds; }
+
+    db.prepare(`UPDATE vault_rotations SET ${fields.join(', ')} WHERE id = @id`).run(params);
+  }
+
+  listDueRotations(now: Date): Rotation[] {
+    const db = this.ensureDb();
+    const rows = db.prepare(`
+      SELECT * FROM vault_rotations
+      WHERE state = 'idle'
+        AND next_rotation_at IS NOT NULL
+        AND datetime(next_rotation_at) <= datetime(?)
+    `).all(now.toISOString()) as RotationRow[];
+    return rows.map((row) => this.mapRotationRow(row));
+  }
+
+  listRotations(): Rotation[] {
+    const db = this.ensureDb();
+    const rows = db.prepare('SELECT * FROM vault_rotations ORDER BY created_at DESC').all() as RotationRow[];
+    return rows.map((row) => this.mapRotationRow(row));
+  }
+
+  private mapRotationRow(row: RotationRow): Rotation {
+    return {
+      id: row.id,
+      connectionId: row.connection_id,
+      strategy: row.strategy as RotationStrategy,
+      intervalSeconds: row.interval_seconds,
+      state: row.state as RotationState,
+      currentVersionId: row.current_version_id,
+      pendingVersionId: row.pending_version_id,
+      previousVersionId: row.previous_version_id,
+      lastRotatedAt: row.last_rotated_at ? new Date(row.last_rotated_at) : null,
+      nextRotationAt: row.next_rotation_at ? new Date(row.next_rotation_at) : null,
+      failureCount: row.failure_count,
+      failureAction: row.failure_action as RotationFailureAction,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    };
   }
 }

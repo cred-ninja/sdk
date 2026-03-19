@@ -139,3 +139,50 @@ export interface AgentRow {
   lastSeenAt: string | null;
   revokedAt: string | null;
 }
+
+// ── Rotation records ─────────────────────────────────────────────────────────
+
+export type RotationStrategy = 'dual_active' | 'single_swap' | 'ephemeral' | 'oauth_refresh';
+export type RotationState = 'idle' | 'pending' | 'testing' | 'promoting' | 'failed' | 'rolling_back';
+export type RotationFailureAction = 'retry_backoff' | 'disable_integration' | 'notify_human';
+
+export interface Rotation {
+  /** rot_ prefixed unique ID */
+  id: string;
+  /** FK to vault_credentials or a logical connection ID */
+  connectionId: string;
+  strategy: RotationStrategy;
+  /** How often to auto-rotate (seconds) */
+  intervalSeconds: number;
+  state: RotationState;
+  /** Access token enc reference for the currently-active token */
+  currentVersionId: string | null;
+  /** Access token enc reference for the pending (new) token — dual_active window */
+  pendingVersionId: string | null;
+  /** Access token enc reference for the previous (retiring) token */
+  previousVersionId: string | null;
+  lastRotatedAt: Date | null;
+  nextRotationAt: Date | null;
+  failureCount: number;
+  failureAction: RotationFailureAction;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Raw DB row for vault_rotations */
+export interface RotationRow {
+  id: string;
+  connection_id: string;
+  strategy: string;
+  interval_seconds: number;
+  state: string;
+  current_version_id: string | null;
+  pending_version_id: string | null;
+  previous_version_id: string | null;
+  last_rotated_at: string | null;
+  next_rotation_at: string | null;
+  failure_count: number;
+  failure_action: string;
+  created_at: string;
+  updated_at: string;
+}

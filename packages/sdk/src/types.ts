@@ -104,3 +104,36 @@ export interface RegisterAgentParams {
 export interface RevokeAgentParams {
   agentId: string;
 }
+
+// ── Rotation types ────────────────────────────────────────────────────────────
+
+export type RotationStrategy = 'dual_active' | 'single_swap' | 'ephemeral' | 'oauth_refresh';
+
+export interface RotateParams {
+  /** The connection to rotate (provider/userId format or logical connection ID) */
+  connectionId: string;
+  /** Rotation strategy. Defaults to 'dual_active'. */
+  strategy?: RotationStrategy;
+  /** How often to auto-rotate in seconds. Defaults to 86400 (24h). */
+  intervalSeconds?: number;
+}
+
+export interface ScheduleRotationParams {
+  connectionId: string;
+  strategy?: RotationStrategy;
+  intervalSeconds?: number;
+}
+
+export interface RotationStatus {
+  id: string;
+  connectionId: string;
+  strategy: RotationStrategy;
+  state: string;
+  currentVersionId: string | null;
+  pendingVersionId: string | null;
+  previousVersionId: string | null;
+  lastRotatedAt: Date | null;
+  nextRotationAt: Date | null;
+  failureCount: number;
+  failureAction: string;
+}

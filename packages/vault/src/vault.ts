@@ -14,8 +14,12 @@ import type {
   EncryptedPayload,
   AgentRecord,
   AgentRow,
+  Rotation,
+  RotationStrategy,
+  RotationFailureAction,
 } from './types.js';
 import type { AuditEvent, AuditFilter } from './audit.js';
+import { RotationEngine } from './rotation.js';
 
 /**
  * CredVault — local-first encrypted token vault.
@@ -337,6 +341,64 @@ export class CredVault {
       return [];
     }
     return this.backend.queryAuditEvents(filter) as AuditEvent[];
+  }
+
+  // ── Rotation methods ────────────────────────────────────────────────────
+
+  /**
+   * Start a rotation schedule for a connection.
+   * Creates a rotation record in 'pending' state via the RotationEngine.
+   *
+   * @param connectionId - Logical connection ID (e.g. "github_user123")
+   * @param strategy - Rotation strategy (dual_active, single_swap, etc.)
+   * @param intervalSeconds - How often to auto-rotate (default 86400 = 24h)
+   */
+  async startRotation(
+    connectionId: string,
+    strategy: RotationStrategy,
+    intervalSeconds?: number,
+  ): Promise<Rotation> {
+    await this.ensureInit();
+    const engine = new RotationEngine(this.backend);
+    return engine.startRotation(connectionId, strategy, intervalSeconds);
+  }
+
+  /**
+   * Promote the pending rotation to current.
+   * Dual-active: old current → previous, pending → current.
+   */
+  async promoteRotation(rotationId: string): Promise<Rotation> {
+    await this.ensureInit();
+    const engine = new RotationEngine(this.backend);
+    return engine.promoteRotation(rotationId);
+  }
+
+  /**
+   * Roll back a rotation — restore previous version as current.
+   */
+  async rollbackRotation(rotationId: string): Promise<Rotation> {
+    await this.ensureInit();
+    const engine = new RotationEngine(this.backend);
+    return engine.rollbackRotation(rotationId);
+  }
+
+  /**
+   * Get current rotation state for a connection by provider + userId.
+   */
+  async getRotationByConnection(provider: string, userId: string): Promise<Rotation | null> {
+    await this.ensureInit();
+    if (!this.backend.getRotationByConnectionId) return null;
+    const connectionId = `${provider}_${userId}`;
+    return this.backend.getRotationByConnectionId(connectionId);
+  }
+
+  /**
+   * Get a rotation by its ID.
+   */
+  async getRotationById(rotationId: string): Promise<Rotation | null> {
+    await this.ensureInit();
+    if (!this.backend.getRotation) return null;
+    return this.backend.getRotation(rotationId);
   }
 
   private agentRowToRecord(row: AgentRow): AgentRecord {
