@@ -6,6 +6,8 @@
  */
 
 export { CredVault, createVault } from './vault.js';
+export { SQLiteAuditBackend, NoopAuditBackend, hmacAuditField } from './audit.js';
+export type { AuditEvent, AuditActor, AuditResource, AuditBackend, AuditFilter } from './audit.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 

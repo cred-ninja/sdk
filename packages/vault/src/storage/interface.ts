@@ -1,4 +1,5 @@
 import type { StoredRow, AgentRow } from '../types.js';
+import type { AuditEvent, AuditFilter } from '../audit.js';
 
 /**
  * StorageBackend — the interface that all vault storage backends must implement.
@@ -41,4 +42,9 @@ export interface StorageBackend {
   getAgent?(id: string): AgentRow | null | Promise<AgentRow | null>;
   getAgentByFingerprint?(fingerprint: string): AgentRow | null | Promise<AgentRow | null>;
   updateAgentStatus?(id: string, status: string, revokedAt?: string): void | Promise<void>;
+
+  // ── Audit methods (optional — not all backends need these) ─────────────────
+
+  writeAuditEvent?(event: AuditEvent): void | Promise<void>;
+  queryAuditEvents?(filter: AuditFilter): AuditEvent[] | Promise<AuditEvent[]>;
 }

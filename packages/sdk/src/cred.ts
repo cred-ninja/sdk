@@ -16,6 +16,7 @@ import {
   RevokeParams,
 } from './types';
 import { CredError, ConsentRequiredError } from './errors';
+import crypto from 'crypto';
 
 const DEFAULT_BASE_URL = 'https://api.cred.ninja';
 
@@ -61,10 +62,38 @@ interface VaultInstance {
   delete(input: { provider: string; userId: string }): Promise<void>;
   revokeAgent?(agentId: string): Promise<void>;
   getAgentByFingerprint?(fingerprint: string): Promise<{ status: string; scopeCeiling: string[] } | null>;
+  writeAuditEvent?(event: {
+    id: string;
+    timestamp: Date;
+    actor: { type: 'agent' | 'user' | 'system'; id: string; fingerprint?: string };
+    action: string;
+    resource: { type: string; id: string };
+    outcome: string;
+    correlationId: string;
+    scopesRequested?: string[];
+    scopesGranted?: string[];
+    sensitiveFieldsHmac?: Record<string, string>;
+    errorMessage?: string;
+  }): void;
 }
 
 interface OAuthModule {
   createAdapter(name: string): { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> };
+}
+
+/** Minimal audit event — matches @credninja/vault AuditEvent shape */
+interface AuditEventInput {
+  id: string;
+  timestamp: Date;
+  actor: { type: 'agent' | 'user' | 'system'; id: string; fingerprint?: string };
+  action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
+  resource: { type: 'connection' | 'token' | 'agent' | 'permission' | 'rotation'; id: string };
+  outcome: 'success' | 'denied' | 'error';
+  scopesRequested?: string[];
+  scopesGranted?: string[];
+  correlationId: string;
+  sensitiveFieldsHmac?: Record<string, string>;
+  errorMessage?: string;
 }
 
 function isLocalConfig(config: CredConfig): config is CredLocalConfig {
@@ -81,6 +110,9 @@ export class Cred {
   private vault?: VaultInstance;
   private vaultInitPromise?: Promise<void>;
   private readonly isLocal: boolean;
+
+  // ── Audit fields ────────────────────────────────────────────────────────────
+  private auditHmacSecret?: string;
 
   constructor(config: CredConfig) {
     if (isLocalConfig(config)) {
@@ -158,6 +190,9 @@ export class Cred {
     });
     await vault.init();
     this.vault = vault;
+
+    // Derive HMAC secret from vault passphrase for audit field hashing
+    this.auditHmacSecret = crypto.createHash('sha256').update(`audit:${config.vault.passphrase}`).digest('hex');
   }
 
   private async getAdapter(service: string): Promise<{ refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> }> {
@@ -194,12 +229,24 @@ export class Cred {
 
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
     const vault = await this.ensureVault();
+    const correlationId = crypto.randomUUID();
 
     // Check agent status and scope ceiling before delegation
     if (params.agentDid && vault.getAgentByFingerprint) {
       const agentRecord = await vault.getAgentByFingerprint(params.agentDid);
       if (agentRecord) {
         if (agentRecord.status === 'revoked') {
+          this.writeAuditEvent({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: params.agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${params.service}/${params.userId}` },
+            outcome: 'denied',
+            scopesRequested: params.scopes ?? [],
+            correlationId,
+            errorMessage: 'agent_revoked',
+          });
           throw new CredError(
             `Agent ${params.agentDid} has been revoked and cannot receive delegations`,
             'agent_revoked',
@@ -207,6 +254,17 @@ export class Cred {
           );
         }
         if (agentRecord.status === 'suspended') {
+          this.writeAuditEvent({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: params.agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${params.service}/${params.userId}` },
+            outcome: 'denied',
+            scopesRequested: params.scopes ?? [],
+            correlationId,
+            errorMessage: 'agent_suspended',
+          });
           throw new CredError(
             `Agent ${params.agentDid} is suspended`,
             'agent_suspended',
@@ -216,6 +274,17 @@ export class Cred {
         if (agentRecord.scopeCeiling.length > 0 && params.scopes && params.scopes.length > 0) {
           const unauthorizedScopes = params.scopes.filter(s => !agentRecord.scopeCeiling.includes(s));
           if (unauthorizedScopes.length > 0) {
+            this.writeAuditEvent({
+              id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+              timestamp: new Date(),
+              actor: { type: 'agent', id: params.agentDid },
+              action: 'deny',
+              resource: { type: 'token', id: `${params.service}/${params.userId}` },
+              outcome: 'denied',
+              scopesRequested: params.scopes,
+              correlationId,
+              errorMessage: `scope_ceiling_exceeded: ${unauthorizedScopes.join(', ')}`,
+            });
             throw new CredError(
               `Agent scope ceiling exceeded: ${unauthorizedScopes.join(', ')} not in ceiling`,
               'scope_ceiling_exceeded',
@@ -248,22 +317,46 @@ export class Cred {
     });
 
     if (!entry) {
-      throw new CredError(
+      const err = new CredError(
         `No credentials found for ${params.service}/${params.userId} in local vault. ` +
         `Store tokens first using @credninja/vault before delegating.`,
         'not_found',
         404,
       );
+      this.writeAuditEvent({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: params.userId },
+        action: 'delegate',
+        resource: { type: 'token', id: `${params.service}/${params.userId}` },
+        outcome: 'error',
+        scopesRequested: params.scopes ?? [],
+        correlationId,
+        errorMessage: err.message,
+      });
+      throw err;
     }
 
     // Check if token is expired (vault.get returns null for expired, but check anyway
     // in case vault returned an entry without expiry enforcement)
     if (entry.expiresAt && entry.expiresAt.getTime() <= Date.now()) {
-      throw new CredError(
+      const err = new CredError(
         `Token for ${params.service}/${params.userId} has expired and could not be refreshed.`,
         'token_expired',
         401,
       );
+      this.writeAuditEvent({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: params.userId },
+        action: 'delegate',
+        resource: { type: 'token', id: `${params.service}/${params.userId}` },
+        outcome: 'error',
+        scopesRequested: params.scopes ?? [],
+        correlationId,
+        errorMessage: err.message,
+      });
+      throw err;
     }
 
     // Always set a TTL — default 900s (15 min) if no expiry info
@@ -279,6 +372,27 @@ export class Cred {
       expiresAt = new Date(Date.now() + DEFAULT_TTL_SECONDS * 1000);
     }
 
+    const delegationId = `local_${params.service}_${params.userId}`;
+
+    // Build HMAC of token for audit (raw token never stored)
+    const sensitiveFieldsHmac = this.auditHmacSecret
+      ? { accessToken: crypto.createHmac('sha256', this.auditHmacSecret).update(entry.accessToken).digest('hex') }
+      : undefined;
+
+    // Write audit event — MUST succeed (fail-closed)
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.userId, fingerprint: params.agentDid },
+      action: 'delegate',
+      resource: { type: 'token', id: delegationId },
+      outcome: 'success',
+      scopesRequested: params.scopes ?? [],
+      scopesGranted: entry.scopes ?? [],
+      correlationId,
+      sensitiveFieldsHmac,
+    });
+
     return {
       accessToken: entry.accessToken,
       tokenType: 'Bearer',
@@ -286,8 +400,25 @@ export class Cred {
       expiresAt,
       service: params.service,
       scopes: entry.scopes ?? [],
-      delegationId: `local_${params.service}_${params.userId}`,
+      delegationId,
     };
+  }
+
+  /**
+   * Write audit event via vault — throws CredError('audit_failure') if write fails.
+   * This is the fail-closed behavior: delegation cannot succeed without a persisted audit record.
+   */
+  private writeAuditEvent(event: AuditEventInput): void {
+    if (!this.vault?.writeAuditEvent) return; // no audit backend configured (e.g. file mode)
+    try {
+      this.vault.writeAuditEvent(event);
+    } catch (err) {
+      throw new CredError(
+        `Audit write failure — delegation aborted for compliance (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+        'audit_failure',
+        500,
+      );
+    }
   }
 
   private async delegateCloud(params: DelegateParams): Promise<DelegationResult> {
@@ -389,6 +520,17 @@ export class Cred {
     if (this.isLocal) {
       const vault = await this.ensureVault();
       await vault.delete({ provider: params.service, userId: params.userId });
+
+      // Audit: revoke event
+      this.writeAuditEvent({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: params.userId },
+        action: 'revoke',
+        resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+      });
       return;
     }
 
