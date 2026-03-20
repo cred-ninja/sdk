@@ -1,0 +1,5 @@
+# Default owner for public OSS changes.
+* @kilroycreative
+
+# CI and release policy changes require maintainer review.
+/.github/ @kilroycreative

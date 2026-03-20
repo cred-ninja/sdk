@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
@@ -40,6 +47,9 @@ jobs:
       - name: Build @credninja/guard
         run: npm run build --workspace=packages/guard
 
+      - name: Build @credninja/sdk
+        run: npm run build --workspace=packages/sdk
+
       - name: Test @credninja/oauth
         run: npm test --workspace=packages/oauth
 
@@ -54,6 +64,9 @@ jobs:
 
       - name: Test @credninja/server
         run: npm test --workspace=packages/server
+
+      - name: Test @credninja/ai
+        run: npm test --workspace=packages/integrations/vercel-ai
 
   build:
     name: Build
@@ -78,5 +91,14 @@ jobs:
       - name: Build @credninja/sdk
         run: npm run build --workspace=packages/sdk
 
+      - name: Build @credninja/server
+        run: npm run build --workspace=packages/server
+
+      - name: Build @credninja/ai
+        run: npm run build --workspace=packages/integrations/vercel-ai
+
       - name: Build @credninja/mcp
         run: npm run build --workspace=packages/mcp
+
+      - name: Pack create-cred-app
+        run: npm pack --dry-run ./packages/create-cred-app

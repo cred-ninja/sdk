@@ -1,0 +1,69 @@
+name: Public Leak Guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: leak-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  leak-guard:
+    name: Block Private Artifact Leakage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect tracked files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files | sed '/^$/d' > /tmp/tracked-files.txt
+          echo "Tracked files under review:"
+          cat /tmp/tracked-files.txt
+
+      - name: Block denylisted paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deny='(^|/)(\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
+
+          if grep -nE "$deny" /tmp/tracked-files.txt; then
+            echo "::error::Denylisted private artifact path detected in public repository."
+            exit 1
+          fi
+
+      - name: Block internal markers in public files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          marker='(\.factory/|SESSION_PACKAGE|DEBT-[0-9]{3}|FINDING-[0-9]{3}|AUDIT-[0-9]+)'
+          fail=0
+
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+
+            case "$path" in
+              .github/workflows/*|.gitignore|package-lock.json|pnpm-lock.yaml|yarn.lock|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico|*.pdf|*.woff|*.woff2|*/__tests__/*|*/tests/*|*.test.*|*.spec.*)
+                continue
+                ;;
+            esac
+
+            if [[ -f "$path" ]] && grep -nE "$marker" "$path"; then
+              echo "::error file=$path::Internal process marker found in public file."
+              fail=1
+            fi
+          done < /tmp/tracked-files.txt
+
+          exit "$fail"

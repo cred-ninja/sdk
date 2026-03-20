@@ -1,0 +1,83 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/sdk-python/**'
+      - 'packages/integrations/**'
+      - '.github/workflows/python-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/sdk-python/**'
+      - 'packages/integrations/**'
+      - '.github/workflows/python-ci.yml'
+
+concurrency:
+  group: python-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-python:
+    name: SDK Python (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            packages/sdk-python/pyproject.toml
+
+      - name: Install SDK Python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e 'packages/sdk-python[dev]'
+
+      - name: Test SDK Python
+        run: python -m pytest packages/sdk-python/tests
+
+      - name: Typecheck SDK Python
+        run: python -m mypy --strict packages/sdk-python/cred
+
+  integrations:
+    name: Python Integration (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - packages/integrations/langchain
+          - packages/integrations/crewai
+          - packages/integrations/openai-agents
+          - packages/integrations/autogen
+          - packages/integrations/semantic-kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            packages/sdk-python/pyproject.toml
+            ${{ matrix.package }}/pyproject.toml
+
+      - name: Install SDK Python + integration
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e packages/sdk-python
+          python -m pip install -e '${{ matrix.package }}[dev]'
+
+      - name: Test integration package
+        run: python -m pytest '${{ matrix.package }}/tests'
