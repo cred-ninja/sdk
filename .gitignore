@@ -10,6 +10,7 @@ build/
 .content-rewrite-done
 .hubspot-done
 .integrations-done
+.done
 .validation-report.md
 .sprint-logs/
 .sprint-prompts/

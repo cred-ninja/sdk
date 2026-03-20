@@ -17,7 +17,7 @@ export type { SalesforceTokenResponse } from './salesforce.js';
 export { LinearAdapter } from './linear.js';
 export { HubSpotAdapter } from './hubspot.js';
 
-// New adapters — DEBT-008
+// Additional built-in adapters
 export { StripeAdapter } from './stripe.js';
 export { DiscordAdapter } from './discord.js';
 export { TwilioAdapter } from './twilio.js';
