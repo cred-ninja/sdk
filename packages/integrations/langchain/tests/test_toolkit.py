@@ -8,6 +8,9 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from datetime import datetime, timezone
+from typing import Optional
+
 import pytest
 import httpx
 from unittest.mock import MagicMock, patch
@@ -26,6 +29,26 @@ from cred_langchain import (
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
+
+
+def make_delegation_result(
+    *,
+    access_token: str = "at",
+    token_type: str = "Bearer",
+    expires_in: int = 3600,
+    service: str = "google",
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_1",
+) -> DelegationResult:
+    return DelegationResult(
+        access_token=access_token,
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
 
 
 @pytest.fixture
@@ -70,9 +93,8 @@ class TestCredToolkit:
 
 class TestCredDelegateTool:
     def test_returns_json_with_access_token(self, toolkit, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
+        mock_cred.delegate.return_value = make_delegation_result(
             access_token="ya29.mock",
-            token_type="Bearer",
             expires_in=3600,
             service="google",
             scopes=["calendar.readonly"],
@@ -94,10 +116,7 @@ class TestCredDelegateTool:
         assert data["delegation_id"] == "del_abc"
 
     def test_passes_user_id_to_cred(self, toolkit, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="google", scopes=[], delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result()
 
         tools = toolkit.get_tools()
         delegate = next(t for t in tools if t.name == "cred_delegate")

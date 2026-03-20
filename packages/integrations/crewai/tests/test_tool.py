@@ -7,6 +7,9 @@ Tests focus on: tool configuration, naming, input schema, output format, error p
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from datetime import datetime, timezone
+from typing import Optional
+
 import pytest
 import httpx
 from unittest.mock import MagicMock, patch
@@ -17,6 +20,26 @@ from cred_crewai import CredTool
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+
+
+def make_delegation_result(
+    *,
+    access_token: str = "at",
+    token_type: str = "Bearer",
+    expires_in: int = 3600,
+    service: str = "google",
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_1",
+) -> DelegationResult:
+    return DelegationResult(
+        access_token=access_token,
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
 
 
 @pytest.fixture
@@ -117,9 +140,8 @@ class TestConstructor:
 
 class TestRun:
     def test_returns_access_token_string(self, tool, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
+        mock_cred.delegate.return_value = make_delegation_result(
             access_token="ya29.mock",
-            token_type="Bearer",
             expires_in=3600,
             service="google",
             scopes=["calendar.readonly"],
@@ -132,13 +154,7 @@ class TestRun:
         assert isinstance(result, str)
 
     def test_passes_service_user_app_client_id(self, tool, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at",
-            token_type="Bearer",
-            service="google",
-            scopes=[],
-            delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result()
 
         tool._run()
 
@@ -151,12 +167,8 @@ class TestRun:
 
     def test_passes_scopes_when_configured(self, tool, mock_cred):
         tool._scopes = ["calendar.readonly", "calendar.events"]
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at",
-            token_type="Bearer",
-            service="google",
+        mock_cred.delegate.return_value = make_delegation_result(
             scopes=["calendar.readonly", "calendar.events"],
-            delegation_id="del_1",
         )
 
         tool._run()
@@ -174,13 +186,7 @@ class TestRun:
         t._cred = mock_cred
         t._scopes = []
 
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at",
-            token_type="Bearer",
-            service="google",
-            scopes=[],
-            delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result()
 
         t._run()
 

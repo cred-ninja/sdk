@@ -5,6 +5,8 @@ output JSON, and error propagation. The Cred client is mocked -- no real HTTP.
 """
 
 import json
+from datetime import datetime, timezone
+from typing import Optional
 import pytest
 import httpx
 from unittest.mock import MagicMock, patch
@@ -15,6 +17,26 @@ from cred_semantic_kernel import CredPlugin
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+
+
+def make_delegation_result(
+    *,
+    access_token: str = "at",
+    token_type: str = "Bearer",
+    expires_in: int = 3600,
+    service: str = "google",
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_1",
+) -> DelegationResult:
+    return DelegationResult(
+        access_token=access_token,
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
 
 
 @pytest.fixture
@@ -70,9 +92,8 @@ class TestKernelFunction:
 
 class TestDelegate:
     def test_returns_json_with_access_token(self, plugin, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
+        mock_cred.delegate.return_value = make_delegation_result(
             access_token="ya29.mock",
-            token_type="Bearer",
             expires_in=3600,
             service="google",
             scopes=["calendar.readonly"],
@@ -90,10 +111,7 @@ class TestDelegate:
         assert result["delegation_id"] == "del_abc"
 
     def test_passes_service_user_app_to_cred(self, plugin, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="github", scopes=[], delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result(service="github")
 
         plugin.delegate(service="github", scopes="repo")
 
@@ -105,10 +123,8 @@ class TestDelegate:
         )
 
     def test_parses_comma_separated_scopes(self, plugin, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="google", scopes=["calendar.readonly", "calendar.events"],
-            delegation_id="del_1",
+        mock_cred.delegate.return_value = make_delegation_result(
+            scopes=["calendar.readonly", "calendar.events"],
         )
 
         plugin.delegate(service="google", scopes="calendar.readonly, calendar.events")
@@ -117,10 +133,7 @@ class TestDelegate:
         assert call_kwargs["scopes"] == ["calendar.readonly", "calendar.events"]
 
     def test_passes_none_scopes_when_empty_string(self, plugin, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="google", scopes=[], delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result()
 
         plugin.delegate(service="google", scopes="")
 

@@ -6,6 +6,8 @@ and error propagation. The Cred client is mocked -- no real HTTP.
 
 import asyncio
 import json
+from datetime import datetime, timezone
+from typing import Optional
 import pytest
 import httpx
 from unittest.mock import MagicMock, patch
@@ -19,6 +21,26 @@ from cred_autogen import cred_delegate_tool, CredTool
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+
+
+def make_delegation_result(
+    *,
+    access_token: str = "at",
+    token_type: str = "Bearer",
+    expires_in: int = 3600,
+    service: str = "google",
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_1",
+) -> DelegationResult:
+    return DelegationResult(
+        access_token=access_token,
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
 
 
 @pytest.fixture
@@ -81,9 +103,8 @@ class TestFactory:
 
 class TestInvoke:
     def test_returns_json_with_access_token(self, tool, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
+        mock_cred.delegate.return_value = make_delegation_result(
             access_token="ya29.mock",
-            token_type="Bearer",
             expires_in=3600,
             service="google",
             scopes=["calendar.readonly"],
@@ -104,10 +125,7 @@ class TestInvoke:
         assert result["delegation_id"] == "del_abc"
 
     def test_passes_service_user_app_to_cred(self, tool, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="github", scopes=[], delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result(service="github")
 
         run(tool.run_json(
             {"service": "github", "scopes": ["repo"]},
@@ -122,10 +140,7 @@ class TestInvoke:
         )
 
     def test_passes_none_scopes_when_empty_list(self, tool, mock_cred):
-        mock_cred.delegate.return_value = DelegationResult(
-            access_token="at", token_type="Bearer",
-            service="google", scopes=[], delegation_id="del_1",
-        )
+        mock_cred.delegate.return_value = make_delegation_result()
 
         run(tool.run_json(
             {"service": "google", "scopes": []},

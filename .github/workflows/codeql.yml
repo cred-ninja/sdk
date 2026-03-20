@@ -48,7 +48,14 @@ jobs:
 
       - name: Build Node workspaces
         if: matrix.language == 'javascript-typescript'
-        run: npm run build --workspaces --if-present
+        run: |
+          npm run build --workspace=packages/oauth
+          npm run build --workspace=packages/vault
+          npm run build --workspace=packages/guard
+          npm run build --workspace=packages/sdk
+          npm run build --workspace=packages/integrations/vercel-ai
+          npm run build --workspace=packages/mcp
+          npm run build --workspace=packages/server
 
       - name: Setup Python
         if: matrix.language == 'python'
