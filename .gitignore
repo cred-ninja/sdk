@@ -3,11 +3,17 @@ dist/
 build/
 
 # Sprint artifacts
+.factory/
 .sprint-*
+.sprint-pid
 .rewire-done
 .content-rewrite-done
+.hubspot-done
+.integrations-done
 .validation-report.md
 .sprint-logs/
+.sprint-prompts/
+SESSION_PACKAGE.md
 run-sprint.sh
 validate.sh
 
