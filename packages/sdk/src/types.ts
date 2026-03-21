@@ -94,6 +94,22 @@ export interface RevokeParams {
   appClientId?: string;
 }
 
+export interface AuditEntry {
+  id: string;
+  action: string;
+  service: string;
+  userId: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AuditParams {
+  userId: string;
+  appClientId?: string;
+  service?: string;
+  limit?: number;
+}
+
 // ── Agent scope ceiling & revocation types ──────────────────────────────────
 
 export interface RegisterAgentParams {

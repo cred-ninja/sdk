@@ -239,6 +239,41 @@ describe('Cred.revoke()', () => {
   });
 });
 
+// ── getAuditLog() ────────────────────────────────────────────────────────────
+
+describe('Cred.getAuditLog()', () => {
+  it('returns audit entries on 200', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      entries: [
+        {
+          id: 'evt_1',
+          action: 'access',
+          service: 'google',
+          userId: 'default',
+          timestamp: '2026-03-21T00:00:00.000Z',
+          metadata: { source: 'server' },
+        },
+      ],
+    }));
+
+    const entries = await cred.getAuditLog({ userId: 'default', service: 'google', limit: 10 });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].action).toBe('access');
+    expect(entries[0].service).toBe('google');
+  });
+
+  it('passes user_id, service, and limit as query params', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, { entries: [] }));
+    await cred.getAuditLog({ userId: 'default', service: 'google', limit: 25 });
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/api/v1/audit?');
+    expect(url).toContain('user_id=default');
+    expect(url).toContain('service=google');
+    expect(url).toContain('limit=25');
+    expect(init.method).toBe('GET');
+  });
+});
+
 // ── error hierarchy ───────────────────────────────────────────────────────────
 
 describe('Error hierarchy', () => {

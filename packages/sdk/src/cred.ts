@@ -12,6 +12,8 @@ import {
   DelegateParams,
   DelegationResult,
   Connection,
+  AuditEntry,
+  AuditParams,
   GetConsentUrlParams,
   RevokeParams,
   RotateParams,
@@ -703,6 +705,29 @@ export class Cred {
     if (params.appClientId) query.set('app_client_id', params.appClientId);
 
     await this.delete(`/api/v1/connections/${params.service}?${query.toString()}`);
+  }
+
+  /**
+   * Retrieve audit log entries for a user in cloud mode.
+   * OSS server currently stores a single logical user (`default`), but the
+   * query param is preserved for SDK parity with hosted/server deployments.
+   */
+  async getAuditLog(params: AuditParams): Promise<AuditEntry[]> {
+    if (this.isLocal) {
+      throw new CredError(
+        'getAuditLog() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const query = new URLSearchParams({ user_id: params.userId });
+    if (params.appClientId) query.set('app_client_id', params.appClientId);
+    if (params.service) query.set('service', params.service);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+
+    const data = await this.get<{ entries: AuditEntry[] }>(`/api/v1/audit?${query.toString()}`);
+    return data.entries;
   }
 
   /**
