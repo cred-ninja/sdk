@@ -11,6 +11,8 @@ import {
   CredLocalConfig,
   DelegateParams,
   DelegationResult,
+  SubDelegateParams,
+  SubDelegationResult,
   Connection,
   AuditEntry,
   AuditParams,
@@ -47,6 +49,31 @@ interface VaultRotationResult {
 
 interface VaultModule {
   CredVault: new (opts: { passphrase: string; storage: 'sqlite' | 'file'; path: string }) => VaultInstance;
+  validateSubDelegation?: (input: {
+    parent: {
+      delegationId: string;
+      agentDid: string;
+      service: string;
+      userId: string;
+      appClientId: string;
+      scopesGranted: string[];
+      chainDepth: number;
+    };
+    childAgentDid: string;
+    service: string;
+    userId: string;
+    appClientId: string;
+    requestedScopes?: string[];
+    permission: {
+      allowedScopes: string[];
+      delegatable: boolean;
+      maxDelegationDepth: number;
+    };
+  }) => {
+    parentDelegationId: string;
+    chainDepth: number;
+    grantedScopes: string[];
+  };
 }
 
 interface VaultInstance {
@@ -136,6 +163,7 @@ interface AuditEventInput {
   outcome: 'pending' | 'success' | 'denied' | 'error';
   scopesRequested?: string[];
   scopesGranted?: string[];
+  delegationChain?: Array<{ delegatorId: string; delegateeId: string; scopes: string[] }>;
   correlationId: string;
   sensitiveFieldsHmac?: Record<string, string>;
   errorMessage?: string;
@@ -284,6 +312,52 @@ export class Cred {
       return this.delegateLocal(params);
     }
     return this.delegateCloud(params);
+  }
+
+  async subDelegate(params: SubDelegateParams): Promise<SubDelegationResult> {
+    if (this.isLocal) {
+      return this.subDelegateLocal(params);
+    }
+
+    const body: Record<string, unknown> = {
+      parent_receipt: params.parentReceipt,
+      service: params.service,
+      user_id: params.userId,
+      appClientId: params.appClientId,
+      agent_did: params.agentDid,
+    };
+    if (params.scopes && params.scopes.length > 0) {
+      body.scopes = params.scopes;
+    }
+
+    const data = await this.post<{
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      service: string;
+      scopes: string[];
+      delegation_id: string;
+      receipt: string;
+      chain_depth: number;
+      parent_delegation_id: string;
+    }>('/api/v1/subdelegate', body);
+
+    const DEFAULT_TTL_SECONDS = 900;
+    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    const expiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    return {
+      accessToken: data.access_token,
+      tokenType: data.token_type,
+      expiresIn,
+      expiresAt,
+      service: data.service,
+      scopes: data.scopes,
+      delegationId: data.delegation_id,
+      receipt: data.receipt,
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+    };
   }
 
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
@@ -551,6 +625,18 @@ export class Cred {
       sensitiveFieldsHmac,
     });
 
+    const receipt = params.agentDid
+      ? this.createLocalDelegationReceipt({
+          agentDid: params.agentDid,
+          service: params.service,
+          userId: params.userId,
+          appClientId: params.appClientId ?? 'local',
+          scopes: delegatedScopes,
+          delegationId,
+          chainDepth: 0,
+        })
+      : undefined;
+
     return {
       accessToken: entry.accessToken,
       tokenType: 'Bearer',
@@ -559,6 +645,119 @@ export class Cred {
       service: params.service,
       scopes: delegatedScopes,
       delegationId,
+      receipt,
+    };
+  }
+
+  private async subDelegateLocal(params: SubDelegateParams): Promise<SubDelegationResult> {
+    const vault = await this.ensureVault();
+    const correlationId = crypto.randomUUID();
+    const vaultModule = await import('@credninja/vault') as unknown as VaultModule;
+    if (!vaultModule.validateSubDelegation) {
+      throw new CredError(
+        'Installed @credninja/vault does not support sub-delegation validation',
+        'not_supported',
+        501,
+      );
+    }
+
+    const parent = this.parseDelegationReceipt(params.parentReceipt);
+    if (parent.service !== params.service) {
+      throw new CredError('Parent receipt service does not match request', 'service_mismatch', 403);
+    }
+    if (parent.userId !== params.userId) {
+      throw new CredError('Parent receipt user does not match request', 'user_mismatch', 403);
+    }
+    if (parent.appClientId !== (params.appClientId ?? 'local')) {
+      throw new CredError('Parent receipt app does not match request', 'app_mismatch', 403);
+    }
+
+    let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
+    if (vault.getAgentByDid) {
+      agentRecord = await vault.getAgentByDid(params.agentDid);
+    }
+    if (agentRecord?.status === 'revoked') {
+      throw new CredError(`Agent ${params.agentDid} has been revoked and cannot receive delegations`, 'agent_revoked', 403);
+    }
+    if (agentRecord?.status === 'suspended') {
+      throw new CredError(`Agent ${params.agentDid} is suspended`, 'agent_suspended', 403);
+    }
+
+    const agentId = agentRecord?.id ?? params.agentDid;
+    const permission = await vault.getPermission?.(agentId, params.service) ?? null;
+    if (!permission) {
+      throw new CredError(`Agent ${params.agentDid} has no permission for ${params.service}`, 'no_permission', 403);
+    }
+
+    const validation = vaultModule.validateSubDelegation({
+      parent: {
+        delegationId: parent.delegationId,
+        agentDid: parent.sub,
+        service: parent.service,
+        userId: parent.userId,
+        appClientId: parent.appClientId,
+        scopesGranted: parent.scopes,
+        chainDepth: parent.chainDepth ?? 0,
+      },
+      childAgentDid: params.agentDid,
+      service: params.service,
+      userId: params.userId,
+      appClientId: params.appClientId ?? 'local',
+      requestedScopes: params.scopes,
+      permission: {
+        allowedScopes: permission.allowedScopes,
+        delegatable: permission.delegatable,
+        maxDelegationDepth: permission.maxDelegationDepth,
+      },
+    });
+
+    const parentScopeSet = new Set(parent.scopes);
+    const requestedScopes = params.scopes ?? parent.scopes;
+    const childRequestedScopes = agentRecord?.scopeCeiling?.length
+      ? requestedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
+      : requestedScopes;
+
+    const childDelegation = await this.delegateLocal({
+      service: params.service,
+      userId: params.userId,
+      agentDid: params.agentDid,
+      appClientId: params.appClientId,
+      scopes: childRequestedScopes.filter((scope) => parentScopeSet.has(scope)),
+    });
+
+    const receipt = this.createLocalDelegationReceipt({
+      agentDid: params.agentDid,
+      service: params.service,
+      userId: params.userId,
+      appClientId: params.appClientId ?? 'local',
+      scopes: validation.grantedScopes,
+      delegationId: childDelegation.delegationId,
+      chainDepth: validation.chainDepth,
+      parentDelegationId: validation.parentDelegationId,
+      parentReceipt: params.parentReceipt,
+    });
+
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentDid },
+      action: 'delegate',
+      resource: { type: 'token', id: childDelegation.delegationId },
+      outcome: 'success',
+      scopesRequested: params.scopes ?? parent.scopes,
+      scopesGranted: validation.grantedScopes,
+      delegationChain: [
+        { delegatorId: parent.sub, delegateeId: params.agentDid, scopes: validation.grantedScopes },
+      ],
+      correlationId,
+    });
+
+    return {
+      ...childDelegation,
+      scopes: validation.grantedScopes,
+      receipt,
+      chainDepth: validation.chainDepth,
+      parentDelegationId: validation.parentDelegationId,
     };
   }
 
@@ -586,6 +785,120 @@ export class Cred {
         500,
       );
     }
+  }
+
+  private createLocalDelegationReceipt(input: {
+    agentDid: string;
+    service: string;
+    userId: string;
+    appClientId: string;
+    scopes: string[];
+    delegationId: string;
+    chainDepth: number;
+    parentDelegationId?: string;
+    parentReceipt?: string;
+  }): string {
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:key:local-cred',
+      sub: input.agentDid,
+      iat: Math.floor(Date.now() / 1000),
+      service: input.service,
+      scopes: input.scopes,
+      userId: input.userId,
+      appClientId: input.appClientId,
+      delegationId: input.delegationId,
+      chainDepth: input.chainDepth,
+      ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
+      ...(input.parentReceipt ? {
+        parentReceiptHash: crypto.createHash('sha256').update(input.parentReceipt).digest('hex'),
+      } : {}),
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const privateKey = this.getLocalReceiptSigningKey();
+    const { sign } = require('node:crypto') as typeof import('node:crypto');
+    const signature = sign(null, signatureInput, privateKey).toString('base64url');
+    return `${header}.${payload}.${signature}`;
+  }
+
+  private parseDelegationReceipt(receipt: string): {
+    sub: string;
+    service: string;
+    scopes: string[];
+    userId: string;
+    appClientId: string;
+    delegationId: string;
+    chainDepth?: number;
+  } {
+    const parts = receipt.split('.');
+    if (parts.length !== 3) {
+      throw new CredError('Invalid parent receipt format', 'invalid_parent', 400);
+    }
+
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+        sub: string;
+        service: string;
+        scopes: string[];
+        userId: string;
+        appClientId: string;
+        delegationId?: string;
+        chainDepth?: number;
+      };
+
+      const publicKey = this.getLocalReceiptPublicKeyHex();
+      const { createPublicKey, verify } = require('node:crypto') as typeof import('node:crypto');
+      const publicKeyObject = createPublicKey({
+        key: Buffer.concat([
+          Buffer.from('302a300506032b6570032100', 'hex'),
+          Buffer.from(publicKey, 'hex'),
+        ]),
+        format: 'der',
+        type: 'spki',
+      });
+      const valid = verify(
+        null,
+        Buffer.from(`${parts[0]}.${parts[1]}`, 'utf8'),
+        publicKeyObject,
+        Buffer.from(parts[2], 'base64url'),
+      );
+      if (!valid) {
+        throw new CredError('Invalid parent receipt signature', 'invalid_parent', 403);
+      }
+      if (!payload.delegationId) {
+        throw new CredError('Parent receipt is missing delegationId', 'invalid_parent', 400);
+      }
+      return {
+        ...payload,
+        delegationId: payload.delegationId,
+      };
+    } catch (error) {
+      if (error instanceof CredError) throw error;
+      throw new CredError('Failed to parse parent receipt', 'invalid_parent', 400);
+    }
+  }
+
+  private getLocalReceiptSigningKey() {
+    const { createPrivateKey } = require('node:crypto') as typeof import('node:crypto');
+    const seed = crypto.createHash('sha256')
+      .update(`cred-local-receipt:${this.localConfig!.vault.passphrase}`)
+      .digest();
+    return createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from('302e020100300506032b657004220420', 'hex'),
+        seed,
+      ]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+  }
+
+  private getLocalReceiptPublicKeyHex(): string {
+    const { createPublicKey } = require('node:crypto') as typeof import('node:crypto');
+    const publicKey = createPublicKey(this.getLocalReceiptSigningKey());
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    return Buffer.from(spki.slice(-32)).toString('hex');
   }
 
   private async delegateCloud(params: DelegateParams): Promise<DelegationResult> {
