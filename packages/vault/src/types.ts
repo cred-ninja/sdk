@@ -47,6 +47,38 @@ export interface Permission {
   createdBy: string;
 }
 
+export interface DelegationAuthority {
+  delegationId: string;
+  agentDid: string;
+  service: string;
+  userId: string;
+  appClientId: string;
+  scopesGranted: string[];
+  chainDepth: number;
+}
+
+export interface DelegationValidationPermission {
+  allowedScopes: string[];
+  delegatable: boolean;
+  maxDelegationDepth: number;
+}
+
+export interface ValidateSubDelegationInput {
+  parent: DelegationAuthority;
+  childAgentDid: string;
+  service: string;
+  userId: string;
+  appClientId: string;
+  requestedScopes?: string[];
+  permission: DelegationValidationPermission;
+}
+
+export interface ValidateSubDelegationResult {
+  parentDelegationId: string;
+  chainDepth: number;
+  grantedScopes: string[];
+}
+
 /**
  * Minimal OAuth adapter interface that vault uses for auto-refresh.
  * Compatible with @credninja/oauth ServiceAdapter.
