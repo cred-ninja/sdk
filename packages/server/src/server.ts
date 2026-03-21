@@ -13,12 +13,14 @@
  *   GET  /connect/:provider               — start OAuth flow (browser)
  *   GET  /connect/:provider/callback      — OAuth callback (browser)
  *   GET  /api/token/:provider             — get delegated token (agent, Bearer auth)
+ *   POST /api/v1/subdelegate              — sub-delegate from a parent receipt (agent, Bearer auth)
  *   DELETE /api/token/:provider           — revoke stored token (agent, Bearer auth)
  */
 
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { CredVault } from '@credninja/vault';
+import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import { ServerConfig, ProviderConfig } from './config.js';
@@ -120,6 +122,98 @@ export function createServer(config: ServerConfig) {
       }
       throw err;
     }
+  }
+
+  // ── Receipt helpers (Ed25519, same key derivation as SDK local mode) ──────
+
+  function getReceiptSigningKey() {
+    const seed = crypto.createHash('sha256')
+      .update(`cred-local-receipt:${config.vaultPassphrase}`)
+      .digest();
+    return createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from('302e020100300506032b657004220420', 'hex'),
+        seed,
+      ]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+  }
+
+  function getReceiptPublicKey() {
+    const publicKey = createPublicKey(getReceiptSigningKey());
+    return publicKey;
+  }
+
+  function createReceipt(input: {
+    agentDid: string;
+    service: string;
+    userId: string;
+    appClientId: string;
+    scopes: string[];
+    delegationId: string;
+    chainDepth: number;
+    parentDelegationId?: string;
+    parentReceiptHash?: string;
+  }): string {
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:key:local-cred',
+      sub: input.agentDid,
+      iat: Math.floor(Date.now() / 1000),
+      service: input.service,
+      scopes: input.scopes,
+      userId: input.userId,
+      appClientId: input.appClientId,
+      delegationId: input.delegationId,
+      chainDepth: input.chainDepth,
+      ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
+      ...(input.parentReceiptHash ? { parentReceiptHash: input.parentReceiptHash } : {}),
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, getReceiptSigningKey()).toString('base64url');
+    return `${header}.${payload}.${signature}`;
+  }
+
+  function parseAndVerifyReceipt(receipt: string): {
+    sub: string;
+    service: string;
+    scopes: string[];
+    userId: string;
+    appClientId: string;
+    delegationId: string;
+    chainDepth: number;
+  } {
+    const parts = receipt.split('.');
+    if (parts.length !== 3) {
+      throw new Error('Invalid receipt format');
+    }
+
+    const [headerB64, payloadB64, signatureB64] = parts;
+
+    // Verify signature
+    const signatureInput = Buffer.from(`${headerB64}.${payloadB64}`, 'utf8');
+    const signatureBuffer = Buffer.from(signatureB64, 'base64url');
+    const valid = verify(null, signatureInput, getReceiptPublicKey(), signatureBuffer);
+    if (!valid) {
+      throw new Error('Invalid receipt signature');
+    }
+
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    if (!payload.delegationId) {
+      throw new Error('Receipt is missing delegationId');
+    }
+
+    return {
+      sub: payload.sub,
+      service: payload.service,
+      scopes: payload.scopes ?? [],
+      userId: payload.userId ?? 'default',
+      appClientId: payload.appClientId ?? 'local',
+      delegationId: payload.delegationId,
+      chainDepth: payload.chainDepth ?? 0,
+    };
   }
 
   // ── Routes ─────────────────────────────────────────────────────────────────
@@ -692,6 +786,275 @@ async function revoke(provider) {
     } catch (err) {
       console.error('[/api/v1/audit] Error:', err);
       res.status(500).json({ error: 'Failed to fetch audit log' });
+    }
+  });
+
+  /**
+   * POST /api/v1/subdelegate — Sub-delegate from a verified parent receipt
+   *
+   * Verifies the parent receipt signature, validates delegation chain constraints
+   * (scope attenuation, depth limits, service/user/app matching), retrieves a
+   * fresh token from the vault, and issues a signed child receipt.
+   *
+   * Request body:
+   *   parent_receipt  — signed parent delegation receipt (JWS)
+   *   agent_did       — DID of the child agent
+   *   service         — provider slug (must match parent)
+   *   user_id         — logical user (must match parent)
+   *   appClientId     — app context (must match parent)
+   *   scopes          — optional subset of parent scopes
+   *
+   * Auth: Bearer cred_at_<token>
+   */
+  app.post('/api/v1/subdelegate', requireAgentAuth, async (req: Request, res: Response) => {
+    const correlationId = crypto.randomUUID();
+    try {
+      const {
+        parent_receipt: parentReceipt,
+        agent_did: agentDid,
+        service,
+        user_id: userId = 'default',
+        appClientId = 'local',
+        scopes: requestedScopes,
+      } = req.body as {
+        parent_receipt?: string;
+        agent_did?: string;
+        service?: string;
+        user_id?: string;
+        appClientId?: string;
+        scopes?: string[];
+      };
+
+      // ── Input validation ──────────────────────────────────────────────────
+
+      if (!parentReceipt || typeof parentReceipt !== 'string') {
+        res.status(400).json({ error: 'parent_receipt is required' });
+        return;
+      }
+      if (!agentDid || typeof agentDid !== 'string') {
+        res.status(400).json({ error: 'agent_did is required' });
+        return;
+      }
+      if (!service || typeof service !== 'string') {
+        res.status(400).json({ error: 'service is required' });
+        return;
+      }
+
+      // ── Verify parent receipt ─────────────────────────────────────────────
+
+      let parent;
+      try {
+        parent = parseAndVerifyReceipt(parentReceipt);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Invalid receipt';
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'delegation', id: `${service}/${userId}` },
+          outcome: 'denied',
+          errorMessage: message,
+          correlationId,
+        });
+        res.status(403).json({ error: message });
+        return;
+      }
+
+      // ── Context matching (service, user, app) ────────────────────────────
+
+      if (parent.service !== service) {
+        res.status(403).json({ error: 'Service does not match parent receipt' });
+        return;
+      }
+      if (parent.userId !== userId) {
+        res.status(403).json({ error: 'User does not match parent receipt' });
+        return;
+      }
+      if (parent.appClientId !== appClientId) {
+        res.status(403).json({ error: 'App does not match parent receipt' });
+        return;
+      }
+
+      // ── Agent status check (if vault supports agents) ────────────────────
+
+      let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
+      if (vault.getAgentByDid) {
+        agentRecord = await vault.getAgentByDid(agentDid);
+      }
+      if (agentRecord?.status === 'revoked') {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'delegation', id: `${service}/${userId}` },
+          outcome: 'denied',
+          errorMessage: 'Agent is revoked',
+          correlationId,
+        });
+        res.status(403).json({ error: 'Agent has been revoked' });
+        return;
+      }
+      if (agentRecord?.status === 'suspended') {
+        res.status(403).json({ error: 'Agent is suspended' });
+        return;
+      }
+
+      // ── Permission lookup ────────────────────────────────────────────────
+
+      const agentId = agentRecord?.id ?? agentDid;
+      const permission = await vault.getPermission?.(agentId, service) ?? null;
+      if (!permission) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'delegation', id: `${service}/${userId}` },
+          outcome: 'denied',
+          errorMessage: `No permission for ${service}`,
+          correlationId,
+        });
+        res.status(403).json({ error: `Agent has no permission for ${service}` });
+        return;
+      }
+
+      // ── Validate delegation chain ────────────────────────────────────────
+
+      let validation;
+      try {
+        validation = validateSubDelegation({
+          parent: {
+            delegationId: parent.delegationId,
+            agentDid: parent.sub,
+            service: parent.service,
+            userId: parent.userId,
+            appClientId: parent.appClientId,
+            scopesGranted: parent.scopes,
+            chainDepth: parent.chainDepth,
+          },
+          childAgentDid: agentDid,
+          service,
+          userId,
+          appClientId,
+          requestedScopes,
+          permission: {
+            allowedScopes: permission.allowedScopes,
+            delegatable: permission.delegatable,
+            maxDelegationDepth: permission.maxDelegationDepth,
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delegation chain validation failed';
+        const code = err instanceof DelegationChainError ? err.code : 'validation_failed';
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'delegation', id: `${service}/${userId}` },
+          outcome: 'denied',
+          scopesRequested: requestedScopes,
+          errorMessage: message,
+          correlationId,
+        });
+        res.status(403).json({ error: message, code });
+        return;
+      }
+
+      // ── Retrieve token from vault ────────────────────────────────────────
+
+      const providerConfig = getProviderConfig(service);
+      const getOpts: Parameters<typeof vault.get>[0] = {
+        provider: service,
+        userId: 'default',
+      };
+      if (providerConfig) {
+        const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
+        getOpts.adapter = {
+          refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
+            const client = new OAuthClient({
+              adapter,
+              clientId,
+              clientSecret,
+              redirectUri: `${config.redirectBaseUri}/connect/${service}/callback`,
+            });
+            const result = await client.refreshToken(refreshToken);
+            return {
+              accessToken: result.access_token,
+              refreshToken: result.refresh_token,
+              expiresIn: result.expires_in,
+            };
+          },
+        };
+        getOpts.clientId = providerConfig.clientId;
+        getOpts.clientSecret = providerConfig.clientSecret;
+      }
+
+      const entry = await vault.get(getOpts);
+      if (!entry) {
+        res.status(404).json({
+          error: `No credentials stored for '${service}'. Connect first: GET /connect/${service}`,
+        });
+        return;
+      }
+
+      // ── Issue child receipt ──────────────────────────────────────────────
+
+      const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
+      const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');
+
+      const receipt = createReceipt({
+        agentDid,
+        service,
+        userId,
+        appClientId,
+        scopes: validation.grantedScopes,
+        delegationId,
+        chainDepth: validation.chainDepth,
+        parentDelegationId: validation.parentDelegationId,
+        parentReceiptHash,
+      });
+
+      // ── Audit event ──────────────────────────────────────────────────────
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: agentDid },
+        action: 'delegate',
+        resource: { type: 'delegation', id: delegationId },
+        outcome: 'success',
+        scopesRequested: requestedScopes,
+        scopesGranted: validation.grantedScopes,
+        delegationChain: [
+          { delegatorId: parent.sub, delegateeId: agentDid, scopes: validation.grantedScopes },
+        ],
+        correlationId,
+      });
+
+      // ── Response ─────────────────────────────────────────────────────────
+
+      const DEFAULT_TTL_SECONDS = 900;
+      const expiresIn = entry.expiresAt
+        ? Math.max(0, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+        : DEFAULT_TTL_SECONDS;
+
+      res.json({
+        access_token: entry.accessToken,
+        token_type: 'Bearer',
+        expires_in: expiresIn,
+        service,
+        scopes: validation.grantedScopes,
+        delegation_id: delegationId,
+        receipt,
+        chain_depth: validation.chainDepth,
+        parent_delegation_id: validation.parentDelegationId,
+      });
+    } catch (err) {
+      console.error('[POST /api/v1/subdelegate] Error:', err);
+      res.status(500).json({ error: 'Sub-delegation failed' });
     }
   });
 
