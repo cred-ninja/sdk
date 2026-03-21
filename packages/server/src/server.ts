@@ -110,6 +110,18 @@ export function createServer(config: ServerConfig) {
     }
   }
 
+  function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
+    try {
+      vault.writeAuditEvent(event);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        return;
+      }
+      throw err;
+    }
+  }
+
   // ── Routes ─────────────────────────────────────────────────────────────────
 
   /**
@@ -583,6 +595,17 @@ async function revoke(provider) {
       const guardDecision = (req as any).guardDecision;
       const effectiveScopes = guardDecision?.effectiveScopes ?? entry.scopes ?? [];
 
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: 'server-agent' },
+        action: 'access',
+        resource: { type: 'connection', id: `${slug}/default` },
+        outcome: 'success',
+        scopesGranted: effectiveScopes,
+        correlationId: crypto.randomUUID(),
+      });
+
       res.json({
         provider: slug,
         accessToken: entry.accessToken,
@@ -606,6 +629,73 @@ async function revoke(provider) {
   });
 
   /**
+   * GET /api/v1/audit — query audit events when the vault backend supports audit.
+   *
+   * Requires Bearer auth. This OSS server stores a single logical user (`default`),
+   * so user_id is accepted for SDK parity and filtered against that user.
+   */
+  app.get('/api/v1/audit', requireAgentAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = typeof req.query.user_id === 'string' ? req.query.user_id : 'default';
+      const service = typeof req.query.service === 'string' ? req.query.service : undefined;
+      const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+      const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        res.status(400).json({ error: 'Invalid limit: must be between 1 and 200' });
+        return;
+      }
+
+      if (userId !== 'default') {
+        res.json({ entries: [] });
+        return;
+      }
+
+      let events;
+      try {
+        events = vault.queryAuditEvents({ limit });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('not supported')) {
+          res.status(501).json({ error: 'Audit query not supported by this vault backend' });
+          return;
+        }
+        throw err;
+      }
+
+      const entries = events
+        .filter((event) => {
+          const [eventService, eventUserId] = event.resource.id.split('/');
+          if (eventUserId !== 'default') return false;
+          if (service && eventService !== service) return false;
+          return true;
+        })
+        .map((event) => {
+          const [eventService, eventUserId] = event.resource.id.split('/');
+          return {
+            id: event.id,
+            action: event.action,
+            service: eventService ?? '',
+            userId: eventUserId ?? 'default',
+            timestamp: event.timestamp.toISOString(),
+            metadata: {
+              outcome: event.outcome,
+              scopesRequested: event.scopesRequested,
+              scopesGranted: event.scopesGranted,
+              correlationId: event.correlationId,
+              errorMessage: event.errorMessage,
+            },
+          };
+        });
+
+      res.json({ entries });
+    } catch (err) {
+      console.error('[/api/v1/audit] Error:', err);
+      res.status(500).json({ error: 'Failed to fetch audit log' });
+    }
+  });
+
+  /**
    * DELETE /api/token/:provider — Revoke stored credentials
    *
    * Deletes the provider's tokens from the vault.
@@ -615,6 +705,17 @@ async function revoke(provider) {
     try {
       const slug = req.params.provider;
       await vault.delete({ provider: slug, userId: 'default' });
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: 'server-agent' },
+        action: 'revoke',
+        resource: { type: 'connection', id: `${slug}/default` },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+      });
+
       res.status(204).send();
     } catch (err) {
       console.error(`[DELETE /api/token/${req.params.provider}] Error:`, err);

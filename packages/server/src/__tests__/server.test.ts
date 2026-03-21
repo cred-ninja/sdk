@@ -11,6 +11,7 @@ import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard'
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.json');
+const TEST_SQLITE_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.sqlite');
 
 function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
   return {
@@ -38,9 +39,11 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
 describe('@credninja/server', () => {
   afterAll(() => {
     // Cleanup test vault files
-    for (const suffix of ['', '.salt']) {
-      const p = TEST_VAULT_PATH + suffix;
-      if (fs.existsSync(p)) fs.unlinkSync(p);
+    for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH]) {
+      for (const suffix of ['', '.salt']) {
+        const p = base + suffix;
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
     }
   });
 
@@ -187,6 +190,49 @@ describe('@credninja/server', () => {
       // Verify it's gone
       const entry = await vault.get({ provider: 'google', userId: 'default' });
       expect(entry).toBeNull();
+    });
+  });
+
+  describe('GET /api/v1/audit', () => {
+    it('returns an empty audit list when no audit-capable backend is configured', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/v1/audit?user_id=default')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.entries).toEqual([]);
+    });
+
+    it('returns audit entries from sqlite-backed vaults', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.audit-test',
+        scopes: ['calendar.readonly'],
+      });
+
+      await request(app)
+        .get('/api/token/google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .expect(200);
+
+      const res = await request(app)
+        .get('/api/v1/audit?user_id=default&service=google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.entries.length).toBeGreaterThan(0);
+      expect(res.body.entries[0].service).toBe('google');
+      expect(res.body.entries[0].action).toBe('access');
     });
   });
 
