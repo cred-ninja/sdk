@@ -110,6 +110,29 @@ export interface AuditParams {
   limit?: number;
 }
 
+// ── Delegation chain types ───────────────────────────────────────────────────
+
+export interface DelegationChainLink {
+  delegatorDid: string;
+  delegateeDid: string;
+  service: string;
+  scopesGranted: string[];
+  delegationId: string;
+  issuedAt: number;
+}
+
+export interface SubDelegateParams extends Omit<DelegateParams, 'agentDid'> {
+  /** Signed parent receipt proving the delegator's granted authority. */
+  parentReceipt: string;
+  /** DID of the child agent receiving the attenuated delegation. */
+  agentDid: string;
+}
+
+export interface SubDelegationResult extends DelegationResult {
+  chainDepth: number;
+  parentDelegationId: string;
+}
+
 // ── Agent scope ceiling & revocation types ──────────────────────────────────
 
 export interface RegisterAgentParams {

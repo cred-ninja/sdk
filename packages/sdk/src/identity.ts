@@ -77,6 +77,14 @@ export interface DelegationReceiptPayload {
   userId: string;
   /** App client ID */
   appClientId: string;
+  /** Delegation identifier */
+  delegationId?: string;
+  /** Parent delegation identifier for sub-delegation chains */
+  parentDelegationId?: string;
+  /** Root delegation starts at 0 and increments per hop */
+  chainDepth?: number;
+  /** SHA-256 of the parent receipt when this is a child delegation */
+  parentReceiptHash?: string;
 }
 
 // ── Base58btc alphabet (Bitcoin) ─────────────────────────────────────────────
