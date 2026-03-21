@@ -67,7 +67,8 @@ async function main() {
     console.log(`  GET  /providers                    — list providers + status`);
     console.log(`  GET  /connect/:provider            — start OAuth flow (browser)`);
     console.log(`  GET  /connect/:provider/callback   — OAuth callback`);
-    console.log(`  GET  /api/token/:provider          — get delegated token (Bearer auth)`);
+    console.log(`  GET  /api/token/:provider          — compatibility token route (Bearer auth)`);
+    console.log(`  POST /api/v1/delegate             — delegate token (Bearer auth)`);
     console.log(`  DELETE /api/token/:provider        — revoke token (Bearer auth)`);
     console.log('');
     if (config.host === '127.0.0.1' || config.host === 'localhost') {

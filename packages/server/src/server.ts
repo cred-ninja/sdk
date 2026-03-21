@@ -12,7 +12,8 @@
  *   GET  /providers                       — list configured providers
  *   GET  /connect/:provider               — start OAuth flow (browser)
  *   GET  /connect/:provider/callback      — OAuth callback (browser)
- *   GET  /api/token/:provider             — get delegated token (agent, Bearer auth)
+ *   GET  /api/token/:provider             — compatibility token access route (agent, Bearer auth)
+ *   POST /api/v1/delegate                 — delegate token (agent, Bearer auth)
  *   POST /api/v1/subdelegate              — sub-delegate from a parent receipt (agent, Bearer auth)
  *   DELETE /api/token/:provider           — revoke stored token (agent, Bearer auth)
  */
@@ -629,6 +630,99 @@ async function revoke(provider) {
       })
     : null;
 
+  const assignProviderFromBody: express.RequestHandler = (req, res, next) => {
+    const service = req.body?.service;
+    if (typeof service !== 'string' || service.trim() === '') {
+      res.status(400).json({ error: 'service is required' });
+      return;
+    }
+    req.params.provider = service;
+    next();
+  };
+
+  async function getVaultEntry(service: string): Promise<VaultEntryResult> {
+    const providerConfig = getProviderConfig(service);
+    if (!providerConfig) {
+      return {
+        status: 404,
+        body: { error: `Provider '${service}' not configured` },
+      } as const;
+    }
+
+    const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
+    const entry = await vault.get({
+      provider: service,
+      userId: 'default',
+      adapter: {
+        refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
+          const client = new OAuthClient({
+            adapter,
+            clientId,
+            clientSecret,
+            redirectUri: `${config.redirectBaseUri}/connect/${service}/callback`,
+          });
+          const result = await client.refreshToken(refreshToken);
+          return {
+            accessToken: result.access_token,
+            refreshToken: result.refresh_token,
+            expiresIn: result.expires_in,
+          };
+        },
+      },
+      clientId: providerConfig.clientId,
+      clientSecret: providerConfig.clientSecret,
+    });
+
+    if (!entry) {
+      return {
+        status: 404,
+        body: {
+          error: `No credentials stored for '${service}'. Connect first: GET /connect/${service}`,
+        },
+      } as const;
+    }
+
+    return { entry } as const;
+  }
+
+  function normalizeRequestedScopes(scopes: unknown): string[] | undefined {
+    if (Array.isArray(scopes)) {
+      return scopes
+        .filter((scope): scope is string => typeof scope === 'string')
+        .map((scope) => scope.trim())
+        .filter(Boolean);
+    }
+    if (typeof scopes === 'string') {
+      const parsed = scopes.split(',').map((scope) => scope.trim()).filter(Boolean);
+      return parsed.length > 0 ? parsed : undefined;
+    }
+    return undefined;
+  }
+
+  type VaultEntryResult =
+    | { entry: Awaited<ReturnType<typeof vault.get>> extends infer T ? Exclude<T, null> : never }
+    | { status: number; body: Record<string, unknown> };
+
+  function resolveGrantedScopes(storedScopes: string[], requestedScopes?: string[]) {
+    if (!requestedScopes || requestedScopes.length === 0) {
+      return { grantedScopes: storedScopes, widenedScopes: [] as string[] };
+    }
+
+    const storedScopeSet = new Set(storedScopes);
+    const widenedScopes = requestedScopes.filter((scope) => !storedScopeSet.has(scope));
+    if (widenedScopes.length > 0) {
+      return {
+        grantedScopes: [] as string[],
+        widenedScopes,
+      };
+    }
+
+    return {
+      grantedScopes: storedScopes.filter((scope) => requestedScopes.includes(scope)),
+      widenedScopes: [] as string[],
+    };
+  }
+
   /**
    * GET /api/token/:provider — Delegation endpoint (agent-facing)
    *
@@ -643,51 +737,34 @@ async function revoke(provider) {
     tokenRouteHandlers.push(guardMiddleware);
   }
 
+  const delegateRouteHandlers: Array<express.RequestHandler> = [requireAgentAuth];
+  if (guardMiddleware) {
+    delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
+  }
+
   app.get('/api/token/:provider', ...tokenRouteHandlers, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
-      const providerConfig = getProviderConfig(slug);
-
-      if (!providerConfig) {
-        res.status(404).json({ error: `Provider '${slug}' not configured` });
+      const vaultEntry = await getVaultEntry(slug);
+      if ('status' in vaultEntry) {
+        res.status(vaultEntry.status).json(vaultEntry.body);
         return;
       }
-
-      // Retrieve from vault with auto-refresh
-      const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
-      const entry = await vault.get({
-        provider: slug,
-        userId: 'default',
-        adapter: {
-          refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
-            const client = new OAuthClient({
-              adapter,
-              clientId,
-              clientSecret,
-              redirectUri: `${config.redirectBaseUri}/connect/${slug}/callback`,
-            });
-            const result = await client.refreshToken(refreshToken);
-            return {
-              accessToken: result.access_token,
-              refreshToken: result.refresh_token,
-              expiresIn: result.expires_in,
-            };
-          },
-        },
-        clientId: providerConfig.clientId,
-        clientSecret: providerConfig.clientSecret,
-      });
-
-      if (!entry) {
-        res.status(404).json({
-          error: `No credentials stored for '${slug}'. Connect first: GET /connect/${slug}`,
-        });
-        return;
-      }
+      const { entry } = vaultEntry;
 
       // Return the delegated token — never the refresh token
       const guardDecision = (req as any).guardDecision;
-      const effectiveScopes = guardDecision?.effectiveScopes ?? entry.scopes ?? [];
+      const requestedScopes = normalizeRequestedScopes(req.query.scopes);
+      const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
+      const { grantedScopes, widenedScopes } = resolveGrantedScopes(entry.scopes ?? [], effectiveRequestedScopes);
+
+      if (widenedScopes.length > 0) {
+        res.status(403).json({
+          error: 'scope_escalation_denied',
+          message: `Requested scopes exceed stored consent: ${widenedScopes.join(', ')}`,
+        });
+        return;
+      }
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -696,7 +773,8 @@ async function revoke(provider) {
         action: 'access',
         resource: { type: 'connection', id: `${slug}/default` },
         outcome: 'success',
-        scopesGranted: effectiveScopes,
+        scopesRequested: effectiveRequestedScopes,
+        scopesGranted: grantedScopes,
         correlationId: crypto.randomUUID(),
       });
 
@@ -704,7 +782,7 @@ async function revoke(provider) {
         provider: slug,
         accessToken: entry.accessToken,
         expiresAt: entry.expiresAt?.toISOString() ?? null,
-        scopes: effectiveScopes,
+        scopes: grantedScopes,
         ...(guardDecision && {
           guard: {
             allowed: guardDecision.allowed,
@@ -719,6 +797,100 @@ async function revoke(provider) {
     } catch (err) {
       console.error(`[/api/token/${req.params.provider}] Error:`, err);
       res.status(500).json({ error: 'Failed to retrieve token' });
+    }
+  });
+
+  app.post('/api/v1/delegate', ...delegateRouteHandlers, async (req: Request, res: Response) => {
+    const correlationId = crypto.randomUUID();
+
+    try {
+      const {
+        service,
+        user_id: userId = 'default',
+        appClientId = 'local',
+        scopes,
+        agent_did: agentDid,
+      } = req.body as {
+        service?: string;
+        user_id?: string;
+        appClientId?: string;
+        scopes?: string[];
+        agent_did?: string;
+      };
+
+      if (!service || typeof service !== 'string') {
+        res.status(400).json({ error: 'service is required' });
+        return;
+      }
+
+      if (userId !== 'default') {
+        res.status(404).json({
+          error: `No credentials stored for '${service}/${userId}'. This OSS server currently serves only the default logical user.`,
+        });
+        return;
+      }
+
+      const requestedScopes = normalizeRequestedScopes(scopes);
+      const vaultEntry = await getVaultEntry(service);
+      if ('status' in vaultEntry) {
+        res.status(vaultEntry.status).json(vaultEntry.body);
+        return;
+      }
+      const { entry } = vaultEntry;
+      const guardDecision = (req as any).guardDecision;
+      const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
+      const { grantedScopes, widenedScopes } = resolveGrantedScopes(entry.scopes ?? [], effectiveRequestedScopes);
+
+      if (widenedScopes.length > 0) {
+        res.status(403).json({
+          error: 'scope_escalation_denied',
+          message: `Requested scopes exceed stored consent: ${widenedScopes.join(', ')}`,
+        });
+        return;
+      }
+
+      const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
+      const DEFAULT_TTL_SECONDS = 900;
+      const expiresIn = entry.expiresAt
+        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+        : DEFAULT_TTL_SECONDS;
+
+      const receipt = agentDid
+        ? createReceipt({
+            agentDid,
+            service,
+            userId,
+            appClientId,
+            scopes: grantedScopes,
+            delegationId,
+            chainDepth: 0,
+          })
+        : undefined;
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: agentDid ?? 'server-agent', fingerprint: agentDid },
+        action: 'delegate',
+        resource: { type: 'token', id: delegationId },
+        outcome: 'success',
+        scopesRequested: effectiveRequestedScopes,
+        scopesGranted: grantedScopes,
+        correlationId,
+      });
+
+      res.json({
+        access_token: entry.accessToken,
+        token_type: 'Bearer',
+        expires_in: expiresIn,
+        service,
+        scopes: grantedScopes,
+        delegation_id: delegationId,
+        ...(receipt ? { receipt } : {}),
+      });
+    } catch (err) {
+      console.error('[/api/v1/delegate] Error:', err);
+      res.status(500).json({ error: 'Delegation failed' });
     }
   });
 

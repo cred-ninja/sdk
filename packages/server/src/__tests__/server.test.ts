@@ -3,6 +3,7 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { verify as verifySignature, createPublicKey } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
 import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard';
@@ -190,6 +191,129 @@ describe('@credninja/server', () => {
       // Verify it's gone
       const entry = await vault.get({ provider: 'google', userId: 'default' });
       expect(entry).toBeNull();
+    });
+  });
+
+  describe('POST /api/v1/delegate', () => {
+    it('returns 401 without auth', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .send({ service: 'google' });
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns a delegated token with requested scopes', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['openid', 'email', 'calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.access_token).toBe('ya29.delegate-token');
+      expect(res.body.token_type).toBe('Bearer');
+      expect(res.body.service).toBe('google');
+      expect(res.body.scopes).toEqual(['calendar.readonly']);
+      expect(res.body.delegation_id).toMatch(/^del_/);
+      expect(res.body.expires_in).toBeGreaterThan(0);
+    });
+
+    it('denies scope escalation on the normalized route', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['gmail.send'],
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('scope_escalation_denied');
+    });
+
+    it('returns a signed receipt when agent_did is provided', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          agent_did: 'did:key:z6MkReceiptAgent',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.receipt).toBeTypeOf('string');
+
+      const [headerB64, payloadB64, signatureB64] = res.body.receipt.split('.');
+      const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+      expect(payload.sub).toBe('did:key:z6MkReceiptAgent');
+      expect(payload.appClientId).toBe('app_123');
+      expect(payload.scopes).toEqual(['calendar.readonly']);
+
+      const seed = crypto.createHash('sha256')
+        .update(`cred-local-receipt:${config.vaultPassphrase}`)
+        .digest();
+      const publicKey = createPublicKey({
+        key: Buffer.concat([
+          Buffer.from('302e020100300506032b657004220420', 'hex'),
+          seed,
+        ]),
+        format: 'der',
+        type: 'pkcs8',
+      });
+      const valid = verifySignature(
+        null,
+        Buffer.from(`${headerB64}.${payloadB64}`, 'utf8'),
+        publicKey,
+        Buffer.from(signatureB64, 'base64url'),
+      );
+
+      expect(valid).toBe(true);
     });
   });
 

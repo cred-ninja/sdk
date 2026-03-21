@@ -5,6 +5,7 @@
   "private": true,
   "workspaces": [
     "packages/oauth",
+    "packages/tofu",
     "packages/vault",
     "packages/sdk",
     "packages/sdk-python",
