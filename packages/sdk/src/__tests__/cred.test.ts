@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
 import { Cred, CredError, ConsentRequiredError } from '../index';
 
 // Mock global fetch
@@ -22,6 +23,23 @@ beforeEach(() => {
   vi.resetAllMocks();
   cred = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function generateTofuKeypair() {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const spki = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer;
+  const publicKeyBytes = spki.slice(-32);
+
+  return {
+    fingerprint: createHash('sha256').update(publicKeyBytes.toString('hex')).digest('hex'),
+    privateKeyBytes: new Uint8Array(pkcs8.slice(-32)),
+    publicKey,
+  };
+}
 
 // ── constructor ───────────────────────────────────────────────────────────────
 
@@ -153,6 +171,97 @@ describe('Cred.delegate()', () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     expect(body).not.toHaveProperty('scopes');
+  });
+});
+
+describe('Cred.tofuDelegate()', () => {
+  it('constructs and posts a signed TOFU proof payload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-22T12:34:56.789Z'));
+    const keypair = generateTofuKeypair();
+
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'ya29.tofu',
+      token_type: 'Bearer',
+      expires_in: 1200,
+      service: 'google',
+      scopes: ['calendar.readonly', 'gmail.readonly'],
+      delegation_id: 'del_tofu_1',
+    }));
+
+    const result = await cred.tofuDelegate({
+      fingerprint: keypair.fingerprint,
+      privateKeyBytes: keypair.privateKeyBytes,
+      service: 'google',
+      userId: 'default',
+      scopes: ['gmail.readonly', 'calendar.readonly'],
+    });
+
+    expect(result.accessToken).toBe('ya29.tofu');
+    expect(result.expiresIn).toBe(1200);
+    expect(result.delegationId).toBe('del_tofu_1');
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe(`${BASE_URL}/api/v1/delegate`);
+    expect(init.method).toBe('POST');
+
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({
+      service: 'google',
+      user_id: 'default',
+      appClientId: 'local',
+      scopes: ['calendar.readonly', 'gmail.readonly'],
+      tofu_fingerprint: keypair.fingerprint,
+    });
+
+    const payloadBytes = Buffer.from(body.tofu_payload, 'base64');
+    const payload = JSON.parse(payloadBytes.toString('utf8'));
+    expect(payload).toEqual({
+      service: 'google',
+      userId: 'default',
+      appClientId: 'local',
+      scopes: ['calendar.readonly', 'gmail.readonly'],
+      timestamp: '2026-03-22T12:34:56.789Z',
+    });
+
+    expect(
+      verifySignature(null, payloadBytes, keypair.publicKey, Buffer.from(body.tofu_signature, 'base64')),
+    ).toBe(true);
+  });
+
+  it('throws CredError when the server rejects the TOFU proof', async () => {
+    const keypair = generateTofuKeypair();
+    mockFetch.mockResolvedValue(mockResponse(403, {
+      error: 'invalid_tofu_proof',
+      message: 'Invalid TOFU proof',
+    }));
+
+    await expect(
+      cred.tofuDelegate({
+        fingerprint: keypair.fingerprint,
+        privateKeyBytes: keypair.privateKeyBytes,
+        service: 'google',
+        userId: 'default',
+      }),
+    ).rejects.toThrow(CredError);
+  });
+
+  it('throws local_mode_unsupported in local mode', async () => {
+    const local = new Cred({
+      mode: 'local',
+      vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json' },
+      providers: {},
+    });
+    const keypair = generateTofuKeypair();
+
+    await expect(
+      local.tofuDelegate({
+        fingerprint: keypair.fingerprint,
+        privateKeyBytes: keypair.privateKeyBytes,
+        service: 'google',
+        userId: 'default',
+      }),
+    ).rejects.toMatchObject({ code: 'local_mode_unsupported' });
   });
 });
 

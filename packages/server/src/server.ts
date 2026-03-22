@@ -22,10 +22,12 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
+import { AgentVault } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import { ServerConfig, ProviderConfig } from './config.js';
 import { createExpressMiddleware } from '@credninja/guard';
+import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,10 @@ export function createServer(config: ServerConfig) {
     passphrase: config.vaultPassphrase,
     storage: config.vaultStorage,
     path: config.vaultPath,
+  });
+  const tofu = new AgentVault({
+    storage: config.tofuStorage,
+    path: config.tofuPath,
   });
 
   // In-memory map of provider slug → ProviderConfig
@@ -227,6 +233,7 @@ export function createServer(config: ServerConfig) {
       status: 'ok',
       providers: config.providers.map((p) => p.slug),
       vault: config.vaultStorage,
+      tofu: config.tofuStorage,
     });
   });
 
@@ -723,6 +730,21 @@ async function revoke(provider) {
     };
   }
 
+  async function getPermissionIfSupported(principalId: string, service: string) {
+    if (!vault.getPermission) {
+      return null;
+    }
+    try {
+      return await vault.getPermission(principalId, service);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   /**
    * GET /api/token/:provider — Delegation endpoint (agent-facing)
    *
@@ -810,12 +832,18 @@ async function revoke(provider) {
         appClientId = 'local',
         scopes,
         agent_did: agentDid,
+        tofu_fingerprint: tofuFingerprint,
+        tofu_payload: tofuPayload,
+        tofu_signature: tofuSignature,
       } = req.body as {
         service?: string;
         user_id?: string;
         appClientId?: string;
         scopes?: string[];
         agent_did?: string;
+        tofu_fingerprint?: string;
+        tofu_payload?: string;
+        tofu_signature?: string;
       };
 
       if (!service || typeof service !== 'string') {
@@ -839,7 +867,55 @@ async function revoke(provider) {
       const { entry } = vaultEntry;
       const guardDecision = (req as any).guardDecision;
       const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
-      const { grantedScopes, widenedScopes } = resolveGrantedScopes(entry.scopes ?? [], effectiveRequestedScopes);
+
+      let principalId: string | null = null;
+      let principalFingerprint: string | undefined;
+      let allowedByPrincipal: string[] | undefined;
+      if (tofuFingerprint || tofuPayload || tofuSignature) {
+        if (!tofuFingerprint || !tofuPayload || !tofuSignature) {
+          res.status(400).json({
+            error: 'tofu_fingerprint, tofu_payload, and tofu_signature must all be provided together',
+          });
+          return;
+        }
+
+        let resolved;
+        try {
+          resolved = await resolveTofuPrincipal(
+            tofu,
+            {
+              fingerprint: tofuFingerprint,
+              payloadBase64: tofuPayload,
+              signatureBase64: tofuSignature,
+            },
+            {
+              service,
+              userId,
+              appClientId,
+              requestedScopes: effectiveRequestedScopes,
+            },
+          );
+        } catch (err) {
+          res.status(403).json({ error: err instanceof Error ? err.message : 'Invalid TOFU proof' });
+          return;
+        }
+
+        principalId = resolved.principal.principalId;
+        principalFingerprint = resolved.principal.fingerprint;
+        const permission = await getPermissionIfSupported(principalId, service);
+        try {
+          const authorization = computeTofuAuthorization(resolved.principal, permission);
+          allowedByPrincipal = authorization.allowedScopes;
+        } catch (err) {
+          res.status(403).json({ error: err instanceof Error ? err.message : 'TOFU authorization denied' });
+          return;
+        }
+      }
+
+      const { grantedScopes, widenedScopes } = resolveGrantedScopes(
+        principalId && allowedByPrincipal ? entry.scopes?.filter((scope) => allowedByPrincipal!.includes(scope)) ?? [] : entry.scopes ?? [],
+        effectiveRequestedScopes,
+      );
 
       if (widenedScopes.length > 0) {
         res.status(403).json({
@@ -870,7 +946,7 @@ async function revoke(provider) {
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'agent', id: agentDid ?? 'server-agent', fingerprint: agentDid },
+        actor: { type: 'agent', id: principalId ?? agentDid ?? 'server-agent', fingerprint: principalFingerprint ?? agentDid },
         action: 'delegate',
         resource: { type: 'token', id: delegationId },
         outcome: 'success',
@@ -891,6 +967,62 @@ async function revoke(provider) {
     } catch (err) {
       console.error('[/api/v1/delegate] Error:', err);
       res.status(500).json({ error: 'Delegation failed' });
+    }
+  });
+
+  // TODO: add IP-based rate limiting for unauthenticated TOFU registration.
+  app.post('/api/v1/tofu/register', async (req: Request, res: Response) => {
+    try {
+      const {
+        public_key: publicKeyBase64,
+        initial_scopes: initialScopes,
+        metadata,
+      } = req.body as {
+        public_key?: string;
+        initial_scopes?: string[];
+        metadata?: Record<string, unknown>;
+      };
+
+      if (!publicKeyBase64 || typeof publicKeyBase64 !== 'string') {
+        res.status(400).json({ error: 'public_key is required' });
+        return;
+      }
+
+      let publicKey: Uint8Array;
+      try {
+        publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
+      } catch {
+        res.status(400).json({ error: 'public_key must be base64-encoded' });
+        return;
+      }
+
+      const registered = await tofu.registerAgent({
+        publicKey,
+        initialScopes: normalizeRequestedScopes(initialScopes) ?? [],
+        metadata: metadata ?? {},
+      });
+      const identity = await tofu.getAgent(registered.fingerprint);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: toTofuPrincipalId(registered.agentId), fingerprint: registered.fingerprint },
+        action: 'create',
+        resource: { type: 'agent', id: registered.agentId },
+        outcome: 'success',
+        scopesGranted: identity?.initialScopes ?? [],
+        correlationId: crypto.randomUUID(),
+      });
+
+      res.status(201).json({
+        agent_id: registered.agentId,
+        fingerprint: registered.fingerprint,
+        status: identity?.status ?? 'unclaimed',
+        initial_scopes: identity?.initialScopes ?? [],
+      });
+    } catch (err) {
+      console.error('[/api/v1/tofu/register] Error:', err);
+      res.status(500).json({ error: 'TOFU registration failed' });
     }
   });
 
@@ -1258,5 +1390,5 @@ async function revoke(provider) {
     }
   });
 
-  return { app, vault };
+  return { app, vault, tofu };
 }

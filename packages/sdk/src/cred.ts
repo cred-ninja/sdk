@@ -10,6 +10,7 @@ import {
   CredCloudConfig,
   CredLocalConfig,
   DelegateParams,
+  TofuDelegateParams,
   DelegationResult,
   SubDelegateParams,
   SubDelegationResult,
@@ -312,6 +313,75 @@ export class Cred {
       return this.delegateLocal(params);
     }
     return this.delegateCloud(params);
+  }
+
+  async tofuDelegate(params: TofuDelegateParams): Promise<DelegationResult> {
+    if (this.isLocal) {
+      throw new CredError(
+        'tofuDelegate() is not supported in local mode. TOFU proof verification is server-side only.',
+        'local_mode_unsupported',
+        0,
+      );
+    }
+
+    const appClientId = params.appClientId ?? 'local';
+    const sortedScopes = params.scopes && params.scopes.length > 0
+      ? [...params.scopes].sort()
+      : undefined;
+    const payload = {
+      service: params.service,
+      userId: params.userId,
+      appClientId,
+      ...(sortedScopes ? { scopes: sortedScopes } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    const payloadBytes = Buffer.from(JSON.stringify(payload), 'utf8');
+    const privateKey = crypto.createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from('302e020100300506032b657004220420', 'hex'),
+        Buffer.from(params.privateKeyBytes),
+      ]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+    const signature = crypto.sign(null, payloadBytes, privateKey);
+
+    const body: Record<string, unknown> = {
+      service: params.service,
+      user_id: params.userId,
+      appClientId,
+      tofu_fingerprint: params.fingerprint,
+      tofu_payload: payloadBytes.toString('base64'),
+      tofu_signature: signature.toString('base64'),
+    };
+    if (sortedScopes) {
+      body.scopes = sortedScopes;
+    }
+
+    const data = await this.post<{
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      service: string;
+      scopes: string[];
+      delegation_id: string;
+      receipt?: string;
+    }>('/api/v1/delegate', body);
+
+    const DEFAULT_TTL_SECONDS = 900;
+    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    const expiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    return {
+      accessToken: data.access_token,
+      tokenType: data.token_type,
+      expiresIn,
+      expiresAt,
+      service: data.service,
+      scopes: data.scopes,
+      delegationId: data.delegation_id,
+      receipt: data.receipt,
+    };
   }
 
   async subDelegate(params: SubDelegateParams): Promise<SubDelegationResult> {

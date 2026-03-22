@@ -80,6 +80,21 @@ export interface DelegateParams {
   agentDid?: string;
 }
 
+export interface TofuDelegateParams {
+  /** Ed25519 fingerprint (SHA-256 hex of public key) from registration */
+  fingerprint: string;
+  /** Raw 32-byte Ed25519 private key */
+  privateKeyBytes: Uint8Array;
+  /** Service slug (e.g. 'google', 'github') */
+  service: string;
+  /** User ID on whose behalf the agent is delegating */
+  userId: string;
+  /** App client ID. Defaults to 'local'. */
+  appClientId?: string;
+  /** Requested scopes. Empty = all consented scopes. */
+  scopes?: string[];
+}
+
 export interface GetConsentUrlParams {
   service: string;
   userId: string;

@@ -3,7 +3,7 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { verify as verifySignature, createPublicKey } from 'node:crypto';
+import { verify as verifySignature, createPublicKey, createPrivateKey, sign, generateKeyPairSync } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
 import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard';
@@ -13,6 +13,8 @@ import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard'
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.json');
 const TEST_SQLITE_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.sqlite');
+const TEST_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-tofu.json');
+const TEST_SQLITE_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-tofu.sqlite');
 
 function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
   return {
@@ -21,6 +23,8 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     vaultPassphrase: 'test-passphrase-not-for-production',
     vaultStorage: 'file',
     vaultPath: TEST_VAULT_PATH,
+    tofuStorage: 'file',
+    tofuPath: TEST_TOFU_PATH,
     agentToken: TEST_TOKEN,
     providers: [
       {
@@ -40,7 +44,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
 describe('@credninja/server', () => {
   afterAll(() => {
     // Cleanup test vault files
-    for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH]) {
+    for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH]) {
       for (const suffix of ['', '.salt']) {
         const p = base + suffix;
         if (fs.existsSync(p)) fs.unlinkSync(p);
@@ -59,6 +63,7 @@ describe('@credninja/server', () => {
       expect(res.body.status).toBe('ok');
       expect(res.body.providers).toEqual(['google']);
       expect(res.body.vault).toBe('file');
+      expect(res.body.tofu).toBe('file');
     });
   });
 
@@ -314,6 +319,266 @@ describe('@credninja/server', () => {
       );
 
       expect(valid).toBe(true);
+    });
+
+    it('accepts TOFU proof-of-possession for unclaimed agents within bootstrap scopes', async () => {
+      const config = makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite',
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.tofu-bootstrap',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+
+      const proof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date().toISOString(),
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.scopes).toEqual(['calendar.readonly']);
+      expect(res.body.receipt).toBeUndefined();
+    });
+
+    it('denies TOFU proof that exceeds bootstrap scopes', async () => {
+      const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.tofu-bootstrap',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+
+      const proof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['gmail.readonly'],
+        timestamp: new Date().toISOString(),
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['gmail.readonly'],
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('scope_escalation_denied');
+    });
+
+    it('requires a permission record for claimed TOFU agents', async () => {
+      const config = makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite',
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.tofu-claimed',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+      await tofu.claimAgent({ fingerprint: registration.fingerprint, ownerUserId: 'user-123' });
+
+      const proof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date().toISOString(),
+      });
+
+      const denied = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+
+      expect(denied.status).toBe(403);
+      expect(denied.body.error).toContain('no permission');
+
+      await vault.createPermission({
+        agentId: `tofu:${registration.agentId}`,
+        connectionId: 'google',
+        allowedScopes: ['calendar.readonly'],
+        delegatable: true,
+        maxDelegationDepth: 1,
+        requiresApproval: false,
+        createdBy: 'admin',
+      });
+
+      const allowed = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.scopes).toEqual(['calendar.readonly']);
+    });
+
+    it('rejects stale TOFU proofs', async () => {
+      const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.tofu-stale',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+
+      const staleProof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: staleProof.payloadBase64,
+          tofu_signature: staleProof.signatureBase64,
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('timestamp');
+    });
+  });
+
+  describe('POST /api/v1/tofu/register', () => {
+    it('registers a TOFU identity without Authorization', async () => {
+      const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
+      const { app, tofu } = createServer(config);
+      await tofu.init();
+
+      const keypair = generateTofuKeypair();
+
+      const res = await request(app)
+        .post('/api/v1/tofu/register')
+        .send({
+          public_key: Buffer.from(keypair.publicKey).toString('base64'),
+          initial_scopes: ['calendar.readonly'],
+          metadata: { name: 'test-agent' },
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.agent_id).toBeTypeOf('string');
+      expect(res.body.fingerprint).toBeTypeOf('string');
+      expect(res.body.status).toBe('unclaimed');
+      expect(res.body.initial_scopes).toEqual(['calendar.readonly']);
+
+      const identity = await tofu.getAgent(res.body.fingerprint);
+      expect(identity?.metadata).toEqual({ name: 'test-agent' });
+    });
+
+    it('still validates the request body', async () => {
+      const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
+      const { app, tofu } = createServer(config);
+      await tofu.init();
+
+      const res = await request(app)
+        .post('/api/v1/tofu/register')
+        .send({
+          initial_scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/public_key is required/);
     });
   });
 
@@ -864,3 +1129,32 @@ describe('@credninja/server', () => {
     });
   });
 });
+
+function generateTofuKeypair(): { publicKey: Uint8Array; privateKeyDer: Buffer } {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const spki = publicKey.export({ type: 'spki', format: 'der' });
+  const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' });
+  return {
+    publicKey: new Uint8Array(spki.slice(-32)),
+    privateKeyDer: Buffer.from(pkcs8),
+  };
+}
+
+function createTofuProof(
+  privateKeyDer: Buffer,
+  payload: {
+    service: string;
+    userId: string;
+    appClientId: string;
+    scopes?: string[];
+    timestamp: string;
+  },
+): { payloadBase64: string; signatureBase64: string } {
+  const payloadBuffer = Buffer.from(JSON.stringify(payload), 'utf8');
+  const privateKey = createPrivateKey({ key: privateKeyDer, format: 'der', type: 'pkcs8' });
+  const signature = sign(null, payloadBuffer, privateKey);
+  return {
+    payloadBase64: payloadBuffer.toString('base64'),
+    signatureBase64: signature.toString('base64'),
+  };
+}

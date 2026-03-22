@@ -25,6 +25,7 @@ export type {
   DelegationChainLink,
   Connection,
   DelegateParams,
+  TofuDelegateParams,
   SubDelegateParams,
   SubDelegationResult,
   GetConsentUrlParams,
