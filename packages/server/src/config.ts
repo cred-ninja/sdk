@@ -24,6 +24,10 @@ export interface ServerConfig {
   vaultStorage: 'sqlite' | 'file';
   vaultPath: string;
 
+  // TOFU identity storage
+  tofuStorage: 'sqlite' | 'file';
+  tofuPath: string;
+
   // Agent auth
   agentToken: string;
 
@@ -59,6 +63,8 @@ export function loadConfig(): ServerConfig {
 
   const vaultStorage = (process.env.VAULT_STORAGE ?? 'file') as 'sqlite' | 'file';
   const vaultPath = process.env.VAULT_PATH ?? './data/vault.json';
+  const tofuStorage = (process.env.TOFU_STORAGE ?? vaultStorage) as 'sqlite' | 'file';
+  const tofuPath = process.env.TOFU_PATH ?? (tofuStorage === 'sqlite' ? './data/tofu.sqlite' : './data/tofu.json');
 
   const agentToken = process.env.AGENT_TOKEN;
   if (!agentToken) {
@@ -92,6 +98,8 @@ export function loadConfig(): ServerConfig {
     vaultPassphrase,
     vaultStorage,
     vaultPath,
+    tofuStorage,
+    tofuPath,
     agentToken,
     providers,
     redirectBaseUri,

@@ -11,6 +11,7 @@ import type { ServerConfig } from '../config.js';
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-subdelegate-vault.sqlite');
+const TEST_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-subdelegate-tofu.sqlite');
 const TEST_PASSPHRASE = 'test-passphrase-for-subdelegation';
 
 function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
@@ -20,6 +21,8 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     vaultPassphrase: TEST_PASSPHRASE,
     vaultStorage: 'sqlite',
     vaultPath: TEST_VAULT_PATH,
+    tofuStorage: 'sqlite',
+    tofuPath: TEST_TOFU_PATH,
     agentToken: TEST_TOKEN,
     providers: [
       {
@@ -88,9 +91,11 @@ function createBadSignatureReceipt(payload: Record<string, unknown>): string {
 
 describe('POST /api/v1/subdelegate', () => {
   afterAll(() => {
-    for (const suffix of ['', '.salt']) {
-      const p = TEST_VAULT_PATH + suffix;
-      if (fs.existsSync(p)) fs.unlinkSync(p);
+    for (const base of [TEST_VAULT_PATH, TEST_TOFU_PATH]) {
+      for (const suffix of ['', '.salt']) {
+        const p = base + suffix;
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
     }
   });
 

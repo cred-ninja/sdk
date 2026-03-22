@@ -40,15 +40,20 @@ async function main() {
   const config = loadConfig();
 
   // Ensure data directory exists
-  const dataDir = path.dirname(path.resolve(config.vaultPath));
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-    console.log(`📁 Created data directory: ${dataDir}`);
+  for (const dataDir of new Set([
+    path.dirname(path.resolve(config.vaultPath)),
+    path.dirname(path.resolve(config.tofuPath)),
+  ])) {
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+      console.log(`📁 Created data directory: ${dataDir}`);
+    }
   }
 
   // Create server and initialize vault
-  const { app, vault } = createServer(config);
+  const { app, vault, tofu } = createServer(config);
   await vault.init();
+  await tofu.init();
 
   // Start listening
   app.listen(config.port, config.host, () => {
@@ -67,6 +72,7 @@ async function main() {
     console.log(`  GET  /providers                    — list providers + status`);
     console.log(`  GET  /connect/:provider            — start OAuth flow (browser)`);
     console.log(`  GET  /connect/:provider/callback   — OAuth callback`);
+    console.log(`  POST /api/v1/tofu/register         — register TOFU identity (Bearer auth)`);
     console.log(`  GET  /api/token/:provider          — compatibility token route (Bearer auth)`);
     console.log(`  POST /api/v1/delegate             — delegate token (Bearer auth)`);
     console.log(`  DELETE /api/token/:provider        — revoke token (Bearer auth)`);
