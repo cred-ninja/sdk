@@ -10,11 +10,13 @@
     "cred-mcp": "./dist/cli.js"
   },
   "scripts": {
-    "build": "npx tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && npx tsc",
     "dev": "tsx src/cli.ts"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE"
   ],
   "keywords": [
     "cred",

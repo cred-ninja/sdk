@@ -13,7 +13,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "build": "npx tsc -p tsconfig.cjs.json && npx tsc -p tsconfig.esm.json",

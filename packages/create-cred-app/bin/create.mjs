@@ -61,7 +61,8 @@ function copyDir(src, dest) {
   mkdirSync(dest, { recursive: true });
   for (const entry of readdirSync(src)) {
     const srcPath = join(src, entry);
-    const destPath = join(dest, entry);
+    const outputName = entry === 'gitignore' ? '.gitignore' : entry;
+    const destPath = join(dest, outputName);
     if (statSync(srcPath).isDirectory()) {
       copyDir(srcPath, destPath);
     } else {

@@ -17,7 +17,9 @@
   },
   "files": [
     "dist",
-    ".env.example"
+    ".env.example",
+    "LICENSE",
+    "NOTICE"
   ],
   "keywords": [
     "cred",
