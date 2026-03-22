@@ -58,6 +58,6 @@ with Cred(agent_token=token) as cred:
     result = cred.delegate(service="github", user_id="u1", app_client_id="app1")
 ```
 
-## Cred Cloud (Coming Soon)
+## Self-Hosted Server Mode
 
-Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+Point `base_url` at your own `@credninja/server` deployment when you want a separate credential broker instead of local-only usage.

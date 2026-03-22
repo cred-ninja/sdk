@@ -128,7 +128,7 @@ When your MCP client needs your calendar, you approve interactively. The token i
 |---------|-------------|---------|
 | [`@credninja/oauth`](./packages/oauth) | Zero-dep OAuth2 client. 7 provider adapters, PKCE, Express middleware | `npm i @credninja/oauth` |
 | [`@credninja/vault`](./packages/vault) | Encrypted local token vault. AES-256-GCM, SQLite or file storage | `npm i @credninja/vault` |
-| [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK. Cloud + standalone | `npm i @credninja/sdk` |
+| [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK for self-hosted servers or standalone use | `npm i @credninja/sdk` |
 | [`@credninja/server`](./packages/server) | Self-hosted credential server. Express, Docker, admin UI | `npm i @credninja/server` |
 | [`@credninja/guard`](./packages/guard) | Policy engine for delegation guardrails. Rate limits, scope filtering, time windows, URL allowlists | `npm i @credninja/guard` |
 | [`@credninja/mcp`](./packages/mcp) | MCP server for MCP-compatible runtimes | `npx @credninja/mcp` |
@@ -211,8 +211,6 @@ const guardedHandler = guard.wrapMcpTool(handleUse);
 
 Use `@credninja/oauth` + `@credninja/vault` for full local control. No account needed, no cloud dependency. MIT licensed. Your credentials stay on your machine.
 
-**Cred Cloud (waitlist):** Managed multi-tenant credential delegation is coming. [Join the waitlist](https://cred.ninja/waitlist) to get early access.
-
 ## Self-Hosting
 
 This repo (MIT) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. The standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run credential delegation locally or on your own infrastructure.
@@ -235,4 +233,4 @@ MIT. See [LICENSE](./LICENSE).
 
 ⭐ **Star this repo** if credential delegation for AI agents matters to you.
 
-[Join the Cloud waitlist](https://cred.ninja/waitlist) · [Read the docs](https://cred.ninja/docs) · [View the roadmap](https://cred.ninja/roadmap)
+[Read the docs](https://cred.ninja/docs) · [Browse the repo](https://github.com/cred-ninja/sdk) · [View the roadmap](https://cred.ninja/roadmap)

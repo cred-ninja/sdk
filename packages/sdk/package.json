@@ -1,7 +1,7 @@
 {
   "name": "@credninja/sdk",
   "version": "1.0.0",
-  "description": "OAuth2 credential delegation SDK for AI agents. Works standalone or with Cred Cloud",
+  "description": "OAuth2 credential delegation SDK for AI agents. Works standalone or with a self-hosted Cred server",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
   "types": "dist/cjs/index.d.ts",

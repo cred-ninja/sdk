@@ -40,7 +40,7 @@ npm run dev
 
 1. **Admin connects providers** — Visit `/connect/google` in a browser, complete OAuth
 2. **Tokens stored encrypted** — AES-256-GCM, PBKDF2-SHA256 key derivation
-3. **Agent requests token** — `GET /api/token/google` with Bearer auth
+3. **Agent requests delegation** — `POST /api/v1/delegate` with Bearer auth
 4. **Server returns access token** — Auto-refreshes if expired. Refresh token never leaves the server.
 
 ## Endpoints
@@ -51,7 +51,8 @@ npm run dev
 | GET | `/providers` | None | List configured providers + connection status |
 | GET | `/connect/:provider` | None | Start OAuth flow (browser) |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
-| GET | `/api/token/:provider` | Bearer | Get delegated access token |
+| POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
+| GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
 
 ## Configuration
@@ -152,6 +153,7 @@ const cred = new Cred({
 const google = await cred.delegate({
   service: 'google',
   userId: 'default',
+  appClientId: 'local',
 });
 
 // Use google.accessToken with any Google API
@@ -160,13 +162,15 @@ const google = await cred.delegate({
 Or with curl:
 
 ```bash
-curl https://cred.yourdomain.com/api/token/google \
-  -H "Authorization: Bearer $CRED_AGENT_TOKEN"
+curl https://cred.yourdomain.com/api/v1/delegate \
+  -H "Authorization: Bearer $CRED_AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"google","user_id":"default","appClientId":"local"}'
 ```
 
 ## Security
 
-- **Refresh tokens never leave the server.** The `/api/token/:provider` endpoint returns only the access token.
+- **Refresh tokens never leave the server.** Delegation endpoints return only the access token.
 - **Vault encrypted at rest** with AES-256-GCM (PBKDF2-SHA256, 100K iterations).
 - **Agent tokens validated** using constant-time comparison (timing-attack resistant).
 - **HTTPS required for remote access.** The SDK refuses to send agent tokens over HTTP to non-localhost servers.

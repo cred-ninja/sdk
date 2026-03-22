@@ -355,13 +355,9 @@ export class MyProviderAdapter extends BaseServiceAdapter {
 
 ---
 
-## Cred Cloud (Coming Soon)
+## Pairing With Cred Server
 
-Need managed token refresh, multi-tenant storage, audit logs, or AI agent delegation?
-
-Managed multi-tenant credential delegation is coming.
-
-[Join the waitlist](https://cred.ninja/waitlist) for early access.
+`@credninja/oauth` is the low-level OAuth toolkit in this repo. When you want a separate credential broker with browser-based connection management and delegated token issuance, pair it with the self-hosted [`@credninja/server`](../server).
 
 ---
 

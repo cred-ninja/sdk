@@ -8,13 +8,14 @@ OAuth2 credential delegation SDK for AI agents. Open-source OAuth2 credential de
 npm install @credninja/sdk
 ```
 
-## Quick Start: Cloud Mode
+## Quick Start: Remote Server Mode
 
 ```typescript
 import { Cred, ConsentRequiredError } from '@credninja/sdk';
 
 const cred = new Cred({
   agentToken: process.env.CRED_AGENT_TOKEN!,
+  baseUrl: process.env.CRED_BASE_URL!,
 });
 
 try {
@@ -78,16 +79,16 @@ See [`@credninja/oauth`](../oauth) and [`@credninja/vault`](../vault) for full s
 
 ## Configuration
 
-### Cloud Mode
+### Remote Server Mode
 
 ```typescript
 const cred = new Cred({
-  agentToken: 'your_agent_token',   // required, from Cred dashboard
+  agentToken: 'your_agent_token',   // required, configured on your Cred server
   baseUrl: 'https://cred.example.com', // your Cred server URL (required)
 });
 ```
 
-`agentToken` and `appClientId` are deployment-time config. Bake them into your agent's environment variables. Don't pass them at runtime from user input.
+`agentToken`, `baseUrl`, and `appClientId` are deployment-time config. Bake them into your agent's environment variables. Don't pass them at runtime from user input.
 
 ## API
 
@@ -222,6 +223,6 @@ try {
 
 ## Standalone First
 
-For fully local operation, use [`@credninja/oauth`](../oauth) + [`@credninja/vault`](../vault). No account needed, no cloud dependency.
+For fully local operation, use [`@credninja/oauth`](../oauth) + [`@credninja/vault`](../vault). No account needed.
 
-Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+For a separate broker process, point `baseUrl` at your own self-hosted [`@credninja/server`](../server) deployment.

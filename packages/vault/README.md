@@ -194,17 +194,9 @@ class RedisBackend implements StorageBackend {
 
 ---
 
-## Cred Cloud (Coming Soon)
+## Pairing With Cred Server
 
-`@credninja/vault` is great for single-machine and CLI use. When you need:
-
-- **Multi-tenant isolation** across thousands of users
-- **Managed token refresh** (background daemon, no polling)
-- **Agent identity verification** (Ed25519 receipts)
-- **Enterprise audit logging**
-- **TEE-grade secret storage**
-
-Managed cloud vault is coming. [Join the waitlist](https://cred.ninja/waitlist).
+`@credninja/vault` is great for single-machine and CLI use. When you need a separate broker process, browser-based provider connection flows, or centralized policy enforcement, pair it with the self-hosted [`@credninja/server`](../server).
 
 ---
 

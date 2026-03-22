@@ -26,12 +26,13 @@ Open [http://localhost:3456/connect](http://localhost:3456/connect) to manage OA
 2. Generates a `.env` with a random vault passphrase and tokens
 3. Run `npm start` to launch the server with the built-in CLI
 4. Use the admin UI to connect OAuth providers
-5. Give your AI agent the agent token — it uses `GET /api/token/:provider` to get access tokens
+5. Give your AI agent the agent token and server URL — it uses `POST /api/v1/delegate` through `@credninja/sdk` to get access tokens
 
 ## Documentation
 
 - [cred.ninja](https://cred.ninja) — Project home
 - [cred.ninja/docs](https://cred.ninja/docs) — Full docs
+- [TOFU proof of possession](https://github.com/cred-ninja/sdk/blob/main/docs/tofu-proof-of-possession.md) — Self-hosted agent identity flow
 - [@credninja/server](https://github.com/cred-ninja/sdk/tree/main/packages/server) — Server package
 - [@credninja/sdk](https://github.com/cred-ninja/sdk/tree/main/packages/sdk) — TypeScript SDK for agents
 

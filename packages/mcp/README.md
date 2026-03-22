@@ -8,7 +8,7 @@ MCP server for OAuth2 credential delegation. Secure token brokering for AI agent
 
 This MCP server enables AI agents running in MCP-compatible runtimes to request delegated OAuth2 access tokens through Cred. Works in two modes:
 
-- **Cloud mode:** calls the hosted Cred API for managed delegation, multi-tenant storage, and audit trails
+- **Remote server mode:** calls a Cred server over HTTP. `CRED_BASE_URL` can point to your own self-hosted deployment.
 - **Local mode:** uses `@credninja/oauth` + `@credninja/vault` for fully offline, self-contained credential management
 
 ## Installation
@@ -30,7 +30,7 @@ cred-mcp
 
 Add to your MCP client configuration:
 
-### Cloud Mode
+### Remote Server Mode
 
 ```json
 {
@@ -40,14 +40,13 @@ Add to your MCP client configuration:
       "args": ["-y", "@credninja/mcp"],
       "env": {
         "CRED_AGENT_TOKEN": "your_agent_token",
-        "CRED_APP_CLIENT_ID": "your_app_client_id"
+        "CRED_APP_CLIENT_ID": "your_app_client_id",
+        "CRED_BASE_URL": "https://cred.example.com"
       }
     }
   }
 }
 ```
-
-Cloud mode requires a Cred account (coming soon). For now, use local mode.
 
 ### Local Mode
 
@@ -74,13 +73,13 @@ When your MCP client needs your calendar, you approve interactively. The token i
 
 ## Environment Variables
 
-### Cloud Mode
+### Remote Server Mode
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CRED_AGENT_TOKEN` | Yes | | Agent token from Cred dashboard |
-| `CRED_APP_CLIENT_ID` | Yes | | App client ID from Cred dashboard |
-| `CRED_BASE_URL` | Yes (cloud mode) | — | Your Cred server URL |
+| `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
+| `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
+| `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
 
 ### Local Mode
 
@@ -159,7 +158,7 @@ Assistant: I'll need access to your Google Calendar.
         It looks like you haven't connected your Google account yet.
         Please visit this link to authorize:
 
-        https://cred.ninja/connect/google?app_client_id=...
+        https://cred.example.com/connect/google?app_client_id=...
 
         Once you've authorized, let me know and I'll check your calendar.
 ```
@@ -202,9 +201,9 @@ const server = createCredMcpServer(config);
 - Refresh tokens are never exposed to agents
 - Local mode: AES-256-GCM encryption with PBKDF2 key derivation for vault storage
 
-## Cred Cloud (Coming Soon)
+## Deployment Modes
 
-Local mode is perfect for single-user setups and development. Managed multi-tenant delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+Use local mode for single-user tools and offline workflows. Use remote server mode when you want a separate self-hosted broker, shared policy enforcement, or central OAuth connection management for multiple agents.
 
 ## License
 
