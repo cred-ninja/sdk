@@ -67,14 +67,14 @@ describe('credDelegateTool factory', () => {
     expect(t.description!.toLowerCase()).toContain('service');
   });
 
-  it('returns a tool with parameters schema', () => {
+  it('returns a tool with input schema', () => {
     const t = credDelegateTool({
       agentToken: TOKEN,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
 
-    expect(t.parameters).toBeDefined();
+    expect(t.inputSchema).toBeDefined();
   });
 
   it('returns a tool with execute function', () => {

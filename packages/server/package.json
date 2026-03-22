@@ -40,7 +40,8 @@
     "@credninja/oauth": "^1.0.0",
     "@credninja/tofu": "^1.0.0",
     "@credninja/vault": "^1.0.0",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "express-rate-limit": "^8.3.1"
   },
   "optionalDependencies": {
     "@credninja/guard": "^0.1.0"

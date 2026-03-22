@@ -40,9 +40,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
 // ── Receipt helpers (mirror the server/SDK key derivation) ───────────────────
 
 function getTestSigningKey() {
-  const seed = crypto.createHash('sha256')
-    .update(`cred-local-receipt:${TEST_PASSPHRASE}`)
-    .digest();
+  const seed = crypto.scryptSync(TEST_PASSPHRASE, 'cred:local-receipt:v1', 32);
   return createPrivateKey({
     key: Buffer.concat([
       Buffer.from('302e020100300506032b657004220420', 'hex'),
@@ -67,7 +65,7 @@ function createTestReceipt(payload: Record<string, unknown>): string {
 
 function createBadSignatureReceipt(payload: Record<string, unknown>): string {
   // Sign with a different key to produce invalid signature
-  const badSeed = crypto.createHash('sha256').update('wrong-key').digest();
+  const badSeed = crypto.scryptSync('wrong-key', 'cred:local-receipt:v1', 32);
   const badKey = createPrivateKey({
     key: Buffer.concat([
       Buffer.from('302e020100300506032b657004220420', 'hex'),

@@ -15,6 +15,20 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { Cred } from '@credninja/sdk';
 
+interface CredDelegateToolInput {
+  service: string;
+  scopes: string[];
+}
+
+interface CredDelegateToolResult {
+  accessToken: string;
+  tokenType: string;
+  expiresIn: number;
+  service: string;
+  scopes: string[];
+  delegationId: string;
+}
+
 export interface CredDelegateToolOptions {
   /** Agent token issued by Cred (starts with cred_at_) */
   agentToken: string;
@@ -52,6 +66,17 @@ export interface CredDelegateToolOptions {
  */
 export function credDelegateTool(options: CredDelegateToolOptions) {
   const { agentToken, userId, appClientId, baseUrl } = options;
+  const inputSchema = z.object({
+    service: z
+      .string()
+      .describe("Service slug to get a token for (e.g. 'google', 'github', 'google-calendar')."),
+    scopes: z
+      .array(z.string())
+      .describe(
+        "OAuth scopes to request (e.g. ['calendar.readonly']). " +
+          'Pass an empty array to use all consented scopes.',
+      ),
+  }) as z.ZodType<CredDelegateToolInput>;
 
   const cred = new Cred({
     agentToken,
@@ -70,24 +95,14 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
       }
     | null = null;
 
-  return tool({
+  const toolDefinition = {
     description:
       'Get a delegated OAuth access token for a third-party service ' +
       'on behalf of the current user. ' +
       'Returns access_token, token_type, expires_in, service, scopes, and delegation_id. ' +
       'Raises an error with consent_url if the user has not connected the service.',
-    parameters: z.object({
-      service: z
-        .string()
-        .describe("Service slug to get a token for (e.g. 'google', 'github', 'google-calendar')."),
-      scopes: z
-        .array(z.string())
-        .describe(
-          "OAuth scopes to request (e.g. ['calendar.readonly']). " +
-            'Pass an empty array to use all consented scopes.',
-        ),
-    }),
-    execute: async ({ service, scopes }) => {
+    inputSchema,
+    execute: async ({ service, scopes }: CredDelegateToolInput) => {
       const resolvedScopes = scopes.length > 0 ? scopes : undefined;
       const cacheKey = JSON.stringify({ service, scopes: resolvedScopes ?? [] });
       const refreshCutoffMs = Date.now() + 60_000;
@@ -133,5 +148,7 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
         delegationId: result.delegationId,
       };
     },
-  });
+  };
+
+  return tool(toolDefinition as any);
 }

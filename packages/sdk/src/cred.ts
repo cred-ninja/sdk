@@ -186,7 +186,7 @@ export class Cred {
   private readonly isLocal: boolean;
 
   // ── Audit fields ────────────────────────────────────────────────────────────
-  private auditHmacSecret?: string;
+  private auditHmacSecret?: Buffer;
 
   constructor(config: CredConfig) {
     if (isLocalConfig(config)) {
@@ -279,8 +279,12 @@ export class Cred {
     await vault.init();
     this.vault = vault;
 
-    // Derive HMAC secret from vault passphrase for audit field hashing
-    this.auditHmacSecret = crypto.createHash('sha256').update(`audit:${config.vault.passphrase}`).digest('hex');
+    // Derive an audit-only HMAC key from the vault passphrase using a password KDF.
+    this.auditHmacSecret = this.deriveLocalKey('audit');
+  }
+
+  private deriveLocalKey(context: string): Buffer {
+    return crypto.scryptSync(this.localConfig!.vault.passphrase, `cred:${context}:v1`, 32);
   }
 
   private async getAdapter(service: string): Promise<{ refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> }> {
@@ -951,9 +955,7 @@ export class Cred {
 
   private getLocalReceiptSigningKey() {
     const { createPrivateKey } = require('node:crypto') as typeof import('node:crypto');
-    const seed = crypto.createHash('sha256')
-      .update(`cred-local-receipt:${this.localConfig!.vault.passphrase}`)
-      .digest();
+    const seed = this.deriveLocalKey('local-receipt');
     return createPrivateKey({
       key: Buffer.concat([
         Buffer.from('302e020100300506032b657004220420', 'hex'),

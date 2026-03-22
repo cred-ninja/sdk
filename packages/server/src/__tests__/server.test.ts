@@ -300,9 +300,7 @@ describe('@credninja/server', () => {
       expect(payload.appClientId).toBe('app_123');
       expect(payload.scopes).toEqual(['calendar.readonly']);
 
-      const seed = crypto.createHash('sha256')
-        .update(`cred-local-receipt:${config.vaultPassphrase}`)
-        .digest();
+      const seed = crypto.scryptSync(config.vaultPassphrase, 'cred:local-receipt:v1', 32);
       const publicKey = createPublicKey({
         key: Buffer.concat([
           Buffer.from('302e020100300506032b657004220420', 'hex'),

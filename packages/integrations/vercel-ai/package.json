@@ -39,13 +39,13 @@
   },
   "peerDependencies": {
     "@credninja/sdk": "^1.0.0",
-    "ai": ">=3.0.0",
+    "ai": ">=5.0.52",
     "zod": ">=3.0.0"
   },
   "devDependencies": {
     "@credninja/sdk": "^1.0.0",
     "@types/node": "^20.10.6",
-    "ai": "^4.0.0",
+    "ai": "^5.0.52",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18",
     "zod": "^3.22.0"

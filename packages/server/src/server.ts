@@ -21,6 +21,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
 import { AgentVault } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
@@ -119,6 +120,54 @@ export function createServer(config: ServerConfig) {
     }
   }
 
+  function escapeHtml(value: string): string {
+    return value.replace(/[&<>"']/g, (char) => {
+      switch (char) {
+        case '&':
+          return '&amp;';
+        case '<':
+          return '&lt;';
+        case '>':
+          return '&gt;';
+        case '"':
+          return '&quot;';
+        case '\'':
+          return '&#39;';
+        default:
+          return char;
+      }
+    });
+  }
+
+  function derivePassphraseKey(context: string): Buffer {
+    return crypto.scryptSync(config.vaultPassphrase, `cred:${context}:v1`, 32);
+  }
+
+  function rateLimitKey(req: Request): string {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    return ipKeyGenerator(ip);
+  }
+
+  function makeRateLimiter(max: number) {
+    return rateLimit({
+      windowMs: 60_000,
+      max,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: rateLimitKey,
+    });
+  }
+
+  const connectUiRateLimiter = makeRateLimiter(30);
+  const connectRateLimiter = makeRateLimiter(20);
+  const callbackRateLimiter = makeRateLimiter(60);
+  const tokenRateLimiter = makeRateLimiter(120);
+  const delegateRateLimiter = makeRateLimiter(60);
+  const auditRateLimiter = makeRateLimiter(30);
+  const subdelegateRateLimiter = makeRateLimiter(60);
+  const revokeRateLimiter = makeRateLimiter(30);
+  const tofuRegisterRateLimiter = makeRateLimiter(10);
+
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     try {
       vault.writeAuditEvent(event);
@@ -134,9 +183,7 @@ export function createServer(config: ServerConfig) {
   // ── Receipt helpers (Ed25519, same key derivation as SDK local mode) ──────
 
   function getReceiptSigningKey() {
-    const seed = crypto.createHash('sha256')
-      .update(`cred-local-receipt:${config.vaultPassphrase}`)
-      .digest();
+    const seed = derivePassphraseKey('local-receipt');
     return createPrivateKey({
       key: Buffer.concat([
         Buffer.from('302e020100300506032b657004220420', 'hex'),
@@ -263,7 +310,7 @@ export function createServer(config: ServerConfig) {
    * Lists all configured providers with connection status, scope selection,
    * and connect/disconnect buttons.
    */
-  app.get('/connect', async (_req: Request, res: Response) => {
+  app.get('/connect', connectUiRateLimiter, async (_req: Request, res: Response) => {
     try {
       const entries = await vault.list({ userId: 'default' });
       const connected = new Map(entries.map((e) => [e.provider, e]));
@@ -322,33 +369,41 @@ export function createServer(config: ServerConfig) {
         const isConnected = !!conn;
         const scopes = COMMON_SCOPES[p.slug] ?? [];
         const defaultChecked = p.defaultScopes;
+        const safeSlug = escapeHtml(p.slug);
+        const encodedSlug = encodeURIComponent(p.slug);
+        const currentScopes = conn?.scopes?.map((scope) => escapeHtml(scope)).join(', ');
+        const safeScopeItems = scopes.map((s) => {
+          const safeLabel = escapeHtml(s.label);
+          const safeValue = escapeHtml(s.value);
+          const isChecked = defaultChecked.includes(s.value) ? 'checked' : '';
+          return `
+                  <label class="scope-item">
+                    <input type="checkbox" name="scope" value="${safeValue}" ${isChecked}>
+                    <span class="scope-label">${safeLabel}</span>
+                    <code class="scope-value">${safeValue}</code>
+                  </label>
+                `;
+        }).join('');
 
         return `
           <div class="provider-card ${isConnected ? 'connected' : ''}">
             <div class="provider-header">
-              <h3>${p.slug}</h3>
+              <h3>${safeSlug}</h3>
               <span class="status ${isConnected ? 'status-ok' : 'status-none'}">
                 ${isConnected ? '● Connected' : '○ Not connected'}
               </span>
             </div>
-            ${isConnected && conn?.scopes?.length ? `<div class="current-scopes">Current scopes: <code>${conn.scopes.join(', ')}</code></div>` : ''}
-            <form class="scope-form" action="/connect/${p.slug}" method="GET" onsubmit="buildScopes(event, '${p.slug}')">
+            ${isConnected && currentScopes ? `<div class="current-scopes">Current scopes: <code>${currentScopes}</code></div>` : ''}
+            <form class="scope-form" action="/connect/${encodedSlug}" method="GET" data-provider="${safeSlug}">
               <div class="scope-grid">
-                ${scopes.map((s) => `
-                  <label class="scope-item">
-                    <input type="checkbox" name="scope" value="${s.value}"
-                      ${defaultChecked.includes(s.value) ? 'checked' : ''}>
-                    <span class="scope-label">${s.label}</span>
-                    <code class="scope-value">${s.value}</code>
-                  </label>
-                `).join('')}
+                ${safeScopeItems}
               </div>
               <div class="custom-scope">
                 <input type="text" name="customScopes" placeholder="Additional scopes (comma-separated)">
               </div>
               <div class="actions">
                 <button type="submit" class="btn btn-connect">${isConnected ? 'Reconnect' : 'Connect'}</button>
-                ${isConnected ? `<button type="button" class="btn btn-revoke" onclick="revoke('${p.slug}')">Revoke</button>` : ''}
+                ${isConnected ? `<button type="button" class="btn btn-revoke" data-revoke-provider="${safeSlug}">Revoke</button>` : ''}
               </div>
             </form>
           </div>
@@ -489,6 +544,16 @@ async function revoke(provider) {
   if (res.ok) { alert('Revoked'); location.reload(); }
   else { alert('Failed: ' + res.status); }
 }
+for (const form of document.querySelectorAll('.scope-form')) {
+  form.addEventListener('submit', (event) => {
+    buildScopes(event, form.dataset.provider || '');
+  });
+}
+for (const button of document.querySelectorAll('[data-revoke-provider]')) {
+  button.addEventListener('click', () => {
+    revoke(button.dataset.revokeProvider || '');
+  });
+}
 </script>
 </body>
 </html>`);
@@ -504,7 +569,7 @@ async function revoke(provider) {
    * Opens in a browser. Redirects to the provider's authorization page.
    * Scopes can be specified via ?scopes=calendar.readonly,gmail.readonly
    */
-  app.get('/connect/:provider', async (req: Request, res: Response) => {
+  app.get('/connect/:provider', connectRateLimiter, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
       const providerConfig = getProviderConfig(slug);
@@ -545,13 +610,14 @@ async function revoke(provider) {
    * Handles the redirect from the provider, exchanges the code for tokens,
    * and stores them encrypted in the vault.
    */
-  app.get('/connect/:provider/callback', async (req: Request, res: Response) => {
+  app.get('/connect/:provider/callback', callbackRateLimiter, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
       const { code, state, error: oauthError } = req.query as Record<string, string>;
 
       if (oauthError) {
-        res.status(400).send(`<h2>OAuth Error</h2><p>${oauthError}</p><p><a href="/providers">Back</a></p>`);
+        const safeOauthError = escapeHtml(oauthError);
+        res.status(400).send(`<h2>OAuth Error</h2><p>${safeOauthError}</p><p><a href="/providers">Back</a></p>`);
         return;
       }
 
@@ -596,12 +662,13 @@ async function revoke(provider) {
         scopes,
       });
 
-      console.log(`[connect] ✅ ${slug} connected successfully`);
+      console.log('[connect] Provider connected successfully', { provider: slug });
 
+      const safeSlug = escapeHtml(slug);
       res.send(`
         <html>
         <body style="background:#0a0a0a;color:#fff;font-family:monospace;padding:40px;text-align:center;">
-          <h2>✅ ${slug} connected</h2>
+          <h2>✅ ${safeSlug} connected</h2>
           <p>Tokens stored in encrypted vault.</p>
           <p style="color:#888;">You can close this window.</p>
           <p><a href="/providers" style="color:#4ade80;">← Back to providers</a></p>
@@ -610,7 +677,10 @@ async function revoke(provider) {
       `);
     } catch (err) {
       console.error('[/callback] Error:', err);
-      res.status(500).send(`<h2>Connection Failed</h2><p>${err instanceof Error ? err.message : 'Unknown error'}</p><p><a href="/providers">Try again</a></p>`);
+      const safeMessage = err instanceof Error
+        ? escapeHtml(err.message)
+        : 'Unknown error';
+      res.status(500).send(`<h2>Connection Failed</h2><p>${safeMessage}</p><p><a href="/providers">Try again</a></p>`);
     }
   });
 
@@ -625,9 +695,10 @@ async function revoke(provider) {
     ? createExpressMiddleware(config.guard, {
         onDeny: (_req, res, decision) => {
           // Log guard denials for audit
-          console.warn(
-            `[guard] DENIED — policy: ${decision.deniedBy?.policy}, reason: ${decision.deniedBy?.reason}`
-          );
+          console.warn('[guard] DENIED', {
+            policy: decision.deniedBy?.policy,
+            reason: decision.deniedBy?.reason,
+          });
           res.status(403).json({
             error: 'Request denied by guard policy',
             policy: decision.deniedBy?.policy,
@@ -754,12 +825,12 @@ async function revoke(provider) {
    *
    * Auth: Bearer cred_at_<token>
    */
-  const tokenRouteHandlers: Array<express.RequestHandler> = [requireAgentAuth];
+  const tokenRouteHandlers: Array<express.RequestHandler> = [tokenRateLimiter, requireAgentAuth];
   if (guardMiddleware) {
     tokenRouteHandlers.push(guardMiddleware);
   }
 
-  const delegateRouteHandlers: Array<express.RequestHandler> = [requireAgentAuth];
+  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth];
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
   }
@@ -817,7 +888,7 @@ async function revoke(provider) {
         }),
       });
     } catch (err) {
-      console.error(`[/api/token/${req.params.provider}] Error:`, err);
+      console.error('[/api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to retrieve token' });
     }
   });
@@ -970,8 +1041,7 @@ async function revoke(provider) {
     }
   });
 
-  // TODO: add IP-based rate limiting for unauthenticated TOFU registration.
-  app.post('/api/v1/tofu/register', async (req: Request, res: Response) => {
+  app.post('/api/v1/tofu/register', tofuRegisterRateLimiter, async (req: Request, res: Response) => {
     try {
       const {
         public_key: publicKeyBase64,
@@ -1032,7 +1102,7 @@ async function revoke(provider) {
    * Requires Bearer auth. This OSS server stores a single logical user (`default`),
    * so user_id is accepted for SDK parity and filtered against that user.
    */
-  app.get('/api/v1/audit', requireAgentAuth, async (req: Request, res: Response) => {
+  app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
     try {
       const userId = typeof req.query.user_id === 'string' ? req.query.user_id : 'default';
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;
@@ -1110,7 +1180,7 @@ async function revoke(provider) {
    *
    * Auth: Bearer cred_at_<token>
    */
-  app.post('/api/v1/subdelegate', requireAgentAuth, async (req: Request, res: Response) => {
+  app.post('/api/v1/subdelegate', subdelegateRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
     try {
       const {
@@ -1368,7 +1438,7 @@ async function revoke(provider) {
    * Deletes the provider's tokens from the vault.
    * Auth: Bearer cred_at_<token>
    */
-  app.delete('/api/token/:provider', requireAgentAuth, async (req: Request, res: Response) => {
+  app.delete('/api/token/:provider', revokeRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
       await vault.delete({ provider: slug, userId: 'default' });
@@ -1385,7 +1455,7 @@ async function revoke(provider) {
 
       res.status(204).send();
     } catch (err) {
-      console.error(`[DELETE /api/token/${req.params.provider}] Error:`, err);
+      console.error('[DELETE /api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to revoke token' });
     }
   });
