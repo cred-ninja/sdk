@@ -21,8 +21,8 @@
     "packages/guard"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspace=packages/oauth && npm run build --workspace=packages/tofu && npm run build --workspace=packages/vault && npm run build --workspace=packages/guard && npm run build --workspace=packages/sdk && npm run build --workspace=packages/integrations/vercel-ai && npm run build --workspace=packages/mcp && npm run build --workspace=packages/server",
+    "test": "npm run test --workspace=packages/oauth && npm run test --workspace=packages/tofu && npm run test --workspace=packages/vault && npm run test --workspace=packages/guard && npm run test --workspace=packages/sdk && npm run test --workspace=packages/server && npm run test --workspace=packages/integrations/vercel-ai",
     "lint": "npm run lint --workspaces --if-present"
   },
   "overrides": {
