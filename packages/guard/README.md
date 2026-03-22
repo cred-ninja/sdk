@@ -177,4 +177,4 @@ See [GUARD-SPEC.md](../../GUARD-SPEC.md) for the complete design specification.
 
 ## License
 
-MIT
+Apache License 2.0

@@ -207,4 +207,4 @@ Use local mode for single-user tools and offline workflows. Use remote server mo
 
 ## License
 
-MIT
+Apache License 2.0

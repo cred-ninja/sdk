@@ -7,14 +7,14 @@ name = "cred-auth"
 version = "1.0.0"
 description = "Cred — credential delegation SDK for AI agents"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "oauth", "delegation", "ai-agents", "credentials"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

@@ -7,7 +7,7 @@ name = "cred-langchain"
 version = "0.1.0"
 description = "Cred LangChain integration — credential delegation tools for LangChain agents"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "langchain", "oauth", "delegation", "ai-agents"]

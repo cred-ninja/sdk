@@ -1,6 +1,6 @@
 # Cred
 
-[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](./LICENSE)
 [![npm](https://img.shields.io/npm/v/@credninja/sdk)](https://www.npmjs.com/package/@credninja/sdk)
 [![GitHub stars](https://img.shields.io/github/stars/cred-ninja/sdk)](https://github.com/cred-ninja/sdk)
 [![Website](https://img.shields.io/badge/website-cred.ninja-00ff88)](https://cred.ninja)
@@ -209,11 +209,11 @@ const guardedHandler = guard.wrapMcpTool(handleUse);
 
 ## Standalone First
 
-Use `@credninja/oauth` + `@credninja/vault` for full local control. No account needed, no cloud dependency. MIT licensed. Your credentials stay on your machine.
+Use `@credninja/oauth` + `@credninja/vault` for full local control. No account needed, no cloud dependency. Apache 2.0 licensed. Your credentials stay on your machine.
 
 ## Self-Hosting
 
-This repo (MIT) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. The standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run credential delegation locally or on your own infrastructure.
+This repo (Apache 2.0) contains all SDKs, the OAuth toolkit, the local vault, and all framework integrations. The standalone packages (`@credninja/oauth` + `@credninja/vault`) give you everything you need to run credential delegation locally or on your own infrastructure.
 
 For production deployments, [`@credninja/server`](./packages/server) includes Docker Compose, Caddy HTTPS, and two-machine isolation guides.
 
@@ -227,7 +227,7 @@ See [SECURITY.md](./SECURITY.md) for vulnerability disclosure. Pre-launch securi
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+Apache License 2.0. See [LICENSE](./LICENSE). Trademarks are covered separately in [TRADEMARKS.md](./TRADEMARKS.md).
 
 ---
 

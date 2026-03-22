@@ -7,7 +7,7 @@ name = "cred-crewai"
 version = "0.1.0"
 description = "Cred CrewAI integration — pre-configured credential delegation tools for CrewAI agents"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "crewai", "oauth", "delegation", "ai-agents"]

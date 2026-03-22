@@ -2,7 +2,7 @@
   "name": "@credninja/tofu",
   "version": "1.0.0",
   "description": "Trust-on-first-use agent identity primitives for Cred",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Cred",
   "engines": {
     "node": ">=18"

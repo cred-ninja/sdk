@@ -38,4 +38,4 @@ Open [http://localhost:3456/connect](http://localhost:3456/connect) to manage OA
 
 ## License
 
-MIT
+Apache License 2.0

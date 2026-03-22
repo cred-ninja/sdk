@@ -363,4 +363,4 @@ export class MyProviderAdapter extends BaseServiceAdapter {
 
 ## License
 
-MIT © CredNinja
+Apache License 2.0 © CredNinja

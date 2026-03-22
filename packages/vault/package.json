@@ -2,7 +2,7 @@
   "name": "@credninja/vault",
   "version": "1.0.0",
   "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Cred",
   "engines": {
     "node": ">=18"

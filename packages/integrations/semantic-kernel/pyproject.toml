@@ -7,7 +7,7 @@ name = "cred-semantic-kernel"
 version = "1.0.0"
 description = "Cred Semantic Kernel integration — credential delegation plugin for Microsoft Semantic Kernel agents"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "semantic-kernel", "microsoft", "oauth", "delegation", "ai-agents"]

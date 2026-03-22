@@ -202,4 +202,4 @@ class RedisBackend implements StorageBackend {
 
 ## License
 
-MIT
+Apache License 2.0

@@ -2,7 +2,7 @@
   "name": "@credninja/guard",
   "version": "0.1.0",
   "description": "Policy engine for credential delegation guardrails. Rate limiting, scope filtering, time windows, and more.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "CredNinja",
   "type": "module",
   "engines": {
