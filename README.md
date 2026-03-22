@@ -91,7 +91,7 @@ await vault.store({
 const creds = await vault.get({ provider: 'google', userId: 'user-123' });
 ```
 
-### 4. MCP Server (Claude Desktop)
+### 4. MCP Server
 
 Your MCP config should be shareable. Credentials shouldn't be in it.
 
@@ -111,7 +111,7 @@ Your MCP config should be shareable. Credentials shouldn't be in it.
 }
 ```
 
-When Claude needs your calendar, you approve interactively. The token is brokered at runtime, never stored in your config file.
+When your MCP client needs your calendar, you approve interactively. The token is brokered at runtime, never stored in your config file.
 
 ## How It Works
 
@@ -131,7 +131,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 | [`@credninja/sdk`](./packages/sdk) | Credential delegation SDK. Cloud + standalone | `npm i @credninja/sdk` |
 | [`@credninja/server`](./packages/server) | Self-hosted credential server. Express, Docker, admin UI | `npm i @credninja/server` |
 | [`@credninja/guard`](./packages/guard) | Policy engine for delegation guardrails. Rate limits, scope filtering, time windows, URL allowlists | `npm i @credninja/guard` |
-| [`@credninja/mcp`](./packages/mcp) | MCP server for Claude Desktop and MCP-compatible runtimes | `npx @credninja/mcp` |
+| [`@credninja/mcp`](./packages/mcp) | MCP server for MCP-compatible runtimes | `npx @credninja/mcp` |
 | [`create-cred-app`](./packages/create-cred-app) | Scaffold a self-hosted Cred server in seconds | `npx create-cred-app` |
 | [`cred-auth`](./packages/sdk-python) | Python SDK | `pip install cred-auth` |
 

@@ -41,6 +41,9 @@ jobs:
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth
 
+      - name: Build @credninja/tofu
+        run: npm run build --workspace=packages/tofu
+
       - name: Build @credninja/vault
         run: npm run build --workspace=packages/vault
 
@@ -52,6 +55,9 @@ jobs:
 
       - name: Test @credninja/oauth
         run: npm test --workspace=packages/oauth
+
+      - name: Test @credninja/tofu
+        run: npm test --workspace=packages/tofu
 
       - name: Test @credninja/vault
         run: npm test --workspace=packages/vault
@@ -81,6 +87,9 @@ jobs:
 
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth
+
+      - name: Build @credninja/tofu
+        run: npm run build --workspace=packages/tofu
 
       - name: Build @credninja/vault
         run: npm run build --workspace=packages/vault

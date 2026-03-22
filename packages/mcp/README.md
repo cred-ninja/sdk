@@ -1,12 +1,12 @@
 # @credninja/mcp
 
-MCP server for OAuth2 credential delegation. Secure token brokering for Claude Desktop and AI agents.
+MCP server for OAuth2 credential delegation. Secure token brokering for AI agents.
 
 **Your MCP config should be shareable. Credentials shouldn't be in it.**
 
 ## Overview
 
-This MCP server enables AI agents running in Claude Desktop (or any MCP-compatible runtime) to request delegated OAuth2 access tokens through Cred. Works in two modes:
+This MCP server enables AI agents running in MCP-compatible runtimes to request delegated OAuth2 access tokens through Cred. Works in two modes:
 
 - **Cloud mode:** calls the hosted Cred API for managed delegation, multi-tenant storage, and audit trails
 - **Local mode:** uses `@credninja/oauth` + `@credninja/vault` for fully offline, self-contained credential management
@@ -26,12 +26,9 @@ npm install -g @credninja/mcp
 cred-mcp
 ```
 
-## Claude Desktop Setup
+## MCP Client Setup
 
-Add to your Claude Desktop configuration:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+Add to your MCP client configuration:
 
 ### Cloud Mode
 
@@ -73,7 +70,7 @@ No Cred account needed. Tokens are stored in an encrypted local vault:
 }
 ```
 
-When Claude needs your calendar, you approve interactively. The token is brokered at runtime, never in your config file.
+When your MCP client needs your calendar, you approve interactively. The token is brokered at runtime, never in your config file.
 
 ## Environment Variables
 
@@ -96,7 +93,7 @@ When Claude needs your calendar, you approve interactively. The token is brokere
 
 ## What the Agent Can Do
 
-Once connected, Claude (or any MCP-compatible agent) has access to three tools:
+Once connected, your MCP-compatible agent has access to three tools:
 
 ### `cred_delegate`
 
@@ -130,12 +127,12 @@ Revoke a user's connection to a service.
 
 ## Example Conversation
 
-Here's what it looks like when Claude Desktop uses the Cred MCP server:
+Here's what it looks like when an MCP client uses the Cred MCP server:
 
 ```
 User: Check my Google Calendar for tomorrow's meetings
 
-Claude: I'll get access to your Google Calendar and check tomorrow's meetings.
+Assistant: I'll get access to your Google Calendar and check tomorrow's meetings.
 
         [Calling cred_delegate with service="google", user_id="user_123",
          scopes=["calendar.readonly"]]
@@ -155,7 +152,7 @@ If the user hasn't connected their Google account yet:
 ```
 User: Check my Google Calendar for tomorrow
 
-Claude: I'll need access to your Google Calendar.
+Assistant: I'll need access to your Google Calendar.
 
         [Calling cred_delegate with service="google", user_id="user_123"]
 
@@ -171,7 +168,7 @@ Claude: I'll need access to your Google Calendar.
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Claude Desktop │────▶│  @credninja/mcp │────▶│   Cred API      │
+│   MCP Client    │────▶│  @credninja/mcp │────▶│   Cred API      │
 │                 │     │  (local server) │     │ (your server)   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                                │
@@ -182,7 +179,7 @@ Claude: I'll need access to your Google Calendar.
                         └─────────────────┘
 ```
 
-1. Claude Desktop starts the MCP server locally via npx
+1. Your MCP client starts the MCP server locally via npx
 2. When the agent needs a credential, it calls `cred_delegate`
 3. The MCP server calls the Cred API with your agent token
 4. Cred returns a delegated access token (or consent URL)

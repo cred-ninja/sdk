@@ -2,7 +2,7 @@
  * @credninja/mcp — MCP server for Cred
  *
  * Model Context Protocol server that wraps Cred's delegation API.
- * Enables AI agents running in Claude Desktop (or any MCP-compatible runtime)
+ * Enables AI agents running in MCP-compatible runtimes
  * to request delegated OAuth2 access tokens.
  */
 
