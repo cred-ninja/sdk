@@ -90,6 +90,13 @@ export function createExpressMiddleware(
         targetMethod: req.body?.targetMethod || req.method,
         delegationId: req.body?.delegationId,
         metadata: req.body?.metadata,
+        identitySource: inferIdentitySource(req.body),
+        agentDid: typeof req.body?.agent_did === 'string' ? req.body.agent_did : undefined,
+        tofuFingerprint: typeof req.body?.tofu_fingerprint === 'string' ? req.body.tofu_fingerprint : undefined,
+        webBotAuthKeyId: typeof req.body?.web_bot_auth_key_id === 'string'
+          ? req.body.web_bot_auth_key_id
+          : (typeof req.body?.key_id === 'string' ? req.body.key_id : undefined),
+        signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
       };
 
       // Evaluate policies
@@ -167,6 +174,20 @@ function defaultOnDeny(req: Request, res: Response, decision: GuardDecision): vo
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function inferIdentitySource(body: Record<string, unknown> | undefined): GuardContext['identitySource'] {
+  if (!body) return 'agent-token';
+  if (typeof body.web_bot_auth_key_id === 'string' || typeof body.signature_agent === 'string') {
+    return 'web-bot-auth';
+  }
+  if (typeof body.tofu_fingerprint === 'string') {
+    return 'tofu';
+  }
+  if (typeof body.agent_did === 'string') {
+    return 'did';
+  }
+  return 'agent-token';
 }
 
 /**

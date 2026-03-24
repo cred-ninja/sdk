@@ -14,6 +14,7 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { TokenCache } from '../token-cache.js';
+import type { WebBotAuthSigner } from '../web-bot-auth.js';
 
 export const USE_TOOL_NAME = 'cred_use';
 
@@ -65,6 +66,7 @@ export interface UseToolInput {
 
 export interface UseToolContext {
   tokenCache: TokenCache;
+  webBotAuthSigner?: WebBotAuthSigner;
 }
 
 export async function handleUse(
@@ -107,21 +109,36 @@ export async function handleUse(
     'Accept': 'application/json',
     'User-Agent': 'Cred-MCP/1.0',
     ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
-    // Sanitize extra_headers — strip Authorization to prevent override
+    // Sanitize extra_headers — strip Authorization and Web Bot Auth signature
+    // fields to prevent caller-controlled spoofing or override.
     ...(input.extra_headers
       ? Object.fromEntries(
           Object.entries(input.extra_headers).filter(
-            ([k]) => k.toLowerCase() !== 'authorization',
+            ([k]) => {
+              const key = k.toLowerCase();
+              return key !== 'authorization' &&
+                key !== 'signature' &&
+                key !== 'signature-input' &&
+                key !== 'signature-agent';
+            },
           ),
         )
       : {}),
   };
 
+  const signedHeaders = context.webBotAuthSigner
+    ? context.webBotAuthSigner.signRequest({
+        url: input.url,
+        method: input.method,
+        headers,
+      })
+    : headers;
+
   let response: Response;
   try {
     response = await fetch(input.url, {
       method: input.method,
-      headers,
+      headers: signedHeaders,
       body: hasBody ? JSON.stringify(input.body) : undefined,
     });
   } catch (err) {

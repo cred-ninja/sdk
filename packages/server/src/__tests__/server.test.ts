@@ -15,6 +15,8 @@ const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test
 const TEST_SQLITE_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.sqlite');
 const TEST_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-tofu.json');
 const TEST_SQLITE_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-tofu.sqlite');
+const TEST_SQLITE_NONCE_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-web-bot-auth-nonces.sqlite');
+const DIRECTORY_TEST_HOST = 'cred.example.com';
 
 function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
   return {
@@ -35,7 +37,88 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
       },
     ],
     redirectBaseUri: 'http://localhost:3456',
+    webBotAuthNonceStore: 'memory',
     ...overrides,
+  };
+}
+
+function verifyDirectoryResponseSignature(
+  res: request.Response,
+  authority: string,
+): void {
+  const signatureInput = res.headers['signature-input'];
+  const signature = res.headers['signature'];
+
+  expect(typeof signatureInput).toBe('string');
+  expect(typeof signature).toBe('string');
+
+  const signatureParams = String(signatureInput).replace(/^sig0=/, '');
+  const keyIdMatch = signatureParams.match(/keyid="([^"]+)"/);
+  expect(keyIdMatch).not.toBeNull();
+  const keyId = keyIdMatch![1];
+
+  const directoryKey = res.body.keys.find((key: any) => key.kid === keyId);
+  expect(directoryKey).toBeDefined();
+
+  const rawPublicKey = Buffer.from(directoryKey.x, 'base64url');
+  const publicKey = createPublicKey({
+    key: Buffer.concat([
+      Buffer.from('302a300506032b6570032100', 'hex'),
+      rawPublicKey,
+    ]),
+    format: 'der',
+    type: 'spki',
+  });
+
+  const signatureMatch = String(signature).match(/^sig0=:([^:]+):$/);
+  expect(signatureMatch).not.toBeNull();
+
+  const signatureBase = [
+    `"@authority";req: ${authority}`,
+    `"@signature-params": ${signatureParams}`,
+  ].join('\n');
+
+  const valid = verifySignature(
+    null,
+    Buffer.from(signatureBase, 'utf8'),
+    publicKey,
+    Buffer.from(signatureMatch![1], 'base64'),
+  );
+  expect(valid).toBe(true);
+}
+
+function signWebBotAuthRequest(input: {
+  url: string;
+  signatureAgent: string;
+  keyId: string;
+  privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'];
+  now?: Date;
+  nonce?: string;
+  components?: string[];
+  expiresInSeconds?: number;
+}): Record<string, string> {
+  const now = input.now ?? new Date();
+  const created = Math.floor(now.getTime() / 1000);
+  const expires = created + (input.expiresInSeconds ?? 60);
+  const nonce = input.nonce ?? crypto.randomBytes(12).toString('base64url');
+  const authority = new URL(input.url).host;
+  const components = input.components ?? ['@authority', 'signature-agent'];
+  const signatureParams =
+    `(${components.map((component) => `"${component}"`).join(' ')});created=${created};expires=${expires};nonce="${nonce}";alg="ed25519";keyid="${input.keyId}";tag="web-bot-auth"`;
+  const signatureBase = [
+    ...components.map((component) => {
+      if (component === '@authority') return `"@authority": ${authority}`;
+      if (component === 'signature-agent') return `"signature-agent": "${input.signatureAgent}"`;
+      throw new Error(`Unsupported test component: ${component}`);
+    }),
+    `"@signature-params": ${signatureParams}`,
+  ].join('\n');
+  const signature = sign(null, Buffer.from(signatureBase, 'utf8'), input.privateKey).toString('base64');
+
+  return {
+    'Signature-Agent': `"${input.signatureAgent}"`,
+    'Signature-Input': `sig1=${signatureParams}`,
+    'Signature': `sig1=:${signature}:`,
   };
 }
 
@@ -44,7 +127,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
 describe('@credninja/server', () => {
   afterAll(() => {
     // Cleanup test vault files
-    for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH]) {
+    for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH, TEST_SQLITE_NONCE_PATH]) {
       for (const suffix of ['', '.salt']) {
         const p = base + suffix;
         if (fs.existsSync(p)) fs.unlinkSync(p);
@@ -64,6 +147,176 @@ describe('@credninja/server', () => {
       expect(res.body.providers).toEqual(['google']);
       expect(res.body.vault).toBe('file');
       expect(res.body.tofu).toBe('file');
+    });
+  });
+
+  describe('GET /.well-known/http-message-signatures-directory', () => {
+    it('returns an empty Web Bot Auth directory when no agents are registered', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const res = await request(app)
+        .get('/.well-known/http-message-signatures-directory')
+        .set('Host', DIRECTORY_TEST_HOST);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('application/http-message-signatures-directory+json');
+      expect(res.body.keys).toHaveLength(1);
+      verifyDirectoryResponseSignature(res, DIRECTORY_TEST_HOST);
+    });
+
+    it('returns registered agent keys as Ed25519 JWKs with thumbprint key ids', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const { publicKey } = generateKeyPairSync('ed25519');
+      const spki = publicKey.export({ type: 'spki', format: 'der' });
+      const rawPublicKey = new Uint8Array(spki.slice(-32));
+
+      await tofu.registerAgent({
+        publicKey: rawPublicKey,
+        initialScopes: ['calendar.readonly'],
+        metadata: { name: 'web-bot-auth-test' },
+      });
+
+      const res = await request(app)
+        .get('/.well-known/http-message-signatures-directory')
+        .set('Host', DIRECTORY_TEST_HOST);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('application/http-message-signatures-directory+json');
+      expect(res.body.keys).toHaveLength(2);
+      expect(res.body.keys[0]).toMatchObject({
+        kty: 'OKP',
+        crv: 'Ed25519',
+        alg: 'EdDSA',
+        use: 'sig',
+      });
+      expect(typeof res.body.keys[0].kid).toBe('string');
+      expect(res.body.keys[0].kid.length).toBeGreaterThan(20);
+      verifyDirectoryResponseSignature(res, DIRECTORY_TEST_HOST);
+    });
+
+    it('publishes both current and previous keys during a rotation grace window', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const first = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+      const second = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      const registered = await tofu.registerAgent({
+        publicKey: new Uint8Array(first.slice(-32)),
+      });
+      const original = await tofu.getAgent(registered.fingerprint);
+      expect(original).not.toBeNull();
+
+      await tofu.rotateKey({
+        fingerprint: registered.fingerprint,
+        newPublicKey: new Uint8Array(second.slice(-32)),
+        gracePeriodHours: 2,
+      });
+
+      const res = await request(app)
+        .get('/.well-known/http-message-signatures-directory')
+        .set('Host', DIRECTORY_TEST_HOST);
+
+      expect(res.status).toBe(200);
+      const kids = res.body.keys.map((key: any) => key.kid);
+      expect(kids).toContain(original!.keyId);
+      const rotated = (await tofu.listAgents()).find((agent) => agent.agentId === original!.agentId);
+      expect(rotated).toBeDefined();
+      expect(kids).toContain(rotated!.keyId);
+      verifyDirectoryResponseSignature(res, DIRECTORY_TEST_HOST);
+    });
+  });
+
+  describe('Web Bot Auth key management APIs', () => {
+    it('creates, lists, and rotates Web Bot Auth keys', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const first = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+      const second = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(first.slice(-32)).toString('base64'),
+          initial_scopes: ['calendar.readonly'],
+          metadata: { label: 'native-web-bot-auth' },
+        });
+
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.agent_id).toBeDefined();
+      expect(createRes.body.key_id).toBeDefined();
+      expect(createRes.body.signature_agent).toContain('/.well-known/http-message-signatures-directory');
+
+      const listRes = await request(app)
+        .get('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(listRes.status).toBe(200);
+      const listed = listRes.body.keys.find((key: any) => key.agent_id === createRes.body.agent_id);
+      expect(listed).toBeDefined();
+      expect(listed.metadata.label).toBe('native-web-bot-auth');
+
+      const rotateRes = await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${createRes.body.agent_id}/rotate`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(second.slice(-32)).toString('base64'),
+          grace_period_hours: 2,
+        });
+
+      expect(rotateRes.status).toBe(200);
+      expect(rotateRes.body.agent_id).toBe(createRes.body.agent_id);
+      expect(rotateRes.body.previous_fingerprint).toBe(createRes.body.fingerprint);
+      expect(rotateRes.body.previous_key_id).toBe(createRes.body.key_id);
+      expect(rotateRes.body.key_id).not.toBe(createRes.body.key_id);
+      expect(rotateRes.body.grace_expires_at).toBeDefined();
+
+      const listAfterRotate = await request(app)
+        .get('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      const rotated = listAfterRotate.body.keys.find((key: any) => key.agent_id === createRes.body.agent_id);
+      expect(rotated.previous_key_id).toBe(createRes.body.key_id);
+      expect(rotated.rotation_grace_expires_at).toBeDefined();
+    });
+
+    it('surfaces Web Bot Auth metadata in the audit API', async () => {
+      const { app, tofu, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await tofu.init();
+      await vault.init();
+
+      const first = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(first.slice(-32)).toString('base64'),
+        });
+
+      expect(createRes.status).toBe(201);
+
+      const auditRes = await request(app)
+        .get('/api/v1/audit')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      const rawEvents = vault.queryAuditEvents({ limit: 20 });
+      const rawCreateEvent = rawEvents.find((event) =>
+        event.action === 'create' &&
+        event.resource.type === 'agent' &&
+        event.metadata?.webBotAuthKeyId === createRes.body.key_id
+      );
+
+      expect(rawCreateEvent).toBeDefined();
+      expect(rawCreateEvent?.metadata?.identitySource).toBe('web-bot-auth');
+
+      expect(auditRes.status).toBe(200);
+      expect(auditRes.body.entries.some((entry: any) => entry.action === 'create' && entry.service === 'agent')).toBe(true);
     });
   });
 
@@ -240,6 +493,312 @@ describe('@credninja/server', () => {
       expect(res.body.scopes).toEqual(['calendar.readonly']);
       expect(res.body.delegation_id).toMatch(/^del_/);
       expect(res.body.expires_in).toBeGreaterThan(0);
+    });
+
+    it('requires and verifies Web Bot Auth signatures when configured', async () => {
+      const config = makeTestConfig({
+        webBotAuthMode: 'require',
+        redirectBaseUri: 'http://localhost:3456',
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite',
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const spki = keypair.publicKey.export({ type: 'spki', format: 'der' });
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(spki.slice(-32)).toString('base64'),
+        });
+
+      expect(createRes.status).toBe(201);
+
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: `${config.redirectBaseUri}/.well-known/http-message-signatures-directory`,
+        keyId: createRes.body.key_id,
+        privateKey: keypair.privateKey,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(200);
+
+      const rawEvents = vault.queryAuditEvents({ limit: 20 });
+      const delegateEvent = rawEvents.find((event) =>
+        event.action === 'delegate' &&
+        event.metadata?.identitySource === 'web-bot-auth'
+      );
+      expect(delegateEvent?.metadata?.webBotAuthKeyId).toBe(createRes.body.key_id);
+      expect(delegateEvent?.metadata?.signatureAgent).toBe(`${config.redirectBaseUri}/.well-known/http-message-signatures-directory`);
+    });
+
+    it('rejects unsigned delegate requests when Web Bot Auth is required', async () => {
+      const config = makeTestConfig({ webBotAuthMode: 'require' });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Web Bot Auth signature required');
+    });
+
+    it('rejects replayed Web Bot Auth nonces', async () => {
+      const sharedConfig = {
+        webBotAuthMode: 'require',
+        redirectBaseUri: 'http://localhost:3456',
+        vaultStorage: 'sqlite' as const,
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite' as const,
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+        webBotAuthNonceStore: 'sqlite' as const,
+        webBotAuthNoncePath: TEST_SQLITE_NONCE_PATH,
+      };
+      const firstServer = createServer(makeTestConfig(sharedConfig));
+      const secondServer = createServer(makeTestConfig(sharedConfig));
+      await firstServer.vault.init();
+      await firstServer.tofu.init();
+      await secondServer.vault.init();
+      await secondServer.tofu.init();
+
+      await firstServer.vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const spki = keypair.publicKey.export({ type: 'spki', format: 'der' });
+      const createRes = await request(firstServer.app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(spki.slice(-32)).toString('base64'),
+        });
+
+      expect(createRes.status).toBe(201);
+
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: `${sharedConfig.redirectBaseUri}/.well-known/http-message-signatures-directory`,
+        keyId: createRes.body.key_id,
+        privateKey: keypair.privateKey,
+        nonce: 'replay-test-nonce',
+      });
+
+      const firstRes = await request(firstServer.app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(firstRes.status).toBe(200);
+
+      const replayRes = await request(secondServer.app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(replayRes.status).toBe(401);
+      expect(replayRes.body.error).toBe('invalid_web_bot_auth');
+      expect(replayRes.body.message).toMatch(/nonce has already been used/i);
+    });
+
+    it('rejects signatures that do not cover signature-agent', async () => {
+      const config = makeTestConfig({
+        webBotAuthMode: 'require',
+        redirectBaseUri: 'http://localhost:3456',
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const spki = keypair.publicKey.export({ type: 'spki', format: 'der' });
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(spki.slice(-32)).toString('base64'),
+        });
+
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: `${config.redirectBaseUri}/.well-known/http-message-signatures-directory`,
+        keyId: createRes.body.key_id,
+        privateKey: keypair.privateKey,
+        components: ['@authority'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_web_bot_auth');
+      expect(res.body.message).toMatch(/must cover @authority and signature-agent/i);
+    });
+
+    it('rejects expired Web Bot Auth signatures', async () => {
+      const config = makeTestConfig({
+        webBotAuthMode: 'require',
+        redirectBaseUri: 'http://localhost:3456',
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const spki = keypair.publicKey.export({ type: 'spki', format: 'der' });
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          public_key: Buffer.from(spki.slice(-32)).toString('base64'),
+        });
+
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: `${config.redirectBaseUri}/.well-known/http-message-signatures-directory`,
+        keyId: createRes.body.key_id,
+        privateKey: keypair.privateKey,
+        now: new Date(Date.now() - 5 * 60 * 1000),
+        expiresInSeconds: 60,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_web_bot_auth');
+      expect(res.body.message).toMatch(/expired/i);
+    });
+
+    it('rejects non-https remote Signature-Agent URLs', async () => {
+      const config = makeTestConfig({ webBotAuthMode: 'require' });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: 'http://remote.example.com/.well-known/http-message-signatures-directory',
+        keyId: 'kid_unused',
+        privateKey: keypair.privateKey,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_web_bot_auth');
+      expect(res.body.message).toMatch(/must use HTTPS unless it targets localhost/i);
     });
 
     it('denies scope escalation on the normalized route', async () => {

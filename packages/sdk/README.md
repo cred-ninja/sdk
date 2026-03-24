@@ -153,6 +153,79 @@ await cred.revoke({
 });
 ```
 
+### `cred.listWebBotAuthKeys()`
+
+List registered Web Bot Auth identities from a Cred server.
+
+```typescript
+const keys = await cred.listWebBotAuthKeys();
+```
+
+### `cred.getWebBotAuthDirectoryUrl()`
+
+Return the expected `Signature-Agent` directory URL for the configured Cred server.
+
+```typescript
+const signatureAgent = cred.getWebBotAuthDirectoryUrl();
+```
+
+### `cred.getWebBotAuthDirectory()`
+
+Fetch the current Web Bot Auth directory document from the Cred server.
+
+```typescript
+const directory = await cred.getWebBotAuthDirectory();
+
+for (const key of directory.keys) {
+  console.log(key.kid);
+}
+```
+
+### `cred.registerWebBotAuthKey(params)`
+
+Register or import a Web Bot Auth public key.
+
+```typescript
+const registered = await cred.registerWebBotAuthKey({
+  publicKey: myEd25519PublicKeyBytes,
+  initialScopes: ['calendar.readonly'],
+  metadata: { environment: 'prod' },
+});
+```
+
+### `cred.rotateWebBotAuthKey(params)`
+
+Rotate the public key for a registered Web Bot Auth identity.
+
+```typescript
+const rotated = await cred.rotateWebBotAuthKey({
+  agentId: registered.agentId,
+  publicKey: nextEd25519PublicKeyBytes,
+  gracePeriodHours: 24,
+});
+```
+
+### `createWebBotAuthSigner(config)`
+
+Create a reusable Web Bot Auth signer for outbound HTTP requests.
+
+```typescript
+import { createWebBotAuthSigner } from '@credninja/sdk';
+
+const signer = createWebBotAuthSigner({
+  privateKeyHex: process.env.CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX!,
+  signatureAgent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+  ttlSeconds: 60,
+});
+
+const signedHeaders = signer.signRequest({
+  url: 'https://api.example.com/v1/resource',
+  method: 'GET',
+});
+```
+
+This signer is transport-agnostic. It only returns headers; it does not send the request.
+
 ## DID agent identity
 
 Agents can have a cryptographic identity (`did:key`) to produce verifiable delegation receipts.

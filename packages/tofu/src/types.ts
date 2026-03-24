@@ -33,6 +33,7 @@ export interface AgentIdentityRow {
   agentId: string;
   publicKey: string;
   fingerprint: string;
+  keyId: string;
   status: AgentStatus;
   ownerUserId: string | null;
   initialScopes: string[];
@@ -41,7 +42,9 @@ export interface AgentIdentityRow {
   updatedAt: Date;
   claimedAt: Date | null;
   revokedAt: Date | null;
+  previousPublicKey: string | null;
   previousFingerprint: string | null;
+  previousKeyId: string | null;
   rotationGraceExpiresAt: Date | null;
 }
 
@@ -49,6 +52,7 @@ export interface AgentIdentityStoredRow {
   agentId: string;
   publicKey: string;
   fingerprint: string;
+  keyId: string;
   status: AgentStatus;
   ownerUserId: string | null;
   initialScopes: string;
@@ -66,4 +70,5 @@ export interface GeneratedKeypair {
   publicKey: Uint8Array;
   privateKey: Uint8Array;
   fingerprint: string;
+  keyId: string;
 }

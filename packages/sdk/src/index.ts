@@ -1,11 +1,12 @@
-export { Cred } from './cred';
-export { CredError, ConsentRequiredError } from './errors';
+export { Cred } from './cred.js';
+export { CredError, ConsentRequiredError } from './errors.js';
+export { createWebBotAuthSigner, rawPrivateKeyToPublicKeyHex } from './web-bot-auth.js';
 export {
   generateAgentIdentity,
   importAgentIdentity,
   verifyDelegationReceipt,
   CRED_PUBLIC_KEY_HEX,
-} from './identity';
+} from './identity.js';
 export type {
   AgentIdentity,
   AgentStatus,
@@ -14,7 +15,8 @@ export type {
   ImportParams,
   VerifyReceiptOptions,
   DelegationReceiptPayload,
-} from './identity';
+} from './identity.js';
+export type { WebBotAuthSigner, WebBotAuthSignerConfig } from './web-bot-auth.js';
 export type {
   CredConfig,
   CredCloudConfig,
@@ -30,6 +32,17 @@ export type {
   SubDelegationResult,
   GetConsentUrlParams,
   RevokeParams,
+  AuditEntry,
+  AuditParams,
   RegisterAgentParams,
   RevokeAgentParams,
-} from './types';
+  WebBotAuthIdentity,
+  WebBotAuthDirectory,
+  WebBotAuthDirectoryKey,
+  RegisterWebBotAuthKeyParams,
+  RotateWebBotAuthKeyParams,
+  RotatedWebBotAuthIdentity,
+  RotateParams,
+  ScheduleRotationParams,
+  RotationStatus,
+} from './types.js';

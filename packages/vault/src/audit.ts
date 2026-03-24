@@ -40,6 +40,8 @@ export interface AuditEvent {
   correlationId: string;
   /** HMAC-SHA256 of sensitive references (raw values never stored) */
   sensitiveFieldsHmac?: Record<string, string>;
+  /** Structured metadata for audit analysis */
+  metadata?: Record<string, unknown>;
   errorMessage?: string;
 }
 
@@ -92,6 +94,7 @@ export interface AuditRow {
   scopes_granted: string | null;
   correlation_id: string;
   sensitive_hmac: string | null;
+  metadata_json: string | null;
   error_message: string | null;
   created_at: string;
 }
@@ -124,6 +127,7 @@ export class SQLiteAuditBackend implements AuditBackend {
         scopes_granted    TEXT,
         correlation_id    TEXT NOT NULL,
         sensitive_hmac    TEXT,
+        metadata_json     TEXT,
         error_message     TEXT,
         created_at        TEXT NOT NULL
       );
@@ -131,6 +135,12 @@ export class SQLiteAuditBackend implements AuditBackend {
       CREATE INDEX IF NOT EXISTS idx_audit_resource  ON vault_audit_events(resource_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_action    ON vault_audit_events(action, timestamp);
     `);
+
+    const columns = this.db.prepare('PRAGMA table_info(vault_audit_events)')
+      .all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'metadata_json')) {
+      this.db.exec('ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
+    }
   }
 
   private ensureDb(): import('better-sqlite3').Database {
@@ -152,12 +162,12 @@ export class SQLiteAuditBackend implements AuditBackend {
         id, timestamp, actor_type, actor_id, actor_fingerprint,
         action, resource_type, resource_id, outcome,
         delegation_chain, scopes_requested, scopes_granted,
-        correlation_id, sensitive_hmac, error_message, created_at
+        correlation_id, sensitive_hmac, metadata_json, error_message, created_at
       ) VALUES (
         @id, @timestamp, @actorType, @actorId, @actorFingerprint,
         @action, @resourceType, @resourceId, @outcome,
         @delegationChain, @scopesRequested, @scopesGranted,
-        @correlationId, @sensitiveHmac, @errorMessage, @createdAt
+        @correlationId, @sensitiveHmac, @metadataJson, @errorMessage, @createdAt
       )
     `).run({
       id: event.id,
@@ -174,6 +184,7 @@ export class SQLiteAuditBackend implements AuditBackend {
       scopesGranted: event.scopesGranted ? JSON.stringify(event.scopesGranted) : null,
       correlationId: event.correlationId,
       sensitiveHmac: event.sensitiveFieldsHmac ? JSON.stringify(event.sensitiveFieldsHmac) : null,
+      metadataJson: event.metadata ? JSON.stringify(event.metadata) : null,
       errorMessage: event.errorMessage ?? null,
       createdAt: now,
     });
@@ -250,6 +261,9 @@ export class SQLiteAuditBackend implements AuditBackend {
       correlationId: row.correlation_id,
       sensitiveFieldsHmac: row.sensitive_hmac
         ? (JSON.parse(row.sensitive_hmac) as Record<string, string>)
+        : undefined,
+      metadata: row.metadata_json
+        ? (JSON.parse(row.metadata_json) as Record<string, unknown>)
         : undefined,
       errorMessage: row.error_message ?? undefined,
     };

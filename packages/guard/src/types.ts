@@ -22,6 +22,16 @@ export interface GuardContext {
   delegationId?: string;
   /** Arbitrary metadata from the agent request */
   metadata?: Record<string, unknown>;
+  /** Identity source used for this request */
+  identitySource?: 'agent-token' | 'did' | 'tofu' | 'web-bot-auth';
+  /** Optional agent DID */
+  agentDid?: string;
+  /** Optional TOFU fingerprint */
+  tofuFingerprint?: string;
+  /** Optional Web Bot Auth key identifier */
+  webBotAuthKeyId?: string;
+  /** Optional Signature-Agent directory URL */
+  signatureAgent?: string;
 }
 
 /** Result of a single policy evaluation */
@@ -85,6 +95,11 @@ export interface GuardAuditEvent {
   effectiveScopes: string[];
   targetUrl?: string;
   targetMethod?: string;
+  identitySource?: 'agent-token' | 'did' | 'tofu' | 'web-bot-auth';
+  agentDid?: string;
+  tofuFingerprint?: string;
+  webBotAuthKeyId?: string;
+  signatureAgent?: string;
 }
 
 // ============================================================================
@@ -131,4 +146,14 @@ export interface MaxTtlPolicyConfig {
   maxTtlSeconds: number;
   /** Per-provider overrides */
   perProvider?: Record<string, number>;
+}
+
+/** Require or constrain Web Bot Auth identities */
+export interface WebBotAuthPolicyConfig {
+  /** Deny when no Web Bot Auth key id is present */
+  requireKeyId?: boolean;
+  /** Restrict allowed identity sources */
+  allowedIdentitySources?: Array<'agent-token' | 'did' | 'tofu' | 'web-bot-auth'>;
+  /** Optional allowed Signature-Agent URL prefixes */
+  allowedSignatureAgentPrefixes?: string[];
 }

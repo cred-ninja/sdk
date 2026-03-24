@@ -5,6 +5,8 @@ import type { AgentIdentityBackend } from './storage/interface.js';
 import {
   fingerprintPublicKey,
   normalizePublicKey,
+  publicKeyToJwkWithKid,
+  publicKeyToJwkThumbprint,
   publicKeyHexToBytes,
   verifySignature as verifySignatureWithPublicKey,
 } from './keypair.js';
@@ -49,6 +51,7 @@ export class AgentVault {
       agentId: randomUUID(),
       publicKey,
       fingerprint,
+      keyId: publicKeyToJwkThumbprint(input.publicKey),
       status: 'unclaimed',
       ownerUserId: null,
       initialScopes: JSON.stringify(input.initialScopes ?? []),
@@ -128,6 +131,12 @@ export class AgentVault {
     return verifySignatureWithPublicKey(publicKeyHexToBytes(keyHex), payload, signature);
   }
 
+  async listAgents(): Promise<AgentIdentityRow[]> {
+    await this.ensureInit();
+    const rows = await this.backend.listAgents(new Date().toISOString());
+    return rows.map(deserializeRow);
+  }
+
   async rotateKey(input: RotateKeyInput): Promise<RotateKeyResult> {
     await this.ensureInit();
     const row = await this.getExistingAgent(input.fingerprint);
@@ -151,6 +160,7 @@ export class AgentVault {
     row.previousFingerprint = row.fingerprint;
     row.publicKey = normalizePublicKey(input.newPublicKey);
     row.fingerprint = newFingerprint;
+    row.keyId = publicKeyToJwkThumbprint(input.newPublicKey);
     row.rotationGraceExpiresAt = graceExpiresAt.toISOString();
     row.updatedAt = now.toISOString();
 
@@ -211,10 +221,14 @@ export async function createAgentVault(options: AgentVaultOptions): Promise<Agen
 }
 
 function deserializeRow(row: AgentIdentityStoredRow): AgentIdentityRow {
+  const previousKeyId = row.previousPublicKey
+    ? publicKeyToJwkThumbprint(publicKeyHexToBytes(row.previousPublicKey))
+    : null;
   return {
     agentId: row.agentId,
     publicKey: row.publicKey,
     fingerprint: row.fingerprint,
+    keyId: row.keyId ?? row.fingerprint,
     status: row.status,
     ownerUserId: row.ownerUserId,
     initialScopes: JSON.parse(row.initialScopes) as string[],
@@ -223,7 +237,35 @@ function deserializeRow(row: AgentIdentityStoredRow): AgentIdentityRow {
     updatedAt: new Date(row.updatedAt),
     claimedAt: row.claimedAt ? new Date(row.claimedAt) : null,
     revokedAt: row.revokedAt ? new Date(row.revokedAt) : null,
+    previousPublicKey: row.previousPublicKey,
     previousFingerprint: row.previousFingerprint,
+    previousKeyId,
     rotationGraceExpiresAt: row.rotationGraceExpiresAt ? new Date(row.rotationGraceExpiresAt) : null,
   };
+}
+
+export function agentIdentityToDirectoryJwk(identity: Pick<AgentIdentityRow, 'publicKey'>): ReturnType<typeof publicKeyToJwkWithKid> & { alg: 'EdDSA'; use: 'sig' } {
+  const jwk = publicKeyToJwkWithKid(publicKeyHexToBytes(identity.publicKey));
+  return {
+    ...jwk,
+    alg: 'EdDSA' as const,
+    use: 'sig' as const,
+  };
+}
+
+export function agentIdentityToDirectoryJwks(
+  identity: Pick<AgentIdentityRow, 'publicKey' | 'previousPublicKey' | 'rotationGraceExpiresAt'>,
+  now = new Date(),
+): Array<ReturnType<typeof publicKeyToJwkWithKid> & { alg: 'EdDSA'; use: 'sig' }> {
+  const keys = [agentIdentityToDirectoryJwk(identity)];
+
+  if (
+    identity.previousPublicKey &&
+    identity.rotationGraceExpiresAt &&
+    identity.rotationGraceExpiresAt.getTime() > now.getTime()
+  ) {
+    keys.push(agentIdentityToDirectoryJwk({ publicKey: identity.previousPublicKey }));
+  }
+
+  return keys;
 }

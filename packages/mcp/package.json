@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && npx tsc",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
   },
   "files": [
     "dist",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "typescript": "^5.3.3",
     "@types/node": "^20.10.6",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "vitest": "^4.0.18"
   }
 }

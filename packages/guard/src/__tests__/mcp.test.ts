@@ -189,6 +189,35 @@ describe('MCP Tool Wrapper', () => {
       expect(ctx.guardAuditEvent.type).toBe('guard.decision');
     });
 
+    it('captures Web Bot Auth identity fields from metadata', async () => {
+      let capturedKeyId = '';
+      let capturedSignatureAgent = '';
+      const guard = new CredGuard({
+        policies: [{
+          name: 'capture-web-bot-auth',
+          evaluate: (ctx) => {
+            capturedKeyId = ctx.webBotAuthKeyId ?? '';
+            capturedSignatureAgent = ctx.signatureAgent ?? '';
+            return { decision: 'ALLOW', policy: 'capture-web-bot-auth' };
+          },
+        }],
+      });
+      const wrapped = wrapMcpToolHandler(guard, makeSuccessHandler());
+      const ctx = makeContext() as any;
+
+      await wrapped(makeToolInput({
+        metadata: {
+          identitySource: 'web-bot-auth',
+          webBotAuthKeyId: 'kid_456',
+          signatureAgent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+        },
+      }), ctx);
+
+      expect(capturedKeyId).toBe('kid_456');
+      expect(capturedSignatureAgent).toContain('/.well-known/http-message-signatures-directory');
+      expect(ctx.guardAuditEvent.webBotAuthKeyId).toBe('kid_456');
+    });
+
     it('updates input scopes when narrowed', async () => {
       const handler = vi.fn().mockResolvedValue({
         content: [{ type: 'text', text: 'Success!' }],

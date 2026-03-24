@@ -44,6 +44,10 @@ export class FileBackend implements AgentIdentityBackend {
     return null;
   }
 
+  listAgents(_nowIso: string): AgentIdentityStoredRow[] {
+    return Object.values(this.readAll());
+  }
+
   updateAgent(row: AgentIdentityStoredRow): void {
     const data = this.readAll();
     data[row.agentId] = row;

@@ -10,6 +10,8 @@ export { createCredMcpServer, startServer } from './server.js';
 export { loadConfig } from './config.js';
 export type { CredMcpConfig, CredMcpCloudConfig, CredMcpLocalConfig } from './config.js';
 export { TokenCache, TokenEntry } from './token-cache.js';
+export { createWebBotAuthSigner } from './web-bot-auth.js';
+export type { WebBotAuthSigner } from './web-bot-auth.js';
 export {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,

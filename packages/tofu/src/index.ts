@@ -1,5 +1,15 @@
-export { AgentVault, createAgentVault } from './agent-vault.js';
-export { generateKeypair, fingerprintPublicKey, normalizePublicKey, verifySignature } from './keypair.js';
+export { AgentVault, createAgentVault, agentIdentityToDirectoryJwk, agentIdentityToDirectoryJwks } from './agent-vault.js';
+export {
+  generateKeypair,
+  fingerprintPublicKey,
+  normalizePublicKey,
+  publicKeyToJwk,
+  publicKeyToJwkThumbprint,
+  publicKeyToJwkWithKid,
+  jwkThumbprint,
+  verifySignature,
+} from './keypair.js';
+export type { Ed25519Jwk, Ed25519JwkWithKid } from './keypair.js';
 export { computeGraceExpiry, DEFAULT_ROTATION_GRACE_HOURS } from './rotation.js';
 export { SQLiteBackend } from './storage/sqlite.js';
 export { FileBackend } from './storage/file.js';

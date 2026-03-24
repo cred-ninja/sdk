@@ -187,6 +187,40 @@ describe('Express Middleware', () => {
       expect(req.guardAuditEvent.allowed).toBe(true);
     });
 
+    it('captures Web Bot Auth identity fields from the request body', async () => {
+      let capturedKeyId = '';
+      let capturedSignatureAgent = '';
+      let capturedIdentitySource = '';
+      const guard = new CredGuard({
+        policies: [{
+          name: 'capture-web-bot-auth',
+          evaluate: (ctx) => {
+            capturedKeyId = ctx.webBotAuthKeyId ?? '';
+            capturedSignatureAgent = ctx.signatureAgent ?? '';
+            capturedIdentitySource = ctx.identitySource ?? '';
+            return { decision: 'ALLOW', policy: 'capture-web-bot-auth' };
+          },
+        }],
+      });
+      const middleware = createExpressMiddleware(guard);
+      const req = mockRequest({
+        body: {
+          scopes: ['gmail.readonly'],
+          web_bot_auth_key_id: 'kid_123',
+          signature_agent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+        },
+      });
+      const res = mockResponse();
+      const next = vi.fn();
+
+      await middleware(req, res, next);
+
+      expect(capturedKeyId).toBe('kid_123');
+      expect(capturedSignatureAgent).toContain('/.well-known/http-message-signatures-directory');
+      expect(capturedIdentitySource).toBe('web-bot-auth');
+      expect((req as any).guardAuditEvent.webBotAuthKeyId).toBe('kid_123');
+    });
+
     it('updates body scopes when narrowed', async () => {
       const guard = new CredGuard({
         policies: [{

@@ -17,14 +17,19 @@ import {
   Connection,
   AuditEntry,
   AuditParams,
+  WebBotAuthIdentity,
+  WebBotAuthDirectory,
+  RegisterWebBotAuthKeyParams,
+  RotateWebBotAuthKeyParams,
+  RotatedWebBotAuthIdentity,
   GetConsentUrlParams,
   RevokeParams,
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
   RotationStrategy,
-} from './types';
-import { CredError, ConsentRequiredError } from './errors';
+} from './types.js';
+import { CredError, ConsentRequiredError } from './errors.js';
 import crypto from 'crypto';
 
 // No default base URL — users must explicitly set their server URL.
@@ -168,6 +173,29 @@ interface AuditEventInput {
   correlationId: string;
   sensitiveFieldsHmac?: Record<string, string>;
   errorMessage?: string;
+}
+
+interface WebBotAuthIdentityWire {
+  agent_id: string;
+  fingerprint: string;
+  key_id: string;
+  previous_fingerprint?: string | null;
+  previous_key_id?: string | null;
+  rotation_grace_expires_at?: string | null;
+  status: 'active' | 'unclaimed' | 'revoked';
+  initial_scopes: string[];
+  metadata: Record<string, unknown>;
+  signature_agent: string;
+  created_at: string;
+  updated_at: string;
+  claimed_at: string | null;
+  revoked_at: string | null;
+}
+
+interface RotatedWebBotAuthIdentityWire extends WebBotAuthIdentityWire {
+  previous_fingerprint: string;
+  previous_key_id?: string | null;
+  grace_expires_at: string;
 }
 
 function isLocalConfig(config: CredConfig): config is CredLocalConfig {
@@ -1116,6 +1144,100 @@ export class Cred {
   }
 
   /**
+   * List registered Web Bot Auth identities in cloud mode.
+   */
+  async listWebBotAuthKeys(): Promise<WebBotAuthIdentity[]> {
+    if (this.isLocal) {
+      throw new CredError(
+        'listWebBotAuthKeys() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const data = await this.get<{ keys: WebBotAuthIdentityWire[] }>('/api/v1/web-bot-auth/keys');
+    return data.keys.map((key) => this.mapWebBotAuthIdentity(key));
+  }
+
+  /**
+   * Return the Web Bot Auth directory URL for the configured Cred server.
+   */
+  getWebBotAuthDirectoryUrl(): string {
+    if (this.isLocal) {
+      throw new CredError(
+        'getWebBotAuthDirectoryUrl() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    return `${this.baseUrl}/.well-known/http-message-signatures-directory`;
+  }
+
+  /**
+   * Fetch the current Web Bot Auth directory document from the Cred server.
+   */
+  async getWebBotAuthDirectory(): Promise<WebBotAuthDirectory> {
+    if (this.isLocal) {
+      throw new CredError(
+        'getWebBotAuthDirectory() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    return this.get<WebBotAuthDirectory>('/.well-known/http-message-signatures-directory');
+  }
+
+  /**
+   * Register or import a Web Bot Auth public key in cloud mode.
+   */
+  async registerWebBotAuthKey(params: RegisterWebBotAuthKeyParams): Promise<WebBotAuthIdentity> {
+    if (this.isLocal) {
+      throw new CredError(
+        'registerWebBotAuthKey() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const data = await this.post<WebBotAuthIdentityWire>('/api/v1/web-bot-auth/keys', {
+      public_key: this.encodeWebBotAuthPublicKey(params.publicKey),
+      initial_scopes: params.initialScopes,
+      metadata: params.metadata,
+    });
+    return this.mapWebBotAuthIdentity(data);
+  }
+
+  /**
+   * Rotate a registered Web Bot Auth public key in cloud mode.
+   */
+  async rotateWebBotAuthKey(params: RotateWebBotAuthKeyParams): Promise<RotatedWebBotAuthIdentity> {
+    if (this.isLocal) {
+      throw new CredError(
+        'rotateWebBotAuthKey() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const data = await this.post<RotatedWebBotAuthIdentityWire>(
+      `/api/v1/web-bot-auth/keys/${encodeURIComponent(params.agentId)}/rotate`,
+      {
+        public_key: this.encodeWebBotAuthPublicKey(params.publicKey),
+        grace_period_hours: params.gracePeriodHours,
+      },
+    );
+
+    return {
+      ...this.mapWebBotAuthIdentity(data),
+      previousFingerprint: data.previous_fingerprint,
+      previousKeyId: data.previous_key_id ?? null,
+      graceExpiresAt: data.grace_expires_at,
+    };
+  }
+
+  /**
    * Emergency revocation: marks agent as revoked.
    * After calling this, all subsequent delegate() calls with this agent's fingerprint will throw.
    * Local mode: updates vault_agents table.
@@ -1162,6 +1284,32 @@ export class Cred {
       headers: this.headers(),
     });
     return this.handleResponse<T>(res);
+  }
+
+  private mapWebBotAuthIdentity(data: WebBotAuthIdentityWire): WebBotAuthIdentity {
+    return {
+      agentId: data.agent_id,
+      fingerprint: data.fingerprint,
+      keyId: data.key_id,
+      previousFingerprint: data.previous_fingerprint ?? null,
+      previousKeyId: data.previous_key_id ?? null,
+      rotationGraceExpiresAt: data.rotation_grace_expires_at ?? null,
+      status: data.status,
+      initialScopes: data.initial_scopes,
+      metadata: data.metadata,
+      signatureAgent: data.signature_agent,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at,
+      claimedAt: data.claimed_at,
+      revokedAt: data.revoked_at,
+    };
+  }
+
+  private encodeWebBotAuthPublicKey(publicKey: Uint8Array | string): string {
+    if (typeof publicKey === 'string') {
+      return publicKey;
+    }
+    return Buffer.from(publicKey).toString('base64');
   }
 
   private async delete(path: string): Promise<void> {

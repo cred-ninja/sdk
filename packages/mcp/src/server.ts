@@ -15,6 +15,7 @@ import { Cred } from '@credninja/sdk';
 
 import { CredMcpConfig, CredMcpCloudConfig, CredMcpLocalConfig } from './config.js';
 import { TokenCache } from './token-cache.js';
+import { createWebBotAuthSigner } from './web-bot-auth.js';
 import {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,
@@ -63,6 +64,9 @@ function createCredClient(config: CredMcpConfig): Cred {
  */
 export function createCredMcpServer(config: CredMcpConfig): Server {
   const cred = createCredClient(config);
+  const webBotAuthSigner = config.webBotAuth
+    ? createWebBotAuthSigner(config.webBotAuth)
+    : undefined;
 
   // In-process token cache — tokens never leave this process
   const tokenCache = new TokenCache();
@@ -72,6 +76,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     tokenCache,
+    webBotAuthSigner,
   };
 
   const server = new Server(
@@ -137,6 +142,9 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
  */
 export async function startServer(config: CredMcpConfig): Promise<void> {
   const cred = createCredClient(config);
+  const webBotAuthSigner = config.webBotAuth
+    ? createWebBotAuthSigner(config.webBotAuth)
+    : undefined;
 
   const tokenCache = new TokenCache();
 
@@ -144,6 +152,7 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     tokenCache,
+    webBotAuthSigner,
   };
 
   const server = new Server(

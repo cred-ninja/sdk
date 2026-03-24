@@ -80,6 +80,9 @@ When your MCP client needs your calendar, you approve interactively. The token i
 | `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
 | `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
+| `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing for `cred_use` |
+| `CRED_WEB_BOT_AUTH_SIGNATURE_AGENT` | No | | HTTPS URL for the agent's `Signature-Agent` directory |
+| `CRED_WEB_BOT_AUTH_TTL_SECONDS` | No | `30` | Signature lifetime in seconds. Must be between `1` and `300` |
 
 ### Local Mode
 
@@ -200,6 +203,18 @@ const server = createCredMcpServer(config);
 - The MCP server runs locally. Credentials never leave your machine except to call APIs.
 - Refresh tokens are never exposed to agents
 - Local mode: AES-256-GCM encryption with PBKDF2 key derivation for vault storage
+
+## Native Web Bot Auth Signing
+
+If `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` and `CRED_WEB_BOT_AUTH_SIGNATURE_AGENT` are set, `cred_use` adds native Web Bot Auth headers on outbound API requests:
+
+- `Signature`
+- `Signature-Input`
+- `Signature-Agent`
+
+This makes MCP mode the first Cred execution path that can speak Web Bot Auth directly. If those variables are not set, `cred_use` behaves exactly as before.
+
+`cred_use` strips any caller-supplied `Authorization`, `Signature`, `Signature-Input`, and `Signature-Agent` headers before signing so the LLM cannot spoof or override the final transport identity.
 
 ## Deployment Modes
 

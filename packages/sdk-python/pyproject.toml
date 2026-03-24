@@ -29,7 +29,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://cred.ninja"
-Repository = "https://github.com/credninja/cred-python"
+Repository = "https://github.com/cred-ninja/sdk"
 Documentation = "https://docs.cred.ninja"
 
 [project.optional-dependencies]

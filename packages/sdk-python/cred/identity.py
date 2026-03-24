@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 
 # ── Cred Public Key (pinned at build time) ───────────────────────────────────
 
-CRED_PUBLIC_KEY_HEX = "PLACEHOLDER_REPLACE_BEFORE_LAUNCH"
+CRED_PUBLIC_KEY_HEX = "ed50f12caeed3e3054be071c2884fda47752a02b5d98e37dfd79db5fd502699f"
 
 # ── Base58btc alphabet (Bitcoin) ─────────────────────────────────────────────
 

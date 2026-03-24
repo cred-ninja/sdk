@@ -59,6 +59,7 @@ export class SQLiteBackend implements StorageBackend {
         scopes_granted    TEXT,
         correlation_id    TEXT NOT NULL,
         sensitive_hmac    TEXT,
+        metadata_json     TEXT,
         error_message     TEXT,
         created_at        TEXT NOT NULL
       );
@@ -66,6 +67,12 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_audit_resource  ON vault_audit_events(resource_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_action    ON vault_audit_events(action, timestamp);
     `);
+
+    const auditColumns = this.db.prepare('PRAGMA table_info(vault_audit_events)')
+      .all() as Array<{ name: string }>;
+    if (!auditColumns.some((column) => column.name === 'metadata_json')) {
+      this.db.exec('ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
+    }
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
@@ -543,12 +550,12 @@ export class SQLiteBackend implements StorageBackend {
         id, timestamp, actor_type, actor_id, actor_fingerprint,
         action, resource_type, resource_id, outcome,
         delegation_chain, scopes_requested, scopes_granted,
-        correlation_id, sensitive_hmac, error_message, created_at
+        correlation_id, sensitive_hmac, metadata_json, error_message, created_at
       ) VALUES (
         @id, @timestamp, @actorType, @actorId, @actorFingerprint,
         @action, @resourceType, @resourceId, @outcome,
         @delegationChain, @scopesRequested, @scopesGranted,
-        @correlationId, @sensitiveHmac, @errorMessage, @createdAt
+        @correlationId, @sensitiveHmac, @metadataJson, @errorMessage, @createdAt
       )
     `).run({
       id: event.id,
@@ -565,6 +572,7 @@ export class SQLiteBackend implements StorageBackend {
       scopesGranted: event.scopesGranted ? JSON.stringify(event.scopesGranted) : null,
       correlationId: event.correlationId,
       sensitiveHmac: event.sensitiveFieldsHmac ? JSON.stringify(event.sensitiveFieldsHmac) : null,
+      metadataJson: event.metadata ? JSON.stringify(event.metadata) : null,
       errorMessage: event.errorMessage ?? null,
       createdAt: now,
     });
@@ -637,6 +645,9 @@ export class SQLiteBackend implements StorageBackend {
       correlationId: row.correlation_id,
       sensitiveFieldsHmac: row.sensitive_hmac
         ? (JSON.parse(row.sensitive_hmac) as Record<string, string>)
+        : undefined,
+      metadata: (row as any).metadata_json
+        ? (JSON.parse((row as any).metadata_json) as Record<string, unknown>)
         : undefined,
       errorMessage: row.error_message ?? undefined,
     }));

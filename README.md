@@ -205,7 +205,27 @@ const guardedHandler = guard.wrapMcpTool(handleUse);
 
 - **Not an auth provider.** Cred never handles login. It receives verified identity from your existing provider (WorkOS, Supabase, Clerk, NextAuth) and manages outbound credential lifecycle from there.
 - **Not a vault/secret manager.** HashiCorp Vault manages infrastructure secrets (DB passwords, API keys you own). Cred manages user-delegated OAuth tokens: credentials users grant to your agent.
-- **Not an API proxy.** Cred is not in the hot path of API calls. The agent calls the service directly with the brokered token. (Token proxy mode is optional for maximum security.)
+- **Not primarily an API proxy.** Core Cred delegation is not in the hot path of upstream API calls. The main exception is signed execution paths such as MCP `cred_use`, where Cred can add Web Bot Auth headers before the upstream request is sent.
+
+## Web Bot Auth
+
+Cred now supports Cloudflare-style Web Bot Auth as a transport identity layer on top of credential delegation:
+
+- `@credninja/server` can host a signed `/.well-known/http-message-signatures-directory`
+- `@credninja/server` can verify inbound signed-agent requests
+- `@credninja/mcp` can emit signed outbound requests
+- `@credninja/sdk` can manage Web Bot Auth keys and create signed requests
+
+Use Web Bot Auth for "who sent this request?" and Cred for "what user-delegated credential is this agent allowed to use?"
+
+Implementation and operator docs:
+
+- [Identity ADR](./docs/web-bot-auth-identity-adr.md)
+- [Data model](./docs/web-bot-auth-data-model.md)
+- [TOFU bridge](./docs/web-bot-auth-tofu-bridge.md)
+- [Threat model](./docs/web-bot-auth-threat-model.md)
+- [Security review](./docs/web-bot-auth-security-review.md)
+- [Cloudflare submission checklist](./docs/cloudflare-submission-checklist.md)
 
 ## Standalone First
 

@@ -13,7 +13,9 @@
     }
   },
   "files": [
-    "dist",
+    "dist/cjs",
+    "dist/esm",
+    "README.md",
     "LICENSE",
     "NOTICE"
   ],

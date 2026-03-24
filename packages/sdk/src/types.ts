@@ -125,6 +125,56 @@ export interface AuditParams {
   limit?: number;
 }
 
+export interface WebBotAuthIdentity {
+  agentId: string;
+  fingerprint: string;
+  keyId: string;
+  previousFingerprint?: string | null;
+  previousKeyId?: string | null;
+  rotationGraceExpiresAt?: string | null;
+  status: 'active' | 'unclaimed' | 'revoked';
+  initialScopes: string[];
+  metadata: Record<string, unknown>;
+  signatureAgent: string;
+  createdAt: string;
+  updatedAt: string;
+  claimedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface WebBotAuthDirectoryKey {
+  kty: 'OKP';
+  crv: 'Ed25519';
+  x: string;
+  kid: string;
+  alg: 'EdDSA';
+  use: 'sig';
+}
+
+export interface WebBotAuthDirectory {
+  keys: WebBotAuthDirectoryKey[];
+}
+
+export interface RegisterWebBotAuthKeyParams {
+  /** Raw 32-byte Ed25519 public key or a base64-encoded public key string. */
+  publicKey: Uint8Array | string;
+  initialScopes?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface RotateWebBotAuthKeyParams {
+  agentId: string;
+  /** Raw 32-byte Ed25519 public key or a base64-encoded public key string. */
+  publicKey: Uint8Array | string;
+  gracePeriodHours?: number;
+}
+
+export interface RotatedWebBotAuthIdentity extends WebBotAuthIdentity {
+  previousFingerprint: string;
+  previousKeyId?: string | null;
+  graceExpiresAt: string;
+}
+
 // ── Delegation chain types ───────────────────────────────────────────────────
 
 export interface DelegationChainLink {

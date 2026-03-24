@@ -27,6 +27,11 @@ export function buildAuditEvent(ctx: GuardContext, decision: GuardDecision): Gua
     effectiveScopes: decision.effectiveScopes,
     targetUrl: ctx.targetUrl,
     targetMethod: ctx.targetMethod,
+    identitySource: ctx.identitySource,
+    agentDid: ctx.agentDid,
+    tofuFingerprint: ctx.tofuFingerprint,
+    webBotAuthKeyId: ctx.webBotAuthKeyId,
+    signatureAgent: ctx.signatureAgent,
   };
 }
 

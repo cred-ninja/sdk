@@ -8,6 +8,7 @@
  * isolation. In production, place behind a TLS reverse proxy (Caddy/nginx).
  *
  * Endpoints:
+ *   GET  /.well-known/http-message-signatures-directory — Web Bot Auth key directory
  *   GET  /health                          — liveness check
  *   GET  /providers                       — list configured providers
  *   GET  /connect/:provider               — start OAuth flow (browser)
@@ -23,12 +24,13 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
-import { AgentVault } from '@credninja/tofu';
+import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import { ServerConfig, ProviderConfig } from './config.js';
 import { createExpressMiddleware } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
+import { createWebBotAuthNonceStore } from './nonce-store.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +39,55 @@ interface PendingOAuth {
   state: string;
   codeVerifier?: string;
   createdAt: number;
+}
+
+interface WebBotAuthDirectoryResponse {
+  keys: Array<{
+    kty: 'OKP';
+    crv: 'Ed25519';
+    x: string;
+    kid: string;
+    alg: 'EdDSA';
+    use: 'sig';
+  }>;
+}
+
+type WebBotAuthDirectoryKey = WebBotAuthDirectoryResponse['keys'][number];
+
+interface DirectorySignatureHeaders {
+  'Signature-Input': string;
+  'Signature': string;
+}
+
+interface WebBotAuthKeyResponse {
+  agent_id: string;
+  fingerprint: string;
+  key_id: string;
+  previous_fingerprint?: string | null;
+  previous_key_id?: string | null;
+  rotation_grace_expires_at?: string | null;
+  status: string;
+  initial_scopes: string[];
+  metadata: Record<string, unknown>;
+  signature_agent: string;
+  created_at: string;
+  updated_at: string;
+  claimed_at: string | null;
+  revoked_at: string | null;
+}
+
+interface ParsedSignatureInput {
+  label: string;
+  rawParams: string;
+  components: string[];
+  params: Record<string, string>;
+}
+
+interface VerifiedWebBotAuthIdentity {
+  keyId: string;
+  signatureAgent: string;
+  agentId?: string;
+  fingerprint?: string;
 }
 
 // ── Server factory ───────────────────────────────────────────────────────────
@@ -65,6 +116,11 @@ export function createServer(config: ServerConfig) {
 
   // Pending OAuth sessions (state → PendingOAuth). Cleaned up after 10 min.
   const pendingOAuth = new Map<string, PendingOAuth>();
+  const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
+  const webBotAuthNonceStore = createWebBotAuthNonceStore({
+    store: config.webBotAuthNonceStore ?? 'memory',
+    path: config.webBotAuthNoncePath,
+  });
 
   // Hash the agent token once at startup for constant-time comparison
   const agentTokenHash = crypto.createHash('sha256').update(config.agentToken).digest('hex');
@@ -83,6 +139,47 @@ export function createServer(config: ServerConfig) {
       clientSecret: providerConfig.clientSecret,
       redirectUri: `${config.redirectBaseUri}/connect/${providerConfig.slug}/callback`,
     });
+  }
+
+  async function buildWebBotAuthDirectory(): Promise<WebBotAuthDirectoryResponse> {
+    const agents = await tofu.listAgents();
+    const agentKeys: WebBotAuthDirectoryKey[] = agents
+      .filter((agent) => agent.status !== 'revoked')
+      .flatMap((agent) => agentIdentityToDirectoryJwks(agent));
+    const signingKey = getDirectorySigningJwk();
+    const keysByKid = new Map<string, WebBotAuthDirectoryKey>();
+    keysByKid.set(signingKey.kid, signingKey);
+    for (const key of agentKeys) {
+      if (!keysByKid.has(key.kid)) {
+        keysByKid.set(key.kid, key);
+      }
+    }
+    const keys: WebBotAuthDirectoryKey[] = Array.from(keysByKid.values());
+
+    return { keys };
+  }
+
+  function getSignatureAgentUrl(): string {
+    return `${config.redirectBaseUri}/.well-known/http-message-signatures-directory`;
+  }
+
+  function mapAgentToWebBotAuthKey(agent: Awaited<ReturnType<typeof tofu.listAgents>>[number]): WebBotAuthKeyResponse {
+    return {
+      agent_id: agent.agentId,
+      fingerprint: agent.fingerprint,
+      key_id: agent.keyId,
+      previous_fingerprint: agent.previousFingerprint,
+      previous_key_id: agent.previousKeyId,
+      rotation_grace_expires_at: agent.rotationGraceExpiresAt ? agent.rotationGraceExpiresAt.toISOString() : null,
+      status: agent.status,
+      initial_scopes: agent.initialScopes,
+      metadata: agent.metadata,
+      signature_agent: getSignatureAgentUrl(),
+      created_at: agent.createdAt.toISOString(),
+      updated_at: agent.updatedAt.toISOString(),
+      claimed_at: agent.claimedAt ? agent.claimedAt.toISOString() : null,
+      revoked_at: agent.revokedAt ? agent.revokedAt.toISOString() : null,
+    };
   }
 
   /**
@@ -106,6 +203,46 @@ export function createServer(config: ServerConfig) {
       return;
     }
     next();
+  }
+
+  async function verifyWebBotAuth(req: Request, res: Response, next: NextFunction) {
+    const mode = config.webBotAuthMode ?? 'off';
+    if (mode === 'off') {
+      next();
+      return;
+    }
+
+    const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
+    if (!hasHeaders) {
+      if (mode === 'require') {
+        res.status(401).json({ error: 'Web Bot Auth signature required' });
+        return;
+      }
+      next();
+      return;
+    }
+
+    try {
+      const verifiedIdentity = await verifyIncomingWebBotAuthRequest(req);
+      (req as any).webBotAuthIdentity = verifiedIdentity;
+
+      if (req.body && typeof req.body === 'object') {
+        const body = req.body as Record<string, unknown>;
+        if (typeof body.web_bot_auth_key_id !== 'string') {
+          body.web_bot_auth_key_id = verifiedIdentity.keyId;
+        }
+        if (typeof body.signature_agent !== 'string') {
+          body.signature_agent = verifiedIdentity.signatureAgent;
+        }
+      }
+
+      next();
+    } catch (err) {
+      res.status(401).json({
+        error: 'invalid_web_bot_auth',
+        message: err instanceof Error ? err.message : 'Web Bot Auth verification failed',
+      });
+    }
   }
 
   /**
@@ -141,6 +278,312 @@ export function createServer(config: ServerConfig) {
 
   function derivePassphraseKey(context: string): Buffer {
     return crypto.scryptSync(config.vaultPassphrase, `cred:${context}:v1`, 32);
+  }
+
+  function getDirectorySigningKey() {
+    const seed = derivePassphraseKey('web-bot-auth-directory');
+    return createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from('302e020100300506032b657004220420', 'hex'),
+        seed,
+      ]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+  }
+
+  function getDirectorySigningJwk(): WebBotAuthDirectoryKey {
+    const publicKey = createPublicKey(getDirectorySigningKey());
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = new Uint8Array(spki.slice(-32));
+    const jwk = publicKeyToJwkWithKid(rawPublicKey);
+    return {
+      ...jwk,
+      alg: 'EdDSA',
+      use: 'sig',
+    };
+  }
+
+  function createDirectorySignatureHeaders(authority: string): DirectorySignatureHeaders {
+    const signingKey = getDirectorySigningKey();
+    const signingJwk = getDirectorySigningJwk();
+    const created = Math.floor(Date.now() / 1000);
+    const expires = created + 60;
+    const signatureParams =
+      `("@authority";req);created=${created};expires=${expires};keyid="${signingJwk.kid}";tag="http-message-signatures-directory"`;
+    const signatureBase = [
+      `"@authority";req: ${authority}`,
+      `"@signature-params": ${signatureParams}`,
+    ].join('\n');
+    const signature = sign(null, Buffer.from(signatureBase, 'utf8'), signingKey).toString('base64');
+
+    return {
+      'Signature-Input': `sig0=${signatureParams}`,
+      'Signature': `sig0=:${signature}:`,
+    };
+  }
+
+  function parseQuotedHeaderValue(value: string | undefined): string | null {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  }
+
+  function parseSignatureInput(headerValue: string | undefined): ParsedSignatureInput {
+    if (!headerValue) {
+      throw new Error('Missing Signature-Input header');
+    }
+
+    const trimmed = headerValue.trim();
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex <= 0) {
+      throw new Error('Invalid Signature-Input header');
+    }
+
+    const label = trimmed.slice(0, eqIndex);
+    const rawParams = trimmed.slice(eqIndex + 1);
+    const componentMatch = rawParams.match(/^\(([^)]*)\)/);
+    if (!componentMatch) {
+      throw new Error('Signature-Input is missing component list');
+    }
+
+    const components = componentMatch[1]
+      .trim()
+      .split(/\s+/)
+      .map((component) => component.replace(/^"|"$/g, ''))
+      .filter(Boolean);
+
+    const params: Record<string, string> = {};
+    const paramRegex = /;([a-zA-Z@_-]+)=("(?:[^"\\]|\\.)*"|[^;]+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = paramRegex.exec(rawParams)) !== null) {
+      const [, name, rawValue] = match;
+      params[name] = rawValue.startsWith('"') && rawValue.endsWith('"')
+        ? rawValue.slice(1, -1)
+        : rawValue;
+    }
+
+    return { label, rawParams, components, params };
+  }
+
+  function parseSignatureHeader(headerValue: string | undefined, expectedLabel: string): Buffer {
+    if (!headerValue) {
+      throw new Error('Missing Signature header');
+    }
+
+    const trimmed = headerValue.trim();
+    const match = trimmed.match(/^([A-Za-z0-9_-]+)=:([^:]+):$/);
+    if (!match) {
+      throw new Error('Invalid Signature header');
+    }
+    if (match[1] !== expectedLabel) {
+      throw new Error('Signature label does not match Signature-Input');
+    }
+
+    return Buffer.from(match[2], 'base64');
+  }
+
+  function assertSignatureTimeWindow(params: Record<string, string>, now = Date.now()): number {
+    const created = Number.parseInt(params.created ?? '', 10);
+    const expires = Number.parseInt(params.expires ?? '', 10);
+    if (!Number.isFinite(created) || !Number.isFinite(expires)) {
+      throw new Error('Signature-Input must include created and expires');
+    }
+
+    const nowSeconds = Math.floor(now / 1000);
+    const allowedSkewSeconds = 60;
+    if (created > nowSeconds + allowedSkewSeconds) {
+      throw new Error('Signature created timestamp is in the future');
+    }
+    if (expires < nowSeconds - allowedSkewSeconds) {
+      throw new Error('Signature has expired');
+    }
+
+    return expires;
+  }
+
+  function createEd25519PublicKeyFromDirectoryKey(key: WebBotAuthDirectoryKey) {
+    return createPublicKey({
+      key: Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        Buffer.from(key.x, 'base64url'),
+      ]),
+      format: 'der',
+      type: 'spki',
+    });
+  }
+
+  function buildRequestSignatureBase(
+    components: string[],
+    authority: string,
+    signatureAgent: string,
+    rawSignatureParams: string,
+  ): string {
+    const lines = components.map((component) => {
+      switch (component) {
+        case '@authority':
+          return `"@authority": ${authority}`;
+        case 'signature-agent':
+          return `"signature-agent": "${signatureAgent}"`;
+        default:
+          throw new Error(`Unsupported signed component: ${component}`);
+      }
+    });
+
+    lines.push(`"@signature-params": ${rawSignatureParams}`);
+    return lines.join('\n');
+  }
+
+  function verifyDirectorySignature(
+    directory: WebBotAuthDirectoryResponse,
+    signatureInputHeader: string | undefined,
+    signatureHeader: string | undefined,
+    authority: string,
+  ): void {
+    const parsed = parseSignatureInput(signatureInputHeader);
+    if (parsed.params.tag !== 'http-message-signatures-directory') {
+      throw new Error('Directory signature is missing http-message-signatures-directory tag');
+    }
+    if (parsed.components.length !== 1 || parsed.components[0] !== '@authority') {
+      throw new Error('Directory signature must cover @authority');
+    }
+
+    assertSignatureTimeWindow(parsed.params);
+    const signature = parseSignatureHeader(signatureHeader, parsed.label);
+    const signingKeyId = parsed.params.keyid;
+    if (!signingKeyId) {
+      throw new Error('Directory signature is missing keyid');
+    }
+
+    const signingKey = directory.keys.find((key) => key.kid === signingKeyId);
+    if (!signingKey) {
+      throw new Error('Directory signing key not found');
+    }
+
+    const valid = verify(
+      null,
+      Buffer.from([
+        `"@authority";req: ${authority}`,
+        `"@signature-params": ${parsed.rawParams}`,
+      ].join('\n'), 'utf8'),
+      createEd25519PublicKeyFromDirectoryKey(signingKey),
+      signature,
+    );
+
+    if (!valid) {
+      throw new Error('Directory signature verification failed');
+    }
+  }
+
+  async function resolveWebBotAuthDirectory(signatureAgent: string): Promise<WebBotAuthDirectoryResponse> {
+    if (signatureAgent === getSignatureAgentUrl()) {
+      return buildWebBotAuthDirectory();
+    }
+
+    const cached = webBotAuthDirectoryCache.get(signatureAgent);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.directory;
+    }
+
+    const url = new URL(signatureAgent);
+    const isLocalhost = ['localhost', '127.0.0.1'].includes(url.hostname);
+    if (url.protocol !== 'https:' && !(isLocalhost && url.protocol === 'http:')) {
+      throw new Error('Signature-Agent must use HTTPS unless it targets localhost');
+    }
+
+    const response = await fetch(signatureAgent, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/http-message-signatures-directory+json, application/json',
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Signature-Agent directory (${response.status})`);
+    }
+
+    const directory = await response.json() as WebBotAuthDirectoryResponse;
+    if (!directory || !Array.isArray(directory.keys)) {
+      throw new Error('Signature-Agent directory returned invalid JSON');
+    }
+
+    verifyDirectorySignature(
+      directory,
+      response.headers.get('signature-input') ?? undefined,
+      response.headers.get('signature') ?? undefined,
+      url.host,
+    );
+
+    const parsed = parseSignatureInput(response.headers.get('signature-input') ?? undefined);
+    const expires = Number.parseInt(parsed.params.expires ?? '', 10);
+    if (Number.isFinite(expires)) {
+      webBotAuthDirectoryCache.set(signatureAgent, {
+        expiresAt: expires * 1000,
+        directory,
+      });
+    }
+
+    return directory;
+  }
+
+  async function verifyIncomingWebBotAuthRequest(req: Request): Promise<VerifiedWebBotAuthIdentity> {
+    const signatureAgent = parseQuotedHeaderValue(req.get('Signature-Agent'));
+    if (!signatureAgent) {
+      throw new Error('Missing Signature-Agent header');
+    }
+
+    const parsed = parseSignatureInput(req.get('Signature-Input') ?? undefined);
+    if (parsed.params.tag !== 'web-bot-auth') {
+      throw new Error('Signature-Input is missing web-bot-auth tag');
+    }
+    if (!parsed.params.keyid) {
+      throw new Error('Signature-Input is missing keyid');
+    }
+    if (!parsed.params.nonce) {
+      throw new Error('Signature-Input is missing nonce');
+    }
+    if (!parsed.components.includes('@authority') || !parsed.components.includes('signature-agent')) {
+      throw new Error('Signature-Input must cover @authority and signature-agent');
+    }
+
+    const expires = assertSignatureTimeWindow(parsed.params);
+    webBotAuthNonceStore.remember({
+      signatureAgent,
+      keyId: parsed.params.keyid,
+      nonce: parsed.params.nonce,
+      expiresAtSeconds: expires,
+    });
+    const signature = parseSignatureHeader(req.get('Signature') ?? undefined, parsed.label);
+    const directory = await resolveWebBotAuthDirectory(signatureAgent);
+    const key = directory.keys.find((candidate) => candidate.kid === parsed.params.keyid);
+    if (!key) {
+      throw new Error('Signing key not found in Signature-Agent directory');
+    }
+
+    const authority = req.get('host') ?? new URL(config.redirectBaseUri).host;
+    const valid = verify(
+      null,
+      Buffer.from(buildRequestSignatureBase(parsed.components, authority, signatureAgent, parsed.rawParams), 'utf8'),
+      createEd25519PublicKeyFromDirectoryKey(key),
+      signature,
+    );
+
+    if (!valid) {
+      throw new Error('Web Bot Auth signature verification failed');
+    }
+
+    const identity: VerifiedWebBotAuthIdentity = {
+      keyId: parsed.params.keyid,
+      signatureAgent,
+    };
+    const localAgent = (await tofu.listAgents()).find((agent) => agent.keyId === parsed.params.keyid);
+    if (localAgent) {
+      identity.agentId = localAgent.agentId;
+      identity.fingerprint = localAgent.fingerprint;
+    }
+    return identity;
   }
 
   function rateLimitKey(req: Request): string {
@@ -271,6 +714,25 @@ export function createServer(config: ServerConfig) {
   }
 
   // ── Routes ─────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /health — liveness check
+   */
+  app.get('/.well-known/http-message-signatures-directory', async (_req: Request, res: Response) => {
+    try {
+      const directory = await buildWebBotAuthDirectory();
+      const authority = _req.get('host') ?? new URL(config.redirectBaseUri).host;
+      const signatureHeaders = createDirectorySignatureHeaders(authority);
+      res
+        .type('application/http-message-signatures-directory+json')
+        .set(signatureHeaders)
+        .status(200)
+        .json(directory);
+    } catch (err) {
+      console.error('[/\\.well-known/http-message-signatures-directory] Error:', err);
+      res.status(500).json({ error: 'Failed to build Web Bot Auth directory' });
+    }
+  });
 
   /**
    * GET /health — liveness check
@@ -825,12 +1287,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    *
    * Auth: Bearer cred_at_<token>
    */
-  const tokenRouteHandlers: Array<express.RequestHandler> = [tokenRateLimiter, requireAgentAuth];
+  const tokenRouteHandlers: Array<express.RequestHandler> = [tokenRateLimiter, requireAgentAuth, verifyWebBotAuth];
   if (guardMiddleware) {
     tokenRouteHandlers.push(guardMiddleware);
   }
 
-  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth];
+  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
   }
@@ -937,6 +1399,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const { entry } = vaultEntry;
       const guardDecision = (req as any).guardDecision;
+      const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
       const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
 
       let principalId: string | null = null;
@@ -1017,13 +1480,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'agent', id: principalId ?? agentDid ?? 'server-agent', fingerprint: principalFingerprint ?? agentDid },
+        actor: {
+          type: 'agent',
+          id: principalId ?? webBotAuthIdentity?.agentId ?? agentDid ?? 'server-agent',
+          fingerprint: principalFingerprint ?? webBotAuthIdentity?.fingerprint ?? agentDid,
+        },
         action: 'delegate',
         resource: { type: 'token', id: delegationId },
         outcome: 'success',
         scopesRequested: effectiveRequestedScopes,
         scopesGranted: grantedScopes,
         correlationId,
+        metadata: {
+          identitySource: tofuFingerprint
+            ? 'tofu'
+            : (webBotAuthIdentity ? 'web-bot-auth' : (agentDid ? 'did' : 'agent-token')),
+          tofuFingerprint,
+          agentDid,
+          webBotAuthKeyId: webBotAuthIdentity?.keyId,
+          signatureAgent: webBotAuthIdentity?.signatureAgent,
+        },
       });
 
       res.json({
@@ -1082,11 +1558,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         outcome: 'success',
         scopesGranted: identity?.initialScopes ?? [],
         correlationId: crypto.randomUUID(),
+        metadata: {
+          identitySource: 'web-bot-auth',
+          webBotAuthKeyId: identity?.keyId ?? registered.fingerprint,
+          signatureAgent: getSignatureAgentUrl(),
+        },
       });
 
       res.status(201).json({
         agent_id: registered.agentId,
         fingerprint: registered.fingerprint,
+        key_id: identity?.keyId ?? registered.fingerprint,
+        signature_agent: getSignatureAgentUrl(),
         status: identity?.status ?? 'unclaimed',
         initial_scopes: identity?.initialScopes ?? [],
       });
@@ -1096,13 +1579,154 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
+  app.get('/api/v1/web-bot-auth/keys', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (_req: Request, res: Response) => {
+    try {
+      const agents = await tofu.listAgents();
+      res.json({
+        keys: agents.map((agent) => mapAgentToWebBotAuthKey(agent)),
+      });
+    } catch (err) {
+      console.error('[/api/v1/web-bot-auth/keys] Error:', err);
+      res.status(500).json({ error: 'Failed to list Web Bot Auth keys' });
+    }
+  });
+
+  app.post('/api/v1/web-bot-auth/keys', tokenRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
+    try {
+      const {
+        public_key: publicKeyBase64,
+        initial_scopes: initialScopes,
+        metadata,
+      } = req.body as {
+        public_key?: string;
+        initial_scopes?: string[];
+        metadata?: Record<string, unknown>;
+      };
+
+      if (!publicKeyBase64 || typeof publicKeyBase64 !== 'string') {
+        res.status(400).json({ error: 'public_key is required' });
+        return;
+      }
+
+      let publicKey: Uint8Array;
+      try {
+        publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
+      } catch {
+        res.status(400).json({ error: 'public_key must be base64-encoded' });
+        return;
+      }
+
+      const registered = await tofu.registerAgent({
+        publicKey,
+        initialScopes: normalizeRequestedScopes(initialScopes) ?? [],
+        metadata: metadata ?? {},
+      });
+      const identity = (await tofu.listAgents()).find((agent) => agent.agentId === registered.agentId);
+      if (!identity) {
+        res.status(500).json({ error: 'Registered key not found after insert' });
+        return;
+      }
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: toTofuPrincipalId(registered.agentId), fingerprint: registered.fingerprint },
+        action: 'create',
+        resource: { type: 'agent', id: registered.agentId },
+        outcome: 'success',
+        scopesGranted: identity.initialScopes,
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          identitySource: 'web-bot-auth',
+          webBotAuthKeyId: identity.keyId,
+          signatureAgent: getSignatureAgentUrl(),
+        },
+      });
+
+      res.status(201).json(mapAgentToWebBotAuthKey(identity));
+    } catch (err) {
+      console.error('[/api/v1/web-bot-auth/keys] Error:', err);
+      res.status(500).json({ error: 'Failed to create Web Bot Auth key' });
+    }
+  });
+
+  app.post('/api/v1/web-bot-auth/keys/:agentId/rotate', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const { agentId } = req.params;
+      const {
+        public_key: publicKeyBase64,
+        grace_period_hours: gracePeriodHours,
+      } = req.body as {
+        public_key?: string;
+        grace_period_hours?: number;
+      };
+
+      if (!publicKeyBase64 || typeof publicKeyBase64 !== 'string') {
+        res.status(400).json({ error: 'public_key is required' });
+        return;
+      }
+
+      const existing = (await tofu.listAgents()).find((agent) => agent.agentId === agentId);
+      if (!existing) {
+        res.status(404).json({ error: 'Web Bot Auth key not found' });
+        return;
+      }
+
+      let publicKey: Uint8Array;
+      try {
+        publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
+      } catch {
+        res.status(400).json({ error: 'public_key must be base64-encoded' });
+        return;
+      }
+
+      const rotation = await tofu.rotateKey({
+        fingerprint: existing.fingerprint,
+        newPublicKey: publicKey,
+        gracePeriodHours: typeof gracePeriodHours === 'number' ? gracePeriodHours : undefined,
+      });
+
+      const updated = (await tofu.listAgents()).find((agent) => agent.agentId === agentId);
+      if (!updated) {
+        res.status(500).json({ error: 'Rotated key not found after update' });
+        return;
+      }
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: toTofuPrincipalId(updated.agentId), fingerprint: updated.fingerprint },
+        action: 'rotate',
+        resource: { type: 'agent', id: updated.agentId },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          identitySource: 'web-bot-auth',
+          webBotAuthKeyId: updated.keyId,
+          previousFingerprint: rotation.previousFingerprint,
+          signatureAgent: getSignatureAgentUrl(),
+          graceExpiresAt: rotation.graceExpiresAt.toISOString(),
+        },
+      });
+
+      res.json({
+        ...mapAgentToWebBotAuthKey(updated),
+        previous_fingerprint: rotation.previousFingerprint,
+        grace_expires_at: rotation.graceExpiresAt.toISOString(),
+      });
+    } catch (err) {
+      console.error('[/api/v1/web-bot-auth/keys/:agentId/rotate] Error:', err);
+      res.status(500).json({ error: 'Failed to rotate Web Bot Auth key' });
+    }
+  });
+
   /**
    * GET /api/v1/audit — query audit events when the vault backend supports audit.
    *
    * Requires Bearer auth. This OSS server stores a single logical user (`default`),
    * so user_id is accepted for SDK parity and filtered against that user.
    */
-  app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
+  app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const userId = typeof req.query.user_id === 'string' ? req.query.user_id : 'default';
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;
@@ -1133,12 +1757,32 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       const entries = events
         .filter((event) => {
+          if (event.resource.type === 'agent') {
+            return !service;
+          }
           const [eventService, eventUserId] = event.resource.id.split('/');
           if (eventUserId !== 'default') return false;
           if (service && eventService !== service) return false;
           return true;
         })
         .map((event) => {
+          if (event.resource.type === 'agent') {
+            return {
+              id: event.id,
+              action: event.action,
+              service: 'agent',
+              userId: 'default',
+              timestamp: event.timestamp.toISOString(),
+              metadata: {
+                outcome: event.outcome,
+                scopesRequested: event.scopesRequested,
+                scopesGranted: event.scopesGranted,
+                correlationId: event.correlationId,
+                errorMessage: event.errorMessage,
+                ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+              },
+            };
+          }
           const [eventService, eventUserId] = event.resource.id.split('/');
           return {
             id: event.id,
@@ -1152,6 +1796,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
               scopesGranted: event.scopesGranted,
               correlationId: event.correlationId,
               errorMessage: event.errorMessage,
+              ...(event.metadata ? { webBotAuth: event.metadata } : {}),
             },
           };
         });
@@ -1180,9 +1825,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    *
    * Auth: Bearer cred_at_<token>
    */
-  app.post('/api/v1/subdelegate', subdelegateRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
+  app.post('/api/v1/subdelegate', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
     try {
+      const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
       const {
         parent_receipt: parentReceipt,
         agent_did: agentDid,
@@ -1406,6 +2052,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           { delegatorId: parent.sub, delegateeId: agentDid, scopes: validation.grantedScopes },
         ],
         correlationId,
+        ...(webBotAuthIdentity && {
+          metadata: {
+            identitySource: 'web-bot-auth',
+            webBotAuthKeyId: webBotAuthIdentity.keyId,
+            signatureAgent: webBotAuthIdentity.signatureAgent,
+          },
+        }),
       });
 
       // ── Response ─────────────────────────────────────────────────────────
@@ -1438,7 +2091,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * Deletes the provider's tokens from the vault.
    * Auth: Bearer cred_at_<token>
    */
-  app.delete('/api/token/:provider', revokeRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
+  app.delete('/api/token/:provider', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
       await vault.delete({ provider: slug, userId: 'default' });

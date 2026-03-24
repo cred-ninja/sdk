@@ -5,6 +5,15 @@
  * Supports cloud mode (default) and local mode (CRED_MODE=local).
  */
 
+export interface CredMcpWebBotAuthConfig {
+  /** Raw 32-byte Ed25519 private key encoded as hex */
+  privateKeyHex: string;
+  /** Fully qualified Signature-Agent directory URL */
+  signatureAgent: string;
+  /** Signature TTL in seconds */
+  ttlSeconds: number;
+}
+
 export interface CredMcpCloudConfig {
   mode: 'cloud';
   /** Agent token issued by Cred (starts with cred_at_) */
@@ -13,6 +22,8 @@ export interface CredMcpCloudConfig {
   appClientId: string;
   /** Your Cred server URL (e.g. https://cred.example.com) */
   baseUrl: string;
+  /** Optional native Web Bot Auth request signing config */
+  webBotAuth?: CredMcpWebBotAuthConfig;
 }
 
 export interface CredMcpLocalConfig {
@@ -25,6 +36,8 @@ export interface CredMcpLocalConfig {
   vaultStorage: 'sqlite' | 'file';
   /** Provider credentials: { google: { clientId, clientSecret }, ... } */
   providers: Record<string, { clientId: string; clientSecret: string }>;
+  /** Optional native Web Bot Auth request signing config */
+  webBotAuth?: CredMcpWebBotAuthConfig;
 }
 
 export type CredMcpConfig = CredMcpCloudConfig | CredMcpLocalConfig;
@@ -69,10 +82,50 @@ function parseProviders(raw: string): Record<string, { clientId: string; clientS
   return providers;
 }
 
+function parseWebBotAuthConfig(): CredMcpWebBotAuthConfig | undefined {
+  const privateKeyHex = process.env.CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX;
+  const signatureAgent = process.env.CRED_WEB_BOT_AUTH_SIGNATURE_AGENT;
+  const ttlRaw = process.env.CRED_WEB_BOT_AUTH_TTL_SECONDS;
+
+  if (!privateKeyHex && !signatureAgent) {
+    return undefined;
+  }
+  if (!privateKeyHex || !signatureAgent) {
+    throw new Error(
+      'CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX and CRED_WEB_BOT_AUTH_SIGNATURE_AGENT must be provided together',
+    );
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(privateKeyHex)) {
+    throw new Error('CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX must be 64 hex characters (32-byte Ed25519 private key)');
+  }
+
+  let parsedSignatureAgent: URL;
+  try {
+    parsedSignatureAgent = new URL(signatureAgent);
+  } catch {
+    throw new Error('CRED_WEB_BOT_AUTH_SIGNATURE_AGENT must be a valid HTTPS URL');
+  }
+  if (parsedSignatureAgent.protocol !== 'https:') {
+    throw new Error('CRED_WEB_BOT_AUTH_SIGNATURE_AGENT must use HTTPS');
+  }
+
+  const ttlSeconds = ttlRaw ? Number.parseInt(ttlRaw, 10) : 30;
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) {
+    throw new Error('CRED_WEB_BOT_AUTH_TTL_SECONDS must be an integer between 1 and 300');
+  }
+
+  return {
+    privateKeyHex: privateKeyHex.toLowerCase(),
+    signatureAgent: parsedSignatureAgent.toString(),
+    ttlSeconds,
+  };
+}
+
 export function loadConfig(args?: string[]): CredMcpConfig {
   const isLocal =
     process.env.CRED_MODE === 'local' ||
     (args ?? process.argv).includes('--local');
+  const webBotAuth = parseWebBotAuthConfig();
 
   if (isLocal) {
     const vaultPassphrase = process.env.CRED_VAULT_PASSPHRASE;
@@ -92,6 +145,7 @@ export function loadConfig(args?: string[]): CredMcpConfig {
       vaultPath,
       vaultStorage,
       providers,
+      webBotAuth,
     };
   }
 
@@ -117,5 +171,6 @@ export function loadConfig(args?: string[]): CredMcpConfig {
     agentToken,
     appClientId,
     baseUrl,
+    webBotAuth,
   };
 }

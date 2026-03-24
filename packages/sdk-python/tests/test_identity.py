@@ -39,12 +39,11 @@ class TestVerifyDelegationReceipt:
     def test_returns_false_for_empty_receipt(self):
         assert verify_delegation_receipt("", expected_did=self.agent_did, cred_public_key="00" * 32) is False
 
-    def test_raises_for_placeholder_public_key(self):
+    def test_returns_false_for_invalid_receipt_with_pinned_public_key(self):
         header = _b64url_json({"alg": "EdDSA", "typ": "JWT"})
         payload = _b64url_json({"sub": self.agent_did})
         receipt = f"{header}.{payload}.sig"
-        with pytest.raises(ValueError, match="placeholder"):
-            verify_delegation_receipt(receipt, expected_did=self.agent_did)
+        assert verify_delegation_receipt(receipt, expected_did=self.agent_did) is False
 
     def test_returns_true_for_valid_signature(self):
         private_key = Ed25519PrivateKey.generate()
@@ -70,8 +69,8 @@ class TestVerifyDelegationReceipt:
             cred_public_key=public_key_hex,
         ) is True
 
-    def test_exported_public_key_constant_is_hex_or_placeholder(self):
-        assert CRED_PUBLIC_KEY_HEX == "PLACEHOLDER_REPLACE_BEFORE_LAUNCH" or len(CRED_PUBLIC_KEY_HEX) == 64
+    def test_exported_public_key_constant_is_real_hex(self):
+        assert CRED_PUBLIC_KEY_HEX != "PLACEHOLDER_REPLACE_BEFORE_LAUNCH" and len(CRED_PUBLIC_KEY_HEX) == 64
 
 
 def _b64url_json(payload: dict[str, object]) -> str:

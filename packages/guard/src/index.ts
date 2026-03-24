@@ -45,6 +45,7 @@ export type {
   TimeWindowPolicyConfig,
   UrlAllowlistPolicyConfig,
   MaxTtlPolicyConfig,
+  WebBotAuthPolicyConfig,
 } from './types.js';
 
 // Policies
@@ -59,6 +60,7 @@ export {
   urlAllowlistPolicy,
   MaxTtlPolicy,
   maxTtlPolicy,
+  webBotAuthPolicy,
 } from './policies/index.js';
 export type { MaxTtlPolicyResult } from './policies/index.js';
 

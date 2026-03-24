@@ -94,6 +94,11 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
         targetMethod: input.targetMethod,
         delegationId: input.delegationId,
         metadata: input.metadata,
+        identitySource: getStringMetadata(input.metadata, 'identitySource') as GuardContext['identitySource'] ?? 'agent-token',
+        agentDid: getStringMetadata(input.metadata, 'agentDid'),
+        tofuFingerprint: getStringMetadata(input.metadata, 'tofuFingerprint'),
+        webBotAuthKeyId: getStringMetadata(input.metadata, 'webBotAuthKeyId'),
+        signatureAgent: getStringMetadata(input.metadata, 'signatureAgent'),
       };
 
       // Evaluate policies
@@ -145,6 +150,11 @@ function defaultOnDeny(
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function getStringMetadata(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'string' ? value : undefined;
 }
 
 /**

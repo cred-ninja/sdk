@@ -40,6 +40,11 @@ export interface ServerConfig {
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
+
+  // Web Bot Auth ingress verification mode
+  webBotAuthMode?: 'off' | 'optional' | 'require';
+  webBotAuthNonceStore?: 'memory' | 'sqlite';
+  webBotAuthNoncePath?: string;
 }
 
 const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
@@ -77,6 +82,16 @@ export function loadConfig(): ServerConfig {
   }
 
   const redirectBaseUri = process.env.REDIRECT_BASE_URI ?? `http://localhost:${port}`;
+  const webBotAuthMode = (process.env.WEB_BOT_AUTH_MODE ?? 'off') as 'off' | 'optional' | 'require';
+  if (!['off', 'optional', 'require'].includes(webBotAuthMode)) {
+    throw new Error('WEB_BOT_AUTH_MODE must be one of: off, optional, require');
+  }
+  const webBotAuthNonceStore = (process.env.WEB_BOT_AUTH_NONCE_STORE ?? 'memory') as 'memory' | 'sqlite';
+  if (!['memory', 'sqlite'].includes(webBotAuthNonceStore)) {
+    throw new Error('WEB_BOT_AUTH_NONCE_STORE must be one of: memory, sqlite');
+  }
+  const webBotAuthNoncePath = process.env.WEB_BOT_AUTH_NONCE_PATH
+    ?? (webBotAuthNonceStore === 'sqlite' ? './data/web-bot-auth-nonces.sqlite' : undefined);
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -103,5 +118,8 @@ export function loadConfig(): ServerConfig {
     agentToken,
     providers,
     redirectBaseUri,
+    webBotAuthMode,
+    webBotAuthNonceStore,
+    webBotAuthNoncePath,
   };
 }

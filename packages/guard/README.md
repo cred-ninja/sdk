@@ -85,6 +85,7 @@ const guard = new CredGuard({
 | `timeWindowPolicy` | Restrict when delegations can occur | `{ allowedHours, timezone?, allowedDays? }` |
 | `urlAllowlistPolicy` | Restrict which URLs agents can call (cred_use) | `{ allowedUrls }` (string prefix or RegExp) |
 | `maxTtlPolicy` | Cap delegation TTL | `{ maxTtlSeconds, perProvider? }` |
+| `webBotAuthPolicy` | Require or constrain Web Bot Auth identity metadata | `{ requireKeyId?, allowedIdentitySources?, allowedSignatureAgentPrefixes? }` |
 
 ## Policy Chain Behavior
 

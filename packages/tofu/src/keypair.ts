@@ -16,6 +16,7 @@ export async function generateKeypair(): Promise<GeneratedKeypair> {
     publicKey: publicKeyBytes,
     privateKey: privateKeyBytes,
     fingerprint: fingerprintPublicKey(publicKeyBytes),
+    keyId: publicKeyToJwkThumbprint(publicKeyBytes),
   };
 }
 
@@ -29,6 +30,45 @@ export function fingerprintPublicKey(publicKey: Uint8Array): string {
 export function normalizePublicKey(publicKey: Uint8Array): string {
   assertRawPublicKey(publicKey);
   return Buffer.from(publicKey).toString('hex');
+}
+
+export interface Ed25519Jwk {
+  kty: 'OKP';
+  crv: 'Ed25519';
+  x: string;
+  kid?: string;
+}
+
+export type Ed25519JwkWithKid = Ed25519Jwk & { kid: string };
+
+export function publicKeyToJwk(publicKey: Uint8Array): Ed25519Jwk {
+  assertRawPublicKey(publicKey);
+  return {
+    kty: 'OKP',
+    crv: 'Ed25519',
+    x: Buffer.from(publicKey).toString('base64url'),
+  };
+}
+
+export function jwkThumbprint(jwk: Pick<Ed25519Jwk, 'kty' | 'crv' | 'x'>): string {
+  const canonical = JSON.stringify({
+    crv: jwk.crv,
+    kty: jwk.kty,
+    x: jwk.x,
+  });
+  return createHash('sha256').update(canonical).digest('base64url');
+}
+
+export function publicKeyToJwkThumbprint(publicKey: Uint8Array): string {
+  return jwkThumbprint(publicKeyToJwk(publicKey));
+}
+
+export function publicKeyToJwkWithKid(publicKey: Uint8Array): Ed25519JwkWithKid {
+  const jwk = publicKeyToJwk(publicKey);
+  return {
+    ...jwk,
+    kid: jwkThumbprint(jwk),
+  };
 }
 
 export function verifySignature(

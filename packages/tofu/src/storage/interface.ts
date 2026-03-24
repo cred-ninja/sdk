@@ -7,5 +7,6 @@ export interface AgentIdentityBackend {
     fingerprint: string,
     nowIso: string,
   ): AgentIdentityStoredRow | null | Promise<AgentIdentityStoredRow | null>;
+  listAgents(nowIso: string): AgentIdentityStoredRow[] | Promise<AgentIdentityStoredRow[]>;
   updateAgent(row: AgentIdentityStoredRow): void | Promise<void>;
 }

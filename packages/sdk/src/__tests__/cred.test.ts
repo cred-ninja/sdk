@@ -174,6 +174,41 @@ describe('Cred.delegate()', () => {
   });
 });
 
+describe('Cred Web Bot Auth discovery', () => {
+  it('returns the configured directory URL', () => {
+    expect(cred.getWebBotAuthDirectoryUrl()).toBe(
+      'https://cred.example.com/.well-known/http-message-signatures-directory',
+    );
+  });
+
+  it('fetches the Web Bot Auth directory document', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      keys: [{
+        kty: 'OKP',
+        crv: 'Ed25519',
+        x: 'test-x',
+        kid: 'test-kid',
+        alg: 'EdDSA',
+        use: 'sig',
+      }],
+    }));
+
+    const directory = await cred.getWebBotAuthDirectory();
+
+    expect(directory.keys).toHaveLength(1);
+    expect(directory.keys[0]?.kid).toBe('test-kid');
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://cred.example.com/.well-known/http-message-signatures-directory',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${TOKEN}`,
+        }),
+      }),
+    );
+  });
+});
+
 describe('Cred.tofuDelegate()', () => {
   it('constructs and posts a signed TOFU proof payload', async () => {
     vi.useFakeTimers();
@@ -380,6 +415,105 @@ describe('Cred.getAuditLog()', () => {
     expect(url).toContain('service=google');
     expect(url).toContain('limit=25');
     expect(init.method).toBe('GET');
+  });
+});
+
+// ── Web Bot Auth key management ───────────────────────────────────────────────
+
+describe('Cred.listWebBotAuthKeys()', () => {
+  it('returns registered identities', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      keys: [
+        {
+          agent_id: 'agent_123',
+          fingerprint: 'fp_123',
+          key_id: 'kid_123',
+          previous_fingerprint: 'fp_prev',
+          previous_key_id: 'kid_prev',
+          rotation_grace_expires_at: '2026-03-24T00:00:00.000Z',
+          status: 'active',
+          initial_scopes: ['calendar.readonly'],
+          metadata: { source: 'import' },
+          signature_agent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+          created_at: '2026-03-23T00:00:00.000Z',
+          updated_at: '2026-03-23T00:00:00.000Z',
+          claimed_at: null,
+          revoked_at: null,
+        },
+      ],
+    }));
+
+    const keys = await cred.listWebBotAuthKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0].agentId).toBe('agent_123');
+    expect(keys[0].keyId).toBe('kid_123');
+    expect(keys[0].previousKeyId).toBe('kid_prev');
+    expect(keys[0].signatureAgent).toContain('/.well-known/http-message-signatures-directory');
+  });
+});
+
+describe('Cred.registerWebBotAuthKey()', () => {
+  it('posts a base64-encoded public key and returns the created identity', async () => {
+    const publicKey = new Uint8Array([1, 2, 3, 4]);
+    mockFetch.mockResolvedValue(mockResponse(201, {
+      agent_id: 'agent_123',
+      fingerprint: 'fp_123',
+      key_id: 'kid_123',
+      status: 'active',
+      initial_scopes: ['calendar.readonly'],
+      metadata: { importedBy: 'sdk-test' },
+      signature_agent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+      created_at: '2026-03-23T00:00:00.000Z',
+      updated_at: '2026-03-23T00:00:00.000Z',
+      claimed_at: null,
+      revoked_at: null,
+    }));
+
+    const key = await cred.registerWebBotAuthKey({
+      publicKey,
+      initialScopes: ['calendar.readonly'],
+      metadata: { importedBy: 'sdk-test' },
+    });
+
+    expect(key.agentId).toBe('agent_123');
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body).public_key).toBe(Buffer.from(publicKey).toString('base64'));
+    expect(JSON.parse(init.body).initial_scopes).toEqual(['calendar.readonly']);
+  });
+});
+
+describe('Cred.rotateWebBotAuthKey()', () => {
+  it('posts a rotation request and returns rotation metadata', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      agent_id: 'agent_123',
+      fingerprint: 'fp_new',
+      key_id: 'kid_new',
+      previous_key_id: 'kid_old',
+      status: 'active',
+      initial_scopes: ['calendar.readonly'],
+      metadata: {},
+      signature_agent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+      created_at: '2026-03-23T00:00:00.000Z',
+      updated_at: '2026-03-23T01:00:00.000Z',
+      claimed_at: null,
+      revoked_at: null,
+      previous_fingerprint: 'fp_old',
+      grace_expires_at: '2026-03-24T01:00:00.000Z',
+    }));
+
+    const rotated = await cred.rotateWebBotAuthKey({
+      agentId: 'agent_123',
+      publicKey: 'AQIDBA==',
+      gracePeriodHours: 24,
+    });
+
+    expect(rotated.previousFingerprint).toBe('fp_old');
+    expect(rotated.previousKeyId).toBe('kid_old');
+    expect(rotated.graceExpiresAt).toBe('2026-03-24T01:00:00.000Z');
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/api/v1/web-bot-auth/keys/agent_123/rotate');
+    expect(JSON.parse(init.body).grace_period_hours).toBe(24);
   });
 });
 

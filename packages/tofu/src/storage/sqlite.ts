@@ -13,12 +13,14 @@ export class SQLiteBackend implements AgentIdentityBackend {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new Database(this.dbPath);
+    const db = this.ensureDb();
 
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS tofu_agents (
         agent_id                   TEXT PRIMARY KEY,
         public_key                 TEXT NOT NULL,
         fingerprint                TEXT NOT NULL UNIQUE,
+        key_id                     TEXT NOT NULL,
         status                     TEXT NOT NULL,
         owner_user_id              TEXT,
         initial_scopes             TEXT NOT NULL DEFAULT '[]',
@@ -35,17 +37,27 @@ export class SQLiteBackend implements AgentIdentityBackend {
         ON tofu_agents(previous_fingerprint)
         WHERE previous_fingerprint IS NOT NULL;
     `);
+
+    const columns = db.prepare(`PRAGMA table_info(tofu_agents)`).all() as Array<{ name: string }>;
+    const hasKeyId = columns.some((column) => column.name === 'key_id');
+    if (!hasKeyId) {
+      db.exec(`ALTER TABLE tofu_agents ADD COLUMN key_id TEXT`);
+      db.exec(`UPDATE tofu_agents SET key_id = fingerprint WHERE key_id IS NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tofu_agents_key_id ON tofu_agents(key_id)`);
+    } else {
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tofu_agents_key_id ON tofu_agents(key_id)`);
+    }
   }
 
   insertAgent(row: AgentIdentityStoredRow): void {
     const db = this.ensureDb();
     db.prepare(`
       INSERT INTO tofu_agents (
-        agent_id, public_key, fingerprint, status, owner_user_id,
+        agent_id, public_key, fingerprint, key_id, status, owner_user_id,
         initial_scopes, metadata, created_at, updated_at, claimed_at, revoked_at,
         previous_public_key, previous_fingerprint, rotation_grace_expires_at
       ) VALUES (
-        @agentId, @publicKey, @fingerprint, @status, @ownerUserId,
+        @agentId, @publicKey, @fingerprint, @keyId, @status, @ownerUserId,
         @initialScopes, @metadata, @createdAt, @updatedAt, @claimedAt, @revokedAt,
         @previousPublicKey, @previousFingerprint, @rotationGraceExpiresAt
       )
@@ -59,6 +71,7 @@ export class SQLiteBackend implements AgentIdentityBackend {
         agent_id                  AS agentId,
         public_key                AS publicKey,
         fingerprint,
+        COALESCE(key_id, fingerprint) AS keyId,
         status,
         owner_user_id             AS ownerUserId,
         initial_scopes            AS initialScopes,
@@ -83,12 +96,37 @@ export class SQLiteBackend implements AgentIdentityBackend {
     return row ?? null;
   }
 
+  listAgents(_nowIso: string): AgentIdentityStoredRow[] {
+    const db = this.ensureDb();
+    return db.prepare(`
+      SELECT
+        agent_id                  AS agentId,
+        public_key                AS publicKey,
+        fingerprint,
+        COALESCE(key_id, fingerprint) AS keyId,
+        status,
+        owner_user_id             AS ownerUserId,
+        initial_scopes            AS initialScopes,
+        metadata,
+        created_at                AS createdAt,
+        updated_at                AS updatedAt,
+        claimed_at                AS claimedAt,
+        revoked_at                AS revokedAt,
+        previous_public_key       AS previousPublicKey,
+        previous_fingerprint      AS previousFingerprint,
+        rotation_grace_expires_at AS rotationGraceExpiresAt
+      FROM tofu_agents
+      ORDER BY created_at ASC
+    `).all() as AgentIdentityStoredRow[];
+  }
+
   updateAgent(row: AgentIdentityStoredRow): void {
     const db = this.ensureDb();
     db.prepare(`
       UPDATE tofu_agents
       SET public_key = @publicKey,
           fingerprint = @fingerprint,
+          key_id = @keyId,
           status = @status,
           owner_user_id = @ownerUserId,
           initial_scopes = @initialScopes,
