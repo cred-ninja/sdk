@@ -478,6 +478,56 @@ export function createServer(config: ServerConfig) {
     }
   }
 
+  function assertSafeSignatureAgentUrl(signatureAgent: string): URL {
+    const url = new URL(signatureAgent);
+    const hostname = url.hostname;
+    const isExplicitLocalhost = ['localhost', '127.0.0.1'].includes(hostname);
+
+    // Enforce existing scheme requirements: HTTPS everywhere, HTTP only for explicit localhost.
+    if (url.protocol !== 'https:' && !(isExplicitLocalhost && url.protocol === 'http:')) {
+      throw new Error('Signature-Agent must use HTTPS unless it targets localhost');
+    }
+
+    // Block private/loopback IPv4 ranges (excluding the explicitly allowed localhost values).
+    const isIPv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+    if (!isExplicitLocalhost && isIPv4) {
+      const octets = hostname.split('.').map((part) => parseInt(part, 10));
+      if (
+        octets.length === 4 &&
+        (
+          octets[0] === 10 ||                                                   // 10.0.0.0/8
+          (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||         // 172.16.0.0/12
+          (octets[0] === 192 && octets[1] === 168) ||                           // 192.168.0.0/16
+          (octets[0] === 169 && octets[1] === 254) ||                           // 169.254.0.0/16 (cloud metadata, APIPA)
+          (octets[0] === 0)                                                      // 0.0.0.0/8 (routes to loopback on many systems)
+        )
+      ) {
+        throw new Error('Signature-Agent must not target private network addresses');
+      }
+    }
+
+    // Block private/loopback IPv6 ranges.
+    // URL spec wraps IPv6 addresses in brackets; strip them for comparison.
+    const isIPv6 = hostname.startsWith('[') && hostname.endsWith(']');
+    if (!isExplicitLocalhost && isIPv6) {
+      const addr = hostname.slice(1, -1).toLowerCase();
+      const isPrivateIPv6 =
+        addr === '::1' ||                         // loopback
+        addr.startsWith('::ffff:') ||             // IPv4-mapped (e.g. ::ffff:10.0.0.1)
+        addr.startsWith('fc') ||                  // unique local fc00::/7
+        addr.startsWith('fd') ||                  // unique local fd00::/8
+        addr.startsWith('fe8') ||                 // link-local fe80::/10
+        addr.startsWith('fe9') ||
+        addr.startsWith('fea') ||
+        addr.startsWith('feb');
+      if (isPrivateIPv6) {
+        throw new Error('Signature-Agent must not target private network addresses');
+      }
+    }
+
+    return url;
+  }
+
   async function resolveWebBotAuthDirectory(signatureAgent: string): Promise<WebBotAuthDirectoryResponse> {
     if (signatureAgent === getSignatureAgentUrl()) {
       return buildWebBotAuthDirectory();
@@ -488,13 +538,9 @@ export function createServer(config: ServerConfig) {
       return cached.directory;
     }
 
-    const url = new URL(signatureAgent);
-    const isLocalhost = ['localhost', '127.0.0.1'].includes(url.hostname);
-    if (url.protocol !== 'https:' && !(isLocalhost && url.protocol === 'http:')) {
-      throw new Error('Signature-Agent must use HTTPS unless it targets localhost');
-    }
+    const url = assertSafeSignatureAgentUrl(signatureAgent);
 
-    const response = await fetch(signatureAgent, {
+    const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
         Accept: 'application/http-message-signatures-directory+json, application/json',
