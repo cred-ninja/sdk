@@ -656,6 +656,9 @@ export function createServer(config: ServerConfig) {
   const subdelegateRateLimiter = makeRateLimiter(60);
   const revokeRateLimiter = makeRateLimiter(30);
   const tofuRegisterRateLimiter = makeRateLimiter(10);
+  const directoryRateLimiter = makeRateLimiter(60);  // /.well-known/… — crypto work per request
+  const healthRateLimiter = makeRateLimiter(120);    // /health       — cheap but still DoS-able
+  const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     try {
@@ -764,7 +767,7 @@ export function createServer(config: ServerConfig) {
   /**
    * GET /health — liveness check
    */
-  app.get('/.well-known/http-message-signatures-directory', async (_req: Request, res: Response) => {
+  app.get('/.well-known/http-message-signatures-directory', directoryRateLimiter, async (_req: Request, res: Response) => {
     try {
       const directory = await buildWebBotAuthDirectory();
       const authority = _req.get('host') ?? new URL(config.redirectBaseUri).host;
@@ -783,7 +786,7 @@ export function createServer(config: ServerConfig) {
   /**
    * GET /health — liveness check
    */
-  app.get('/health', (_req: Request, res: Response) => {
+  app.get('/health', healthRateLimiter, (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       providers: config.providers.map((p) => p.slug),
@@ -795,7 +798,7 @@ export function createServer(config: ServerConfig) {
   /**
    * GET /providers — list configured providers and connection status
    */
-  app.get('/providers', async (_req: Request, res: Response) => {
+  app.get('/providers', providersRateLimiter, async (_req: Request, res: Response) => {
     try {
       const entries = await vault.list({ userId: 'default' });
       const connected = new Set(entries.map((e) => e.provider));
