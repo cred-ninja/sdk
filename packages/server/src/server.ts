@@ -27,7 +27,7 @@ import { CredVault, validateSubDelegation, DelegationChainError } from '@crednin
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
-import { ServerConfig, ProviderConfig } from './config.js';
+import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
 import { createExpressMiddleware } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
@@ -93,6 +93,10 @@ interface VerifiedWebBotAuthIdentity {
 // ── Server factory ───────────────────────────────────────────────────────────
 
 export function createServer(config: ServerConfig) {
+  if (!config.agentToken && !config.agentRequestVerifier) {
+    throw new Error('Either agentToken or agentRequestVerifier is required');
+  }
+
   const app = express();
   app.use(express.json());
 
@@ -122,8 +126,10 @@ export function createServer(config: ServerConfig) {
     path: config.webBotAuthNoncePath,
   });
 
-  // Hash the agent token once at startup for constant-time comparison
-  const agentTokenHash = crypto.createHash('sha256').update(config.agentToken).digest('hex');
+  // Hash the static agent token once at startup for constant-time comparison
+  const agentTokenHash = config.agentToken
+    ? crypto.createHash('sha256').update(config.agentToken).digest('hex')
+    : null;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -163,6 +169,15 @@ export function createServer(config: ServerConfig) {
     return `${config.redirectBaseUri}/.well-known/http-message-signatures-directory`;
   }
 
+  function getAllowedSignatureAgentOrigins(): Set<string> {
+    const allowedOrigins = new Set<string>();
+    allowedOrigins.add(new URL(config.redirectBaseUri).origin);
+    for (const origin of config.webBotAuthAllowedOrigins ?? []) {
+      allowedOrigins.add(new URL(origin).origin);
+    }
+    return allowedOrigins;
+  }
+
   function mapAgentToWebBotAuthKey(agent: Awaited<ReturnType<typeof tofu.listAgents>>[number]): WebBotAuthKeyResponse {
     return {
       agent_id: agent.agentId,
@@ -186,6 +201,7 @@ export function createServer(config: ServerConfig) {
    * Validate agent Bearer token. Constant-time comparison via hash.
    */
   function validateAgentToken(req: Request): boolean {
+    if (!agentTokenHash) return false;
     const auth = req.headers.authorization ?? '';
     if (!auth.startsWith('Bearer ')) return false;
     const token = auth.slice(7).trim();
@@ -194,14 +210,45 @@ export function createServer(config: ServerConfig) {
     return crypto.timingSafeEqual(Buffer.from(tokenHash, 'hex'), Buffer.from(agentTokenHash, 'hex'));
   }
 
+  function hashAgentPrincipal(principal: RequestAgentPrincipal): string {
+    const stableId = principal.principalId ?? 'anonymous';
+    return crypto.createHash('sha256').update(`${principal.type}:${stableId}`).digest('hex');
+  }
+
   /**
    * Agent auth middleware for /api/* routes.
    */
-  function requireAgentAuth(req: Request, res: Response, next: NextFunction) {
+  async function requireAgentAuth(req: Request, res: Response, next: NextFunction) {
+    if (config.agentRequestVerifier) {
+      try {
+        const result = await config.agentRequestVerifier(req);
+        if (result.ok) {
+          const principal: RequestAgentPrincipal = result.principal ?? { type: 'custom-verifier' };
+          (req as any).agentPrincipal = principal;
+          (req as any).agentTokenHash = hashAgentPrincipal(principal);
+          next();
+          return;
+        }
+        res.status(result.status ?? 401).json({
+          error: result.error ?? 'Unauthorized. Provide valid agent credentials.',
+        });
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Agent request verification failed';
+        res.status(401).json({ error: message });
+        return;
+      }
+    }
+
     if (!validateAgentToken(req)) {
       res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' });
       return;
     }
+    const principal: RequestAgentPrincipal = { type: 'static-bearer' };
+    (req as any).agentPrincipal = principal;
+    (req as any).agentTokenHash = crypto.createHash('sha256')
+      .update((req.headers.authorization ?? '').slice(7).trim())
+      .digest('hex');
     next();
   }
 
@@ -482,10 +529,19 @@ export function createServer(config: ServerConfig) {
     const url = new URL(signatureAgent);
     const hostname = url.hostname;
     const isExplicitLocalhost = ['localhost', '127.0.0.1'].includes(hostname);
+    const expectedPath = '/.well-known/http-message-signatures-directory';
 
     // Enforce existing scheme requirements: HTTPS everywhere, HTTP only for explicit localhost.
     if (url.protocol !== 'https:' && !(isExplicitLocalhost && url.protocol === 'http:')) {
       throw new Error('Signature-Agent must use HTTPS unless it targets localhost');
+    }
+
+    if (url.username || url.password) {
+      throw new Error('Signature-Agent must not include credentials');
+    }
+
+    if (url.pathname !== expectedPath || url.search || url.hash) {
+      throw new Error(`Signature-Agent must point to ${expectedPath}`);
     }
 
     // Block private/loopback IPv4 ranges (excluding the explicitly allowed localhost values).
@@ -525,7 +581,11 @@ export function createServer(config: ServerConfig) {
       }
     }
 
-    return url;
+    if (!getAllowedSignatureAgentOrigins().has(url.origin)) {
+      throw new Error('Signature-Agent origin is not trusted');
+    }
+
+    return new URL(expectedPath, `${url.origin}/`);
   }
 
   async function resolveWebBotAuthDirectory(signatureAgent: string): Promise<WebBotAuthDirectoryResponse> {
@@ -542,6 +602,7 @@ export function createServer(config: ServerConfig) {
 
     const response = await fetch(url.toString(), {
       method: 'GET',
+      redirect: 'error',
       headers: {
         Accept: 'application/http-message-signatures-directory+json, application/json',
       },
@@ -701,6 +762,7 @@ export function createServer(config: ServerConfig) {
     chainDepth: number;
     parentDelegationId?: string;
     parentReceiptHash?: string;
+    receiptClaims?: string[];
   }): string {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({
@@ -713,6 +775,7 @@ export function createServer(config: ServerConfig) {
       appClientId: input.appClientId,
       delegationId: input.delegationId,
       chainDepth: input.chainDepth,
+      ...(input.receiptClaims && input.receiptClaims.length > 0 ? { receiptClaims: input.receiptClaims } : {}),
       ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
       ...(input.parentReceiptHash ? { parentReceiptHash: input.parentReceiptHash } : {}),
     })).toString('base64url');
@@ -730,6 +793,7 @@ export function createServer(config: ServerConfig) {
     appClientId: string;
     delegationId: string;
     chainDepth: number;
+    receiptClaims: string[];
   } {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
@@ -759,8 +823,46 @@ export function createServer(config: ServerConfig) {
       appClientId: payload.appClientId ?? 'local',
       delegationId: payload.delegationId,
       chainDepth: payload.chainDepth ?? 0,
+      receiptClaims: Array.isArray(payload.receiptClaims)
+        ? payload.receiptClaims.filter((claim: unknown): claim is string => typeof claim === 'string' && claim.trim().length > 0)
+        : [],
     };
   }
+
+  function extractTrustedReceiptClaims(req: Request): string[] | undefined {
+    const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    const rawClaims = principal?.metadata?.receiptClaims;
+    if (!Array.isArray(rawClaims)) {
+      return undefined;
+    }
+    const claims = rawClaims
+      .filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0);
+    return claims.length > 0 ? claims : undefined;
+  }
+
+  const attachParentReceiptClaimsForGuard: express.RequestHandler = (req, res, next) => {
+    const parentReceipt = req.body?.parent_receipt;
+    if (typeof parentReceipt !== 'string' || parentReceipt.trim() === '') {
+      next();
+      return;
+    }
+    try {
+      const parent = parseAndVerifyReceipt(parentReceipt);
+      (req as any).verifiedParentReceipt = parent;
+      req.body = {
+        ...(req.body ?? {}),
+        receipt_claims: parent.receiptClaims,
+        metadata: {
+          ...((req.body?.metadata && typeof req.body.metadata === 'object') ? req.body.metadata : {}),
+          receiptClaims: parent.receiptClaims,
+        },
+      };
+      next();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid receipt';
+      res.status(403).json({ error: message });
+    }
+  };
 
   // ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -1346,6 +1448,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
   }
 
+  const subdelegateRouteHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
+  if (guardMiddleware) {
+    subdelegateRouteHandlers.push(attachParentReceiptClaimsForGuard, assignProviderFromBody, guardMiddleware);
+  }
+
   app.get('/api/token/:provider', ...tokenRouteHandlers, async (req: Request, res: Response) => {
     try {
       const slug = req.params.provider;
@@ -1523,6 +1630,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             scopes: grantedScopes,
             delegationId,
             chainDepth: 0,
+            receiptClaims: extractTrustedReceiptClaims(req),
           })
         : undefined;
 
@@ -1548,6 +1656,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           agentDid,
           webBotAuthKeyId: webBotAuthIdentity?.keyId,
           signatureAgent: webBotAuthIdentity?.signatureAgent,
+          receiptClaims: extractTrustedReceiptClaims(req),
         },
       });
 
@@ -1874,7 +1983,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    *
    * Auth: Bearer cred_at_<token>
    */
-  app.post('/api/v1/subdelegate', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  app.post('/api/v1/subdelegate', ...subdelegateRouteHandlers, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
     try {
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
@@ -1911,9 +2020,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Verify parent receipt ─────────────────────────────────────────────
 
-      let parent;
+      let parent = (req as any).verifiedParentReceipt as ReturnType<typeof parseAndVerifyReceipt> | undefined;
       try {
-        parent = parseAndVerifyReceipt(parentReceipt);
+        parent = parent ?? parseAndVerifyReceipt(parentReceipt);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Invalid receipt';
         writeAuditEventIfSupported({
@@ -2084,6 +2193,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         chainDepth: validation.chainDepth,
         parentDelegationId: validation.parentDelegationId,
         parentReceiptHash,
+        receiptClaims: parent.receiptClaims,
       });
 
       // ── Audit event ──────────────────────────────────────────────────────
@@ -2106,6 +2216,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             identitySource: 'web-bot-auth',
             webBotAuthKeyId: webBotAuthIdentity.keyId,
             signatureAgent: webBotAuthIdentity.signatureAgent,
+            receiptClaims: parent.receiptClaims,
           },
         }),
       });

@@ -8,4 +8,5 @@ export { TimeWindowPolicy, timeWindowPolicy } from './time-window.js';
 export { UrlAllowlistPolicy, urlAllowlistPolicy } from './url-allowlist.js';
 export { MaxTtlPolicy, maxTtlPolicy } from './max-ttl.js';
 export { webBotAuthPolicy } from './web-bot-auth.js';
+export { receiptClaimsPolicy } from './receipt-claims.js';
 export type { MaxTtlPolicyResult } from './max-ttl.js';

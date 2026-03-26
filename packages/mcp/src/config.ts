@@ -18,6 +18,8 @@ export interface CredMcpCloudConfig {
   mode: 'cloud';
   /** Agent token issued by Cred (starts with cred_at_) */
   agentToken: string;
+  /** Stable agent identifier used when Cred should return signed delegation receipts */
+  agentDid?: string;
   /** Your Cred app's client ID */
   appClientId: string;
   /** Your Cred server URL (e.g. https://cred.example.com) */
@@ -28,6 +30,8 @@ export interface CredMcpCloudConfig {
 
 export interface CredMcpLocalConfig {
   mode: 'local';
+  /** Stable agent identifier used when Cred should return signed delegation receipts */
+  agentDid?: string;
   /** Passphrase for vault encryption */
   vaultPassphrase: string;
   /** Path to vault file */
@@ -141,6 +145,7 @@ export function loadConfig(args?: string[]): CredMcpConfig {
 
     return {
       mode: 'local',
+      agentDid: process.env.CRED_AGENT_DID,
       vaultPassphrase,
       vaultPath,
       vaultStorage,
@@ -169,6 +174,7 @@ export function loadConfig(args?: string[]): CredMcpConfig {
   return {
     mode: 'cloud',
     agentToken,
+    agentDid: process.env.CRED_AGENT_DID,
     appClientId,
     baseUrl,
     webBotAuth,

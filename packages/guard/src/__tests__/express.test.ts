@@ -3,6 +3,7 @@ import { CredGuard } from '../guard.js';
 import { createExpressMiddleware } from '../middleware/express.js';
 import type { Request, Response, NextFunction } from 'express';
 import type { CredPolicy } from '../types.js';
+import { receiptClaimsPolicy } from '../policies/receipt-claims.js';
 
 // Import middleware module to register prototype method
 import '../middleware/express.js';
@@ -219,6 +220,92 @@ describe('Express Middleware', () => {
       expect(capturedSignatureAgent).toContain('/.well-known/http-message-signatures-directory');
       expect(capturedIdentitySource).toBe('web-bot-auth');
       expect((req as any).guardAuditEvent.webBotAuthKeyId).toBe('kid_123');
+    });
+
+    it('uses a precomputed agent hash and forwards principal metadata', async () => {
+      let capturedHash = '';
+      let capturedPrincipal: unknown;
+      const guard = new CredGuard({
+        policies: [{
+          name: 'capture-principal',
+          evaluate: (ctx) => {
+            capturedHash = ctx.agentTokenHash;
+            capturedPrincipal = ctx.metadata?.authPrincipal;
+            return { decision: 'ALLOW', policy: 'capture-principal' };
+          },
+        }],
+      });
+      const middleware = createExpressMiddleware(guard);
+      const req = mockRequest({
+        headers: {},
+        body: { scopes: ['gmail.readonly'] },
+      }) as any;
+      req.agentTokenHash = 'precomputed-agent-hash';
+      req.agentPrincipal = { type: 'paperclip-bridge', principalId: 'agt_123' };
+      const res = mockResponse();
+      const next = vi.fn();
+
+      await middleware(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(capturedHash).toBe('precomputed-agent-hash');
+      expect(capturedPrincipal).toEqual({ type: 'paperclip-bridge', principalId: 'agt_123' });
+    });
+
+    it('captures receipt claims from request metadata', async () => {
+      let capturedClaims: string[] | undefined;
+      const guard = new CredGuard({
+        policies: [{
+          name: 'capture-receipt-claims',
+          evaluate: (ctx) => {
+            capturedClaims = ctx.receiptClaims;
+            return { decision: 'ALLOW', policy: 'capture-receipt-claims' };
+          },
+        }],
+      });
+      const middleware = createExpressMiddleware(guard);
+      const req = mockRequest({
+        body: {
+          scopes: ['repo'],
+          metadata: {
+            receiptClaims: ['staff-engineer:approved'],
+          },
+        },
+      });
+      const res = mockResponse();
+      const next = vi.fn();
+
+      await middleware(req, res, next);
+
+      expect(capturedClaims).toEqual(['staff-engineer:approved']);
+    });
+
+    it('denies when required receipt claims are missing', async () => {
+      const guard = new CredGuard({
+        policies: [
+          receiptClaimsPolicy({
+            perProvider: {
+              github: ['staff-engineer:approved'],
+            },
+          }),
+        ],
+      });
+      const middleware = createExpressMiddleware(guard);
+      const req = mockRequest({
+        params: { provider: 'github' },
+        body: {
+          scopes: ['repo'],
+          metadata: {},
+        },
+      });
+      const res = mockResponse();
+      const next = vi.fn();
+
+      await middleware(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res._status).toBe(403);
+      expect(res._json.reason).toMatch(/Missing required receipt claims/i);
     });
 
     it('updates body scopes when narrowed', async () => {

@@ -40,6 +40,12 @@ import {
   handleUse,
   UseToolInput,
 } from './tools/use.js';
+import {
+  SUBDELEGATE_TOOL_NAME,
+  SUBDELEGATE_TOOL_DEFINITION,
+  handleSubdelegate,
+  SubdelegateToolInput,
+} from './tools/subdelegate.js';
 
 function createCredClient(config: CredMcpConfig): Cred {
   if (config.mode === 'local') {
@@ -75,6 +81,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
   const toolContext = {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
+    agentDid: config.agentDid,
     tokenCache,
     webBotAuthSigner,
   };
@@ -96,6 +103,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     return {
       tools: [
         DELEGATE_TOOL_DEFINITION,
+        SUBDELEGATE_TOOL_DEFINITION,
         USE_TOOL_DEFINITION,
         STATUS_TOOL_DEFINITION,
         REVOKE_TOOL_DEFINITION,
@@ -110,6 +118,9 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     switch (name) {
       case DELEGATE_TOOL_NAME:
         return handleDelegate(args as unknown as DelegateToolInput, toolContext);
+
+      case SUBDELEGATE_TOOL_NAME:
+        return handleSubdelegate(args as unknown as SubdelegateToolInput, toolContext);
 
       case STATUS_TOOL_NAME:
         return handleStatus(args as unknown as StatusToolInput, toolContext);
@@ -151,6 +162,7 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
   const toolContext = {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
+    agentDid: config.agentDid,
     tokenCache,
     webBotAuthSigner,
   };
@@ -161,13 +173,14 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [DELEGATE_TOOL_DEFINITION, USE_TOOL_DEFINITION, STATUS_TOOL_DEFINITION, REVOKE_TOOL_DEFINITION],
+    tools: [DELEGATE_TOOL_DEFINITION, SUBDELEGATE_TOOL_DEFINITION, USE_TOOL_DEFINITION, STATUS_TOOL_DEFINITION, REVOKE_TOOL_DEFINITION],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     switch (name) {
       case DELEGATE_TOOL_NAME: return handleDelegate(args as unknown as DelegateToolInput, toolContext);
+      case SUBDELEGATE_TOOL_NAME: return handleSubdelegate(args as unknown as SubdelegateToolInput, toolContext);
       case USE_TOOL_NAME:      return handleUse(args as unknown as UseToolInput, toolContext);
       case STATUS_TOOL_NAME:   return handleStatus(args as unknown as StatusToolInput, toolContext);
       case REVOKE_TOOL_NAME:   return handleRevoke(args as unknown as RevokeToolInput, toolContext);

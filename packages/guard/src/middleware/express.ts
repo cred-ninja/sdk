@@ -69,17 +69,17 @@ export function createExpressMiddleware(
       }
 
       // Extract agent token and hash it
-      const agentToken = extractAgentToken(req);
-      if (!agentToken) {
+      const agentTokenHash = resolveAgentTokenHash(req, extractAgentToken);
+      if (!agentTokenHash) {
         res.status(401).json({ error: 'Missing agent token' });
         return;
       }
-      const agentTokenHash = hashToken(agentToken);
 
       // Build guard context
       const requestedScopes = extractScopes(req);
       const consentedScopes = extractConsentedScopes(req) || requestedScopes;
 
+      const principal = (req as any).agentPrincipal;
       const ctx: GuardContext = {
         provider,
         agentTokenHash,
@@ -89,7 +89,7 @@ export function createExpressMiddleware(
         targetUrl: req.body?.targetUrl,
         targetMethod: req.body?.targetMethod || req.method,
         delegationId: req.body?.delegationId,
-        metadata: req.body?.metadata,
+        metadata: mergeMetadata(req.body?.metadata, principal),
         identitySource: inferIdentitySource(req.body),
         agentDid: typeof req.body?.agent_did === 'string' ? req.body.agent_did : undefined,
         tofuFingerprint: typeof req.body?.tofu_fingerprint === 'string' ? req.body.tofu_fingerprint : undefined,
@@ -97,6 +97,7 @@ export function createExpressMiddleware(
           ? req.body.web_bot_auth_key_id
           : (typeof req.body?.key_id === 'string' ? req.body.key_id : undefined),
         signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
+        receiptClaims: resolveReceiptClaims(req.body, principal),
       };
 
       // Evaluate policies
@@ -176,6 +177,35 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+function resolveAgentTokenHash(
+  req: Request,
+  extractAgentToken: (req: Request) => string | undefined,
+): string | undefined {
+  const precomputed = (req as any).agentTokenHash;
+  if (typeof precomputed === 'string' && precomputed.length > 0) {
+    return precomputed;
+  }
+
+  const agentToken = extractAgentToken(req);
+  if (!agentToken) {
+    return undefined;
+  }
+  return hashToken(agentToken);
+}
+
+function mergeMetadata(
+  metadata: Record<string, unknown> | undefined,
+  principal: unknown,
+): Record<string, unknown> | undefined {
+  if (!principal || typeof principal !== 'object') {
+    return metadata;
+  }
+  return {
+    ...(metadata ?? {}),
+    authPrincipal: principal as Record<string, unknown>,
+  };
+}
+
 function inferIdentitySource(body: Record<string, unknown> | undefined): GuardContext['identitySource'] {
   if (!body) return 'agent-token';
   if (typeof body.web_bot_auth_key_id === 'string' || typeof body.signature_agent === 'string') {
@@ -188,6 +218,45 @@ function inferIdentitySource(body: Record<string, unknown> | undefined): GuardCo
     return 'did';
   }
   return 'agent-token';
+}
+
+function resolveReceiptClaims(
+  body: Record<string, unknown> | undefined,
+  principal: unknown,
+): string[] | undefined {
+  const principalClaims = getClaimsFromPrincipal(principal);
+  if (principalClaims) {
+    return principalClaims;
+  }
+  if (!body) return undefined;
+  const direct = body.receipt_claims;
+  if (Array.isArray(direct)) {
+    const claims = direct.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    return claims.length > 0 ? claims : undefined;
+  }
+  const metadataClaims = body.metadata;
+  if (metadataClaims && typeof metadataClaims === 'object' && Array.isArray((metadataClaims as Record<string, unknown>).receiptClaims)) {
+    const claims = ((metadataClaims as Record<string, unknown>).receiptClaims as unknown[])
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    return claims.length > 0 ? claims : undefined;
+  }
+  return undefined;
+}
+
+function getClaimsFromPrincipal(principal: unknown): string[] | undefined {
+  if (!principal || typeof principal !== 'object') {
+    return undefined;
+  }
+  const metadata = (principal as Record<string, unknown>).metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return undefined;
+  }
+  const claims = (metadata as Record<string, unknown>).receiptClaims;
+  if (!Array.isArray(claims)) {
+    return undefined;
+  }
+  const normalized = claims.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 /**

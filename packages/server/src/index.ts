@@ -7,7 +7,13 @@
 
 export { createServer } from './server.js';
 export { loadConfig } from './config.js';
-export type { ServerConfig, ProviderConfig } from './config.js';
+export type {
+  ServerConfig,
+  ProviderConfig,
+  RequestAgentPrincipal,
+  AgentRequestAuthResult,
+  AgentRequestVerifier,
+} from './config.js';
 export type { AgentPrincipal, TofuProofInput, TofuDelegationPayload, ResolvedTofuIdentity } from './tofu-bridge.js';
 
 // Re-export guard for convenience — users can configure guard inline

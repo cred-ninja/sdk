@@ -32,6 +32,8 @@ export interface GuardContext {
   webBotAuthKeyId?: string;
   /** Optional Signature-Agent directory URL */
   signatureAgent?: string;
+  /** Optional claims carried by a delegation receipt chain */
+  receiptClaims?: string[];
 }
 
 /** Result of a single policy evaluation */
@@ -156,4 +158,12 @@ export interface WebBotAuthPolicyConfig {
   allowedIdentitySources?: Array<'agent-token' | 'did' | 'tofu' | 'web-bot-auth'>;
   /** Optional allowed Signature-Agent URL prefixes */
   allowedSignatureAgentPrefixes?: string[];
+}
+
+/** Require claims present on a delegation receipt chain */
+export interface ReceiptClaimsPolicyConfig {
+  /** Claims required for every provider unless overridden */
+  requiredClaims?: string[];
+  /** Optional per-provider claim requirements */
+  perProvider?: Record<string, string[]>;
 }

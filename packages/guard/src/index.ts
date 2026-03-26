@@ -46,6 +46,7 @@ export type {
   UrlAllowlistPolicyConfig,
   MaxTtlPolicyConfig,
   WebBotAuthPolicyConfig,
+  ReceiptClaimsPolicyConfig,
 } from './types.js';
 
 // Policies
@@ -61,6 +62,7 @@ export {
   MaxTtlPolicy,
   maxTtlPolicy,
   webBotAuthPolicy,
+  receiptClaimsPolicy,
 } from './policies/index.js';
 export type { MaxTtlPolicyResult } from './policies/index.js';
 

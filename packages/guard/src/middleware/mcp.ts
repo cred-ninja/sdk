@@ -99,6 +99,7 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
         tofuFingerprint: getStringMetadata(input.metadata, 'tofuFingerprint'),
         webBotAuthKeyId: getStringMetadata(input.metadata, 'webBotAuthKeyId'),
         signatureAgent: getStringMetadata(input.metadata, 'signatureAgent'),
+        receiptClaims: getStringArrayMetadata(input.metadata, 'receiptClaims'),
       };
 
       // Evaluate policies
@@ -155,6 +156,15 @@ function hashToken(token: string): string {
 function getStringMetadata(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function getStringArrayMetadata(metadata: Record<string, unknown> | undefined, key: string): string[] | undefined {
+  const value = metadata?.[key];
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const claims = value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  return claims.length > 0 ? claims : undefined;
 }
 
 /**

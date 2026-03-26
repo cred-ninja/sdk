@@ -14,7 +14,7 @@ export const DELEGATE_TOOL_DEFINITION = {
   name: DELEGATE_TOOL_NAME,
   description:
     'Request delegated OAuth2 access for a service on behalf of a user. ' +
-    'Returns a delegation handle (not the raw token) if consent has been granted, ' +
+    'Returns a delegation handle (not the raw token) and, when the MCP server is configured with an agent identity, a signed delegation receipt for handoff/sub-delegation. ' +
     'or a consent URL if the user needs to authorize. ' +
     'Pass the handle to cred_use to make authenticated API calls.',
   inputSchema: {
@@ -47,6 +47,7 @@ export interface DelegateToolInput {
 export interface DelegateToolContext {
   cred: Cred;
   appClientId: string;
+  agentDid?: string;
   tokenCache: TokenCache;
 }
 
@@ -60,6 +61,7 @@ export async function handleDelegate(
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
+      agentDid: context.agentDid,
     });
 
     // Store the token in the local cache — never return the raw token to the LLM.
@@ -82,6 +84,7 @@ export async function handleDelegate(
             delegationId,
             service: result.service,
             expiresIn,
+            ...(result.receipt ? { receipt: result.receipt } : {}),
             note: 'Pass delegationId to cred_use to make authenticated API calls.',
           }),
         },
