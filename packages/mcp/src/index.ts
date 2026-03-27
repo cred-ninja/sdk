@@ -20,6 +20,13 @@ export {
   DelegateToolContext,
 } from './tools/delegate.js';
 export {
+  SUBDELEGATE_TOOL_NAME,
+  SUBDELEGATE_TOOL_DEFINITION,
+  handleSubdelegate,
+  SubdelegateToolInput,
+  SubdelegateToolContext,
+} from './tools/subdelegate.js';
+export {
   USE_TOOL_NAME,
   USE_TOOL_DEFINITION,
   handleUse,

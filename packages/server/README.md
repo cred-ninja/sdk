@@ -75,6 +75,7 @@ All configuration via environment variables (or `.env` file):
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |
+| `WEB_BOT_AUTH_ALLOWED_ORIGINS` | No | Comma-separated trusted remote `Signature-Agent` origins for ingress verification |
 | `GOOGLE_CLIENT_ID` | No | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | No | Google OAuth client secret |
 | `GITHUB_CLIENT_ID` | No | GitHub OAuth client ID |
@@ -82,6 +83,8 @@ All configuration via environment variables (or `.env` file):
 | `SLACK_CLIENT_ID` | No | Slack OAuth client ID |
 | `SLACK_CLIENT_SECRET` | No | Slack OAuth client secret |
 | ... | No | Same pattern for NOTION, SALESFORCE, LINEAR, HUBSPOT |
+
+`AGENT_TOKEN` is required when you use `loadConfig()` from environment variables. For embedded/programmatic usage, you can instead provide a custom `agentRequestVerifier` function in `createServer(config)` and omit the static token entirely.
 
 ## Docker Deployment (Production)
 
@@ -182,6 +185,7 @@ curl https://cred.yourdomain.com/api/v1/delegate \
 - **Agent tokens validated** using constant-time comparison (timing-attack resistant).
 - **Optional ingress Web Bot Auth verification** validates `Signature`, `Signature-Input`, and `Signature-Agent` on incoming agent requests and rejects replayed nonces within the signature validity window.
 - **Shared replay defense is available** with `WEB_BOT_AUTH_NONCE_STORE=sqlite`, allowing multiple Cred instances to reject the same nonce when they share the same nonce database.
+- **Remote `Signature-Agent` fetches are origin-gated.** Cred only resolves remote directories from `WEB_BOT_AUTH_ALLOWED_ORIGINS`, requires the canonical well-known directory path, and rejects redirects during fetch.
 - **HTTPS required for remote access.** The SDK refuses to send agent tokens over HTTP to non-localhost servers.
 - **For production:** Always run behind a TLS reverse proxy (Caddy auto-provisions certificates).
 
@@ -213,6 +217,49 @@ const { app, vault } = createServer(config);
 await vault.init();
 app.listen(3456);
 ```
+
+### Custom Agent Auth
+
+For integrations that already have their own agent identity system, use a programmatic verifier instead of a shared static bearer token:
+
+```typescript
+import { createServer } from '@credninja/server';
+
+const { app, vault } = createServer({
+  port: 3456,
+  host: '127.0.0.1',
+  vaultPassphrase: process.env.VAULT_PASSPHRASE!,
+  vaultStorage: 'file',
+  vaultPath: './data/vault.json',
+  tofuStorage: 'file',
+  tofuPath: './data/tofu.json',
+  redirectBaseUri: 'http://localhost:3456',
+  providers: [],
+  agentRequestVerifier: async (req) => {
+    const assertion = req.get('X-Agent-Assertion');
+    if (!assertion) {
+      return { ok: false, status: 401, error: 'Missing agent assertion' };
+    }
+
+    // Verify the assertion using your own runtime's identity system.
+    return {
+      ok: true,
+      principal: {
+        type: 'external-runtime',
+        principalId: 'agent_123',
+        metadata: { runtime: 'external-runtime' },
+      },
+    };
+  },
+});
+
+await vault.init();
+app.listen(3456);
+```
+
+This keeps Cred core generic while letting adapters for external runtimes translate their native auth model into Cred's issuance path.
+
+If your verifier returns a stable `principalId`, Cred can derive a stable per-agent hash for downstream Guard policies and rate limits even when no bearer token is present on the request.
 
 ## License
 

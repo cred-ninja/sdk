@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { verify as verifySignature, createPublicKey, createPrivateKey, sign, generateKeyPairSync } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
-import { CredGuard, rateLimitPolicy, scopeFilterPolicy } from '@credninja/guard';
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy, receiptClaimsPolicy } from '@credninja/guard';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -147,6 +147,49 @@ describe('@credninja/server', () => {
       expect(res.body.providers).toEqual(['google']);
       expect(res.body.vault).toBe('file');
       expect(res.body.tofu).toBe('file');
+    });
+  });
+
+  describe('agent auth configuration', () => {
+    it('supports a custom request verifier without a static agent token', async () => {
+      const { app, tofu } = createServer(makeTestConfig({
+        agentToken: undefined,
+        agentRequestVerifier: (req) => {
+          if (req.get('X-Test-Agent') === 'external-agent') {
+            return {
+              ok: true,
+              principal: {
+                type: 'external-runtime',
+                principalId: 'agt_release_engineer',
+                metadata: { workspaceId: 'workspace_demo' },
+              },
+            };
+          }
+          return { ok: false, status: 401, error: 'invalid test agent' };
+        },
+      }));
+      await tofu.init();
+
+      const okRes = await request(app)
+        .get('/api/v1/web-bot-auth/keys')
+        .set('X-Test-Agent', 'external-agent');
+
+      expect(okRes.status).toBe(200);
+      expect(Array.isArray(okRes.body.keys)).toBe(true);
+
+      const deniedRes = await request(app)
+        .get('/api/v1/web-bot-auth/keys')
+        .set('X-Test-Agent', 'wrong-agent');
+
+      expect(deniedRes.status).toBe(401);
+      expect(deniedRes.body.error).toBe('invalid test agent');
+    });
+
+    it('throws when no agent auth mode is configured', () => {
+      expect(() => createServer(makeTestConfig({
+        agentToken: undefined,
+        agentRequestVerifier: undefined,
+      }))).toThrow('Either agentToken or agentRequestVerifier is required');
     });
   });
 
@@ -799,6 +842,184 @@ describe('@credninja/server', () => {
       expect(res.status).toBe(401);
       expect(res.body.error).toBe('invalid_web_bot_auth');
       expect(res.body.message).toMatch(/must use HTTPS unless it targets localhost/i);
+    });
+
+    it('rejects untrusted remote Signature-Agent origins', async () => {
+      const config = makeTestConfig({ webBotAuthMode: 'require' });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: 'https://remote.example.com/.well-known/http-message-signatures-directory',
+        keyId: 'kid_unused',
+        privateKey: keypair.privateKey,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_web_bot_auth');
+      expect(res.body.message).toMatch(/origin is not trusted/i);
+    });
+
+    it('rejects Signature-Agent URLs that do not use the canonical directory path', async () => {
+      const config = makeTestConfig({
+        webBotAuthMode: 'require',
+        webBotAuthAllowedOrigins: ['https://remote.example.com'],
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.delegate-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const keypair = generateKeyPairSync('ed25519');
+      const signedHeaders = signWebBotAuthRequest({
+        url: 'http://localhost:3456/api/v1/delegate',
+        signatureAgent: 'https://remote.example.com/not-the-directory',
+        keyId: 'kid_unused',
+        privateKey: keypair.privateKey,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_web_bot_auth');
+      expect(res.body.message).toMatch(/must point to \/.well-known\/http-message-signatures-directory/i);
+    });
+
+    it('preserves trusted receipt claims across guarded sub-delegation', async () => {
+      const config = makeTestConfig({
+        agentToken: undefined,
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        providers: [
+          {
+            slug: 'github',
+            clientId: 'test-github-client-id',
+            clientSecret: 'test-github-client-secret',
+            defaultScopes: ['repo'],
+          },
+        ],
+        agentRequestVerifier: (req) => {
+          if (req.get('X-Test-Agent') === 'staff-reviewer') {
+            return {
+              ok: true,
+              principal: {
+                type: 'external-runtime',
+                principalId: 'agt_staff_reviewer',
+                metadata: {
+                  receiptClaims: ['staff-engineer:approved'],
+                },
+              },
+            };
+          }
+          if (req.get('X-Test-Agent') === 'release-engineer') {
+            return {
+              ok: true,
+              principal: {
+                type: 'external-runtime',
+                principalId: 'agt_release_engineer',
+              },
+            };
+          }
+          return { ok: false, status: 401, error: 'invalid test agent' };
+        },
+        guard: new CredGuard({
+          policies: [
+            receiptClaimsPolicy({
+              perProvider: {
+                github: ['staff-engineer:approved'],
+              },
+            }),
+          ],
+        }),
+      });
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      await vault.store({
+        provider: 'github',
+        userId: 'default',
+        accessToken: 'gho_delegate_token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['repo'],
+      });
+
+      await vault.createPermission({
+        agentId: 'did:key:release-engineer',
+        connectionId: 'github',
+        allowedScopes: ['repo'],
+        delegatable: true,
+        maxDelegationDepth: 2,
+        requiresApproval: false,
+        createdBy: 'test',
+      });
+
+      const rootRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('X-Test-Agent', 'staff-reviewer')
+        .send({
+          service: 'github',
+          user_id: 'default',
+          appClientId: 'app_123',
+          agent_did: 'did:key:staff-reviewer',
+          scopes: ['repo'],
+        });
+
+      expect(rootRes.status).toBe(200);
+      expect(rootRes.body.receipt).toBeDefined();
+
+      const childRes = await request(app)
+        .post('/api/v1/subdelegate')
+        .set('X-Test-Agent', 'release-engineer')
+        .send({
+          parent_receipt: rootRes.body.receipt,
+          agent_did: 'did:key:release-engineer',
+          service: 'github',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['repo'],
+        });
+
+      expect(childRes.status).toBe(200);
+      expect(childRes.body.receipt).toBeDefined();
+      expect(childRes.body.chain_depth).toBe(1);
     });
 
     it('denies scope escalation on the normalized route', async () => {

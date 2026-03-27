@@ -40,6 +40,7 @@ Add to your MCP client configuration:
       "args": ["-y", "@credninja/mcp"],
       "env": {
         "CRED_AGENT_TOKEN": "your_agent_token",
+        "CRED_AGENT_DID": "agent:release-engineer",
         "CRED_APP_CLIENT_ID": "your_app_client_id",
         "CRED_BASE_URL": "https://cred.example.com"
       }
@@ -78,6 +79,7 @@ When your MCP client needs your calendar, you approve interactively. The token i
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
+| `CRED_AGENT_DID` | No | | Stable agent identifier used when Cred should return signed delegation receipts |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
 | `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
 | `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing for `cred_use` |
@@ -95,7 +97,7 @@ When your MCP client needs your calendar, you approve interactively. The token i
 
 ## What the Agent Can Do
 
-Once connected, your MCP-compatible agent has access to three tools:
+Once connected, your MCP-compatible agent has access to four tools:
 
 ### `cred_delegate`
 
@@ -107,6 +109,19 @@ Get an OAuth access token for a user's connected service.
 - `scopes` (string[], optional): OAuth scopes to request
 
 **Returns:** Access token and expiry, or a consent URL if the user hasn't authorized yet.
+
+### `cred_subdelegate`
+
+Create a child delegation from a signed parent receipt.
+
+**Input:**
+- `parent_receipt` (string, required): Signed parent delegation receipt
+- `agent_did` (string, required): Stable identifier for the child agent
+- `user_id` (string, required): The user to delegate for
+- `service` (string, required): Service slug
+- `scopes` (string[], optional): Optional subset of the parent scopes
+
+**Returns:** A local delegation handle, a child receipt, and chain metadata.
 
 ### `cred_status`
 
@@ -183,9 +198,10 @@ Assistant: I'll need access to your Google Calendar.
 
 1. Your MCP client starts the MCP server locally via npx
 2. When the agent needs a credential, it calls `cred_delegate`
-3. The MCP server calls the Cred API with your agent token
-4. Cred returns a delegated access token (or consent URL)
-5. The agent uses the token to call the service API
+3. If authority needs to move across agents, it calls `cred_subdelegate`
+4. The MCP server calls the Cred API with your agent token
+5. Cred returns a delegated access token and, when configured with `CRED_AGENT_DID`, a signed receipt
+6. The agent uses the local delegation handle with `cred_use` to call the service API
 
 ## Programmatic Usage
 

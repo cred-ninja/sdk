@@ -7,6 +7,7 @@
 
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
+import type { Request } from 'express';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -14,6 +15,19 @@ export interface ProviderConfig {
   clientSecret: string;
   defaultScopes: string[];
 }
+
+export interface RequestAgentPrincipal {
+  type: string;
+  principalId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type AgentRequestAuthResult =
+  | { ok: true; principal?: RequestAgentPrincipal }
+  | { ok: false; status?: number; error?: string };
+
+export type AgentRequestVerifier =
+  (req: Request) => AgentRequestAuthResult | Promise<AgentRequestAuthResult>;
 
 export interface ServerConfig {
   port: number;
@@ -29,7 +43,8 @@ export interface ServerConfig {
   tofuPath: string;
 
   // Agent auth
-  agentToken: string;
+  agentToken?: string;
+  agentRequestVerifier?: AgentRequestVerifier;
 
   // OAuth providers (only those with both clientId and clientSecret)
   providers: ProviderConfig[];
@@ -45,6 +60,7 @@ export interface ServerConfig {
   webBotAuthMode?: 'off' | 'optional' | 'require';
   webBotAuthNonceStore?: 'memory' | 'sqlite';
   webBotAuthNoncePath?: string;
+  webBotAuthAllowedOrigins?: string[];
 }
 
 const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
@@ -92,6 +108,10 @@ export function loadConfig(): ServerConfig {
   }
   const webBotAuthNoncePath = process.env.WEB_BOT_AUTH_NONCE_PATH
     ?? (webBotAuthNonceStore === 'sqlite' ? './data/web-bot-auth-nonces.sqlite' : undefined);
+  const webBotAuthAllowedOrigins = (process.env.WEB_BOT_AUTH_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -121,5 +141,6 @@ export function loadConfig(): ServerConfig {
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,
+    webBotAuthAllowedOrigins,
   };
 }

@@ -78,6 +78,8 @@ export interface DelegateParams {
   scopes?: string[];
   /** Agent's DID (did:key:...). If provided, Cred returns a signed receipt. */
   agentDid?: string;
+  /** Optional trusted claims embedded into a local delegation receipt. */
+  receiptClaims?: string[];
 }
 
 export interface TofuDelegateParams {

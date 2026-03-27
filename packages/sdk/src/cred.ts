@@ -736,6 +736,7 @@ export class Cred {
           scopes: delegatedScopes,
           delegationId,
           chainDepth: 0,
+          receiptClaims: params.receiptClaims,
         })
       : undefined;
 
@@ -837,6 +838,7 @@ export class Cred {
       chainDepth: validation.chainDepth,
       parentDelegationId: validation.parentDelegationId,
       parentReceipt: params.parentReceipt,
+      receiptClaims: parent.receiptClaims,
     });
 
     this.writeAuditEvent({
@@ -899,6 +901,7 @@ export class Cred {
     chainDepth: number;
     parentDelegationId?: string;
     parentReceipt?: string;
+    receiptClaims?: string[];
   }): string {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({
@@ -911,6 +914,7 @@ export class Cred {
       appClientId: input.appClientId,
       delegationId: input.delegationId,
       chainDepth: input.chainDepth,
+      ...(input.receiptClaims && input.receiptClaims.length > 0 ? { receiptClaims: input.receiptClaims } : {}),
       ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
       ...(input.parentReceipt ? {
         parentReceiptHash: crypto.createHash('sha256').update(input.parentReceipt).digest('hex'),
@@ -932,6 +936,7 @@ export class Cred {
     appClientId: string;
     delegationId: string;
     chainDepth?: number;
+    receiptClaims: string[];
   } {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
@@ -947,6 +952,7 @@ export class Cred {
         appClientId: string;
         delegationId?: string;
         chainDepth?: number;
+        receiptClaims?: string[];
       };
 
       const publicKey = this.getLocalReceiptPublicKeyHex();
@@ -974,6 +980,9 @@ export class Cred {
       return {
         ...payload,
         delegationId: payload.delegationId,
+        receiptClaims: Array.isArray(payload.receiptClaims)
+          ? payload.receiptClaims.filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0)
+          : [],
       };
     } catch (error) {
       if (error instanceof CredError) throw error;
