@@ -218,14 +218,12 @@ Cred now supports Cloudflare-style Web Bot Auth as a transport identity layer on
 
 Use Web Bot Auth for "who sent this request?" and Cred for "what user-delegated credential is this agent allowed to use?"
 
-Implementation and operator docs:
+Docs:
 
-- [Identity ADR](./docs/web-bot-auth-identity-adr.md)
-- [Data model](./docs/web-bot-auth-data-model.md)
-- [TOFU bridge](./docs/web-bot-auth-tofu-bridge.md)
-- [Threat model](./docs/web-bot-auth-threat-model.md)
-- [Security review](./docs/web-bot-auth-security-review.md)
+- [Docs index](./docs/README.md)
+- [Web Bot Auth overview](./docs/web-bot-auth.md)
 - [Cloudflare submission checklist](./docs/cloudflare-submission-checklist.md)
+- [TOFU proof of possession](./docs/tofu-proof-of-possession.md)
 
 ## Standalone First
 

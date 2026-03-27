@@ -32,7 +32,9 @@ Open [http://localhost:3456/connect](http://localhost:3456/connect) to manage OA
 
 - [cred.ninja](https://cred.ninja) — Project home
 - [cred.ninja/docs](https://cred.ninja/docs) — Full docs
+- [Repo docs index](https://github.com/cred-ninja/sdk/blob/main/docs/README.md) — Public repo docs
 - [TOFU proof of possession](https://github.com/cred-ninja/sdk/blob/main/docs/tofu-proof-of-possession.md) — Self-hosted agent identity flow
+- [Web Bot Auth overview](https://github.com/cred-ninja/sdk/blob/main/docs/web-bot-auth.md) — Signed transport identity overview
 - [@credninja/server](https://github.com/cred-ninja/sdk/tree/main/packages/server) — Server package
 - [@credninja/sdk](https://github.com/cred-ninja/sdk/tree/main/packages/sdk) — TypeScript SDK for agents
 
