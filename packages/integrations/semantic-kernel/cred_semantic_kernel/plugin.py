@@ -45,19 +45,22 @@ class CredPlugin:
         agent_token: str,
         user_id: str,
         app_client_id: str,
-        base_url: str = "https://api.cred.ninja",
+        base_url: str,
+        token_format: str = "raw",
     ) -> None:
+        if token_format not in {"raw", "handle"}:
+            raise ValueError("token_format must be 'raw' or 'handle'")
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
         self._user_id = user_id
         self._app_client_id = app_client_id
+        self._token_format = token_format
 
     @kernel_function(
         name="delegate",
         description=(
-            "Get a delegated OAuth access token for a third-party service "
+            "Get delegated OAuth access for a third-party service "
             "on behalf of the current user. "
-            "Returns JSON with access_token, token_type, expires_in, service, scopes, "
-            "and delegation_id. "
+            "Returns JSON with either access_token or a brokered delegation_id, plus expiry, service, and scopes. "
             "Raises an error with consent_url if the user hasn't connected the service."
         ),
     )
@@ -71,13 +74,29 @@ class CredPlugin:
         if scopes:
             scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
 
+        if self._token_format == "handle":
+            result = self._cred.delegate_handle(
+                service=service,
+                user_id=self._user_id,
+                app_client_id=self._app_client_id,
+                scopes=scope_list if scope_list else None,
+            )
+            return json.dumps({
+                "token_type": result.token_type,
+                "expires_in": result.expires_in,
+                "service": result.service,
+                "user_id": result.user_id,
+                "scopes": result.scopes,
+                "delegation_id": result.delegation_id,
+                "note": "Pass delegation_id to use to make authenticated API calls.",
+            })
+
         result = self._cred.delegate(
             service=service,
             user_id=self._user_id,
             app_client_id=self._app_client_id,
             scopes=scope_list if scope_list else None,
         )
-
         return json.dumps({
             "access_token": result.access_token,
             "token_type": result.token_type,
@@ -85,4 +104,38 @@ class CredPlugin:
             "service": result.service,
             "scopes": result.scopes,
             "delegation_id": result.delegation_id,
+        })
+
+    @kernel_function(
+        name="use",
+        description=(
+            "Make an authenticated API call through Cred using a brokered delegation handle. "
+            "The provider access token stays on the Cred server."
+        ),
+    )
+    def use(
+        self,
+        delegation_id: Annotated[str, "Brokered delegation handle returned by delegate."],
+        url: Annotated[str, "Full HTTPS API URL to call."],
+        method: Annotated[str, "HTTP method: GET, POST, PUT, PATCH, or DELETE."],
+        body: Annotated[str, "Optional JSON request body. Pass empty string when unused."] = "",
+        extra_headers: Annotated[str, "Optional JSON object of service-specific headers. Pass empty string when unused."] = "",
+    ) -> str:
+        """Broker an upstream API request and return JSON result."""
+        parsed_body = json.loads(body) if body else None
+        parsed_headers = json.loads(extra_headers) if extra_headers else None
+        result = self._cred.use(
+            delegation_id=delegation_id,
+            url=url,
+            method=method,
+            body=parsed_body,
+            extra_headers=parsed_headers,
+        )
+        return json.dumps({
+            "status": result.status,
+            "ok": result.ok,
+            "content_type": result.content_type,
+            "body": result.body,
+            "truncated": result.truncated,
+            "truncated_at": result.truncated_at,
         })

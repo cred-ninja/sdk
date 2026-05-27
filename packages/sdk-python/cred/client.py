@@ -15,9 +15,8 @@ from .exceptions import (
     RateLimitException,
     ScopeCeilingException,
 )
-from .models import Connection, DelegationResult
+from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
-DEFAULT_BASE_URL = "https://api.cred.ninja"
 _LOCALHOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -32,9 +31,16 @@ def _parse_expires_at(raw_value: Any, expires_in: int) -> datetime:
 
 
 class _CredBase:
-    def __init__(self, agent_token: str, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(self, agent_token: str, base_url: Optional[str] = None) -> None:
         if not agent_token:
             raise CredError("agent_token is required", "invalid_config", 0)
+        if not base_url:
+            raise CredError(
+                "base_url is required. Set it to your Cred server URL, for example "
+                "https://cred.example.com or http://localhost:3456 for local development.",
+                "invalid_config",
+                0,
+            )
         self._agent_token = agent_token
         self._base_url = self._validate_base_url(base_url)
 
@@ -78,6 +84,33 @@ class _CredBase:
             scopes=data["scopes"],
             delegation_id=data["delegation_id"],
             receipt=data.get("receipt"),
+        )
+
+    @staticmethod
+    def _build_delegation_handle_result(data: dict[str, Any]) -> DelegationHandleResult:
+        raw_expires_in = data.get("expires_in")
+        expires_in = int(raw_expires_in) if raw_expires_in is not None else 900
+        expires_at = _parse_expires_at(data.get("expires_at") or data.get("expiresAt"), expires_in)
+        return DelegationHandleResult(
+            token_type=data["token_type"],
+            expires_in=expires_in,
+            expires_at=expires_at,
+            service=data["service"],
+            scopes=data["scopes"],
+            delegation_id=data["delegation_id"],
+            user_id=data["user_id"],
+            receipt=data.get("receipt"),
+        )
+
+    @staticmethod
+    def _build_brokered_use_result(data: dict[str, Any]) -> BrokeredUseResult:
+        return BrokeredUseResult(
+            status=int(data["status"]),
+            ok=bool(data["ok"]),
+            content_type=str(data.get("contentType", "")),
+            body=data.get("body"),
+            truncated=bool(data.get("truncated", False)),
+            truncated_at=int(data["truncatedAt"]) if data.get("truncatedAt") is not None else None,
         )
 
     @staticmethod
@@ -137,12 +170,13 @@ class _CredBase:
     ) -> str:
         params = urlencode(
             {
+                "user_id": user_id,
                 "app_client_id": app_client_id,
                 "scopes": ",".join(scopes),
                 "redirect_uri": redirect_uri,
             },
         )
-        return f"{self._base_url}/api/connect/{service}/authorize?{params}"
+        return f"{self._base_url}/connect/{service}?{params}"
 
 
 class Cred(_CredBase):
@@ -151,7 +185,7 @@ class Cred(_CredBase):
     def __init__(
         self,
         agent_token: str,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: Optional[str] = None,
     ) -> None:
         super().__init__(agent_token=agent_token, base_url=base_url)
         self._client = httpx.Client(
@@ -181,6 +215,50 @@ class Cred(_CredBase):
 
         data = self._request_json("POST", "/api/v1/delegate", body)
         return self._build_delegation_result(data)
+
+    def delegate_handle(
+        self,
+        service: str,
+        user_id: str,
+        app_client_id: Optional[str] = None,
+        scopes: Optional[list[str]] = None,
+        agent_did: Optional[str] = None,
+    ) -> DelegationHandleResult:
+        body: dict[str, Any] = {
+            "service": service,
+            "user_id": user_id,
+            "token_format": "handle",
+        }
+        if app_client_id:
+            body["appClientId"] = app_client_id
+        if scopes:
+            body["scopes"] = scopes
+        if agent_did:
+            body["agent_did"] = agent_did
+
+        data = self._request_json("POST", "/api/v1/delegate", body)
+        return self._build_delegation_handle_result(data)
+
+    def use(
+        self,
+        delegation_id: str,
+        url: str,
+        method: str = "GET",
+        body: Optional[dict[str, Any]] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> BrokeredUseResult:
+        request_body: dict[str, Any] = {
+            "delegation_id": delegation_id,
+            "url": url,
+            "method": method,
+        }
+        if body is not None:
+            request_body["body"] = body
+        if extra_headers:
+            request_body["extra_headers"] = extra_headers
+
+        data = self._request_json("POST", "/api/v1/use", request_body)
+        return self._build_brokered_use_result(data)
 
     def list_connections(
         self,
@@ -246,7 +324,7 @@ class AsyncCred(_CredBase):
     def __init__(
         self,
         agent_token: str,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: Optional[str] = None,
     ) -> None:
         super().__init__(agent_token=agent_token, base_url=base_url)
         self._client = httpx.AsyncClient(
@@ -276,6 +354,50 @@ class AsyncCred(_CredBase):
 
         data = await self._request_json("POST", "/api/v1/delegate", body)
         return self._build_delegation_result(data)
+
+    async def delegate_handle(
+        self,
+        service: str,
+        user_id: str,
+        app_client_id: Optional[str] = None,
+        scopes: Optional[list[str]] = None,
+        agent_did: Optional[str] = None,
+    ) -> DelegationHandleResult:
+        body: dict[str, Any] = {
+            "service": service,
+            "user_id": user_id,
+            "token_format": "handle",
+        }
+        if app_client_id:
+            body["appClientId"] = app_client_id
+        if scopes:
+            body["scopes"] = scopes
+        if agent_did:
+            body["agent_did"] = agent_did
+
+        data = await self._request_json("POST", "/api/v1/delegate", body)
+        return self._build_delegation_handle_result(data)
+
+    async def use(
+        self,
+        delegation_id: str,
+        url: str,
+        method: str = "GET",
+        body: Optional[dict[str, Any]] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> BrokeredUseResult:
+        request_body: dict[str, Any] = {
+            "delegation_id": delegation_id,
+            "url": url,
+            "method": method,
+        }
+        if body is not None:
+            request_body["body"] = body
+        if extra_headers:
+            request_body["extra_headers"] = extra_headers
+
+        data = await self._request_json("POST", "/api/v1/use", request_body)
+        return self._build_brokered_use_result(data)
 
     async def list_connections(
         self,

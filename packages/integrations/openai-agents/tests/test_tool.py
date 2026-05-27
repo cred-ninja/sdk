@@ -14,12 +14,13 @@ from unittest.mock import MagicMock, patch
 
 from agents import FunctionTool
 
-from cred import DelegationResult, ConsentRequiredError, CredError
-from cred_openai_agents import cred_delegate_tool, CredTool
+from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, ConsentRequiredError, CredError
+from cred_openai_agents import cred_delegate_tool, cred_use_tool, CredTool
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+BASE_URL = "https://cred.example.com"
 
 
 def make_delegation_result(
@@ -42,6 +43,26 @@ def make_delegation_result(
     )
 
 
+def make_handle_result(
+    *,
+    token_type: str = "Delegation",
+    expires_in: int = 3600,
+    service: str = "google",
+    user_id: str = USER_ID,
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_handle",
+) -> DelegationHandleResult:
+    return DelegationHandleResult(
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        user_id=user_id,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
+
+
 @pytest.fixture
 def mock_cred():
     return MagicMock()
@@ -54,6 +75,7 @@ def tool(mock_cred):
             agent_token=TOKEN,
             user_id=USER_ID,
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
 
 
@@ -71,6 +93,7 @@ class TestFactory:
                 agent_token=TOKEN,
                 user_id=USER_ID,
                 app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
             )
         assert isinstance(t, FunctionTool)
 
@@ -105,6 +128,12 @@ class TestFactory:
     def test_exports_cred_tool_alias(self):
         assert CredTool is cred_delegate_tool
 
+    def test_returns_cred_use_tool(self):
+        with patch("cred_openai_agents.tool.Cred"):
+            t = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL)
+        assert isinstance(t, FunctionTool)
+        assert t.name == "cred_use"
+
 
 # ── on_invoke_tool ────────────────────────────────────────────────────────────
 
@@ -128,6 +157,61 @@ class TestInvoke:
         assert result["service"] == "google"
         assert result["scopes"] == ["calendar.readonly"]
         assert result["delegation_id"] == "del_abc"
+
+    def test_handle_mode_returns_json_without_access_token(self, mock_cred):
+        mock_cred.delegate_handle.return_value = make_handle_result(
+            scopes=["calendar.readonly"],
+            delegation_id="del_brokered",
+        )
+        with patch("cred_openai_agents.tool.Cred", return_value=mock_cred):
+            handle_tool = cred_delegate_tool(
+                agent_token=TOKEN,
+                user_id=USER_ID,
+                app_client_id=APP_CLIENT_ID,
+                base_url=BASE_URL,
+                token_format="handle",
+            )
+
+        args_json = json.dumps({"service": "google", "scopes": ["calendar.readonly"]})
+        result_str = run(handle_tool.on_invoke_tool(MagicMock(), args_json))
+        result = json.loads(result_str)
+
+        assert "access_token" not in result
+        assert result["token_type"] == "Delegation"
+        assert result["delegation_id"] == "del_brokered"
+        mock_cred.delegate_handle.assert_called_once_with(
+            service="google",
+            user_id=USER_ID,
+            app_client_id=APP_CLIENT_ID,
+            scopes=["calendar.readonly"],
+        )
+
+    def test_cred_use_tool_brokers_request(self, mock_cred):
+        mock_cred.use.return_value = BrokeredUseResult(
+            status=200,
+            ok=True,
+            content_type="application/json",
+            body={"items": []},
+        )
+        with patch("cred_openai_agents.tool.Cred", return_value=mock_cred):
+            use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL)
+
+        result_str = run(use_tool.on_invoke_tool(MagicMock(), json.dumps({
+            "delegation_id": "del_brokered",
+            "url": "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            "method": "GET",
+        })))
+        result = json.loads(result_str)
+
+        assert result["ok"] is True
+        assert result["body"] == {"items": []}
+        mock_cred.use.assert_called_once_with(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+            body=None,
+            extra_headers=None,
+        )
 
     def test_passes_service_user_app_to_cred(self, tool, mock_cred):
         mock_cred.delegate.return_value = make_delegation_result(service="github")
@@ -154,7 +238,7 @@ class TestInvoke:
     def test_propagates_consent_required_error(self, tool, mock_cred):
         mock_cred.delegate.side_effect = ConsentRequiredError(
             "User has not consented",
-            "https://api.cred.ninja/api/connect/google/authorize?app_client_id=app_1",
+            "https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1",
         )
 
         args_json = json.dumps({"service": "google", "scopes": ["calendar.readonly"]})
@@ -162,7 +246,7 @@ class TestInvoke:
         with pytest.raises(ConsentRequiredError) as exc_info:
             run(tool.on_invoke_tool(MagicMock(), args_json))
 
-        assert "/api/connect/google/authorize" in exc_info.value.consent_url
+        assert "/connect/google" in exc_info.value.consent_url
 
     def test_propagates_cred_error_on_401(self, tool, mock_cred):
         mock_cred.delegate.side_effect = CredError(

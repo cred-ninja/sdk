@@ -17,10 +17,11 @@ from unittest.mock import MagicMock, patch
 from langchain_core.tools import BaseTool
 from pydantic import SecretStr
 
-from cred import DelegationResult, Connection, ConsentRequiredError
+from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, Connection, ConsentRequiredError
 from cred_langchain import (
     CredToolkit,
     CredDelegateTool,
+    CredUseTool,
     CredStatusTool,
     CredRevokeTool,
     secret_from_cred,
@@ -29,6 +30,7 @@ from cred_langchain import (
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
+BASE_URL = "https://cred.example.com"
 
 
 def make_delegation_result(
@@ -51,6 +53,26 @@ def make_delegation_result(
     )
 
 
+def make_handle_result(
+    *,
+    token_type: str = "Delegation",
+    expires_in: int = 3600,
+    service: str = "google",
+    user_id: str = USER_ID,
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_handle",
+) -> DelegationHandleResult:
+    return DelegationHandleResult(
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        user_id=user_id,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
+
+
 @pytest.fixture
 def mock_cred():
     return MagicMock()
@@ -58,7 +80,7 @@ def mock_cred():
 
 @pytest.fixture
 def toolkit(mock_cred):
-    tk = CredToolkit(agent_token=TOKEN, user_id=USER_ID)
+    tk = CredToolkit(agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID)
     tk._cred = mock_cred
     return tk
 
@@ -77,6 +99,15 @@ class TestCredToolkit:
     def test_tool_names(self, toolkit):
         names = {t.name for t in toolkit.get_tools()}
         assert names == {"cred_delegate", "cred_status", "cred_revoke"}
+
+    def test_handle_mode_includes_use_tool(self, mock_cred):
+        tk = CredToolkit(agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID, token_format="handle")
+        tk._cred = mock_cred
+
+        tools = tk.get_tools()
+
+        assert {t.name for t in tools} == {"cred_delegate", "cred_use", "cred_status", "cred_revoke"}
+        assert any(isinstance(t, CredUseTool) for t in tools)
 
     def test_tools_share_user_id(self, toolkit):
         tools = toolkit.get_tools()
@@ -129,10 +160,64 @@ class TestCredDelegateTool:
             scopes=[],
         )
 
+    def test_handle_mode_returns_delegation_handle_without_access_token(self, mock_cred):
+        mock_cred.delegate_handle.return_value = make_handle_result(
+            scopes=["calendar.readonly"],
+            delegation_id="del_brokered",
+        )
+        tk = CredToolkit(agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID, token_format="handle")
+        tk._cred = mock_cred
+
+        delegate = next(t for t in tk.get_tools() if t.name == "cred_delegate")
+        result = delegate._run(
+            service="google",
+            app_client_id="app_1",
+            scopes=["calendar.readonly"],
+        )
+
+        data = json.loads(result)
+        assert "access_token" not in data
+        assert data["token_type"] == "Delegation"
+        assert data["delegation_id"] == "del_brokered"
+        assert data["user_id"] == USER_ID
+        mock_cred.delegate_handle.assert_called_once_with(
+            service="google",
+            user_id=USER_ID,
+            app_client_id="app_1",
+            scopes=["calendar.readonly"],
+        )
+
+    def test_cred_use_tool_brokers_request(self, mock_cred):
+        mock_cred.use.return_value = BrokeredUseResult(
+            status=200,
+            ok=True,
+            content_type="application/json",
+            body={"items": []},
+        )
+        use = CredUseTool()
+        use._cred = mock_cred
+
+        result = use._run(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+        )
+
+        data = json.loads(result)
+        assert data["ok"] is True
+        assert data["body"] == {"items": []}
+        mock_cred.use.assert_called_once_with(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+            body=None,
+            extra_headers=None,
+        )
+
     def test_propagates_consent_required_error(self, toolkit, mock_cred):
         mock_cred.delegate.side_effect = ConsentRequiredError(
             "User has not consented",
-            "https://api.cred.ninja/api/connect/google/authorize?app_client_id=app_1",
+            "https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1",
         )
 
         tools = toolkit.get_tools()
@@ -141,7 +226,7 @@ class TestCredDelegateTool:
         with pytest.raises(ConsentRequiredError) as exc_info:
             delegate._run(service="google", app_client_id="app_1", scopes=["calendar.readonly"])
 
-        assert "/api/connect/google/authorize" in exc_info.value.consent_url
+        assert "/connect/google" in exc_info.value.consent_url
 
     def test_has_args_schema(self, toolkit):
         tools = toolkit.get_tools()

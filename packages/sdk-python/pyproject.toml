@@ -8,6 +8,7 @@ version = "1.0.0"
 description = "Cred — credential delegation SDK for AI agents"
 readme = "README.md"
 license = { text = "Apache-2.0" }
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "oauth", "delegation", "ai-agents", "credentials"]
@@ -30,7 +31,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://cred.ninja"
 Repository = "https://github.com/cred-ninja/sdk"
-Documentation = "https://docs.cred.ninja"
+Documentation = "https://cred.ninja/docs"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "respx>=0.20", "mypy>=1.10", "hatchling"]

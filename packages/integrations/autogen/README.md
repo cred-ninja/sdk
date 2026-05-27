@@ -12,12 +12,14 @@ pip install cred-autogen
 
 ```python
 import os
-from cred_autogen import cred_delegate_tool
+from cred_autogen import cred_delegate_tool, cred_use_tool
 
 tool = cred_delegate_tool(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
+    base_url=os.environ["CRED_BASE_URL"],
     user_id="user_123",
     app_client_id="my_app_client_id",
+    token_format="handle",
 )
 
 # Register with an AutoGen AssistantAgent
@@ -25,7 +27,10 @@ from autogen_agentchat.agents import AssistantAgent
 
 agent = AssistantAgent(
     name="assistant",
-    tools=[tool],
+    tools=[tool, cred_use_tool(
+        agent_token=os.environ["CRED_AGENT_TOKEN"],
+        base_url=os.environ["CRED_BASE_URL"],
+    )],
 )
 ```
 
@@ -39,6 +44,8 @@ The `cred_delegate` tool accepts:
 | `scopes` | `string[]` | OAuth scopes to request |
 
 `user_id` and `app_client_id` are pre-configured at factory time, not agent-controlled.
+
+By default, `cred_delegate_tool` returns a legacy access token for backwards compatibility. Set `token_format="handle"` to return a brokered delegation handle, then use `cred_use_tool` to make allowed service API calls without exposing provider access tokens.
 
 ## Handling Consent
 
@@ -57,6 +64,6 @@ except ConsentRequiredError as e:
     print(f"Redirect user to: {e.consent_url}")
 ```
 
-## Cred Cloud (Coming Soon)
+## Brokered Server Mode
 
-Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+Point `CRED_BASE_URL` at your self-hosted `@credninja/server` deployment and set `token_format="handle"` when you want the agent to receive delegation handles instead of provider access tokens.

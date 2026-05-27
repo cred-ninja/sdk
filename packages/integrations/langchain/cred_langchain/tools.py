@@ -25,6 +25,23 @@ class DelegateInput(BaseModel):
     )
 
 
+class UseInput(BaseModel):
+    delegation_id: str = Field(description="Brokered delegation handle returned by cred_delegate")
+    url: str = Field(description="Full HTTPS API URL to call")
+    method: str = Field(
+        default="GET",
+        description="HTTP method: GET, POST, PUT, PATCH, or DELETE",
+    )
+    body: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional JSON request body for POST, PUT, or PATCH",
+    )
+    extra_headers: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Optional service-specific headers",
+    )
+
+
 class RevokeInput(BaseModel):
     service: str = Field(description="Service slug to revoke (e.g. 'google', 'github')")
     app_client_id: Optional[str] = Field(
@@ -49,7 +66,8 @@ class CredDelegateTool(BaseTool):
     # Injected by CredToolkit
     _cred: Any = None
     _user_id: str = ""
-    _cache: dict[tuple[str, str, tuple[str, ...]], tuple[Any, float]] = {}
+    _token_format: str = "raw"
+    _cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[Any, float]] = {}
 
     def _get_delegation_result(
         self,
@@ -58,18 +76,26 @@ class CredDelegateTool(BaseTool):
         scopes: Optional[list[str]],
     ) -> Any:
         resolved_scopes = scopes or []
-        cache_key = (service, app_client_id, tuple(resolved_scopes))
+        cache_key = (self._token_format, service, app_client_id, tuple(resolved_scopes))
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached and cached[1] > now:
             return cached[0]
 
-        result = self._cred.delegate(
-            service=service,
-            user_id=self._user_id,
-            app_client_id=app_client_id,
-            scopes=resolved_scopes,
-        )
+        if self._token_format == "handle":
+            result = self._cred.delegate_handle(
+                service=service,
+                user_id=self._user_id,
+                app_client_id=app_client_id,
+                scopes=resolved_scopes,
+            )
+        else:
+            result = self._cred.delegate(
+                service=service,
+                user_id=self._user_id,
+                app_client_id=app_client_id,
+                scopes=resolved_scopes,
+            )
 
         expires_in = getattr(result, "expires_in", None)
         refresh_deadline = 0.0
@@ -86,6 +112,16 @@ class CredDelegateTool(BaseTool):
         **kwargs: Any,
     ) -> str:
         result = self._get_delegation_result(service, app_client_id, scopes)
+        if self._token_format == "handle":
+            return json.dumps({
+                "token_type": result.token_type,
+                "expires_in": result.expires_in,
+                "service": result.service,
+                "user_id": result.user_id,
+                "scopes": result.scopes,
+                "delegation_id": result.delegation_id,
+                "note": "Pass delegation_id to cred_use to make authenticated API calls.",
+            })
         return json.dumps({
             "access_token": result.access_token,
             "token_type": result.token_type,
@@ -93,6 +129,44 @@ class CredDelegateTool(BaseTool):
             "service": result.service,
             "scopes": result.scopes,
             "delegation_id": result.delegation_id,
+        })
+
+
+class CredUseTool(BaseTool):
+    """Broker an upstream API request through Cred without exposing provider tokens."""
+
+    name: str = "cred_use"
+    description: str = (
+        "Make an authenticated API call through Cred using a brokered delegation handle. "
+        "The provider access token stays on the Cred server."
+    )
+    args_schema: Type[BaseModel] = UseInput
+
+    _cred: Any = None
+
+    def _run(
+        self,
+        delegation_id: str,
+        url: str,
+        method: str = "GET",
+        body: Optional[dict[str, Any]] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+        **kwargs: Any,
+    ) -> str:
+        result = self._cred.use(
+            delegation_id=delegation_id,
+            url=url,
+            method=method,
+            body=body,
+            extra_headers=extra_headers,
+        )
+        return json.dumps({
+            "status": result.status,
+            "ok": result.ok,
+            "content_type": result.content_type,
+            "body": result.body,
+            "truncated": result.truncated,
+            "truncated_at": result.truncated_at,
         })
 
 

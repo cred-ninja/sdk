@@ -4,7 +4,7 @@ from pydantic import SecretStr
 
 from cred import Cred
 from .toolkit import CredToolkit
-from .tools import CredDelegateTool, CredStatusTool, CredRevokeTool
+from .tools import CredDelegateTool, CredStatusTool, CredRevokeTool, CredUseTool
 
 
 def secret_from_cred(
@@ -26,6 +26,7 @@ def secret_from_cred(
 __all__ = [
     "CredToolkit",
     "CredDelegateTool",
+    "CredUseTool",
     "CredStatusTool",
     "CredRevokeTool",
     "secret_from_cred",

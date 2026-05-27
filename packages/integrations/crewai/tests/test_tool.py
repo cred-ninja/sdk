@@ -7,6 +7,7 @@ Tests focus on: tool configuration, naming, input schema, output format, error p
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,12 +15,13 @@ import pytest
 import httpx
 from unittest.mock import MagicMock, patch
 
-from cred import DelegationResult, ConsentRequiredError
-from cred_crewai import CredTool
+from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, ConsentRequiredError
+from cred_crewai import CredTool, CredUseTool
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+BASE_URL = "https://cred.example.com"
 
 
 def make_delegation_result(
@@ -42,6 +44,26 @@ def make_delegation_result(
     )
 
 
+def make_handle_result(
+    *,
+    token_type: str = "Delegation",
+    expires_in: int = 3600,
+    service: str = "google",
+    user_id: str = USER_ID,
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_handle",
+) -> DelegationHandleResult:
+    return DelegationHandleResult(
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        user_id=user_id,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
+
+
 @pytest.fixture
 def mock_cred():
     return MagicMock()
@@ -54,6 +76,7 @@ def tool(mock_cred):
         user_id=USER_ID,
         service="google",
         app_client_id=APP_CLIENT_ID,
+        base_url=BASE_URL,
         scopes=["calendar.readonly"],
     )
     t._cred = mock_cred
@@ -69,6 +92,7 @@ class TestConstructor:
             user_id=USER_ID,
             service="github",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         assert t._service == "github"
         assert "github" in t.name
@@ -79,6 +103,7 @@ class TestConstructor:
             user_id=USER_ID,
             service="google-calendar",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         assert google_tool.name == "cred_google_calendar_delegate"
 
@@ -88,9 +113,21 @@ class TestConstructor:
             user_id=USER_ID,
             service="github",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         assert "github" in t.description
         assert "access token" in t.description
+
+    def test_handle_mode_description_mentions_handle(self):
+        t = CredTool(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            service="google",
+            app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
+            token_format="handle",
+        )
+        assert "delegation handle" in t.description
 
     def test_stores_user_id(self):
         t = CredTool(
@@ -98,6 +135,7 @@ class TestConstructor:
             user_id="user_456",
             service="google",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         assert t._user_id == "user_456"
 
@@ -108,6 +146,7 @@ class TestConstructor:
             user_id=USER_ID,
             service="google",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
             scopes=scopes,
         )
         assert t._scopes == scopes
@@ -118,6 +157,7 @@ class TestConstructor:
             user_id=USER_ID,
             service="google",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         assert t._scopes == []
 
@@ -153,6 +193,34 @@ class TestRun:
         assert result == "ya29.mock"
         assert isinstance(result, str)
 
+    def test_handle_mode_returns_json_without_access_token(self, mock_cred):
+        t = CredTool(
+            agent_token=TOKEN,
+            user_id=USER_ID,
+            service="google",
+            app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
+            scopes=["calendar.readonly"],
+            token_format="handle",
+        )
+        t._cred = mock_cred
+        mock_cred.delegate_handle.return_value = make_handle_result(
+            scopes=["calendar.readonly"],
+            delegation_id="del_brokered",
+        )
+
+        result = t._run()
+        data = json.loads(result)
+
+        assert "access_token" not in data
+        assert data["delegation_id"] == "del_brokered"
+        mock_cred.delegate_handle.assert_called_once_with(
+            service="google",
+            user_id=USER_ID,
+            app_client_id=APP_CLIENT_ID,
+            scopes=["calendar.readonly"],
+        )
+
     def test_passes_service_user_app_client_id(self, tool, mock_cred):
         mock_cred.delegate.return_value = make_delegation_result()
 
@@ -182,6 +250,7 @@ class TestRun:
             user_id=USER_ID,
             service="google",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
         )
         t._cred = mock_cred
         t._scopes = []
@@ -196,13 +265,40 @@ class TestRun:
     def test_propagates_consent_required_error(self, tool, mock_cred):
         mock_cred.delegate.side_effect = ConsentRequiredError(
             "User has not consented",
-            "https://api.cred.ninja/api/connect/google/authorize?app_client_id=app_1",
+            "https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1",
         )
 
         with pytest.raises(ConsentRequiredError) as exc_info:
             tool._run()
 
-        assert "/api/connect/google/authorize" in exc_info.value.consent_url
+        assert "/connect/google" in exc_info.value.consent_url
+
+    def test_cred_use_tool_brokers_request(self, mock_cred):
+        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+            use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL)
+        mock_cred.use.return_value = BrokeredUseResult(
+            status=200,
+            ok=True,
+            content_type="application/json",
+            body={"items": []},
+        )
+
+        result = use_tool._run(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+        )
+
+        data = json.loads(result)
+        assert data["ok"] is True
+        assert data["body"] == {"items": []}
+        mock_cred.use.assert_called_once_with(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+            body=None,
+            extra_headers=None,
+        )
 
 
 # ── langchain compatibility ───────────────────────────────────────────────────
@@ -226,8 +322,8 @@ class TestIntegrationFlow:
             user_id=USER_ID,
             service="google",
             app_client_id=APP_CLIENT_ID,
+            base_url=BASE_URL,
             scopes=["calendar.readonly"],
-            base_url="https://cred.example.com",
         )
 
         with patch("httpx.Client.request", return_value=httpx.Response(

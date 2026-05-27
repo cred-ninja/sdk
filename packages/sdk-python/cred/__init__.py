@@ -14,7 +14,7 @@ from .identity import (
     generate_agent_identity,
     verify_delegation_receipt,
 )
-from .models import DelegationResult, Connection
+from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
 __all__ = [
     "Cred",
@@ -28,6 +28,8 @@ __all__ = [
     "generate_agent_identity",
     "verify_delegation_receipt",
     "CRED_PUBLIC_KEY_HEX",
+    "BrokeredUseResult",
+    "DelegationHandleResult",
     "DelegationResult",
     "Connection",
 ]

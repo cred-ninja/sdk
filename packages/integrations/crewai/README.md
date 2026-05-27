@@ -18,10 +18,12 @@ from crewai import Agent
 # Create a pre-configured tool for Google Calendar
 google_tool = CredTool(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
+    base_url=os.environ["CRED_BASE_URL"],
     user_id="user_123",
     service="google",
     app_client_id="my_app_client_id",
     scopes=["calendar.readonly"],
+    token_format="handle",
 )
 
 # Use with CrewAI agent
@@ -43,6 +45,8 @@ agent = Agent(
 - Tool name auto-generated: `cred_google_delegate`, `cred_github_delegate`, etc.
 - Best for specialized agents (e.g., a "Calendar Manager" agent only needs Google tokens)
 
+Set `token_format="handle"` to return a brokered delegation handle instead of a provider access token. Pair it with `CredUseTool` when the agent needs to call service APIs through Cred.
+
 One `CredTool` per service per agent = clearer intent, smaller decision space for the LLM.
 
 ## Handling Consent
@@ -50,6 +54,6 @@ One `CredTool` per service per agent = clearer intent, smaller decision space fo
 When a user hasn't connected the service yet, `_run()` raises `ConsentRequiredError`.
 Catch it and redirect the user to `e.consent_url` to complete the OAuth flow.
 
-## Cred Cloud (Coming Soon)
+## Brokered Server Mode
 
-Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+Point `CRED_BASE_URL` at your self-hosted `@credninja/server` deployment and set `token_format="handle"` when you want the agent to receive delegation handles instead of provider access tokens.

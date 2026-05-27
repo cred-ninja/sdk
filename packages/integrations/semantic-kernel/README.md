@@ -19,8 +19,10 @@ kernel = sk.Kernel()
 
 plugin = CredPlugin(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
+    base_url=os.environ["CRED_BASE_URL"],
     user_id="user_123",
     app_client_id="my_app_client_id",
+    token_format="handle",
 )
 
 kernel.add_plugin(plugin, plugin_name="cred")
@@ -28,7 +30,7 @@ kernel.add_plugin(plugin, plugin_name="cred")
 
 ## Plugin Functions
 
-The `cred` plugin exposes one kernel function:
+The `cred` plugin exposes two kernel functions:
 
 ### `delegate`
 
@@ -39,7 +41,17 @@ The `cred` plugin exposes one kernel function:
 
 `user_id` and `app_client_id` are pre-configured at construction time, not agent-controlled.
 
-Returns a JSON string with `access_token`, `token_type`, `expires_in`, `service`, `scopes`, and `delegation_id`.
+By default, `delegate` returns a legacy access token for backwards compatibility. Set `token_format="handle"` to return a brokered delegation handle instead, then call `use` to make allowed service API calls without exposing provider access tokens.
+
+### `use`
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `delegation_id` | `string` | Brokered handle returned by `delegate` |
+| `url` | `string` | Full HTTPS API URL |
+| `method` | `string` | HTTP method |
+| `body` | `string` | Optional JSON body, or empty string |
+| `extra_headers` | `string` | Optional JSON object of service-specific headers, or empty string |
 
 ## Handling Consent
 
@@ -55,6 +67,6 @@ except ConsentRequiredError as e:
     print(f"Redirect user to: {e.consent_url}")
 ```
 
-## Cred Cloud (Coming Soon)
+## Brokered Server Mode
 
-Managed cloud delegation is coming. [Join the waitlist](https://cred.ninja/waitlist).
+Point `CRED_BASE_URL` at your self-hosted `@credninja/server` deployment and set `token_format="handle"` when you want the agent to receive delegation handles instead of provider access tokens.

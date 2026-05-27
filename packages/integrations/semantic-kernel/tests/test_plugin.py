@@ -11,12 +11,13 @@ import pytest
 import httpx
 from unittest.mock import MagicMock, patch
 
-from cred import DelegationResult, ConsentRequiredError, CredError
+from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, ConsentRequiredError, CredError
 from cred_semantic_kernel import CredPlugin
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
+BASE_URL = "https://cred.example.com"
 
 
 def make_delegation_result(
@@ -39,6 +40,26 @@ def make_delegation_result(
     )
 
 
+def make_handle_result(
+    *,
+    token_type: str = "Delegation",
+    expires_in: int = 3600,
+    service: str = "google",
+    user_id: str = USER_ID,
+    scopes: Optional[list[str]] = None,
+    delegation_id: str = "del_handle",
+) -> DelegationHandleResult:
+    return DelegationHandleResult(
+        token_type=token_type,
+        expires_in=expires_in,
+        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        service=service,
+        user_id=user_id,
+        scopes=scopes or [],
+        delegation_id=delegation_id,
+    )
+
+
 @pytest.fixture
 def mock_cred():
     return MagicMock()
@@ -50,6 +71,7 @@ def plugin(mock_cred):
         return CredPlugin(
             agent_token=TOKEN,
             user_id=USER_ID,
+            base_url=BASE_URL,
             app_client_id=APP_CLIENT_ID,
         )
 
@@ -76,6 +98,17 @@ class TestConstructor:
     def test_stores_app_client_id(self, plugin):
         assert plugin._app_client_id == APP_CLIENT_ID
 
+    def test_stores_token_format(self, mock_cred):
+        with patch("cred_semantic_kernel.plugin.Cred", return_value=mock_cred):
+            plugin = CredPlugin(
+                agent_token=TOKEN,
+                user_id=USER_ID,
+                app_client_id=APP_CLIENT_ID,
+                base_url=BASE_URL,
+                token_format="handle",
+            )
+        assert plugin._token_format == "handle"
+
 
 # -- kernel_function metadata --------------------------------------------------
 
@@ -86,6 +119,9 @@ class TestKernelFunction:
 
     def test_delegate_is_callable(self, plugin):
         assert callable(plugin.delegate)
+
+    def test_use_is_callable(self, plugin):
+        assert callable(plugin.use)
 
 
 # -- delegate invocation -------------------------------------------------------
@@ -109,6 +145,58 @@ class TestDelegate:
         assert result["service"] == "google"
         assert result["scopes"] == ["calendar.readonly"]
         assert result["delegation_id"] == "del_abc"
+
+    def test_handle_mode_returns_json_without_access_token(self, mock_cred):
+        mock_cred.delegate_handle.return_value = make_handle_result(
+            scopes=["calendar.readonly"],
+            delegation_id="del_brokered",
+        )
+        with patch("cred_semantic_kernel.plugin.Cred", return_value=mock_cred):
+            plugin = CredPlugin(
+                agent_token=TOKEN,
+                user_id=USER_ID,
+                app_client_id=APP_CLIENT_ID,
+                base_url=BASE_URL,
+                token_format="handle",
+            )
+
+        result_str = plugin.delegate(service="google", scopes="calendar.readonly")
+        result = json.loads(result_str)
+
+        assert "access_token" not in result
+        assert result["token_type"] == "Delegation"
+        assert result["delegation_id"] == "del_brokered"
+        mock_cred.delegate_handle.assert_called_once_with(
+            service="google",
+            user_id=USER_ID,
+            app_client_id=APP_CLIENT_ID,
+            scopes=["calendar.readonly"],
+        )
+
+    def test_use_brokers_request(self, plugin, mock_cred):
+        mock_cred.use.return_value = BrokeredUseResult(
+            status=200,
+            ok=True,
+            content_type="application/json",
+            body={"items": []},
+        )
+
+        result_str = plugin.use(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+        )
+        result = json.loads(result_str)
+
+        assert result["ok"] is True
+        assert result["body"] == {"items": []}
+        mock_cred.use.assert_called_once_with(
+            delegation_id="del_brokered",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+            body=None,
+            extra_headers=None,
+        )
 
     def test_passes_service_user_app_to_cred(self, plugin, mock_cred):
         mock_cred.delegate.return_value = make_delegation_result(service="github")
@@ -143,13 +231,13 @@ class TestDelegate:
     def test_propagates_consent_required_error(self, plugin, mock_cred):
         mock_cred.delegate.side_effect = ConsentRequiredError(
             "User has not consented",
-            "https://api.cred.ninja/api/connect/google/authorize?app_client_id=app_1",
+            "https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1",
         )
 
         with pytest.raises(ConsentRequiredError) as exc_info:
             plugin.delegate(service="google", scopes="calendar.readonly")
 
-        assert "/api/connect/google/authorize" in exc_info.value.consent_url
+        assert "/connect/google" in exc_info.value.consent_url
 
     def test_propagates_cred_error_on_401(self, plugin, mock_cred):
         mock_cred.delegate.side_effect = CredError(
@@ -165,8 +253,8 @@ class TestDelegate:
         plugin = CredPlugin(
             agent_token=TOKEN,
             user_id=USER_ID,
+            base_url=BASE_URL,
             app_client_id=APP_CLIENT_ID,
-            base_url="https://cred.example.com",
         )
 
         with patch("httpx.Client.request", return_value=httpx.Response(

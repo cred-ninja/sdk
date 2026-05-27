@@ -4,17 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cred-langchain"
-version = "0.1.0"
+version = "1.0.0"
 description = "Cred LangChain integration — credential delegation tools for LangChain agents"
 readme = "README.md"
 license = { text = "Apache-2.0" }
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "langchain", "oauth", "delegation", "ai-agents"]
 dependencies = [
-    "cred-auth>=0.1.0",
+    "cred-auth>=1.0.0",
     "langchain-core>=0.2",
 ]
+
+[project.urls]
+Homepage = "https://cred.ninja"
+Repository = "https://github.com/cred-ninja/sdk"
+Documentation = "https://cred.ninja/docs"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "hatchling"]

@@ -12,21 +12,23 @@ import respx
 
 from cred import (
     AsyncCred,
+    BrokeredUseResult,
     Connection,
     ConsentRequiredError,
     Cred,
     CredError,
+    DelegationHandleResult,
     DelegationResult,
 )
 from cred.exceptions import AgentRevokedException, RateLimitException, ScopeCeilingException
 
-BASE_URL = "https://api.cred.ninja"
+BASE_URL = "https://cred.example.com"
 TOKEN = "cred_at_test_token"
 
 
 @pytest.fixture
 def cred():
-    return Cred(agent_token=TOKEN)
+    return Cred(agent_token=TOKEN, base_url=BASE_URL)
 
 
 def run(coro):
@@ -38,17 +40,18 @@ def run(coro):
 class TestConstructor:
     def test_raises_when_token_empty(self):
         with pytest.raises(CredError):
-            Cred(agent_token="")
+            Cred(agent_token="", base_url=BASE_URL)
 
-    def test_default_base_url(self, cred):
-        assert cred._base_url == BASE_URL
+    def test_raises_when_base_url_missing(self):
+        with pytest.raises(CredError, match="base_url is required"):
+            Cred(agent_token=TOKEN)
 
     def test_custom_base_url_strips_trailing_slash(self):
         c = Cred(agent_token=TOKEN, base_url="http://localhost:3001/")
         assert c._base_url == "http://localhost:3001"
 
     def test_context_manager(self):
-        with Cred(agent_token=TOKEN) as c:
+        with Cred(agent_token=TOKEN, base_url=BASE_URL) as c:
             assert c._base_url == BASE_URL
 
 
@@ -107,7 +110,7 @@ class TestDelegate:
             json={
                 "error": "consent_required",
                 "message": "User has not consented",
-                "consent_url": f"{BASE_URL}/api/connect/google/authorize?app_client_id=app1",
+                "consent_url": f"{BASE_URL}/connect/google?user_id=u1&app_client_id=app1",
             },
         ))
 
@@ -117,7 +120,7 @@ class TestDelegate:
         err = exc_info.value
         assert err.status_code == 403
         assert err.code == "consent_required"
-        assert "/api/connect/google/authorize" in err.consent_url
+        assert "/connect/google" in err.consent_url
 
     @respx.mock
     def test_raises_cred_error_on_scope_escalation(self, cred):
@@ -181,6 +184,70 @@ class TestDelegate:
         result = cred.delegate(service="google", user_id="u1", app_client_id="app1")
         assert result.expires_in == 900
         assert isinstance(result.expires_at, datetime)
+
+
+class TestDelegateHandleAndUse:
+    @respx.mock
+    def test_delegate_handle_requests_brokered_handle(self, cred):
+        route = respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
+            200,
+            json={
+                "token_type": "Delegation",
+                "expires_in": 900,
+                "expires_at": "2026-03-20T00:00:00Z",
+                "service": "google",
+                "user_id": "user_1",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_handle",
+            },
+        ))
+
+        result = cred.delegate_handle(
+            service="google",
+            user_id="user_1",
+            app_client_id="app_1",
+            scopes=["calendar.readonly"],
+        )
+
+        assert isinstance(result, DelegationHandleResult)
+        assert result.token_type == "Delegation"
+        assert result.delegation_id == "del_handle"
+        assert result.user_id == "user_1"
+
+        import json
+        parsed = json.loads(route.calls[0].request.read())
+        assert parsed["token_format"] == "handle"
+        assert "access_token" not in parsed
+
+    @respx.mock
+    def test_use_returns_brokered_response_payload(self, cred):
+        route = respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(
+            200,
+            json={
+                "status": 404,
+                "ok": False,
+                "contentType": "application/json",
+                "body": {"message": "missing"},
+            },
+        ))
+
+        result = cred.use(
+            delegation_id="del_handle",
+            url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="GET",
+            extra_headers={"X-Test": "1"},
+        )
+
+        assert isinstance(result, BrokeredUseResult)
+        assert result.status == 404
+        assert result.ok is False
+        assert result.content_type == "application/json"
+        assert result.body == {"message": "missing"}
+
+        import json
+        parsed = json.loads(route.calls[0].request.read())
+        assert parsed["delegation_id"] == "del_handle"
+        assert parsed["extra_headers"] == {"X-Test": "1"}
 
 
 # ── get_user_connections() ────────────────────────────────────────────────────
@@ -247,7 +314,8 @@ class TestGetConsentUrl:
             redirect_uri="https://myapp.com/callback",
         )
 
-        assert f"{BASE_URL}/api/connect/google/authorize" in url
+        assert f"{BASE_URL}/connect/google" in url
+        assert "user_id=user_1" in url
         assert "app_client_id=app_1" in url
         assert "calendar.readonly" in url
         assert "redirect_uri=" in url
@@ -349,12 +417,50 @@ class TestAsyncCred:
         ))
 
         async def scenario():
-            async with AsyncCred(agent_token=TOKEN) as client:
+            async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
                 return await client.delegate(service="google", user_id="u1", app_client_id="app1")
 
         result = run(scenario())
         assert result.access_token == "ya29.async"
         assert result.expires_in == 1200
+
+    @respx.mock
+    def test_delegate_handle_and_use_return_brokered_results(self):
+        respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
+            200,
+            json={
+                "token_type": "Delegation",
+                "expires_in": 1200,
+                "expires_at": "2026-03-20T00:20:00Z",
+                "service": "google",
+                "user_id": "u1",
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_async_handle",
+            },
+        ))
+        respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(
+            200,
+            json={
+                "status": 200,
+                "ok": True,
+                "contentType": "application/json",
+                "body": {"items": []},
+            },
+        ))
+
+        async def scenario():
+            async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
+                handle = await client.delegate_handle(service="google", user_id="u1", app_client_id="app1")
+                used = await client.use(
+                    delegation_id=handle.delegation_id,
+                    url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                )
+                return handle, used
+
+        handle, used = run(scenario())
+        assert handle.delegation_id == "del_async_handle"
+        assert used.ok is True
+        assert used.body == {"items": []}
 
     @respx.mock
     def test_list_connections_returns_payloads(self):
@@ -365,7 +471,7 @@ class TestAsyncCred:
         )
 
         async def scenario():
-            async with AsyncCred(agent_token=TOKEN) as client:
+            async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
                 return await client.list_connections("u1")
 
         assert run(scenario()) == [{"slug": "github", "scopesGranted": ["repo"]}]
@@ -377,7 +483,7 @@ class TestAsyncCred:
         )
 
         async def scenario():
-            async with AsyncCred(agent_token=TOKEN) as client:
+            async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
                 await client.revoke_agent("agt_1")
 
         run(scenario())
