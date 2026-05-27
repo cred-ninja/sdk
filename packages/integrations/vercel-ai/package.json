@@ -14,11 +14,12 @@
   },
   "files": [
     "dist",
+    "README.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json",
+    "build": "tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json && node ../../../scripts/write-package-types.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
@@ -49,7 +50,7 @@
     "@types/node": "^20.10.6",
     "ai": "^5.0.52",
     "typescript": "^5.3.3",
-    "vitest": "^4.0.18",
+    "vitest": "^4.1.7",
     "zod": "^3.22.0"
   }
 }

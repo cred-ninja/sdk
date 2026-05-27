@@ -16,6 +16,7 @@
   },
   "files": [
     "dist",
+    "README.md",
     "LICENSE",
     "NOTICE"
   ],
@@ -36,8 +37,8 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "@credninja/sdk": "*"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@credninja/sdk": "^1.0.0"
   },
   "peerDependencies": {
     "@credninja/oauth": "^1.0.0",
@@ -55,6 +56,6 @@
     "typescript": "^5.3.3",
     "@types/node": "^20.10.6",
     "tsx": "^4.7.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.7"
   }
 }

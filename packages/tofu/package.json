@@ -19,11 +19,12 @@
   },
   "files": [
     "dist",
+    "README.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
-    "build": "npm run build:cjs && npm run build:esm",
+    "build": "npm run build:cjs && npm run build:esm && node ../../scripts/write-package-types.cjs",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "build:esm": "tsc -p tsconfig.esm.json",
     "test": "vitest run",
@@ -37,7 +38,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.11.5",
     "typescript": "^5.3.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.7"
   },
   "publishConfig": {
     "access": "public"
