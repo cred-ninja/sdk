@@ -1,2 +1,2 @@
-export { credDelegateTool } from './tool.js';
-export type { CredDelegateToolOptions } from './tool.js';
+export { credDelegateTool, credUseTool } from './tool.js';
+export type { CredDelegateToolOptions, CredUseToolOptions } from './tool.js';

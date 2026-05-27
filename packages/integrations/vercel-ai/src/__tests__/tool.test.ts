@@ -9,11 +9,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the @credninja/sdk module
 const mockDelegate = vi.fn();
+const mockDelegateHandle = vi.fn();
+const mockUse = vi.fn();
 
 vi.mock('@credninja/sdk', () => {
   class MockCred {
     constructor(public config: any) {}
     delegate = mockDelegate;
+    delegateHandle = mockDelegateHandle;
+    use = mockUse;
   }
 
   class CredError extends Error {
@@ -43,10 +47,12 @@ vi.mock('@credninja/sdk', () => {
 
 const { ConsentRequiredError, CredError } = await import('@credninja/sdk');
 import { credDelegateTool } from '../tool';
+import { credUseTool } from '../tool';
 
 const TOKEN = 'cred_at_test';
 const USER_ID = 'user_123';
 const APP_CLIENT_ID = 'app_1';
+const BASE_URL = 'https://cred.example.com';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -58,6 +64,7 @@ describe('credDelegateTool factory', () => {
   it('returns a tool with description', () => {
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -67,9 +74,23 @@ describe('credDelegateTool factory', () => {
     expect(t.description!.toLowerCase()).toContain('service');
   });
 
+  it('returns a brokered-handle tool description when configured', () => {
+    const t = credDelegateTool({
+      agentToken: TOKEN,
+      baseUrl: BASE_URL,
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+      tokenFormat: 'handle',
+    });
+
+    expect(t.description!.toLowerCase()).toContain('delegation handle');
+    expect(t.description!.toLowerCase()).not.toContain('access_token');
+  });
+
   it('returns a tool with input schema', () => {
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -80,6 +101,7 @@ describe('credDelegateTool factory', () => {
   it('returns a tool with execute function', () => {
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -104,6 +126,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -134,6 +157,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -151,6 +175,48 @@ describe('credDelegateTool execute', () => {
     });
   });
 
+  it('can return brokered handles without exposing access tokens', async () => {
+    mockDelegateHandle.mockResolvedValue({
+      tokenType: 'Delegation',
+      expiresIn: 900,
+      expiresAt: new Date(Date.now() + 900_000),
+      service: 'google',
+      userId: USER_ID,
+      scopes: ['calendar.readonly'],
+      delegationId: 'del_handle',
+    });
+
+    const t = credDelegateTool({
+      agentToken: TOKEN,
+      baseUrl: BASE_URL,
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+      tokenFormat: 'handle',
+    });
+
+    const result = await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
+    );
+
+    expect(result).toEqual({
+      tokenType: 'Delegation',
+      expiresIn: 900,
+      service: 'google',
+      userId: USER_ID,
+      scopes: ['calendar.readonly'],
+      delegationId: 'del_handle',
+      note: 'Pass delegationId to cred_use to make authenticated API calls.',
+    });
+    expect(mockDelegateHandle).toHaveBeenCalledWith({
+      service: 'google',
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+      scopes: ['calendar.readonly'],
+    });
+    expect(mockDelegate).not.toHaveBeenCalled();
+  });
+
   it('passes undefined scopes when empty array', async () => {
     mockDelegate.mockResolvedValue({
       accessToken: 'at',
@@ -162,6 +228,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -192,6 +259,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -233,6 +301,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -253,12 +322,13 @@ describe('credDelegateTool execute', () => {
   it('propagates ConsentRequiredError', async () => {
     const err = new (ConsentRequiredError as any)(
       'User has not consented',
-      'https://cred.example.com/api/connect/google/authorize?app_client_id=app_1',
+      'https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1',
     );
     mockDelegate.mockRejectedValue(err);
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -277,6 +347,7 @@ describe('credDelegateTool execute', () => {
 
     const t = credDelegateTool({
       agentToken: TOKEN,
+      baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
     });
@@ -287,5 +358,45 @@ describe('credDelegateTool execute', () => {
         { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
       ),
     ).rejects.toThrow('Invalid agent token');
+  });
+});
+
+describe('credUseTool execute', () => {
+  it('brokers an upstream request through Cred.use', async () => {
+    mockUse.mockResolvedValue({
+      status: 200,
+      ok: true,
+      contentType: 'application/json',
+      body: { items: [] },
+    });
+
+    const t = credUseTool({
+      agentToken: TOKEN,
+      baseUrl: 'https://cred.example.com',
+    });
+
+    const result = await t.execute!(
+      {
+        delegationId: 'del_handle',
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        method: 'GET',
+        extraHeaders: { 'X-Test': '1' },
+      },
+      { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      ok: true,
+      contentType: 'application/json',
+      body: { items: [] },
+    });
+    expect(mockUse).toHaveBeenCalledWith({
+      delegationId: 'del_handle',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+      body: undefined,
+      extraHeaders: { 'X-Test': '1' },
+    });
   });
 });
