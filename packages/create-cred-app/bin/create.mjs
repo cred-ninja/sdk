@@ -41,6 +41,7 @@ if (!name || name === '--help' || name === '-h') {
 
 const targetDir = resolve(process.cwd(), name);
 const projectName = name === '.' ? basename(process.cwd()) : name;
+const skipInstall = process.env.CREATE_CRED_APP_SKIP_INSTALL === '1';
 
 console.log();
 console.log(`  \x1b[1m🦀 create-cred-app\x1b[0m`);
@@ -88,7 +89,11 @@ VAULT_PASSPHRASE=${passphrase}
 # Server config
 PORT=3456
 HOST=127.0.0.1
-PUBLIC_URL=http://localhost:3456
+REDIRECT_BASE_URI=http://localhost:3456
+VAULT_STORAGE=sqlite
+VAULT_PATH=./data/vault.sqlite
+TOFU_STORAGE=sqlite
+TOFU_PATH=./data/tofu.sqlite
 
 # Admin token (for management APIs)
 ADMIN_TOKEN=${adminToken}
@@ -116,17 +121,21 @@ AGENT_TOKEN=${agentToken}
 # SLACK_DEFAULT_SCOPES=chat:write,channels:read
 `;
 
-writeFileSync(join(targetDir, '.env'), envContent);
+writeFileSync(join(targetDir, '.env'), envContent, { mode: 0o600 });
 console.log(`  \x1b[32m✓\x1b[0m .env (generated with random passphrase + tokens)`);
 
 // Install dependencies
 console.log();
-console.log(`  \x1b[36mInstalling dependencies...\x1b[0m`);
-try {
-  execSync('npm install', { cwd: targetDir, stdio: 'pipe' });
-  console.log(`  \x1b[32m✓\x1b[0m Dependencies installed`);
-} catch (e) {
-  console.log(`  \x1b[33m⚠\x1b[0m npm install failed — run it manually`);
+if (skipInstall) {
+  console.log(`  \x1b[33m⚠\x1b[0m Skipped npm install because CREATE_CRED_APP_SKIP_INSTALL=1`);
+} else {
+  console.log(`  \x1b[36mInstalling dependencies...\x1b[0m`);
+  try {
+    execSync('npm install', { cwd: targetDir, stdio: 'pipe' });
+    console.log(`  \x1b[32m✓\x1b[0m Dependencies installed`);
+  } catch (e) {
+    console.log(`  \x1b[33m⚠\x1b[0m npm install failed — run it manually`);
+  }
 }
 
 // Done
@@ -140,7 +149,7 @@ if (name !== '.') {
 console.log(`  \x1b[36mnpm start\x1b[0m`);
 console.log();
 console.log(`  \x1b[1mThen:\x1b[0m`);
-console.log(`  1. Open \x1b[36mhttp://localhost:3456/connect\x1b[0m to manage providers`);
+console.log(`  1. Open \x1b[36mhttp://localhost:3456/admin/login\x1b[0m and sign in with ADMIN_TOKEN from .env`);
 console.log(`  2. Add OAuth credentials to \x1b[36m.env\x1b[0m`);
 console.log(`  3. Give your agent the token: \x1b[33m${agentToken.slice(0, 12)}...\x1b[0m`);
 console.log();
