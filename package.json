@@ -24,12 +24,20 @@
   "scripts": {
     "build": "npm run build --workspace=packages/oauth && npm run build --workspace=packages/tofu && npm run build --workspace=packages/vault && npm run build --workspace=packages/guard && npm run build --workspace=packages/sdk && npm run build --workspace=packages/integrations/vercel-ai && npm run build --workspace=packages/mcp && npm run build --workspace=packages/server",
     "test": "npm run test --workspace=packages/oauth && npm run test --workspace=packages/tofu && npm run test --workspace=packages/vault && npm run test --workspace=packages/guard && npm run test --workspace=packages/sdk && npm run test --workspace=packages/mcp && npm run test --workspace=packages/server && npm run test --workspace=packages/integrations/vercel-ai",
-    "lint": "npm run lint --workspaces --if-present"
+    "test:python": "bash scripts/test-python-packages.sh",
+    "lint": "npm run lint --workspaces --if-present",
+    "release:hygiene": "node scripts/check-release-hygiene.mjs",
+    "smoke:npm": "node scripts/smoke-npm-packages.mjs",
+    "smoke:python": "bash scripts/smoke-python-wheels.sh"
   },
   "overrides": {
     "esbuild": "0.27.4",
-    "express-rate-limit": "8.3.1",
-    "hono": "4.12.8"
+    "express-rate-limit": "8.5.2",
+    "fast-uri": "3.1.2",
+    "hono": "4.12.23",
+    "path-to-regexp": "8.4.2",
+    "qs": "6.15.2",
+    "vite": "8.0.14"
   },
   "engines": {
     "node": ">=18"

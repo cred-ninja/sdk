@@ -25,6 +25,19 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run lint
+      - run: npm run release:hygiene
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm audit --audit-level=moderate
 
   test:
     name: Test
@@ -67,6 +80,9 @@ jobs:
 
       - name: Test @credninja/sdk
         run: npm test --workspace=packages/sdk
+
+      - name: Test @credninja/mcp
+        run: npm test --workspace=packages/mcp
 
       - name: Test @credninja/server
         run: npm test --workspace=packages/server
@@ -111,3 +127,16 @@ jobs:
 
       - name: Pack create-cred-app
         run: npm pack --dry-run ./packages/create-cred-app
+
+  package-smoke:
+    name: Package Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Smoke fresh npm package installs
+        run: npm run smoke:npm

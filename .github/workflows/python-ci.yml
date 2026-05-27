@@ -6,12 +6,14 @@ on:
     paths:
       - 'packages/sdk-python/**'
       - 'packages/integrations/**'
+      - 'scripts/smoke-python-wheels.sh'
       - '.github/workflows/python-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'packages/sdk-python/**'
       - 'packages/integrations/**'
+      - 'scripts/smoke-python-wheels.sh'
       - '.github/workflows/python-ci.yml'
 
 concurrency:
@@ -81,3 +83,20 @@ jobs:
 
       - name: Test integration package
         run: python -m pytest '${{ matrix.package }}/tests'
+
+  wheel-smoke:
+    name: Python Wheel Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            packages/sdk-python/pyproject.toml
+            packages/integrations/**/pyproject.toml
+
+      - name: Smoke fresh Python wheel installs
+        run: bash scripts/smoke-python-wheels.sh
