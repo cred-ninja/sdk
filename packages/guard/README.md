@@ -172,10 +172,6 @@ const event = buildAuditEvent(ctx, decision);
 // { type: 'guard.decision', timestamp, agentTokenHash, provider, allowed, policies, ... }
 ```
 
-## Full Specification
-
-See [GUARD-SPEC.md](../../GUARD-SPEC.md) for the complete design specification.
-
 ## License
 
 Apache License 2.0

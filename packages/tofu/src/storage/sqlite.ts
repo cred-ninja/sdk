@@ -1,5 +1,6 @@
 import type { AgentIdentityBackend } from './interface.js';
 import type { AgentIdentityStoredRow } from '../types.js';
+import Database from 'better-sqlite3';
 
 export class SQLiteBackend implements AgentIdentityBackend {
   private db: import('better-sqlite3').Database | null = null;
@@ -10,8 +11,6 @@ export class SQLiteBackend implements AgentIdentityBackend {
   }
 
   init(): void {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new Database(this.dbPath);
     const db = this.ensureDb();
 

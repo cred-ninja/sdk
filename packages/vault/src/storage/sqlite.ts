@@ -1,6 +1,7 @@
 import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
+import Database from 'better-sqlite3';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
 
@@ -20,9 +21,6 @@ export class SQLiteBackend implements StorageBackend {
   }
 
   init(): void {
-    // Lazy require so the package works without better-sqlite3 when using file backend
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new Database(this.dbPath);
 
     this.db.exec(`

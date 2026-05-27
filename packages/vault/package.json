@@ -23,7 +23,7 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "npm run build:cjs && npm run build:esm",
+    "build": "npm run build:cjs && npm run build:esm && node ../../scripts/write-package-types.cjs",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "build:esm": "tsc -p tsconfig.esm.json",
     "test": "vitest run",
@@ -34,7 +34,7 @@
     "better-sqlite3": "^12.6.2"
   },
   "peerDependencies": {
-    "@credninja/oauth": "*"
+    "@credninja/oauth": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

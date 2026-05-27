@@ -8,6 +8,7 @@
  */
 
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -107,8 +108,6 @@ export class SQLiteAuditBackend implements AuditBackend {
   constructor(private readonly dbPath: string) {}
 
   init(): void {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new Database(this.dbPath);
 
     this.db.exec(`

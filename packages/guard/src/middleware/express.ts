@@ -62,7 +62,8 @@ export function createExpressMiddleware(
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       // Extract provider from route params
-      const provider = req.params.provider;
+      const providerParam = req.params.provider;
+      const provider = Array.isArray(providerParam) ? providerParam[0] : providerParam;
       if (!provider) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
