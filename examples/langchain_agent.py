@@ -6,20 +6,25 @@
 
 import os
 import requests
-from cred_sdk import CredClient
+from cred import Cred
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools import Tool
 from langchain_openai import ChatOpenAI
 
-cred = CredClient(
-    server_url=os.environ.get("CRED_SERVER_URL", "http://localhost:3000"),
+cred = Cred(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
+    base_url=os.environ["CRED_BASE_URL"],
 )
 
 
 def list_github_repos(query: str = "") -> str:
     """List the authenticated user's GitHub repositories."""
-    credential = cred.delegate("github")
+    credential = cred.delegate(
+        service="github",
+        user_id=os.environ.get("CRED_USER_ID", "default"),
+        app_client_id=os.environ["CRED_APP_CLIENT_ID"],
+        scopes=["repo"],
+    )
 
     res = requests.get(
         "https://api.github.com/user/repos",

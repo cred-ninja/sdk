@@ -27,7 +27,7 @@ These are complementary layers.
 
 ### `@credninja/mcp`
 
-- can add native Web Bot Auth headers on outbound `cred_use` requests
+- can add native Web Bot Auth headers on outbound local `cred_use` requests and remote broker requests to Cred
 - is the first end-to-end execution path where Cred both delegates credentials and signs the transport request
 
 ### `@credninja/sdk`
@@ -51,6 +51,6 @@ These are complementary layers.
 
 ## Contributor Notes
 
-Implementation notes, ADRs, threat modeling, and design docs live under:
-
-- [Internal Web Bot Auth docs](./internal/web-bot-auth/)
+Implementation details are covered by the server, MCP, SDK, and TOFU tests in
+this repository. Keep public Web Bot Auth documentation limited to shipped
+operator behavior and checked-in examples.

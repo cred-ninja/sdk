@@ -1,6 +1,6 @@
 # Security Audits
 
-Cred was built security-first. This document summarizes the audits conducted on the client-side packages in this repository. Published before launch, not after.
+Cred was built security-first. This document summarizes audits conducted on the SDK, MCP, integration, and self-hosted server packages. Published before launch, not after.
 
 Found something we missed? See [SECURITY.md](./SECURITY.md).
 
@@ -8,13 +8,13 @@ Found something we missed? See [SECURITY.md](./SECURITY.md).
 
 ## Design Principles
 
-These invariants are enforced across every package in this repo:
+These invariants are enforced across the SDK-facing packages in this repo:
 
-- **Zero credential persistence.** SDKs are stateless. No token is ever written to disk, cached between calls, or stored in memory beyond a single request lifecycle.
-- **HTTPS-only.** All packages reject non-HTTPS base URLs at construction time. No plaintext fallback exists.
+- **Bounded credential persistence.** SDKs are stateless. In local mode the MCP server stores delegated access tokens only in-process behind opaque handles until expiration; in remote server mode it stores brokered handles and leaves provider tokens on the Cred server. Refresh tokens stay in the encrypted vault.
+- **HTTPS for remote transport.** SDK-facing packages reject non-HTTPS remote base URLs at construction time. Plain HTTP is allowed only for explicit localhost development URLs where supported.
 - **Zero runtime dependencies (TypeScript).** The TypeScript SDK uses only Node.js built-in `fetch`. No transitive dependency handles credentials.
-- **Minimal dependencies (Python).** The Python SDK depends on `httpx` only. No transitive credential handling.
-- **No third-party cryptography.** DID identity uses Node.js built-in `crypto` and Python stdlib `cryptography`. No external crypto packages.
+- **Minimal dependencies (Python).** The Python SDK depends on `httpx` and `cryptography`. No transitive credential handling.
+- **Small cryptography surface.** DID identity uses Node.js built-in `crypto` in TypeScript and the Python `cryptography` package in Python.
 - **Token isolation**. Agent tokens never appear in error messages, stack traces, or logs. `ConsentRequiredError` surfaces only the consent URL and status code.
 
 ---
@@ -30,7 +30,7 @@ These invariants are enforced across every package in this repo:
 - Agent tokens excluded from all error surfaces and stack traces
 - `ConsentRequiredError` exposes only `consentUrl` and `code`. No internal state
 - SDK stateless between calls. No credential carryover
-- All HTTP calls enforce HTTPS. No plaintext fallback
+- All remote HTTP calls enforce HTTPS. Plain HTTP is allowed only for explicit localhost development URLs where supported.
 - Import isolation confirmed: no package imports from server-side infrastructure
 - All packages fully self-contained
 
@@ -43,11 +43,11 @@ These invariants are enforced across every package in this repo:
 
 ### Result: One finding identified and resolved.
 
-**Finding:** Base URL validation added to all three packages. Non-HTTPS URLs are now rejected at construction time with a clear error message. This prevents misconfiguration from silently downgrading transport security.
+**Finding:** Base URL validation added to all three packages. Non-HTTPS remote URLs are now rejected at construction time with a clear error message. This prevents misconfiguration from silently downgrading transport security.
 
 **Verified:**
-- TypeScript SDK: `new Cred({ baseUrl: 'http://...' })` throws
-- Python SDK: `Cred(base_url='http://...')` raises `ValueError`
+- TypeScript SDK: `new Cred({ baseUrl: 'http://remote.example.com' })` throws
+- Python SDK: `Cred(base_url='http://remote.example.com')` raises `CredError`
 - MCP server: config validation rejects non-HTTPS API URLs
 
 ---
@@ -57,7 +57,7 @@ These invariants are enforced across every package in this repo:
 **Date:** 2026-03-03
 **Scope:** `packages/mcp`. Token relay, SSRF protection, response handling
 
-### Result: No vulnerabilities found. 45 SSRF bypass tests added.
+### Result: Follow-up hardening completed. SSRF bypass tests and scope-aware endpoint checks are in place.
 
 **Verified:**
 - `cred_use` tool relays authenticated requests without exposing tokens to the LLM context window
@@ -65,6 +65,26 @@ These invariants are enforced across every package in this repo:
 - Responses truncated at 32KB with `truncated: true` indicator
 - All errors returned as MCP tool content. Never thrown into the LLM runtime
 - Token cache returns copies, not references. Callers cannot mutate cached state
+- Google broker/MCP relay URLs are constrained by delegated scopes and fail closed when scope metadata is missing
+- Brokered server use runs configured Guard policies, including `urlAllowlistPolicy`, before forwarding upstream requests
+
+---
+
+## Audit 7. Self-Hosted Server Cleanup
+
+**Date:** 2026-05-26
+**Scope:** `packages/server`, `packages/mcp`, `packages/create-cred-app`
+
+### Result: Findings remediated in-tree.
+
+**Resolved:**
+- Provider-management routes now require admin auth. Browser bootstrap uses `/admin/login` and stores an HttpOnly same-site session cookie.
+- Admin UI revocation uses the admin session instead of prompting for an agent token.
+- TOFU registration now requires agent Bearer auth.
+- The self-hosted server now exposes SDK-compatible `/api/v1/connections` list/revoke routes.
+- Brokered handle paths are available in the server, TypeScript SDK, Python SDK, MCP, Vercel AI integration, and Python framework integrations.
+- MCP cached delegations retain granted scopes and apply Google endpoint restrictions from those scopes.
+- `create-cred-app` writes `REDIRECT_BASE_URI`, generates private `.env` files, and documents admin bootstrap.
 
 ---
 
@@ -94,9 +114,9 @@ These invariants are enforced across every package in this repo:
 
 **Improvements beyond spec:**
 - Placeholder key detection throws instead of returning false. Prevents silent misconfiguration in production
-- Delegation endpoint returns opaque handle instead of raw token. Prevents credentials from entering LLM context windows
+- Delegation endpoints support opaque handles instead of raw tokens. This prevents credentials from entering LLM context windows on brokered paths
 - Token cache includes SSRF allowlist validation (not in original spec)
-- HTTPS-only enforcement added at SDK, MCP, and Python client levels (not in original spec)
+- HTTPS remote-transport enforcement added at SDK, MCP, and Python client levels (not in original spec)
 
 ---
 
@@ -142,12 +162,12 @@ Key test suites:
 
 | Package | Runtime Dependencies | Status |
 |---------|---------------------|--------|
-| `@credninja/sdk` | 0 | ✅ Clean |
-| `cred-auth` (Python) | 1 (`httpx`) | ✅ Clean |
-| `@credninja/mcp` | 2 (`@modelcontextprotocol/sdk`, `@credninja/sdk`) | ✅ Clean |
-| `cred-langchain` | 2 (`langchain-core`, `cred-auth`) | ✅ Clean |
-| `cred-crewai` | 2 (`crewai`, `cred-auth`) | ✅ Clean |
-| `cred-openai-agents` | 2 (`agents`, `cred-auth`) | ✅ Clean |
+| `@credninja/sdk` | 0 | Stateless TypeScript client; verify with `npm audit` |
+| `cred-auth` (Python) | 2 (`httpx`, `cryptography`) | Minimal Python client; verify with Python audit tooling |
+| `@credninja/mcp` | 2 (`@modelcontextprotocol/sdk`, `@credninja/sdk`) | Scope-aware relay; verify with `npm audit` |
+| `cred-langchain` | 2 (`langchain-core`, `cred-auth`) | Integration package; verify with Python audit tooling |
+| `cred-crewai` | 3 (`crewai`, `langchain-core`, `cred-auth`) | Integration package; verify with Python audit tooling |
+| `cred-openai-agents` | 2 (`agents`, `cred-auth`) | Integration package; verify with Python audit tooling |
 
 ---
 
@@ -156,7 +176,7 @@ Key test suites:
 | Item | Status |
 |------|--------|
 | Receipt signing | Ships with API v1.0. SDK verification code is ready |
-| CI dependency scanning | `npm audit` / `pip audit` in CI pipeline |
+| CI dependency scanning | `npm audit` in CI; Python audit tooling pending constraints/lockfile setup |
 | Independent third-party audit | Planned before v1.0 GA |
 
 ---

@@ -1,19 +1,19 @@
-// Demonstrates: agent receives a scoped Google access token via Cred.
-// Raw OAuth credentials never touch the agent host.
+// Demonstrates: agent receives a scoped Google delegation handle via Cred.
+// Raw OAuth credentials and provider access tokens never touch the agent host.
 //
 // Prerequisites:
 //   1. A running Cred server (npx @credninja/server) with Google configured
 //   2. Google connected via the server's /connect/google endpoint
-//   3. CRED_SERVER_URL and CRED_AGENT_TOKEN environment variables set
+//   3. CRED_BASE_URL, CRED_AGENT_TOKEN, and CRED_APP_CLIENT_ID environment variables set
 //
 // Run: npx tsx examples/google-drive-agent.ts
 
 import { Cred } from "@credninja/sdk";
 
 async function main() {
-  const serverUrl = process.env.CRED_SERVER_URL;
-  if (!serverUrl) {
-    throw new Error("Set CRED_SERVER_URL to your Cred server (e.g. http://localhost:3456)");
+  const baseUrl = process.env.CRED_BASE_URL;
+  if (!baseUrl) {
+    throw new Error("Set CRED_BASE_URL to your Cred server (e.g. http://localhost:3456)");
   }
 
   const agentToken = process.env.CRED_AGENT_TOKEN;
@@ -21,37 +21,40 @@ async function main() {
     throw new Error("Set CRED_AGENT_TOKEN to your agent token (starts with cred_at_)");
   }
 
+  const appClientId = process.env.CRED_APP_CLIENT_ID;
+  if (!appClientId) {
+    throw new Error("Set CRED_APP_CLIENT_ID to your Cred app client ID");
+  }
+
   const cred = new Cred({
-    baseUrl: serverUrl,
+    baseUrl,
     agentToken,
   });
 
-  // Delegate to Google — Cred handles the token retrieval + refresh
-  const credential = await cred.delegate({
+  // Delegate to Google. The returned handle is used through Cred's broker.
+  const credential = await cred.delegateHandle({
     service: "google",
     userId: "default",
+    appClientId,
+    scopes: ["drive.readonly"],
   });
 
-  console.log(`✓ Got Google token (expires in ${credential.expiresIn}s)`);
+  console.log(`✓ Got Google delegation handle (expires in ${credential.expiresIn}s)`);
   console.log(`  Scopes: ${credential.scopes.join(", ")}`);
 
-  // Use the delegated token to list Drive files
-  const res = await fetch(
-    "https://www.googleapis.com/drive/v3/files?pageSize=10&fields=files(id,name,mimeType)",
-    {
-      headers: {
-        Authorization: `Bearer ${credential.accessToken}`,
-      },
-    }
-  );
+  const result = await cred.use({
+    delegationId: credential.delegationId,
+    url: "https://www.googleapis.com/drive/v3/files?pageSize=10&fields=files(id,name,mimeType)",
+    method: "GET",
+  });
 
-  if (!res.ok) {
-    throw new Error(`Drive API error: ${res.status} ${await res.text()}`);
+  if (!result.ok) {
+    throw new Error(`Drive API error: ${result.status} ${JSON.stringify(result.body)}`);
   }
 
-  const data = await res.json();
+  const data = result.body as { files?: Array<{ id: string; name: string; mimeType: string }> };
 
-  console.log(`\n📁 Drive files (${data.files?.length ?? 0}):`);
+  console.log(`\nDrive files (${data.files?.length ?? 0}):`);
   for (const file of data.files ?? []) {
     console.log(`  ${file.name} (${file.mimeType})`);
   }

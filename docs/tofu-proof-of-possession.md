@@ -59,10 +59,13 @@ import { generateKeypair } from '@credninja/tofu';
 
 const { publicKey, privateKey, fingerprint } = await generateKeypair();
 
-// One-time registration (no auth required)
+// One-time registration. The server requires agent bearer auth.
 await fetch('http://localhost:3456/api/v1/tofu/register', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Authorization': `Bearer ${process.env.CRED_AGENT_TOKEN}`,
+    'Content-Type': 'application/json',
+  },
   body: JSON.stringify({
     public_key: Buffer.from(publicKey).toString('base64'),
   }),
@@ -93,6 +96,7 @@ Registration request:
 ```http
 POST /api/v1/tofu/register HTTP/1.1
 Host: localhost:3456
+Authorization: Bearer cred_at_...
 Content-Type: application/json
 
 {
@@ -130,4 +134,4 @@ The decoded `tofu_payload` must be the exact UTF-8 JSON string that was signed.
 - The server enforces a `+/- 5 minute` clock-skew window on `timestamp`. Keep the agent clock synchronized.
 - Unclaimed agents are restricted to the bootstrap scopes supplied during registration.
 - Claimed agents are governed by the permission model, which defines the maximum scope ceiling for that agent and service.
-- Rotate keys with `POST /api/v1/tofu/rotate`. Plan for a grace period so in-flight requests signed by the previous key can still complete safely.
+- Web Bot Auth identities can rotate keys with `POST /api/v1/web-bot-auth/keys/:agentId/rotate`. The lower-level `AgentVault.rotateKey()` API is available for embedded TOFU use cases.

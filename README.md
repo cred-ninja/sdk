@@ -5,11 +5,11 @@
 [![GitHub stars](https://img.shields.io/github/stars/cred-ninja/sdk)](https://github.com/cred-ninja/sdk)
 [![Website](https://img.shields.io/badge/website-cred.ninja-00ff88)](https://cred.ninja)
 
-**OAuth2 credential delegation for AI agents. Tokens are brokered, never exposed.**
+**OAuth2 credential delegation for AI agents. Refresh tokens stay vaulted; agents receive scoped access or brokered delegation handles.**
 
 *Delegation, not exposure.*
 
-Cred is credential delegation middleware for AI agents. When your agent needs to access a user's Google Calendar, Slack workspace, or GitHub repos, Cred validates the agent's identity, checks that the user consented, and returns a short-lived access token. Refresh tokens never leave the vault. Three lines of code to integrate. Works with your existing auth provider.
+Cred is credential delegation middleware for AI agents. When your agent needs to access a user's Google Calendar, Slack workspace, or GitHub repos, Cred validates the agent's identity, checks that the user consented, and returns either a short-lived access token or an opaque brokered handle. Refresh tokens never leave the vault. Three lines of code to integrate. Works with your existing auth provider.
 
 ## Why Cred?
 
@@ -41,7 +41,7 @@ cd my-cred-server
 npm start
 ```
 
-Open [http://localhost:3456/connect](http://localhost:3456/connect) to connect OAuth providers. Give your agent the token from `.env`.
+Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to connect OAuth providers. Give your agent the `AGENT_TOKEN` from `.env`.
 
 ### 2. Self-Hosted Server
 
@@ -102,23 +102,23 @@ Your MCP config should be shareable. Credentials shouldn't be in it.
       "command": "npx",
       "args": ["-y", "@credninja/mcp"],
       "env": {
-        "VAULT_PASSPHRASE": "your-passphrase",
-        "GOOGLE_CLIENT_ID": "your-google-client-id",
-        "GOOGLE_CLIENT_SECRET": "your-google-client-secret"
+        "CRED_BASE_URL": "https://cred.example.com",
+        "CRED_AGENT_TOKEN": "your-agent-token",
+        "CRED_APP_CLIENT_ID": "your-app-client-id"
       }
     }
   }
 }
 ```
 
-When your MCP client needs your calendar, you approve interactively. The token is brokered at runtime, never stored in your config file.
+When your MCP client needs your calendar, it requests a brokered handle from your Cred server. Provider tokens stay on the server and are never stored in your MCP config file.
 
 ## How It Works
 
 1. **User consents** once, via a standard OAuth flow
 2. **Cred stores the refresh token** encrypted at rest (AES-256-GCM), never returned to agents
-3. **Agent requests access.** Cred validates identity, checks consent, returns a fresh short-lived token
-4. **Token is used and discarded.** Your agent never persists credentials
+3. **Agent requests access.** Cred validates identity, checks consent, returns a fresh short-lived token or brokered handle
+4. **Access is used and discarded.** Agents do not need to persist credentials, and brokered handles keep provider access tokens on the server
 
 ## Packages
 
@@ -162,13 +162,13 @@ Need a provider that's not listed? [Adding an adapter](./CONTRIBUTING.md#adding-
 
 ## Security
 
-- **AES-256-GCM encryption.** All refresh tokens encrypted at rest with per-account key isolation.
+- **AES-256-GCM encryption.** Refresh tokens are encrypted at rest with per-entry IVs and tags.
 - **PKCE (RFC 7636).** S256 challenge for all providers that support it.
 - **PBKDF2-SHA256.** 100,000 iteration key derivation for local vault.
-- **Append-only audit trail.** Cryptographic delegation receipts (Ed25519 JWS).
-- **Per-account isolation.** Cross-account access requires possession of the account DEK.
+- **Audit trail where supported.** SQLite vaults record append-only audit events; file vaults do not.
+- **Delegation receipts.** Receipt chains are signed as Ed25519 JWS values.
 - **Zero runtime dependencies.** TypeScript SDK and OAuth package use only Node.js built-ins.
-- **Pre-launch audits.** 6 security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
+- **Pre-launch audits.** 7 security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
 
 ## Guard — Policy Engine
 
@@ -205,7 +205,7 @@ const guardedHandler = guard.wrapMcpTool(handleUse);
 
 - **Not an auth provider.** Cred never handles login. It receives verified identity from your existing provider (WorkOS, Supabase, Clerk, NextAuth) and manages outbound credential lifecycle from there.
 - **Not a vault/secret manager.** HashiCorp Vault manages infrastructure secrets (DB passwords, API keys you own). Cred manages user-delegated OAuth tokens: credentials users grant to your agent.
-- **Not primarily an API proxy.** Core Cred delegation is not in the hot path of upstream API calls. The main exception is signed execution paths such as MCP `cred_use`, where Cred can add Web Bot Auth headers before the upstream request is sent.
+- **Not a general-purpose API proxy.** Raw-token delegation can stay out of the hot path. Brokered handle modes intentionally relay scoped upstream calls through Cred or MCP so provider tokens stay hidden, with service allowlists, delegated-scope checks, and Guard policies applied before forwarding.
 
 ## Web Bot Auth
 

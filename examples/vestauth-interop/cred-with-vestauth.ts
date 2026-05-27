@@ -8,7 +8,7 @@
 //   1. Install and initialize VestAuth:
 //      curl -sSf https://vestauth.sh | sh
 //      vestauth agent init
-//   2. Set CRED_SERVER_URL and CRED_AGENT_TOKEN
+//   2. Set CRED_BASE_URL, CRED_AGENT_TOKEN, and CRED_APP_CLIENT_ID
 //   3. A Google connection already established in Cred
 //
 // Run:
@@ -18,9 +18,9 @@ import { spawnSync } from 'node:child_process';
 import { Cred } from '@credninja/sdk';
 
 async function main() {
-  const baseUrl = process.env.CRED_SERVER_URL;
+  const baseUrl = process.env.CRED_BASE_URL;
   if (!baseUrl) {
-    throw new Error('Set CRED_SERVER_URL to your Cred server URL');
+    throw new Error('Set CRED_BASE_URL to your Cred server URL');
   }
 
   const agentToken = process.env.CRED_AGENT_TOKEN;
@@ -28,10 +28,16 @@ async function main() {
     throw new Error('Set CRED_AGENT_TOKEN to a valid Cred agent token');
   }
 
+  const appClientId = process.env.CRED_APP_CLIENT_ID;
+  if (!appClientId) {
+    throw new Error('Set CRED_APP_CLIENT_ID to your Cred app client ID');
+  }
+
   const cred = new Cred({ baseUrl, agentToken });
   const delegated = await cred.delegate({
     service: 'google',
     userId: 'default',
+    appClientId,
     scopes: ['calendar.readonly'],
   });
 
