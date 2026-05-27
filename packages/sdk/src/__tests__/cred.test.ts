@@ -118,7 +118,7 @@ describe('Cred.delegate()', () => {
     mockFetch.mockResolvedValue(mockResponse(403, {
       error: 'consent_required',
       message: 'User has not consented',
-      consent_url: 'https://cred.example.com/api/connect/google/authorize?app_client_id=app1',
+      consent_url: 'https://cred.example.com/connect/google?user_id=u1&app_client_id=app1',
     }));
 
     await expect(
@@ -129,7 +129,7 @@ describe('Cred.delegate()', () => {
       await cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
     } catch (err) {
       expect(err).toBeInstanceOf(ConsentRequiredError);
-      expect((err as ConsentRequiredError).consentUrl).toContain('/api/connect/google/authorize');
+      expect((err as ConsentRequiredError).consentUrl).toContain('/connect/google');
     }
   });
 
@@ -171,6 +171,95 @@ describe('Cred.delegate()', () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     expect(body).not.toHaveProperty('scopes');
+  });
+});
+
+describe('Cred.delegateHandle() and use()', () => {
+  it('requests a brokered handle without an access token', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      token_type: 'Delegation',
+      expires_in: 900,
+      service: 'google',
+      user_id: 'user_1',
+      scopes: ['calendar.readonly'],
+      delegation_id: 'del_handle',
+    }));
+
+    const result = await cred.delegateHandle({
+      service: 'google',
+      userId: 'user_1',
+      appClientId: 'app_1',
+      scopes: ['calendar.readonly'],
+    });
+
+    expect(result.tokenType).toBe('Delegation');
+    expect(result.delegationId).toBe('del_handle');
+    expect(result.userId).toBe('user_1');
+    const [, init] = mockFetch.mock.calls[0];
+    expect(JSON.parse(init.body)).toMatchObject({
+      service: 'google',
+      user_id: 'user_1',
+      appClientId: 'app_1',
+      token_format: 'handle',
+    });
+  });
+
+  it('uses a brokered handle through the server', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      status: 200,
+      ok: true,
+      contentType: 'application/json',
+      body: { items: [] },
+    }));
+
+    const result = await cred.use({
+      delegationId: 'del_handle',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+      extraHeaders: { 'X-Test': '1' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.body).toEqual({ items: [] });
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe(`${BASE_URL}/api/v1/use`);
+    expect(JSON.parse(init.body)).toMatchObject({
+      delegation_id: 'del_handle',
+      method: 'GET',
+      extra_headers: { 'X-Test': '1' },
+    });
+  });
+
+  it('signs brokered server requests when Web Bot Auth is configured', async () => {
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer;
+    const signedCred = new Cred({
+      agentToken: TOKEN,
+      baseUrl: BASE_URL,
+      webBotAuth: {
+        privateKeyHex: pkcs8.slice(-32).toString('hex'),
+        signatureAgent: 'https://agent.example.com/.well-known/http-message-signatures-directory',
+        ttlSeconds: 30,
+      },
+    });
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      status: 200,
+      ok: true,
+      contentType: 'application/json',
+      body: { items: [] },
+    }));
+
+    await signedCred.use({
+      delegationId: 'del_handle',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers['Authorization']).toBe(`Bearer ${TOKEN}`);
+    expect(init.headers['Signature-Agent']).toBe('"https://agent.example.com/.well-known/http-message-signatures-directory"');
+    expect(init.headers['Signature-Input']).toContain('tag="web-bot-auth"');
+    expect(init.headers['Signature']).toMatch(/^sig1=:[^:]+:$/);
   });
 });
 
@@ -338,7 +427,8 @@ describe('Cred.getConsentUrl()', () => {
       redirectUri: 'https://myapp.com/callback',
     });
 
-    expect(url).toContain(`${BASE_URL}/api/connect/google/authorize`);
+    expect(url).toContain(`${BASE_URL}/connect/google`);
+    expect(url).toContain('user_id=user_1');
     expect(url).toContain('app_client_id=app_1');
     expect(url).toContain('scopes=calendar.readonly%2Ccalendar.events');
     expect(url).toContain('redirect_uri=');

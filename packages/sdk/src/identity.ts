@@ -5,7 +5,7 @@
  * Zero external dependencies — Node.js crypto module only.
  */
 
-import { generateKeyPair, KeyObject, verify, createPublicKey } from 'node:crypto';
+import { generateKeyPair, KeyObject, verify, createPrivateKey, createPublicKey } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
@@ -235,7 +235,6 @@ export function importAgentIdentity(params: ImportParams): AgentIdentity {
   }
 
   // Derive public key from private key using Node.js crypto
-  const { createPrivateKey, createPublicKey } = require('node:crypto');
   const privateKeyObject = createPrivateKey({
     key: Buffer.concat([
       // Ed25519 PKCS#8 prefix

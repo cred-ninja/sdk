@@ -9,6 +9,12 @@ export interface CredCloudConfig {
   agentToken: string;
   /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl: string;
+  /** Optional Web Bot Auth signing for requests sent to the Cred server. */
+  webBotAuth?: {
+    privateKeyHex: string;
+    signatureAgent: string;
+    ttlSeconds: number;
+  };
   mode?: never;
 }
 
@@ -58,6 +64,37 @@ export interface DelegationResult {
   delegationId: string;
   /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
   receipt?: string;
+}
+
+export interface DelegationHandleResult {
+  tokenType: 'Delegation';
+  /** Seconds until handle expires. Always set — defaults to 900 (15 min). */
+  expiresIn: number;
+  /** Absolute expiry timestamp. Always set. */
+  expiresAt: Date;
+  service: string;
+  userId: string;
+  scopes: string[];
+  delegationId: string;
+  /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
+  receipt?: string;
+}
+
+export interface BrokeredUseParams {
+  delegationId: string;
+  url: string;
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  body?: Record<string, unknown>;
+  extraHeaders?: Record<string, string>;
+}
+
+export interface BrokeredUseResult {
+  status: number;
+  ok: boolean;
+  contentType: string;
+  body: unknown;
+  truncated?: boolean;
+  truncatedAt?: number;
 }
 
 export interface Connection {
@@ -196,6 +233,11 @@ export interface SubDelegateParams extends Omit<DelegateParams, 'agentDid'> {
 }
 
 export interface SubDelegationResult extends DelegationResult {
+  chainDepth: number;
+  parentDelegationId: string;
+}
+
+export interface SubDelegationHandleResult extends DelegationHandleResult {
   chainDepth: number;
   parentDelegationId: string;
 }

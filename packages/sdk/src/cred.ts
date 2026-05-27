@@ -12,8 +12,12 @@ import {
   DelegateParams,
   TofuDelegateParams,
   DelegationResult,
+  DelegationHandleResult,
+  BrokeredUseParams,
+  BrokeredUseResult,
   SubDelegateParams,
   SubDelegationResult,
+  SubDelegationHandleResult,
   Connection,
   AuditEntry,
   AuditParams,
@@ -30,7 +34,8 @@ import {
   RotationStrategy,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
-import crypto from 'crypto';
+import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
+import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
 // No default base URL — users must explicitly set their server URL.
 
@@ -206,6 +211,7 @@ export class Cred {
   // ── Cloud mode fields ───────────────────────────────────────────────────────
   private readonly agentToken?: string;
   private readonly baseUrl?: string;
+  private readonly webBotAuthSigner?: WebBotAuthSigner;
 
   // ── Local mode fields ───────────────────────────────────────────────────────
   private readonly localConfig?: CredLocalConfig;
@@ -242,6 +248,9 @@ export class Cred {
       }
       this.agentToken = config.agentToken;
       this.baseUrl = Cred.validateBaseUrl(config.baseUrl);
+      this.webBotAuthSigner = config.webBotAuth
+        ? createWebBotAuthSigner(config.webBotAuth)
+        : undefined;
     }
   }
 
@@ -345,6 +354,22 @@ export class Cred {
       return this.delegateLocal(params);
     }
     return this.delegateCloud(params);
+  }
+
+  /**
+   * Get a brokered delegation handle without returning the provider access token.
+   * Use the returned `delegationId` with `cred.use()` to make upstream API calls
+   * through the Cred server.
+   */
+  async delegateHandle(params: DelegateParams): Promise<DelegationHandleResult> {
+    if (this.isLocal) {
+      throw new CredError(
+        'delegateHandle() is only supported with a Cred server. Local mode has no broker process.',
+        'local_mode_unsupported',
+        0,
+      );
+    }
+    return this.delegateCloudHandle(params);
   }
 
   async tofuDelegate(params: TofuDelegateParams): Promise<DelegationResult> {
@@ -460,6 +485,73 @@ export class Cred {
       chainDepth: data.chain_depth,
       parentDelegationId: data.parent_delegation_id,
     };
+  }
+
+  async subDelegateHandle(params: SubDelegateParams): Promise<SubDelegationHandleResult> {
+    if (this.isLocal) {
+      throw new CredError(
+        'subDelegateHandle() is only supported with a Cred server. Local mode has no broker process.',
+        'local_mode_unsupported',
+        0,
+      );
+    }
+
+    const body: Record<string, unknown> = {
+      parent_receipt: params.parentReceipt,
+      service: params.service,
+      user_id: params.userId,
+      appClientId: params.appClientId,
+      agent_did: params.agentDid,
+      token_format: 'handle',
+    };
+    if (params.scopes && params.scopes.length > 0) {
+      body.scopes = params.scopes;
+    }
+
+    const data = await this.post<{
+      token_type: 'Delegation';
+      expires_in?: number;
+      service: string;
+      user_id?: string;
+      scopes: string[];
+      delegation_id: string;
+      receipt: string;
+      chain_depth: number;
+      parent_delegation_id: string;
+    }>('/api/v1/subdelegate', body);
+
+    const DEFAULT_TTL_SECONDS = 900;
+    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    return {
+      tokenType: 'Delegation',
+      expiresIn,
+      expiresAt: new Date(Date.now() + expiresIn * 1000),
+      service: data.service,
+      userId: data.user_id ?? params.userId,
+      scopes: data.scopes,
+      delegationId: data.delegation_id,
+      receipt: data.receipt,
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+    };
+  }
+
+  async use(params: BrokeredUseParams): Promise<BrokeredUseResult> {
+    if (this.isLocal) {
+      throw new CredError(
+        'use() is only supported with a Cred server broker. Local mode delegates raw tokens in-process.',
+        'local_mode_unsupported',
+        0,
+      );
+    }
+
+    return this.post<BrokeredUseResult>('/api/v1/use', {
+      delegation_id: params.delegationId,
+      url: params.url,
+      method: params.method,
+      ...(params.body !== undefined ? { body: params.body } : {}),
+      ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
+    });
   }
 
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
@@ -923,7 +1015,6 @@ export class Cred {
 
     const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
     const privateKey = this.getLocalReceiptSigningKey();
-    const { sign } = require('node:crypto') as typeof import('node:crypto');
     const signature = sign(null, signatureInput, privateKey).toString('base64url');
     return `${header}.${payload}.${signature}`;
   }
@@ -956,7 +1047,6 @@ export class Cred {
       };
 
       const publicKey = this.getLocalReceiptPublicKeyHex();
-      const { createPublicKey, verify } = require('node:crypto') as typeof import('node:crypto');
       const publicKeyObject = createPublicKey({
         key: Buffer.concat([
           Buffer.from('302a300506032b6570032100', 'hex'),
@@ -991,7 +1081,6 @@ export class Cred {
   }
 
   private getLocalReceiptSigningKey() {
-    const { createPrivateKey } = require('node:crypto') as typeof import('node:crypto');
     const seed = this.deriveLocalKey('local-receipt');
     return createPrivateKey({
       key: Buffer.concat([
@@ -1004,7 +1093,6 @@ export class Cred {
   }
 
   private getLocalReceiptPublicKeyHex(): string {
-    const { createPublicKey } = require('node:crypto') as typeof import('node:crypto');
     const publicKey = createPublicKey(this.getLocalReceiptSigningKey());
     const spki = publicKey.export({ type: 'spki', format: 'der' });
     return Buffer.from(spki.slice(-32)).toString('hex');
@@ -1052,6 +1140,47 @@ export class Cred {
     };
   }
 
+  private async delegateCloudHandle(params: DelegateParams): Promise<DelegationHandleResult> {
+    if (!params.appClientId) {
+      throw new CredError('appClientId is required for cloud mode delegation', 'invalid_config', 0);
+    }
+    const body: Record<string, unknown> = {
+      service: params.service,
+      user_id: params.userId,
+      appClientId: params.appClientId,
+      token_format: 'handle',
+    };
+    if (params.scopes && params.scopes.length > 0) {
+      body.scopes = params.scopes;
+    }
+    if (params.agentDid) {
+      body.agent_did = params.agentDid;
+    }
+
+    const data = await this.post<{
+      token_type: 'Delegation';
+      expires_in?: number;
+      service: string;
+      user_id?: string;
+      scopes: string[];
+      delegation_id: string;
+      receipt?: string;
+    }>('/api/v1/delegate', body);
+
+    const DEFAULT_TTL_SECONDS = 900;
+    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    return {
+      tokenType: 'Delegation',
+      expiresIn,
+      expiresAt: new Date(Date.now() + expiresIn * 1000),
+      service: data.service,
+      userId: data.user_id ?? params.userId,
+      scopes: data.scopes,
+      delegationId: data.delegation_id,
+      receipt: data.receipt,
+    };
+  }
+
   /**
    * List all services a user has actively connected.
    *
@@ -1092,7 +1221,8 @@ export class Cred {
         0,
       );
     }
-    const url = new URL(`${this.baseUrl}/api/connect/${params.service}/authorize`);
+    const url = new URL(`${this.baseUrl}/connect/${params.service}`);
+    url.searchParams.set('user_id', params.userId);
     url.searchParams.set('app_client_id', params.appClientId);
     url.searchParams.set('scopes', params.scopes.join(','));
     url.searchParams.set('redirect_uri', params.redirectUri);
@@ -1278,10 +1408,20 @@ export class Cred {
     };
   }
 
+  private requestHeaders(path: string, method: string): Record<string, string> {
+    const headers = this.headers();
+    if (!this.webBotAuthSigner || !this.baseUrl) return headers;
+    return this.webBotAuthSigner.signRequest({
+      url: `${this.baseUrl}${path}`,
+      method,
+      headers,
+    });
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: this.headers(),
+      headers: this.requestHeaders(path, 'POST'),
       body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);
@@ -1290,7 +1430,7 @@ export class Cred {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: this.headers(),
+      headers: this.requestHeaders(path, 'GET'),
     });
     return this.handleResponse<T>(res);
   }
@@ -1324,7 +1464,7 @@ export class Cred {
   private async delete(path: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
-      headers: this.headers(),
+      headers: this.requestHeaders(path, 'DELETE'),
     });
     if (res.status === 204) return;
     await this.handleResponse(res);

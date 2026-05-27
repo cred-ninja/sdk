@@ -117,12 +117,12 @@ Throws `ConsentRequiredError` with `.consentUrl` if the user hasn't connected th
 Get the URL to send a user to for connecting a service.
 
 ```typescript
-const { consentUrl } = await cred.getConsentUrl({
+const consentUrl = cred.getConsentUrl({
   userId: 'user_123',
   appClientId: 'app_xxx',
   service: 'google',
   scopes: ['calendar.readonly'],
-  redirectUri: 'https://yourapp.com/callback', // optional
+  redirectUri: 'https://yourapp.com/callback',
 });
 ```
 
