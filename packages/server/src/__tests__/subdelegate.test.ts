@@ -10,6 +10,7 @@ import type { ServerConfig } from '../config.js';
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
+const TEST_ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-subdelegate-vault.sqlite');
 const TEST_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-subdelegate-tofu.sqlite');
 const TEST_PASSPHRASE = 'test-passphrase-for-subdelegation';
@@ -23,6 +24,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     vaultPath: TEST_VAULT_PATH,
     tofuStorage: 'sqlite',
     tofuPath: TEST_TOFU_PATH,
+    adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
     providers: [
       {

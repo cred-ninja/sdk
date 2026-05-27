@@ -4,6 +4,8 @@
  * Supports process-local memory mode and shared SQLite mode for replay defense.
  */
 
+import Database from 'better-sqlite3';
+
 export interface WebBotAuthNonceStore {
   remember(input: {
     signatureAgent: string;
@@ -42,8 +44,6 @@ class SQLiteWebBotAuthNonceStore implements WebBotAuthNonceStore {
   private readonly db: import('better-sqlite3').Database;
 
   constructor(dbPath: string) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(`

@@ -2,7 +2,7 @@
  * @credninja/server — Self-hosted credential delegation server
  *
  * A complete, runnable HTTP server that stores OAuth tokens in an encrypted
- * vault and serves delegated access tokens to authenticated agents.
+ * vault and serves delegated access tokens or brokered handles to authenticated agents.
  *
  * Designed to run on a separate host from the AI agent for true credential
  * isolation. In production, place behind a TLS reverse proxy (Caddy/nginx).
@@ -10,12 +10,17 @@
  * Endpoints:
  *   GET  /.well-known/http-message-signatures-directory — Web Bot Auth key directory
  *   GET  /health                          — liveness check
- *   GET  /providers                       — list configured providers
- *   GET  /connect/:provider               — start OAuth flow (browser)
+ *   GET  /admin/login                     — admin login form
+ *   POST /admin/login                     — admin session cookie
+ *   GET  /providers                       — list configured providers (admin auth)
+ *   GET  /connect/:provider               — start OAuth flow (browser, admin auth)
  *   GET  /connect/:provider/callback      — OAuth callback (browser)
+ *   GET  /api/v1/connections              — list connections (agent, Bearer auth)
+ *   POST /api/v1/use                      — brokered upstream API call (agent, Bearer auth)
  *   GET  /api/token/:provider             — compatibility token access route (agent, Bearer auth)
- *   POST /api/v1/delegate                 — delegate token (agent, Bearer auth)
+ *   POST /api/v1/delegate                 — delegate token or handle (agent, Bearer auth)
  *   POST /api/v1/subdelegate              — sub-delegate from a parent receipt (agent, Bearer auth)
+ *   DELETE /api/v1/connections/:provider  — revoke stored token (agent, Bearer auth)
  *   DELETE /api/token/:provider           — revoke stored token (agent, Bearer auth)
  */
 
@@ -24,11 +29,12 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
+import type { AgentRecord } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
-import { createExpressMiddleware } from '@credninja/guard';
+import { createExpressMiddleware, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 
@@ -36,8 +42,19 @@ import { createWebBotAuthNonceStore } from './nonce-store.js';
 
 interface PendingOAuth {
   provider: string;
+  userId: string;
+  scopes: string[];
   state: string;
   codeVerifier?: string;
+  createdAt: number;
+}
+
+interface BrokeredDelegation {
+  accessToken: string;
+  service: string;
+  userId: string;
+  scopes: string[];
+  expiresAt: number;
   createdAt: number;
 }
 
@@ -90,6 +107,93 @@ interface VerifiedWebBotAuthIdentity {
   fingerprint?: string;
 }
 
+const ADMIN_SESSION_COOKIE = 'cred_admin_session';
+const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
+const DEFAULT_DELEGATION_TTL_SECONDS = 900;
+const MAX_BROKER_RESPONSE_BYTES = 32_768;
+const ED25519_PUBLIC_KEY_BYTES = 32;
+
+const SERVICE_ALLOWLIST: Record<string, string[]> = {
+  google: [
+    'https://www.googleapis.com/',
+    'https://gmail.googleapis.com/',
+    'https://calendar.googleapis.com/',
+    'https://drive.googleapis.com/',
+    'https://sheets.googleapis.com/',
+    'https://docs.googleapis.com/',
+    'https://admin.googleapis.com/',
+    'https://people.googleapis.com/',
+    'https://openidconnect.googleapis.com/',
+  ],
+  github: ['https://api.github.com/'],
+  slack: ['https://slack.com/api/'],
+  notion: ['https://api.notion.com/'],
+  salesforce: [],
+};
+
+const GOOGLE_SCOPE_ENDPOINTS: Array<{ scopes: string[]; bases: string[] }> = [
+  {
+    scopes: ['calendar', 'calendar.readonly', 'calendar.events'],
+    bases: ['https://www.googleapis.com/calendar/', 'https://calendar.googleapis.com/'],
+  },
+  {
+    scopes: ['gmail.readonly', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
+    bases: ['https://gmail.googleapis.com/', 'https://www.googleapis.com/gmail/'],
+  },
+  {
+    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata.readonly'],
+    bases: ['https://www.googleapis.com/drive/', 'https://www.googleapis.com/upload/drive/', 'https://drive.googleapis.com/'],
+  },
+  {
+    scopes: ['spreadsheets', 'spreadsheets.readonly'],
+    bases: ['https://sheets.googleapis.com/'],
+  },
+  {
+    scopes: ['documents', 'documents.readonly'],
+    bases: ['https://docs.googleapis.com/'],
+  },
+  {
+    scopes: ['admin', 'admin.directory.user.readonly', 'admin.directory.group.readonly'],
+    bases: ['https://admin.googleapis.com/'],
+  },
+  {
+    scopes: ['openid', 'email', 'profile', 'userinfo.email', 'userinfo.profile'],
+    bases: ['https://www.googleapis.com/oauth2/', 'https://openidconnect.googleapis.com/'],
+  },
+  {
+    scopes: ['contacts', 'contacts.readonly'],
+    bases: ['https://people.googleapis.com/'],
+  },
+];
+
+const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
+  'authorization',
+  'connection',
+  'content-length',
+  'cookie',
+  'forwarded',
+  'host',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'set-cookie',
+  'signature',
+  'signature-agent',
+  'signature-input',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+]);
+
+function isForwardableBrokerHeader(key: string, value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  return !BLOCKED_BROKER_EXTRA_HEADERS.has(key.trim().toLowerCase());
+}
+
 // ── Server factory ───────────────────────────────────────────────────────────
 
 export function createServer(config: ServerConfig) {
@@ -99,6 +203,7 @@ export function createServer(config: ServerConfig) {
 
   const app = express();
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -120,13 +225,15 @@ export function createServer(config: ServerConfig) {
 
   // Pending OAuth sessions (state → PendingOAuth). Cleaned up after 10 min.
   const pendingOAuth = new Map<string, PendingOAuth>();
+  const brokeredDelegations = new Map<string, BrokeredDelegation>();
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
     path: config.webBotAuthNoncePath,
   });
 
-  // Hash the static agent token once at startup for constant-time comparison
+  // Hash bearer/admin tokens once at startup for constant-time comparison
+  const adminTokenHash = crypto.createHash('sha256').update(config.adminToken).digest('hex');
   const agentTokenHash = config.agentToken
     ? crypto.createHash('sha256').update(config.agentToken).digest('hex')
     : null;
@@ -197,17 +304,226 @@ export function createServer(config: ServerConfig) {
     };
   }
 
+  function decodeWebBotAuthPublicKey(publicKeyBase64: string): Uint8Array | null {
+    const publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
+    if (publicKey.length !== ED25519_PUBLIC_KEY_BYTES) return null;
+    return publicKey;
+  }
+
+  function hashTokenValue(token: string): string {
+    return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  function tokenMatchesHash(token: string, expectedHash: string): boolean {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const actual = Buffer.from(tokenHash, 'hex');
+    const expected = Buffer.from(expectedHash, 'hex');
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  }
+
+  function extractBearerToken(req: Request): string | null {
+    const auth = req.headers.authorization ?? '';
+    if (!auth.startsWith('Bearer ')) return null;
+    const token = auth.slice(7).trim();
+    return token || null;
+  }
+
+  function routeParam(value: string | string[] | undefined): string | undefined {
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  function queryStringValue(value: unknown): string | undefined {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) {
+      return value.find((item): item is string => typeof item === 'string');
+    }
+    return undefined;
+  }
+
+  function safeRelativePath(rawPath: string | undefined, fallback = '/connect'): string {
+    if (!rawPath || !rawPath.startsWith('/') || rawPath.startsWith('//') || rawPath.includes('\\')) {
+      return fallback;
+    }
+    return rawPath;
+  }
+
+  function requestUserId(req: Request): string {
+    const queryUserId = queryStringValue(req.query.user_id);
+    const bodyUserId = typeof req.body?.user_id === 'string' ? req.body.user_id : undefined;
+    const userId = (bodyUserId ?? queryUserId ?? 'default').trim();
+    return userId || 'default';
+  }
+
+  function buildConsentUrl(input: {
+    service: string;
+    userId: string;
+    appClientId?: string;
+    scopes?: string[];
+  }): string {
+    const url = new URL(`/connect/${encodeURIComponent(input.service)}`, config.redirectBaseUri);
+    url.searchParams.set('user_id', input.userId);
+    if (input.appClientId) {
+      url.searchParams.set('app_client_id', input.appClientId);
+    }
+    if (input.scopes && input.scopes.length > 0) {
+      url.searchParams.set('scopes', input.scopes.join(','));
+    }
+    return url.toString();
+  }
+
+  function tokenFormatFromBody(req: Request): 'raw' | 'handle' {
+    return req.body?.token_format === 'handle' ? 'handle' : 'raw';
+  }
+
+  function scopeMatches(grantedScope: string, requiredScope: string): boolean {
+    const normalized = grantedScope.toLowerCase().replace(/\/$/, '');
+    const required = requiredScope.toLowerCase();
+    return scopeEquivalent(grantedScope, requiredScope) ||
+      normalized.endsWith(`/${required}`) ||
+      normalized.endsWith(`auth/${required}`) ||
+      normalized.includes(`//${required}`);
+  }
+
+  function canonicalScope(scope: string): string {
+    const trimmed = scope.trim().replace(/\/$/, '');
+    const normalized = trimmed.toLowerCase();
+    const googleAuthPrefix = 'https://www.googleapis.com/auth/';
+    if (normalized.startsWith(googleAuthPrefix)) {
+      return normalized.slice(googleAuthPrefix.length);
+    }
+    return trimmed;
+  }
+
+  function scopeEquivalent(left: string, right: string): boolean {
+    return canonicalScope(left) === canonicalScope(right);
+  }
+
+  function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[]): boolean {
+    if (!scopes || scopes.length === 0) return false;
+    return GOOGLE_SCOPE_ENDPOINTS.some(({ scopes: requiredScopes, bases }) => (
+      bases.some((base) => normalizedUrl.startsWith(base)) &&
+      requiredScopes.some((requiredScope) => scopes.some((scope) => scopeMatches(scope, requiredScope)))
+    ));
+  }
+
+  function isAllowedBrokerUrl(service: string, url: string, scopes?: string[]): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    if (parsed.port !== '' && parsed.port !== '443') return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (service === 'salesforce') {
+      const isPrivateIpSubdomain = /^(\d{1,3}\.){3}\d{1,3}\./.test(hostname);
+      if (isPrivateIpSubdomain) return false;
+      return hostname.endsWith('.salesforce.com') || hostname.endsWith('.force.com');
+    }
+
+    const allowed = SERVICE_ALLOWLIST[service];
+    if (!allowed) return false;
+    const normalizedUrl = `https://${hostname}${parsed.pathname}`;
+    if (!allowed.some((base) => normalizedUrl.startsWith(base))) return false;
+    if (service === 'google') {
+      return isAllowedGoogleScopeEndpoint(normalizedUrl, scopes);
+    }
+    return true;
+  }
+
   /**
    * Validate agent Bearer token. Constant-time comparison via hash.
    */
   function validateAgentToken(req: Request): boolean {
     if (!agentTokenHash) return false;
-    const auth = req.headers.authorization ?? '';
-    if (!auth.startsWith('Bearer ')) return false;
-    const token = auth.slice(7).trim();
-    if (!token) return false;
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(tokenHash, 'hex'), Buffer.from(agentTokenHash, 'hex'));
+    const token = extractBearerToken(req);
+    return token ? tokenMatchesHash(token, agentTokenHash) : false;
+  }
+
+  function parseCookies(req: Request): Record<string, string> {
+    const raw = req.get('cookie') ?? '';
+    const cookies: Record<string, string> = {};
+    for (const part of raw.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq <= 0) continue;
+      const key = part.slice(0, eq).trim();
+      const rawValue = part.slice(eq + 1).trim();
+      try {
+        if (key) cookies[key] = decodeURIComponent(rawValue);
+      } catch {
+        continue;
+      }
+    }
+    return cookies;
+  }
+
+  function createAdminSessionValue(nowMs = Date.now()): string {
+    const issuedAt = Math.floor(nowMs / 1000).toString();
+    const signature = crypto
+      .createHmac('sha256', config.adminToken)
+      .update(issuedAt)
+      .digest('base64url');
+    return `${issuedAt}.${signature}`;
+  }
+
+  function validateAdminSessionValue(value: string | undefined, nowMs = Date.now()): boolean {
+    if (!value) return false;
+    const parts = value.split('.');
+    if (parts.length !== 2) return false;
+    const [issuedAtRaw, signature] = parts;
+    if (!issuedAtRaw || !signature) return false;
+    const issuedAt = Number.parseInt(issuedAtRaw, 10);
+    if (!Number.isFinite(issuedAt)) return false;
+
+    const nowSeconds = Math.floor(nowMs / 1000);
+    if (issuedAt > nowSeconds + 60 || nowSeconds - issuedAt > ADMIN_SESSION_TTL_SECONDS) {
+      return false;
+    }
+
+    const expected = crypto
+      .createHmac('sha256', config.adminToken)
+      .update(issuedAtRaw)
+      .digest('base64url');
+    const actualBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+  }
+
+  function setAdminSessionCookie(res: Response): void {
+    const secure = new URL(config.redirectBaseUri).protocol === 'https:' ? '; Secure' : '';
+    res.setHeader(
+      'Set-Cookie',
+      `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(createAdminSessionValue())}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${ADMIN_SESSION_TTL_SECONDS}${secure}`,
+    );
+  }
+
+  function validateAdminRequest(req: Request): boolean {
+    const token = extractBearerToken(req);
+    if (token && tokenMatchesHash(token, adminTokenHash)) {
+      return true;
+    }
+    const cookies = parseCookies(req);
+    return validateAdminSessionValue(cookies[ADMIN_SESSION_COOKIE]);
+  }
+
+  /**
+   * Admin auth middleware for provider-management browser routes.
+   *
+   * Browser login posts the admin token to `/admin/login`, then stores an
+   * HttpOnly same-site cookie. API callers may also use Bearer admin auth.
+   */
+  function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+    if (!validateAdminRequest(req)) {
+      res.status(401).json({ error: 'Unauthorized. Provide a valid admin Bearer token or sign in at /admin/login.' });
+      return;
+    }
+
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
   }
 
   function hashAgentPrincipal(principal: RequestAgentPrincipal): string {
@@ -246,9 +562,7 @@ export function createServer(config: ServerConfig) {
     }
     const principal: RequestAgentPrincipal = { type: 'static-bearer' };
     (req as any).agentPrincipal = principal;
-    (req as any).agentTokenHash = crypto.createHash('sha256')
-      .update((req.headers.authorization ?? '').slice(7).trim())
-      .digest('hex');
+    (req as any).agentTokenHash = hashTokenValue(extractBearerToken(req) ?? '');
     next();
   }
 
@@ -321,6 +635,10 @@ export function createServer(config: ServerConfig) {
           return char;
       }
     });
+  }
+
+  function jsonScriptString(value: string): string {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
   }
 
   function derivePassphraseKey(context: string): Buffer {
@@ -897,12 +1215,60 @@ export function createServer(config: ServerConfig) {
     });
   });
 
+  app.get('/admin/login', connectUiRateLimiter, (req: Request, res: Response) => {
+    const nextPath = queryStringValue(req.query.next) ?? '/connect';
+    const safeNext = escapeHtml(safeRelativePath(nextPath));
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cred Admin Login</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background:#0a0a0a; color:#e0e0e0; min-height:100vh; display:grid; place-items:center; margin:0; }
+  form { width:min(360px, calc(100vw - 32px)); display:grid; gap:14px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  label { display:grid; gap:6px; font-size:13px; color:#999; }
+  input { padding:10px 12px; border-radius:6px; border:1px solid #333; background:#141414; color:#fff; font-family:monospace; }
+  button { padding:10px 14px; border:0; border-radius:6px; background:#166534; color:#fff; font-weight:600; cursor:pointer; }
+</style>
+</head>
+<body>
+<form method="POST" action="/admin/login">
+  <h1>Cred Admin</h1>
+  <input type="hidden" name="next" value="${safeNext}">
+  <label>Admin token
+    <input name="admin_token" type="password" autocomplete="current-password" autofocus required>
+  </label>
+  <button type="submit">Sign in</button>
+</form>
+</body>
+</html>`);
+  });
+
+  app.post('/admin/login', connectUiRateLimiter, (req: Request, res: Response) => {
+    const token = typeof req.body?.admin_token === 'string' ? req.body.admin_token.trim() : '';
+    const nextPathRaw = typeof req.body?.next === 'string' ? req.body.next : '/connect';
+    const nextPath = safeRelativePath(nextPathRaw);
+
+    if (!token || !tokenMatchesHash(token, adminTokenHash)) {
+      res.status(401).send('Unauthorized');
+      return;
+    }
+
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    setAdminSessionCookie(res);
+    res.redirect(303, nextPath);
+  });
+
   /**
    * GET /providers — list configured providers and connection status
    */
-  app.get('/providers', providersRateLimiter, async (_req: Request, res: Response) => {
+  app.get('/providers', providersRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const entries = await vault.list({ userId: 'default' });
+      const userId = requestUserId(req);
+      const entries = await vault.list({ userId });
       const connected = new Set(entries.map((e) => e.provider));
 
       const providers = config.providers.map((p) => ({
@@ -923,9 +1289,12 @@ export function createServer(config: ServerConfig) {
    * Lists all configured providers with connection status, scope selection,
    * and connect/disconnect buttons.
    */
-  app.get('/connect', connectUiRateLimiter, async (_req: Request, res: Response) => {
+  app.get('/connect', connectUiRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const entries = await vault.list({ userId: 'default' });
+      const userId = requestUserId(req);
+      const safeUserId = escapeHtml(userId);
+      const encodedUserId = encodeURIComponent(userId);
+      const entries = await vault.list({ userId });
       const connected = new Map(entries.map((e) => [e.provider, e]));
 
       const COMMON_SCOPES: Record<string, { label: string; value: string }[]> = {
@@ -1007,7 +1376,7 @@ export function createServer(config: ServerConfig) {
               </span>
             </div>
             ${isConnected && currentScopes ? `<div class="current-scopes">Current scopes: <code>${currentScopes}</code></div>` : ''}
-            <form class="scope-form" action="/connect/${encodedSlug}" method="GET" data-provider="${safeSlug}">
+            <form class="scope-form" action="/connect/${encodedSlug}?user_id=${encodedUserId}" method="GET" data-provider="${safeSlug}" data-user-id="${safeUserId}">
               <div class="scope-grid">
                 ${safeScopeItems}
               </div>
@@ -1129,11 +1498,12 @@ export function createServer(config: ServerConfig) {
 <body>
 <div class="container">
   <h1>Cred</h1>
-  <p class="subtitle">Credential delegation for AI agents</p>
+  <p class="subtitle">Credential delegation for AI agents · <code>${safeUserId}</code></p>
   ${providerCards}
-  <p class="health"><a href="/health">/health</a> · <a href="/providers">/providers</a></p>
+  <p class="health"><a href="/health">/health</a> · <a href="/providers?user_id=${encodedUserId}">/providers</a></p>
 </div>
 <script>
+const currentUserId = ${jsonScriptString(userId)};
 function buildScopes(e, provider) {
   e.preventDefault();
   const form = e.target;
@@ -1144,15 +1514,12 @@ function buildScopes(e, provider) {
     alert('Select at least one scope');
     return;
   }
-  window.location.href = '/connect/' + provider + '?scopes=' + encodeURIComponent(checked.join(','));
+  window.location.href = '/connect/' + provider + '?user_id=' + encodeURIComponent(currentUserId) + '&scopes=' + encodeURIComponent(checked.join(','));
 }
 async function revoke(provider) {
   if (!confirm('Revoke ' + provider + ' credentials?')) return;
-  const token = prompt('Enter agent token to confirm revocation:');
-  if (!token) return;
-  const res = await fetch('/api/token/' + provider, {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + token }
+  const res = await fetch('/connect/' + encodeURIComponent(provider) + '?user_id=' + encodeURIComponent(currentUserId), {
+    method: 'DELETE'
   });
   if (res.ok) { alert('Revoked'); location.reload(); }
   else { alert('Failed: ' + res.status); }
@@ -1177,14 +1544,43 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   });
 
   /**
+   * DELETE /connect/:provider — revoke a provider connection from the admin UI.
+   */
+  app.delete('/connect/:provider', connectUiRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      if (!getProviderConfig(slug)) {
+        res.status(404).json({ error: `Provider '${slug}' not configured` });
+        return;
+      }
+
+      const userId = requestUserId(req);
+      await revokeStoredProvider(slug, userId);
+      res.status(204).send();
+    } catch (err) {
+      console.error('[/connect/:provider DELETE] Error:', err);
+      res.status(500).json({ error: 'Failed to revoke provider connection' });
+    }
+  });
+
+  /**
    * GET /connect/:provider — start OAuth flow
    *
    * Opens in a browser. Redirects to the provider's authorization page.
    * Scopes can be specified via ?scopes=calendar.readonly,gmail.readonly
    */
-  app.get('/connect/:provider', connectRateLimiter, async (req: Request, res: Response) => {
+  app.get('/connect/:provider', connectRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const slug = req.params.provider;
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      const userId = requestUserId(req);
       const providerConfig = getProviderConfig(slug);
       if (!providerConfig) {
         res.status(404).json({ error: `Provider '${slug}' not configured. Available: ${config.providers.map((p) => p.slug).join(', ')}` });
@@ -1194,9 +1590,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const client = makeOAuthClient(providerConfig);
 
       // Parse scopes from query string, fall back to provider's default scopes from config
-      const scopesParam = req.query.scopes as string | undefined;
-      const scopes = scopesParam
-        ? scopesParam.split(',').map((s) => s.trim())
+      const scopeValues = Array.isArray(req.query.scopes)
+        ? req.query.scopes.filter((scope): scope is string => typeof scope === 'string')
+        : (typeof req.query.scopes === 'string' ? [req.query.scopes] : []);
+      const scopes = scopeValues.length > 0
+        ? scopeValues.flatMap((value) => value.split(',').map((scope) => scope.trim()).filter(Boolean))
         : providerConfig.defaultScopes;
 
       const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes });
@@ -1205,6 +1603,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       cleanPendingOAuth();
       pendingOAuth.set(state, {
         provider: slug,
+        userId,
+        scopes,
         state,
         codeVerifier,
         createdAt: Date.now(),
@@ -1225,7 +1625,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   app.get('/connect/:provider/callback', callbackRateLimiter, async (req: Request, res: Response) => {
     try {
-      const slug = req.params.provider;
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
       const { code, state, error: oauthError } = req.query as Record<string, string>;
 
       if (oauthError) {
@@ -1264,11 +1668,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ? new Date(Date.now() + tokens.expires_in * 1000)
         : undefined;
 
-      const scopes = tokens.scope ? tokens.scope.split(/[\s,]+/) : [];
+      const scopes = tokens.scope
+        ? tokens.scope.split(/[\s,]+/).map((scope) => scope.trim()).filter(Boolean)
+        : pending.scopes;
 
       await vault.store({
         provider: slug,
-        userId: 'default',
+        userId: pending.userId,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt,
@@ -1284,7 +1690,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           <h2>✅ ${safeSlug} connected</h2>
           <p>Tokens stored in encrypted vault.</p>
           <p style="color:#888;">You can close this window.</p>
-          <p><a href="/providers" style="color:#4ade80;">← Back to providers</a></p>
+          <p><a href="/providers?user_id=${encodeURIComponent(pending.userId)}" style="color:#4ade80;">← Back to providers</a></p>
         </body>
         </html>
       `);
@@ -1331,7 +1737,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     next();
   };
 
-  async function getVaultEntry(service: string): Promise<VaultEntryResult> {
+  async function getVaultEntry(service: string, userId: string): Promise<VaultEntryResult> {
     const providerConfig = getProviderConfig(service);
     if (!providerConfig) {
       return {
@@ -1343,7 +1749,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
     const entry = await vault.get({
       provider: service,
-      userId: 'default',
+      userId,
       adapter: {
         refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
           const client = new OAuthClient({
@@ -1368,7 +1774,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       return {
         status: 404,
         body: {
-          error: `No credentials stored for '${service}'. Connect first: GET /connect/${service}`,
+          error: `No credentials stored for '${service}/${userId}'. Connect first: GET /connect/${service}?user_id=${encodeURIComponent(userId)}`,
         },
       } as const;
     }
@@ -1394,13 +1800,100 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     | { entry: Awaited<ReturnType<typeof vault.get>> extends infer T ? Exclude<T, null> : never }
     | { status: number; body: Record<string, unknown> };
 
+  async function revokeStoredProvider(slug: string, userId: string): Promise<void> {
+    await vault.delete({ provider: slug, userId });
+
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: 'server-agent' },
+      action: 'revoke',
+      resource: { type: 'connection', id: `${slug}/${userId}` },
+      outcome: 'success',
+      correlationId: crypto.randomUUID(),
+    });
+  }
+
+  function storeBrokeredDelegation(input: {
+    delegationId: string;
+    accessToken: string;
+    service: string;
+    userId: string;
+    scopes: string[];
+    expiresIn: number;
+  }): void {
+    const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
+    brokeredDelegations.set(input.delegationId, {
+      accessToken: input.accessToken,
+      service: input.service,
+      userId: input.userId,
+      scopes: input.scopes,
+      expiresAt,
+      createdAt: Date.now(),
+    });
+    const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
+    if (timeout.unref) timeout.unref();
+  }
+
+  function getBrokeredDelegation(id: string): BrokeredDelegation | null {
+    const delegation = brokeredDelegations.get(id);
+    if (!delegation) return null;
+    if (Date.now() >= delegation.expiresAt) {
+      brokeredDelegations.delete(id);
+      return null;
+    }
+    return delegation;
+  }
+
+  function buildDelegationResponse(input: {
+    tokenFormat: 'raw' | 'handle';
+    accessToken: string;
+    tokenType?: string;
+    expiresIn: number;
+    service: string;
+    userId: string;
+    scopes: string[];
+    delegationId: string;
+    receipt?: string;
+    chainDepth?: number;
+    parentDelegationId?: string;
+    guard?: Record<string, unknown>;
+  }): Record<string, unknown> {
+    if (input.tokenFormat === 'handle') {
+      storeBrokeredDelegation({
+        delegationId: input.delegationId,
+        accessToken: input.accessToken,
+        service: input.service,
+        userId: input.userId,
+        scopes: input.scopes,
+        expiresIn: input.expiresIn,
+      });
+    }
+
+    return {
+      ...(input.tokenFormat === 'raw'
+        ? { access_token: input.accessToken, token_type: input.tokenType ?? 'Bearer' }
+        : { token_type: 'Delegation' }),
+      expires_in: input.expiresIn,
+      service: input.service,
+      user_id: input.userId,
+      scopes: input.scopes,
+      delegation_id: input.delegationId,
+      ...(input.receipt ? { receipt: input.receipt } : {}),
+      ...(input.chainDepth !== undefined ? { chain_depth: input.chainDepth } : {}),
+      ...(input.parentDelegationId ? { parent_delegation_id: input.parentDelegationId } : {}),
+      ...(input.guard ? { guard: input.guard } : {}),
+    };
+  }
+
   function resolveGrantedScopes(storedScopes: string[], requestedScopes?: string[]) {
     if (!requestedScopes || requestedScopes.length === 0) {
       return { grantedScopes: storedScopes, widenedScopes: [] as string[] };
     }
 
-    const storedScopeSet = new Set(storedScopes);
-    const widenedScopes = requestedScopes.filter((scope) => !storedScopeSet.has(scope));
+    const widenedScopes = requestedScopes.filter(
+      (requestedScope) => !storedScopes.some((storedScope) => scopeEquivalent(storedScope, requestedScope)),
+    );
     if (widenedScopes.length > 0) {
       return {
         grantedScopes: [] as string[],
@@ -1409,9 +1902,74 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
 
     return {
-      grantedScopes: storedScopes.filter((scope) => requestedScopes.includes(scope)),
+      grantedScopes: storedScopes.filter((storedScope) =>
+        requestedScopes.some((requestedScope) => scopeEquivalent(storedScope, requestedScope))
+      ),
       widenedScopes: [] as string[],
     };
+  }
+
+  async function evaluateBrokerUseGuard(
+    req: Request,
+    res: Response,
+    input: {
+      delegationId: string;
+      url: string;
+      method: string;
+      delegation: BrokeredDelegation;
+    },
+  ): Promise<{ allowed: true; effectiveScopes: string[]; decision?: GuardDecision } | { allowed: false }> {
+    if (!config.guard) {
+      return { allowed: true, effectiveScopes: input.delegation.scopes };
+    }
+
+    try {
+      const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
+      const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+      const ctx: GuardContext = {
+        provider: input.delegation.service,
+        agentTokenHash: (req as any).agentTokenHash ?? hashAgentPrincipal(principal ?? { type: 'unknown' }),
+        requestedScopes: input.delegation.scopes,
+        consentedScopes: input.delegation.scopes,
+        timestamp: new Date().toISOString(),
+        targetUrl: input.url,
+        targetMethod: input.method,
+        delegationId: input.delegationId,
+        metadata: {
+          brokered: true,
+          userId: input.delegation.userId,
+          ...(principal ? { authPrincipal: principal } : {}),
+        },
+        identitySource: webBotAuthIdentity ? 'web-bot-auth' : 'agent-token',
+        webBotAuthKeyId: webBotAuthIdentity?.keyId,
+        signatureAgent: webBotAuthIdentity?.signatureAgent,
+      };
+
+      const decision = await config.guard.evaluate(ctx);
+      (req as any).guardDecision = decision;
+      (req as any).guardContext = ctx;
+
+      if (!decision.allowed) {
+        res.status(403).json({
+          error: 'Request denied by guard policy',
+          policy: decision.deniedBy?.policy,
+          reason: decision.deniedBy?.reason,
+        });
+        return { allowed: false };
+      }
+
+      return {
+        allowed: true,
+        effectiveScopes: decision.effectiveScopes,
+        decision,
+      };
+    } catch (err) {
+      res.status(500).json({
+        error: 'Guard evaluation failed',
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return { allowed: false };
+    }
   }
 
   async function getPermissionIfSupported(principalId: string, service: string) {
@@ -1455,8 +2013,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
   app.get('/api/token/:provider', ...tokenRouteHandlers, async (req: Request, res: Response) => {
     try {
-      const slug = req.params.provider;
-      const vaultEntry = await getVaultEntry(slug);
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      const userId = requestUserId(req);
+      const vaultEntry = await getVaultEntry(slug, userId);
       if ('status' in vaultEntry) {
         res.status(vaultEntry.status).json(vaultEntry.body);
         return;
@@ -1482,7 +2045,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         timestamp: new Date(),
         actor: { type: 'agent', id: 'server-agent' },
         action: 'access',
-        resource: { type: 'connection', id: `${slug}/default` },
+        resource: { type: 'connection', id: `${slug}/${userId}` },
         outcome: 'success',
         scopesRequested: effectiveRequestedScopes,
         scopesGranted: grantedScopes,
@@ -1511,13 +2074,155 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
+  app.get('/api/v1/connections', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = requestUserId(req);
+      const entries = await vault.list({ userId });
+      res.json({
+        connections: entries.map((entry) => ({
+          slug: entry.provider,
+          scopesGranted: entry.scopes ?? [],
+          consentedAt: entry.createdAt?.toISOString() ?? null,
+          appClientId: null,
+        })),
+      });
+    } catch (err) {
+      console.error('[/api/v1/connections] Error:', err);
+      res.status(500).json({ error: 'Failed to list connections' });
+    }
+  });
+
+  app.post('/api/v1/use', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const {
+        delegation_id: delegationId,
+        url,
+        method,
+        body,
+        extra_headers: extraHeaders,
+      } = req.body as {
+        delegation_id?: string;
+        url?: string;
+        method?: string;
+        body?: unknown;
+        extra_headers?: Record<string, string>;
+      };
+
+      if (!delegationId || typeof delegationId !== 'string') {
+        res.status(400).json({ error: 'delegation_id is required' });
+        return;
+      }
+      if (!url || typeof url !== 'string') {
+        res.status(400).json({ error: 'url is required' });
+        return;
+      }
+      const normalizedMethod = typeof method === 'string' ? method.toUpperCase() : '';
+      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(normalizedMethod)) {
+        res.status(400).json({ error: 'method must be one of GET, POST, PUT, PATCH, DELETE' });
+        return;
+      }
+      if (normalizedMethod === 'GET' && body !== undefined) {
+        res.status(400).json({ error: 'GET requests cannot have a body' });
+        return;
+      }
+
+      const delegation = getBrokeredDelegation(delegationId);
+      if (!delegation) {
+        res.status(404).json({ error: 'Delegation handle not found or expired' });
+        return;
+      }
+      const guardResult = await evaluateBrokerUseGuard(req, res, {
+        delegationId,
+        url,
+        method: normalizedMethod,
+        delegation,
+      });
+      if (!guardResult.allowed) return;
+
+      if (!isAllowedBrokerUrl(delegation.service, url, guardResult.effectiveScopes)) {
+        res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
+        return;
+      }
+
+      const hasBody = body !== undefined;
+      const sanitizedExtraHeaders = extraHeaders && typeof extraHeaders === 'object'
+        ? Object.fromEntries(
+            Object.entries(extraHeaders).filter(([key, value]) => {
+              return isForwardableBrokerHeader(key, value);
+            }),
+          )
+        : {};
+
+      const upstream = await fetch(url, {
+        method: normalizedMethod,
+        redirect: 'manual',
+        headers: {
+          Authorization: `Bearer ${delegation.accessToken}`,
+          Accept: 'application/json',
+          'User-Agent': 'Cred-Server/1.0',
+          ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+          ...sanitizedExtraHeaders,
+        },
+        body: hasBody ? JSON.stringify(body) : undefined,
+      });
+
+      const contentType = upstream.headers.get('content-type') ?? '';
+      const raw = await upstream.text();
+      const truncated = raw.length > MAX_BROKER_RESPONSE_BYTES;
+      const responseBody = truncated ? raw.slice(0, MAX_BROKER_RESPONSE_BYTES) : raw;
+      let parsedBody: unknown = responseBody;
+      try {
+        parsedBody = JSON.parse(responseBody);
+      } catch {
+        // Leave non-JSON responses as text.
+      }
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: 'server-agent' },
+        action: 'access',
+        resource: { type: 'connection', id: `${delegation.service}/${delegation.userId}` },
+        outcome: upstream.ok ? 'success' : 'error',
+        scopesGranted: guardResult.effectiveScopes,
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          brokered: true,
+          method: normalizedMethod,
+          status: upstream.status,
+          ...(guardResult.decision ? {
+            guard: {
+              allowed: guardResult.decision.allowed,
+              evaluationMs: guardResult.decision.evaluationMs,
+              policies: guardResult.decision.results.map((result) => ({
+                name: result.policy,
+                decision: result.decision,
+              })),
+            },
+          } : {}),
+        },
+      });
+
+      res.json({
+        status: upstream.status,
+        ok: upstream.ok,
+        contentType: contentType.split(';')[0].trim(),
+        body: parsedBody,
+        ...(truncated ? { truncated: true, truncatedAt: MAX_BROKER_RESPONSE_BYTES } : {}),
+      });
+    } catch (err) {
+      console.error('[/api/v1/use] Error:', err);
+      res.status(502).json({ error: 'Brokered upstream request failed' });
+    }
+  });
+
   app.post('/api/v1/delegate', ...delegateRouteHandlers, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
 
     try {
       const {
         service,
-        user_id: userId = 'default',
+        user_id: requestedUserId,
         appClientId = 'local',
         scopes,
         agent_did: agentDid,
@@ -1540,27 +2245,68 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      if (userId !== 'default') {
-        res.status(404).json({
-          error: `No credentials stored for '${service}/${userId}'. This OSS server currently serves only the default logical user.`,
-        });
-        return;
-      }
-
+      const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
       const requestedScopes = normalizeRequestedScopes(scopes);
-      const vaultEntry = await getVaultEntry(service);
+      const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
+        if (vaultEntry.status === 404 && getProviderConfig(service)) {
+          res.status(403).json({
+            error: 'consent_required',
+            message: `No credentials stored for '${service}/${userId}'. Connect the service before requesting delegation.`,
+            consent_url: buildConsentUrl({
+              service,
+              userId,
+              appClientId,
+              scopes: requestedScopes,
+            }),
+          });
+          return;
+        }
         res.status(vaultEntry.status).json(vaultEntry.body);
         return;
       }
       const { entry } = vaultEntry;
-      const guardDecision = (req as any).guardDecision;
+      const guardDecision = (req as any).guardDecision as GuardDecision | undefined;
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
-      const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
+      const effectiveRequestedScopes: string[] | undefined = guardDecision?.effectiveScopes ?? requestedScopes;
+      const tokenFormat = tokenFormatFromBody(req);
 
       let principalId: string | null = null;
       let principalFingerprint: string | undefined;
       let allowedByPrincipal: string[] | undefined;
+      let didAgentRecord: AgentRecord | null = null;
+      if (agentDid && vault.getAgentByDid) {
+        didAgentRecord = await vault.getAgentByDid(agentDid);
+        if (didAgentRecord?.status === 'revoked') {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${service}/${userId}` },
+            outcome: 'denied',
+            scopesRequested: effectiveRequestedScopes,
+            correlationId,
+            errorMessage: 'agent_revoked',
+          });
+          res.status(403).json({ error: 'agent_revoked', message: 'Agent has been revoked' });
+          return;
+        }
+        if (didAgentRecord?.status === 'suspended') {
+          res.status(403).json({ error: 'agent_suspended', message: 'Agent is suspended' });
+          return;
+        }
+        if (didAgentRecord?.scopeCeiling.length && effectiveRequestedScopes?.length) {
+          const unauthorizedScopes = effectiveRequestedScopes.filter((scope) => !didAgentRecord!.scopeCeiling.includes(scope));
+          if (unauthorizedScopes.length > 0) {
+            res.status(403).json({
+              error: 'scope_ceiling_exceeded',
+              message: `Agent scope ceiling exceeded: ${unauthorizedScopes.join(', ')}`,
+            });
+            return;
+          }
+        }
+      }
       if (tofuFingerprint || tofuPayload || tofuSignature) {
         if (!tofuFingerprint || !tofuPayload || !tofuSignature) {
           res.status(400).json({
@@ -1603,7 +2349,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(
-        principalId && allowedByPrincipal ? entry.scopes?.filter((scope) => allowedByPrincipal!.includes(scope)) ?? [] : entry.scopes ?? [],
+        (entry.scopes ?? [])
+          .filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope))
+          .filter((scope) => !didAgentRecord?.scopeCeiling.length || didAgentRecord.scopeCeiling.includes(scope)),
         effectiveRequestedScopes,
       );
 
@@ -1616,10 +2364,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
-      const DEFAULT_TTL_SECONDS = 900;
       const expiresIn = entry.expiresAt
         ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_TTL_SECONDS;
+        : DEFAULT_DELEGATION_TTL_SECONDS;
 
       const receipt = agentDid
         ? createReceipt({
@@ -1660,22 +2407,23 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         },
       });
 
-      res.json({
-        access_token: entry.accessToken,
-        token_type: 'Bearer',
-        expires_in: expiresIn,
+      res.json(buildDelegationResponse({
+        tokenFormat,
+        accessToken: entry.accessToken,
+        expiresIn,
         service,
+        userId,
         scopes: grantedScopes,
-        delegation_id: delegationId,
-        ...(receipt ? { receipt } : {}),
-      });
+        delegationId,
+        receipt,
+      }));
     } catch (err) {
       console.error('[/api/v1/delegate] Error:', err);
       res.status(500).json({ error: 'Delegation failed' });
     }
   });
 
-  app.post('/api/v1/tofu/register', tofuRegisterRateLimiter, async (req: Request, res: Response) => {
+  app.post('/api/v1/tofu/register', tofuRegisterRateLimiter, requireAgentAuth, async (req: Request, res: Response) => {
     try {
       const {
         public_key: publicKeyBase64,
@@ -1692,11 +2440,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      let publicKey: Uint8Array;
-      try {
-        publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
-      } catch {
-        res.status(400).json({ error: 'public_key must be base64-encoded' });
+      const publicKey = decodeWebBotAuthPublicKey(publicKeyBase64);
+      if (!publicKey) {
+        res.status(400).json({ error: 'public_key must be a base64-encoded 32-byte Ed25519 public key' });
         return;
       }
 
@@ -1766,11 +2512,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      let publicKey: Uint8Array;
-      try {
-        publicKey = new Uint8Array(Buffer.from(publicKeyBase64, 'base64'));
-      } catch {
-        res.status(400).json({ error: 'public_key must be base64-encoded' });
+      const publicKey = decodeWebBotAuthPublicKey(publicKeyBase64);
+      if (!publicKey) {
+        res.status(400).json({ error: 'public_key must be a base64-encoded 32-byte Ed25519 public key' });
         return;
       }
 
@@ -1878,26 +2622,62 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
+  app.post('/api/v1/agents/:agentId/revoke-all', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const agentIdParam = req.params.agentId;
+      if (typeof agentIdParam !== 'string') {
+        res.status(400).json({ error: 'agentId must be a string' });
+        return;
+      }
+      const agentId = agentIdParam;
+      const agent = await vault.getAgent(agentId);
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+
+      await vault.revokeAgent(agentId);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: agent.id, fingerprint: agent.fingerprint },
+        action: 'revoke',
+        resource: { type: 'agent', id: agent.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          agentDid: agent.did,
+        },
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'Agent storage not supported by this vault backend' });
+        return;
+      }
+      console.error('[/api/v1/agents/:agentId/revoke-all] Error:', err);
+      res.status(500).json({ error: 'Failed to revoke agent' });
+    }
+  });
+
   /**
    * GET /api/v1/audit — query audit events when the vault backend supports audit.
    *
-   * Requires Bearer auth. This OSS server stores a single logical user (`default`),
-   * so user_id is accepted for SDK parity and filtered against that user.
+   * Requires Bearer auth. Events are filtered by logical `user_id` and optional
+   * service when the backend supports audit queries.
    */
   app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
-      const userId = typeof req.query.user_id === 'string' ? req.query.user_id : 'default';
+      const userId = requestUserId(req);
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;
       const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
       const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
 
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
         res.status(400).json({ error: 'Invalid limit: must be between 1 and 200' });
-        return;
-      }
-
-      if (userId !== 'default') {
-        res.json({ entries: [] });
         return;
       }
 
@@ -1916,10 +2696,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const entries = events
         .filter((event) => {
           if (event.resource.type === 'agent') {
-            return !service;
+            return userId === 'default' && !service;
           }
           const [eventService, eventUserId] = event.resource.id.split('/');
-          if (eventUserId !== 'default') return false;
+          if (eventUserId !== userId) return false;
           if (service && eventService !== service) return false;
           return true;
         })
@@ -1929,7 +2709,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
               id: event.id,
               action: event.action,
               service: 'agent',
-              userId: 'default',
+              userId,
               timestamp: event.timestamp.toISOString(),
               metadata: {
                 outcome: event.outcome,
@@ -1991,7 +2771,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         parent_receipt: parentReceipt,
         agent_did: agentDid,
         service,
-        user_id: userId = 'default',
+        user_id: requestedUserId,
         appClientId = 'local',
         scopes: requestedScopes,
       } = req.body as {
@@ -2002,6 +2782,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         appClientId?: string;
         scopes?: string[];
       };
+      const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
+      const tokenFormat = tokenFormatFromBody(req);
 
       // ── Input validation ──────────────────────────────────────────────────
 
@@ -2146,7 +2928,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const providerConfig = getProviderConfig(service);
       const getOpts: Parameters<typeof vault.get>[0] = {
         provider: service,
-        userId: 'default',
+        userId,
       };
       if (providerConfig) {
         const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
@@ -2223,22 +3005,22 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Response ─────────────────────────────────────────────────────────
 
-      const DEFAULT_TTL_SECONDS = 900;
       const expiresIn = entry.expiresAt
-        ? Math.max(0, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_TTL_SECONDS;
+        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+        : DEFAULT_DELEGATION_TTL_SECONDS;
 
-      res.json({
-        access_token: entry.accessToken,
-        token_type: 'Bearer',
-        expires_in: expiresIn,
+      res.json(buildDelegationResponse({
+        tokenFormat,
+        accessToken: entry.accessToken,
+        expiresIn,
         service,
+        userId,
         scopes: validation.grantedScopes,
-        delegation_id: delegationId,
+        delegationId,
         receipt,
-        chain_depth: validation.chainDepth,
-        parent_delegation_id: validation.parentDelegationId,
-      });
+        chainDepth: validation.chainDepth,
+        parentDelegationId: validation.parentDelegationId,
+      }));
     } catch (err) {
       console.error('[POST /api/v1/subdelegate] Error:', err);
       res.status(500).json({ error: 'Sub-delegation failed' });
@@ -2253,23 +3035,33 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   app.delete('/api/token/:provider', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
-      const slug = req.params.provider;
-      await vault.delete({ provider: slug, userId: 'default' });
-
-      writeAuditEventIfSupported({
-        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-        timestamp: new Date(),
-        actor: { type: 'agent', id: 'server-agent' },
-        action: 'revoke',
-        resource: { type: 'connection', id: `${slug}/default` },
-        outcome: 'success',
-        correlationId: crypto.randomUUID(),
-      });
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      await revokeStoredProvider(slug, requestUserId(req));
 
       res.status(204).send();
     } catch (err) {
       console.error('[DELETE /api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to revoke token' });
+    }
+  });
+
+  app.delete('/api/v1/connections/:provider', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = requestUserId(req);
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      await revokeStoredProvider(slug, userId);
+      res.status(204).send();
+    } catch (err) {
+      console.error('[DELETE /api/v1/connections/:provider] Error:', { provider: req.params.provider, err });
+      res.status(500).json({ error: 'Failed to revoke connection' });
     }
   });
 

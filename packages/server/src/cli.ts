@@ -69,12 +69,18 @@ async function main() {
     console.log('');
     console.log('Endpoints:');
     console.log(`  GET  /health                       — liveness check`);
-    console.log(`  GET  /providers                    — list providers + status`);
-    console.log(`  GET  /connect/:provider            — start OAuth flow (browser)`);
+    console.log(`  GET  /admin/login                  — admin login form`);
+    console.log(`  GET  /providers                    — list providers + status (admin auth)`);
+    console.log(`  GET  /connect                      — provider admin UI (admin auth)`);
+    console.log(`  GET  /connect/:provider            — start OAuth flow (admin auth)`);
     console.log(`  GET  /connect/:provider/callback   — OAuth callback`);
+    console.log(`  GET  /api/v1/connections           — list connections (Bearer auth)`);
     console.log(`  POST /api/v1/tofu/register         — register TOFU identity (Bearer auth)`);
+    console.log(`  POST /api/v1/agents/:agentId/revoke-all — revoke agent record (Bearer auth)`);
     console.log(`  GET  /api/token/:provider          — compatibility token route (Bearer auth)`);
-    console.log(`  POST /api/v1/delegate             — delegate token (Bearer auth)`);
+    console.log(`  POST /api/v1/delegate              — delegate token or handle (Bearer auth)`);
+    console.log(`  POST /api/v1/use                   — broker upstream API call (Bearer auth)`);
+    console.log(`  DELETE /api/v1/connections/:provider — revoke connection (Bearer auth)`);
     console.log(`  DELETE /api/token/:provider        — revoke token (Bearer auth)`);
     console.log('');
     if (config.host === '127.0.0.1' || config.host === 'localhost') {

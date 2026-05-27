@@ -2,7 +2,7 @@
 
 Self-hosted credential delegation server for AI agents.
 
-Stores OAuth tokens in an encrypted vault and serves delegated access tokens to authenticated agents. Run on a separate host from your AI agents for true credential isolation.
+Stores OAuth tokens in an encrypted vault and can either serve delegated access tokens to authenticated agents or broker upstream API calls behind opaque delegation handles.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ npm install @credninja/server
 
 # Set up configuration
 cp node_modules/@credninja/server/.env.example .env
-# Edit .env — set VAULT_PASSPHRASE, AGENT_TOKEN, and at least one provider
+# Edit .env — set VAULT_PASSPHRASE, ADMIN_TOKEN, AGENT_TOKEN, and at least one provider
 
 # Run
 npx cred-server
@@ -38,10 +38,10 @@ npm run dev
 └─────────────────┘         └──────────────────────┘         └─────────────┘
 ```
 
-1. **Admin connects providers** — Visit `/connect/google` in a browser, complete OAuth
+1. **Admin connects providers** — Sign in at `/admin/login`, then complete OAuth
 2. **Tokens stored encrypted** — AES-256-GCM, PBKDF2-SHA256 key derivation
 3. **Agent requests delegation** — `POST /api/v1/delegate` with Bearer auth
-4. **Server returns access token** — Auto-refreshes if expired. Refresh token never leaves the server.
+4. **Server returns a handle or access token** — Brokered handles keep provider tokens on the server; legacy token routes remain available.
 
 ## Endpoints
 
@@ -49,13 +49,21 @@ npm run dev
 |--------|------|------|-------------|
 | GET | `/health` | None | Liveness check |
 | GET | `/.well-known/http-message-signatures-directory` | None | Web Bot Auth key directory |
-| GET | `/providers` | None | List configured providers + connection status |
-| GET | `/connect/:provider` | None | Start OAuth flow (browser) |
+| GET | `/admin/login` | None | Admin login form |
+| POST | `/admin/login` | None | Create admin session cookie |
+| GET | `/providers` | Admin | List configured providers + connection status |
+| GET | `/connect` | Admin | Browser UI for managing provider connections |
+| GET | `/connect/:provider` | Admin | Start OAuth flow (browser) |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
+| POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle |
+| GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
+| DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
+| POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |
 | POST | `/api/v1/web-bot-auth/keys/:agentId/rotate` | Bearer | Rotate a registered Web Bot Auth key |
+| POST | `/api/v1/agents/:agentId/revoke-all` | Bearer | Revoke a stored agent record |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
 
@@ -66,11 +74,12 @@ All configuration via environment variables (or `.env` file):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `VAULT_PASSPHRASE` | Yes | Encryption passphrase for the token vault |
+| `ADMIN_TOKEN` | Yes | Admin token for provider-management browser routes (must start with `cred_admin_`) |
 | `AGENT_TOKEN` | Yes | Bearer token for agent API access (must start with `cred_at_`) |
 | `PORT` | No | Server port (default: 3456) |
 | `HOST` | No | Bind address (default: 127.0.0.1) |
-| `VAULT_STORAGE` | No | `file` (default) or `sqlite` |
-| `VAULT_PATH` | No | Path to vault file (default: `./data/vault.json`) |
+| `VAULT_STORAGE` | No | `sqlite` (default, audit-capable) or `file` |
+| `VAULT_PATH` | No | Path to vault file (default: `./data/vault.sqlite`) |
 | `REDIRECT_BASE_URI` | No | OAuth redirect base (default: `http://localhost:3456`) |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
@@ -84,7 +93,7 @@ All configuration via environment variables (or `.env` file):
 | `SLACK_CLIENT_SECRET` | No | Slack OAuth client secret |
 | ... | No | Same pattern for NOTION, SALESFORCE, LINEAR, HUBSPOT |
 
-`AGENT_TOKEN` is required when you use `loadConfig()` from environment variables. For embedded/programmatic usage, you can instead provide a custom `agentRequestVerifier` function in `createServer(config)` and omit the static token entirely.
+`ADMIN_TOKEN` and `AGENT_TOKEN` are required when you use `loadConfig()` from environment variables. For embedded/programmatic agent auth, you can instead provide a custom `agentRequestVerifier` function in `createServer(config)` and omit the static agent token entirely. Admin routes still require `adminToken`.
 
 ## Docker Deployment (Production)
 
@@ -160,13 +169,17 @@ const cred = new Cred({
   baseUrl: 'https://cred.yourdomain.com',
 });
 
-const google = await cred.delegate({
+const google = await cred.delegateHandle({
   service: 'google',
   userId: 'default',
   appClientId: 'local',
 });
 
-// Use google.accessToken with any Google API
+const events = await cred.use({
+  delegationId: google.delegationId,
+  url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+  method: 'GET',
+});
 ```
 
 Or with curl:
@@ -175,14 +188,21 @@ Or with curl:
 curl https://cred.yourdomain.com/api/v1/delegate \
   -H "Authorization: Bearer $CRED_AGENT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"service":"google","user_id":"default","appClientId":"local"}'
+  -d '{"service":"google","user_id":"default","appClientId":"local","token_format":"handle"}'
+
+curl https://cred.yourdomain.com/api/v1/use \
+  -H "Authorization: Bearer $CRED_AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"delegation_id":"del_...","url":"https://www.googleapis.com/calendar/v3/calendars/primary/events","method":"GET"}'
 ```
 
 ## Security
 
-- **Refresh tokens never leave the server.** Delegation endpoints return only the access token.
+- **Refresh tokens never leave the server.** Brokered delegation handles also keep provider access tokens on the server.
 - **Vault encrypted at rest** with AES-256-GCM (PBKDF2-SHA256, 100K iterations).
 - **Agent tokens validated** using constant-time comparison (timing-attack resistant).
+- **Provider-management routes require admin auth.** Browser login posts `ADMIN_TOKEN`, then sets an HttpOnly same-site session cookie.
+- **Brokered upstream calls are bounded.** `/api/v1/use` enforces service URL allowlists, delegated Google scope checks, configured Guard policies, and strips caller-supplied auth, cookie, proxy, forwarding, signature, and hop-by-hop headers before forwarding.
 - **Optional ingress Web Bot Auth verification** validates `Signature`, `Signature-Input`, and `Signature-Agent` on incoming agent requests and rejects replayed nonces within the signature validity window.
 - **Shared replay defense is available** with `WEB_BOT_AUTH_NONCE_STORE=sqlite`, allowing multiple Cred instances to reject the same nonce when they share the same nonce database.
 - **Remote `Signature-Agent` fetches are origin-gated.** Cred only resolves remote directories from `WEB_BOT_AUTH_ALLOWED_ORIGINS`, requires the canonical well-known directory path, and rejects redirects during fetch.
@@ -233,6 +253,7 @@ const { app, vault } = createServer({
   vaultPath: './data/vault.json',
   tofuStorage: 'file',
   tofuPath: './data/tofu.json',
+  adminToken: process.env.CRED_ADMIN_TOKEN!,
   redirectBaseUri: 'http://localhost:3456',
   providers: [],
   agentRequestVerifier: async (req) => {

@@ -43,6 +43,7 @@ export interface ServerConfig {
   tofuPath: string;
 
   // Agent auth
+  adminToken: string;
   agentToken?: string;
   agentRequestVerifier?: AgentRequestVerifier;
 
@@ -82,8 +83,8 @@ export function loadConfig(): ServerConfig {
     throw new Error('VAULT_PASSPHRASE is required. Generate one: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
   }
 
-  const vaultStorage = (process.env.VAULT_STORAGE ?? 'file') as 'sqlite' | 'file';
-  const vaultPath = process.env.VAULT_PATH ?? './data/vault.json';
+  const vaultStorage = (process.env.VAULT_STORAGE ?? 'sqlite') as 'sqlite' | 'file';
+  const vaultPath = process.env.VAULT_PATH ?? (vaultStorage === 'sqlite' ? './data/vault.sqlite' : './data/vault.json');
   const tofuStorage = (process.env.TOFU_STORAGE ?? vaultStorage) as 'sqlite' | 'file';
   const tofuPath = process.env.TOFU_PATH ?? (tofuStorage === 'sqlite' ? './data/tofu.sqlite' : './data/tofu.json');
 
@@ -95,6 +96,16 @@ export function loadConfig(): ServerConfig {
   }
   if (!agentToken.startsWith('cred_at_')) {
     throw new Error('AGENT_TOKEN must start with cred_at_');
+  }
+
+  const adminToken = process.env.ADMIN_TOKEN;
+  if (!adminToken) {
+    throw new Error(
+      'ADMIN_TOKEN is required. Generate one: node -e "console.log(\'cred_admin_\' + require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
+  if (!adminToken.startsWith('cred_admin_')) {
+    throw new Error('ADMIN_TOKEN must start with cred_admin_');
   }
 
   const redirectBaseUri = process.env.REDIRECT_BASE_URI ?? `http://localhost:${port}`;
@@ -135,6 +146,7 @@ export function loadConfig(): ServerConfig {
     vaultPath,
     tofuStorage,
     tofuPath,
+    adminToken,
     agentToken,
     providers,
     redirectBaseUri,

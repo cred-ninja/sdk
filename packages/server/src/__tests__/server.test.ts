@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -6,11 +6,12 @@ import crypto from 'crypto';
 import { verify as verifySignature, createPublicKey, createPrivateKey, sign, generateKeyPairSync } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
-import { CredGuard, rateLimitPolicy, scopeFilterPolicy, receiptClaimsPolicy } from '@credninja/guard';
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy, receiptClaimsPolicy, urlAllowlistPolicy } from '@credninja/guard';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
+const TEST_ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.json');
 const TEST_SQLITE_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-vault.sqlite');
 const TEST_TOFU_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-tofu.json');
@@ -27,6 +28,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     vaultPath: TEST_VAULT_PATH,
     tofuStorage: 'file',
     tofuPath: TEST_TOFU_PATH,
+    adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
     providers: [
       {
@@ -40,6 +42,12 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     webBotAuthNonceStore: 'memory',
     ...overrides,
   };
+}
+
+function adminGet(app: any, route: string) {
+  return request(app)
+    .get(route)
+    .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
 }
 
 function verifyDirectoryResponseSignature(
@@ -361,14 +369,64 @@ describe('@credninja/server', () => {
       expect(auditRes.status).toBe(200);
       expect(auditRes.body.entries.some((entry: any) => entry.action === 'create' && entry.service === 'agent')).toBe(true);
     });
+
+    it('requires agent auth for Web Bot Auth key management', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const listRes = await request(app).get('/api/v1/web-bot-auth/keys');
+      expect(listRes.status).toBe(401);
+
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .send({ public_key: Buffer.alloc(32).toString('base64') });
+      expect(createRes.status).toBe(401);
+    });
+
+    it('returns 400 for malformed Web Bot Auth public keys', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ public_key: Buffer.alloc(31).toString('base64') });
+
+      expect(createRes.status).toBe(400);
+      expect(createRes.body.error).toMatch(/32-byte Ed25519 public key/);
+    });
+
+    it('returns 404 before validating rotation payloads for unknown Web Bot Auth keys', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const rotateRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys/missing-agent/rotate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ public_key: 'not-base64' });
+
+      expect(rotateRes.status).toBe(404);
+      expect(rotateRes.body.error).toBe('Web Bot Auth key not found');
+    });
   });
 
   describe('GET /providers', () => {
-    it('lists configured providers', async () => {
+    it('requires admin auth', async () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
       const res = await request(app).get('/providers');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('lists configured providers', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/providers')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
 
       expect(res.status).toBe(200);
       expect(res.body.providers).toHaveLength(1);
@@ -382,7 +440,9 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
-      const res = await request(app).get('/connect/slack');
+      const res = await request(app)
+        .get('/connect/slack')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
 
       expect(res.status).toBe(404);
       expect(res.body.error).toMatch(/not configured/);
@@ -392,7 +452,9 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
-      const res = await request(app).get('/connect/google?scopes=calendar.readonly');
+      const res = await request(app)
+        .get('/connect/google?scopes=calendar.readonly')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
 
       expect(res.status).toBe(302);
       expect(res.headers.location).toMatch(/accounts\.google\.com/);
@@ -495,6 +557,81 @@ describe('@credninja/server', () => {
     });
   });
 
+  describe('GET /api/v1/connections', () => {
+    it('requires agent auth', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/v1/connections?user_id=default');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('lists default-user connections for SDK compatibility', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.test-access-token',
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .get('/api/v1/connections?user_id=default')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.connections).toHaveLength(1);
+      expect(res.body.connections[0]).toMatchObject({
+        slug: 'google',
+        scopesGranted: ['calendar.readonly'],
+        appClientId: null,
+      });
+      expect(res.body.connections[0].consentedAt).toBeTypeOf('string');
+    });
+
+    it('lists connections for the requested logical user only', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({ provider: 'google', userId: 'default', accessToken: 'default-token' });
+      await vault.store({ provider: 'google', userId: 'user-2', accessToken: 'user-2-token', scopes: ['calendar.readonly'] });
+
+      const res = await request(app)
+        .get('/api/v1/connections?user_id=user-2')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.connections).toHaveLength(1);
+      expect(res.body.connections[0]).toMatchObject({
+        slug: 'google',
+        scopesGranted: ['calendar.readonly'],
+      });
+    });
+  });
+
+  describe('DELETE /api/v1/connections/:provider', () => {
+    it('revokes the default-user connection for SDK compatibility', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.to-be-revoked',
+      });
+
+      const res = await request(app)
+        .delete('/api/v1/connections/google?user_id=default')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(204);
+      await expect(vault.get({ provider: 'google', userId: 'default' })).resolves.toBeNull();
+    });
+  });
+
   describe('POST /api/v1/delegate', () => {
     it('returns 401 without auth', async () => {
       const { app, vault } = createServer(makeTestConfig());
@@ -505,6 +642,29 @@ describe('@credninja/server', () => {
         .send({ service: 'google' });
 
       expect(res.status).toBe(401);
+    });
+
+    it('returns consent URL when delegation is requested before connection', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'needs-consent-user',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('consent_required');
+      expect(res.body.consent_url).toContain('/connect/google');
+      expect(res.body.consent_url).toContain('user_id=needs-consent-user');
+      expect(res.body.consent_url).toContain('app_client_id=app_123');
+      expect(res.body.consent_url).toContain('scopes=calendar.readonly');
+      expect(res.body.access_token).toBeUndefined();
     });
 
     it('returns a delegated token with requested scopes', async () => {
@@ -536,6 +696,511 @@ describe('@credninja/server', () => {
       expect(res.body.scopes).toEqual(['calendar.readonly']);
       expect(res.body.delegation_id).toMatch(/^del_/);
       expect(res.body.expires_in).toBeGreaterThan(0);
+    });
+
+    it('can return a brokered handle without exposing the access token', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'user-2',
+        accessToken: 'ya29.brokered-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'user-2',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+
+      expect(delegateRes.status).toBe(200);
+      expect(delegateRes.body.access_token).toBeUndefined();
+      expect(delegateRes.body.token_type).toBe('Delegation');
+      expect(delegateRes.body.user_id).toBe('user-2');
+      expect(delegateRes.body.delegation_id).toMatch(/^del_/);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          method: 'GET',
+          extra_headers: {
+            Authorization: 'Bearer attacker-token',
+            ' Authorization ': 'Bearer whitespace-attacker-token',
+            Host: 'attacker.com',
+            Cookie: 'session=secret',
+            'Content-Length': '999',
+            'X-Forwarded-For': '127.0.0.1',
+            'X-Test': '1',
+          },
+        });
+
+      expect(useRes.status).toBe(200);
+      expect(useRes.body.body).toEqual({ items: [] });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [, init] = fetchSpy.mock.calls[0]!;
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer ya29.brokered-token');
+      expect(headers[' Authorization ']).toBeUndefined();
+      expect(headers.Host).toBeUndefined();
+      expect(headers.Cookie).toBeUndefined();
+      expect(headers['Content-Length']).toBeUndefined();
+      expect(headers['X-Forwarded-For']).toBeUndefined();
+      expect(headers['X-Test']).toBe('1');
+      fetchSpy.mockRestore();
+    });
+
+    it('blocks brokered use outside delegated Google scopes', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.calendar-only',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it.each([
+      ['missing delegation id', {}, 400, /delegation_id is required/],
+      ['missing URL', { delegation_id: 'del_missing', method: 'GET' }, 400, /url is required/],
+      ['invalid method', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'TRACE' }, 400, /method must be one of/],
+      ['GET body', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'GET', body: { q: 'bad' } }, 400, /GET requests cannot have a body/],
+      ['unknown delegation handle', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'GET' }, 404, /Delegation handle not found/],
+    ])('validates brokered use request shape: %s', async (_name, payload, status, errorPattern) => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        const useRes = await request(app)
+          .post('/api/v1/use')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send(payload);
+
+        expect(useRes.status).toBe(status);
+        expect(useRes.body.error).toMatch(errorPattern);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      ['userinfo host confusion', 'https://www.googleapis.com@attacker.example/calendar/v3/calendars/primary/events'],
+      ['subdomain confusion', 'https://www.googleapis.com.evil.example/calendar/v3/calendars/primary/events'],
+      ['http protocol downgrade', 'http://www.googleapis.com/calendar/v3/calendars/primary/events'],
+      ['private IPv4 target', 'https://127.0.0.1/calendar/v3/calendars/primary/events'],
+      ['private IPv6 target', 'https://[::1]/calendar/v3/calendars/primary/events'],
+      ['non-standard https port', 'https://www.googleapis.com:8443/calendar/v3/calendars/primary/events'],
+      ['cross-service API target', 'https://api.github.com/repos/cred-ninja/sdk'],
+      ['encoded authority confusion', 'https://www.googleapis.com%2F@attacker.example/calendar/v3/calendars/primary/events'],
+      ['unicode homoglyph host', 'https://www.google\u0430pis.com/calendar/v3/calendars/primary/events'],
+    ])('blocks brokered server-side SSRF attempt: %s', async (_name, targetUrl) => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'ssrf-user',
+        accessToken: 'ya29.ssrf-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'ssrf-user',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+
+      expect(delegateRes.status).toBe(200);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      try {
+        const useRes = await request(app)
+          .post('/api/v1/use')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({
+            delegation_id: delegateRes.body.delegation_id,
+            url: targetUrl,
+            method: 'GET',
+          });
+
+        expect(useRes.status).toBe(400);
+        expect(useRes.body.error).toMatch(/URL is not allowed/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('matches short Google scope requests against full OAuth scope URLs', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.full-scope-url',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+
+      expect(delegateRes.status).toBe(200);
+      expect(delegateRes.body.access_token).toBeUndefined();
+      expect(delegateRes.body.scopes).toEqual(['https://www.googleapis.com/auth/calendar.readonly']);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(200);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      fetchSpy.mockRestore();
+    });
+
+    it('applies guard URL policies to brokered use before forwarding', async () => {
+      const guard = new CredGuard({
+        policies: [
+          urlAllowlistPolicy({
+            allowedUrls: {
+              google: ['https://www.googleapis.com/calendar/'],
+            },
+          }),
+        ],
+      });
+      const { app, vault } = createServer(makeTestConfig({ guard }));
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.guard-brokered-use',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly', 'gmail.readonly'],
+          token_format: 'handle',
+        });
+
+      expect(delegateRes.status).toBe(200);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(403);
+      expect(useRes.body.policy).toBe('url-allowlist');
+      expect(JSON.stringify(useRes.body)).not.toContain('ya29.guard-brokered-use');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('fails closed for brokered Google use when stored scopes are missing', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.no-scope-metadata',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: [],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          token_format: 'handle',
+        });
+
+      expect(delegateRes.status).toBe(200);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('returns upstream error responses without exposing the provider token', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.brokered-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ message: 'Not Found' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegateRes.body.delegation_id,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/missing',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(200);
+      expect(useRes.body.ok).toBe(false);
+      expect(useRes.body.status).toBe(404);
+      expect(useRes.body.body).toEqual({ message: 'Not Found' });
+      expect(JSON.stringify(useRes.body)).not.toContain('ya29.brokered-token');
+      fetchSpy.mockRestore();
+    });
+
+    it('delegates credentials for non-default logical users', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'user-2',
+        accessToken: 'ya29.user-2-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'user-2',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.access_token).toBe('ya29.user-2-token');
+      expect(res.body.user_id).toBe('user-2');
+    });
+
+    it('revokes stored DID agents and blocks future delegations for that agent', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const now = new Date().toISOString();
+      const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      const agentDid = `did:key:${agentId}`;
+      await vault.registerAgent({
+        id: agentId,
+        did: agentDid,
+        fingerprint: `fp_${agentId}`,
+        name: 'revokable-agent',
+        scopeCeiling: ['calendar.readonly'],
+        status: 'active',
+        createdBy: 'test',
+        createdAt: now,
+        updatedAt: now,
+      });
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.revoked-agent-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const allowedRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          agent_did: agentDid,
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(allowedRes.status).toBe(200);
+
+      const revokeRes = await request(app)
+        .post(`/api/v1/agents/${agentId}/revoke-all`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({});
+
+      expect(revokeRes.status).toBe(204);
+      await expect(vault.getAgent(agentId)).resolves.toMatchObject({ status: 'revoked' });
+
+      const deniedRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          agent_did: agentDid,
+          scopes: ['calendar.readonly'],
+        });
+
+      expect(deniedRes.status).toBe(403);
+      expect(deniedRes.body.error).toBe('agent_revoked');
+      expect(JSON.stringify(deniedRes.body)).not.toContain('ya29.revoked-agent-test');
+    });
+
+    it('enforces stored DID agent scope ceilings during root delegation', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const now = new Date().toISOString();
+      const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      await vault.registerAgent({
+        id: agentId,
+        did: `did:key:${agentId}`,
+        fingerprint: `fp_${agentId}`,
+        name: 'scope-ceiling-agent',
+        scopeCeiling: ['calendar.readonly'],
+        status: 'active',
+        createdBy: 'test',
+        createdAt: now,
+        updatedAt: now,
+      });
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.scope-ceiling-test',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const deniedRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          agent_did: `did:key:${agentId}`,
+          scopes: ['gmail.readonly'],
+        });
+
+      expect(deniedRes.status).toBe(403);
+      expect(deniedRes.body.error).toBe('scope_ceiling_exceeded');
+      expect(JSON.stringify(deniedRes.body)).not.toContain('ya29.scope-ceiling-test');
     });
 
     it('requires and verifies Web Bot Auth signatures when configured', async () => {
@@ -1319,7 +1984,7 @@ describe('@credninja/server', () => {
   });
 
   describe('POST /api/v1/tofu/register', () => {
-    it('registers a TOFU identity without Authorization', async () => {
+    it('requires agent auth', async () => {
       const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
       const { app, tofu } = createServer(config);
       await tofu.init();
@@ -1328,6 +1993,24 @@ describe('@credninja/server', () => {
 
       const res = await request(app)
         .post('/api/v1/tofu/register')
+        .send({
+          public_key: Buffer.from(keypair.publicKey).toString('base64'),
+          initial_scopes: ['calendar.readonly'],
+        });
+
+      expect(res.status).toBe(401);
+    });
+
+    it('registers a TOFU identity with agent Authorization', async () => {
+      const config = makeTestConfig({ tofuStorage: 'sqlite', tofuPath: TEST_SQLITE_TOFU_PATH });
+      const { app, tofu } = createServer(config);
+      await tofu.init();
+
+      const keypair = generateTofuKeypair();
+
+      const res = await request(app)
+        .post('/api/v1/tofu/register')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
         .send({
           public_key: Buffer.from(keypair.publicKey).toString('base64'),
           initial_scopes: ['calendar.readonly'],
@@ -1351,6 +2034,7 @@ describe('@credninja/server', () => {
 
       const res = await request(app)
         .post('/api/v1/tofu/register')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
         .send({
           initial_scopes: ['calendar.readonly'],
         });
@@ -1466,7 +2150,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect/google');
+      const res = await adminGet(app, '/connect/google');
 
       expect(res.status).toBe(302);
       const location = res.headers.location;
@@ -1486,7 +2170,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect/google?scopes=calendar.readonly');
+      const res = await adminGet(app, '/connect/google?scopes=calendar.readonly');
 
       expect(res.status).toBe(302);
       const location = res.headers.location;
@@ -1495,6 +2179,114 @@ describe('@credninja/server', () => {
       expect(scopeParam).toContain('calendar');
       // Should NOT contain default scopes when overridden
       // (they're replaced, not merged)
+    });
+
+    it('stores requested scopes when the OAuth token response omits scope metadata', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const connectRes = await adminGet(app, '/connect/google?user_id=user-2&scopes=calendar.readonly');
+      expect(connectRes.status).toBe(302);
+      const authUrl = new URL(connectRes.headers.location);
+      const state = authUrl.searchParams.get('state');
+      expect(state).toBeTruthy();
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        access_token: 'ya29.callback-token',
+        refresh_token: 'rt_callback-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      try {
+        const callbackRes = await request(app)
+          .get(`/connect/google/callback?code=test-code&state=${encodeURIComponent(state!)}`);
+
+        expect(callbackRes.status).toBe(200);
+        const entry = await vault.get({ provider: 'google', userId: 'user-2' });
+        expect(entry?.scopes).toEqual(['calendar.readonly']);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('rejects OAuth callbacks with missing code or state', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const missingCode = await request(app)
+        .get('/connect/google/callback?state=state-only');
+      expect(missingCode.status).toBe(400);
+      expect(missingCode.body.error).toBe('Missing code or state parameter');
+
+      const missingState = await request(app)
+        .get('/connect/google/callback?code=code-only');
+      expect(missingState.status).toBe(400);
+      expect(missingState.body.error).toBe('Missing code or state parameter');
+    });
+
+    it('escapes OAuth callback error messages before rendering HTML', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/connect/google/callback?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E');
+
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(res.text).not.toContain('<script>alert(1)</script>');
+    });
+
+    it('rejects OAuth callbacks with invalid or provider-mismatched state', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const invalidState = await request(app)
+        .get('/connect/google/callback?code=test-code&state=missing-state');
+      expect(invalidState.status).toBe(400);
+      expect(invalidState.body.error).toMatch(/Invalid or expired OAuth state/);
+
+      const connectRes = await adminGet(app, '/connect/google?user_id=user-2&scopes=calendar.readonly');
+      const state = new URL(connectRes.headers.location).searchParams.get('state');
+      expect(state).toBeTruthy();
+
+      const providerMismatch = await request(app)
+        .get(`/connect/github/callback?code=test-code&state=${encodeURIComponent(state!)}`);
+      expect(providerMismatch.status).toBe(400);
+      expect(providerMismatch.body.error).toMatch(/Invalid or expired OAuth state/);
+    });
+
+    it('does not store credentials when OAuth token exchange fails', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const connectRes = await adminGet(app, '/connect/google?user_id=exchange-fail-user&scopes=calendar.readonly');
+      const state = new URL(connectRes.headers.location).searchParams.get('state');
+      expect(state).toBeTruthy();
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        error: 'invalid_grant',
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      try {
+        const callbackRes = await request(app)
+          .get(`/connect/google/callback?code=test-code&state=${encodeURIComponent(state!)}`);
+
+        expect(callbackRes.status).toBe(500);
+        expect(callbackRes.text).toContain('Connection Failed');
+        const entry = await vault.get({ provider: 'google', userId: 'exchange-fail-user' });
+        expect(entry).toBeNull();
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('uses empty scopes when no defaults configured and no param', async () => {
@@ -1511,7 +2303,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect/github');
+      const res = await adminGet(app, '/connect/github');
 
       expect(res.status).toBe(302);
       // Should redirect without error even with empty scopes
@@ -1530,7 +2322,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/html/);
@@ -1543,7 +2335,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       expect(res.text).toContain('google');
       expect(res.text).toContain('Connect');
@@ -1561,7 +2353,7 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       expect(res.text).toContain('Connected');
       expect(res.text).toContain('calendar.readonly');
@@ -1574,7 +2366,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       // Default scopes should be pre-checked
       // openid, email, profile are in defaultScopes
@@ -1589,7 +2381,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       // gmail.readonly is NOT in defaultScopes, should not be checked
       // The checkbox for gmail.readonly should exist but not be checked
@@ -1607,7 +2399,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       expect(res.text).toContain('google');
       expect(res.text).toContain('github');
@@ -1626,7 +2418,7 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       // Access tokens MUST NOT appear in admin UI HTML
       expect(res.text).not.toContain('ya29.super-secret-access-token');
@@ -1636,14 +2428,48 @@ describe('@credninja/server', () => {
       expect(res.text).not.toContain('test-google-client-secret');
     });
 
-    it('does not require auth (admin is browser-accessible)', async () => {
+    it('requires admin auth', async () => {
       const config = makeTestConfig();
       const { app, vault } = createServer(config);
       await vault.init();
 
-      // No auth header — should still work
       const res = await request(app).get('/connect');
+      expect(res.status).toBe(401);
+    });
+
+    it('creates a browser admin session from login form', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const bootstrap = await request(app)
+        .post('/admin/login')
+        .type('form')
+        .send({ admin_token: TEST_ADMIN_TOKEN, next: '/connect' });
+
+      expect(bootstrap.status).toBe(303);
+      expect(bootstrap.headers.location).toBe('/connect');
+      expect(bootstrap.headers['set-cookie']?.[0]).toContain('cred_admin_session=');
+      expect(bootstrap.headers['referrer-policy']).toBe('no-referrer');
+
+      const res = await request(app)
+        .get('/connect')
+        .set('Cookie', bootstrap.headers['set-cookie']);
       expect(res.status).toBe(200);
+    });
+
+    it('does not redirect admin login to protocol-relative external URLs', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const bootstrap = await request(app)
+        .post('/admin/login')
+        .type('form')
+        .send({ admin_token: TEST_ADMIN_TOKEN, next: '//evil.example.com' });
+
+      expect(bootstrap.status).toBe(303);
+      expect(bootstrap.headers.location).toBe('/connect');
     });
   });
 
@@ -1656,7 +2482,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       // Verify the HTML is well-formed and contains expected structure
       expect(res.text).toContain('<!DOCTYPE html>');
@@ -1668,7 +2494,7 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(config);
       await vault.init();
 
-      const res = await request(app).get('/connect');
+      const res = await adminGet(app, '/connect');
 
       // The custom scope input accepts text and is processed client-side
       // via buildScopes() which uses encodeURIComponent — safe for URL injection
@@ -1677,14 +2503,36 @@ describe('@credninja/server', () => {
   });
 
   describe('Revoke via Admin UI', () => {
-    it('revoke endpoint requires agent token (not cookie-based)', async () => {
+    it('revokes with the admin session without asking for an agent token', async () => {
       const config = makeTestConfig();
       const { app, vault } = createServer(config);
       await vault.init();
 
-      // The admin UI's revoke uses prompt() for token — this is by design.
-      // Verify the DELETE endpoint still requires auth
-      const res = await request(app).delete('/api/token/google');
+      await vault.store({
+        provider: 'google',
+        userId: 'user-2',
+        accessToken: 'ya29.to-be-revoked',
+      });
+
+      const login = await request(app)
+        .post('/admin/login')
+        .type('form')
+        .send({ admin_token: TEST_ADMIN_TOKEN, next: '/connect?user_id=user-2' });
+
+      const res = await request(app)
+        .delete('/connect/google?user_id=user-2')
+        .set('Cookie', login.headers['set-cookie']);
+
+      expect(res.status).toBe(204);
+      await expect(vault.get({ provider: 'google', userId: 'user-2' })).resolves.toBeNull();
+    });
+
+    it('admin revoke endpoint requires admin auth', async () => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const res = await request(app).delete('/connect/google');
       expect(res.status).toBe(401);
     });
   });
@@ -1869,7 +2717,7 @@ describe('@credninja/server', () => {
       const healthRes = await request(app).get('/health');
       expect(healthRes.status).toBe(200);
 
-      const providersRes = await request(app).get('/providers');
+      const providersRes = await adminGet(app, '/providers');
       expect(providersRes.status).toBe(200);
     });
 
