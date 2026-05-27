@@ -3,7 +3,7 @@
  *
  * Model Context Protocol server that wraps Cred's delegation API.
  * Enables AI agents running in MCP-compatible runtimes
- * to request delegated OAuth2 access tokens.
+ * to request delegated OAuth2 access and brokered handles.
  */
 
 export { createCredMcpServer, startServer } from './server.js';

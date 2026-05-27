@@ -13,12 +13,41 @@
  */
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Cred } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
 
 export const USE_TOOL_NAME = 'cred_use';
 
 const MAX_RESPONSE_BYTES = 32_768; // 32KB — keeps responses LLM-friendly
+
+const BLOCKED_EXTRA_HEADERS = new Set([
+  'authorization',
+  'connection',
+  'content-length',
+  'cookie',
+  'forwarded',
+  'host',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'set-cookie',
+  'signature',
+  'signature-agent',
+  'signature-input',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+]);
+
+function isForwardableExtraHeader(key: string, value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  return !BLOCKED_EXTRA_HEADERS.has(key.toLowerCase());
+}
 
 export const USE_TOOL_DEFINITION = {
   name: USE_TOOL_NAME,
@@ -66,6 +95,7 @@ export interface UseToolInput {
 
 export interface UseToolContext {
   tokenCache: TokenCache;
+  cred?: Cred;
   webBotAuthSigner?: WebBotAuthSigner;
 }
 
@@ -82,13 +112,48 @@ export async function handleUse(
     };
   }
 
+  if (entry.brokered) {
+    if (!context.cred) {
+      return {
+        content: [{ type: 'text', text: 'Error: brokered delegation requires a Cred client.' }],
+        isError: true,
+      };
+    }
+    try {
+      const result = await context.cred.use({
+        delegationId: entry.serverDelegationId ?? input.delegation_id,
+        url: input.url,
+        method: input.method,
+        body: input.body,
+        extraHeaders: input.extra_headers,
+      });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Brokered upstream request failed';
+      return {
+        content: [{ type: 'text', text: `Error: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  if (!entry.accessToken) {
+    return {
+      content: [{ type: 'text', text: 'Error: delegation handle has no usable token.' }],
+      isError: true,
+    };
+  }
+
   // ── 2. Validate target URL (SSRF protection) ───────────────────────────────
-  if (!context.tokenCache.isAllowedUrl(entry.service, input.url)) {
+  if (!context.tokenCache.isAllowedUrl(entry.service, input.url, entry.scopes)) {
     return {
       content: [{
         type: 'text',
         text: `Error: URL is not a valid ${entry.service} API endpoint. ` +
-              `Only known ${entry.service} API base URLs are allowed.`,
+              `Only known ${entry.service} API base URLs allowed by the delegated scopes are allowed.`,
       }],
       isError: true,
     };
@@ -114,13 +179,7 @@ export async function handleUse(
     ...(input.extra_headers
       ? Object.fromEntries(
           Object.entries(input.extra_headers).filter(
-            ([k]) => {
-              const key = k.toLowerCase();
-              return key !== 'authorization' &&
-                key !== 'signature' &&
-                key !== 'signature-input' &&
-                key !== 'signature-agent';
-            },
+            ([key, value]) => isForwardableExtraHeader(key, value),
           ),
         )
       : {}),

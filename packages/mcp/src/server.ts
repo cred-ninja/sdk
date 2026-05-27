@@ -47,6 +47,8 @@ import {
   SubdelegateToolInput,
 } from './tools/subdelegate.js';
 
+const MCP_SERVER_VERSION = '1.0.0';
+
 function createCredClient(config: CredMcpConfig): Cred {
   if (config.mode === 'local') {
     return new Cred({
@@ -62,6 +64,7 @@ function createCredClient(config: CredMcpConfig): Cred {
   return new Cred({
     agentToken: config.agentToken,
     baseUrl: config.baseUrl,
+    ...(config.webBotAuth ? { webBotAuth: config.webBotAuth } : {}),
   });
 }
 
@@ -84,12 +87,13 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     agentDid: config.agentDid,
     tokenCache,
     webBotAuthSigner,
+    useServerBroker: config.mode === 'cloud',
   };
 
   const server = new Server(
     {
       name: 'cred-mcp',
-      version: '0.1.0',
+      version: MCP_SERVER_VERSION,
     },
     {
       capabilities: {
@@ -165,10 +169,11 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
     agentDid: config.agentDid,
     tokenCache,
     webBotAuthSigner,
+    useServerBroker: config.mode === 'cloud',
   };
 
   const server = new Server(
-    { name: 'cred-mcp', version: '0.1.0' },
+    { name: 'cred-mcp', version: MCP_SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
 

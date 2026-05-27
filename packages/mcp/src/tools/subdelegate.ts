@@ -57,6 +57,7 @@ export interface SubdelegateToolContext {
   cred: Cred;
   appClientId: string;
   tokenCache: TokenCache;
+  useServerBroker?: boolean;
 }
 
 export async function handleSubdelegate(
@@ -64,23 +65,36 @@ export async function handleSubdelegate(
   context: SubdelegateToolContext,
 ): Promise<CallToolResult> {
   try {
-    const result = await context.cred.subDelegate({
+    const request = {
       parentReceipt: input.parent_receipt,
       agentDid: input.agent_did,
       userId: input.user_id,
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
-    });
+    };
+    const result = context.useServerBroker
+      ? await context.cred.subDelegateHandle(request)
+      : await context.cred.subDelegate(request);
 
     const now = Date.now();
     const expiresIn = result.expiresIn ?? 3600;
-    const delegationId = context.tokenCache.store({
-      accessToken: result.accessToken,
-      service: input.service,
-      userId: input.user_id,
-      expiresAt: now + expiresIn * 1000,
-    });
+    const delegationId = context.tokenCache.store(context.useServerBroker
+      ? {
+          brokered: true,
+          serverDelegationId: result.delegationId,
+          service: input.service,
+          userId: input.user_id,
+          scopes: result.scopes,
+          expiresAt: now + expiresIn * 1000,
+        }
+      : {
+          accessToken: (result as Awaited<ReturnType<Cred['subDelegate']>>).accessToken,
+          service: input.service,
+          userId: input.user_id,
+          scopes: result.scopes,
+          expiresAt: now + expiresIn * 1000,
+        });
 
     return {
       content: [

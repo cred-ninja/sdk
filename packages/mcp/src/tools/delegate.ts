@@ -49,6 +49,7 @@ export interface DelegateToolContext {
   appClientId: string;
   agentDid?: string;
   tokenCache: TokenCache;
+  useServerBroker?: boolean;
 }
 
 export async function handleDelegate(
@@ -56,25 +57,37 @@ export async function handleDelegate(
   context: DelegateToolContext,
 ): Promise<CallToolResult> {
   try {
-    const result = await context.cred.delegate({
+    const request = {
       userId: input.user_id,
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
       agentDid: context.agentDid,
-    });
+    };
+    const result = context.useServerBroker
+      ? await context.cred.delegateHandle(request)
+      : await context.cred.delegate(request);
 
-    // Store the token in the local cache — never return the raw token to the LLM.
-    // The LLM gets a delegation handle only. It passes this to cred_use to make
-    // actual API calls. This prevents prompt injection from extracting the token.
+    // Store either the local token or the server-side broker handle in the local
+    // cache — never return a raw provider token to the LLM.
     const now = Date.now();
     const expiresIn = result.expiresIn ?? 3600;
-    const delegationId = context.tokenCache.store({
-      accessToken: result.accessToken,
-      service: input.service,
-      userId: input.user_id,
-      expiresAt: now + expiresIn * 1000,
-    });
+    const delegationId = context.tokenCache.store(context.useServerBroker
+      ? {
+          brokered: true,
+          serverDelegationId: result.delegationId,
+          service: input.service,
+          userId: input.user_id,
+          scopes: result.scopes,
+          expiresAt: now + expiresIn * 1000,
+        }
+      : {
+          accessToken: (result as Awaited<ReturnType<Cred['delegate']>>).accessToken,
+          service: input.service,
+          userId: input.user_id,
+          scopes: result.scopes,
+          expiresAt: now + expiresIn * 1000,
+        });
 
     return {
       content: [

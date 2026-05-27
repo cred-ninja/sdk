@@ -51,10 +51,40 @@ describe('TokenCache', () => {
   // ── SSRF protection — isAllowedUrl ─────────────────────────────────────────
 
   describe('isAllowedUrl', () => {
-    it('allows known Google API bases', () => {
-      expect(cache.isAllowedUrl('google', 'https://www.googleapis.com/calendar/v3/calendars')).toBe(true);
-      expect(cache.isAllowedUrl('google', 'https://gmail.googleapis.com/gmail/v1/users/me/messages')).toBe(true);
-      expect(cache.isAllowedUrl('google', 'https://drive.googleapis.com/drive/v3/files')).toBe(true);
+    it('allows known Google API bases when matching scopes are known', () => {
+      expect(cache.isAllowedUrl('google', 'https://www.googleapis.com/calendar/v3/calendars', ['calendar.readonly'])).toBe(true);
+      expect(cache.isAllowedUrl('google', 'https://gmail.googleapis.com/gmail/v1/users/me/messages', ['gmail.readonly'])).toBe(true);
+      expect(cache.isAllowedUrl('google', 'https://drive.googleapis.com/drive/v3/files', ['drive.readonly'])).toBe(true);
+    });
+
+    it('fails closed for Google API bases when scopes are missing', () => {
+      expect(cache.isAllowedUrl('google', 'https://www.googleapis.com/calendar/v3/calendars')).toBe(false);
+    });
+
+    it('restricts Google endpoints to delegated scopes when scopes are known', () => {
+      expect(cache.isAllowedUrl(
+        'google',
+        'https://www.googleapis.com/calendar/v3/calendars',
+        ['calendar.readonly'],
+      )).toBe(true);
+      expect(cache.isAllowedUrl(
+        'google',
+        'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+        ['calendar.readonly'],
+      )).toBe(false);
+    });
+
+    it('matches full Google OAuth scope URLs', () => {
+      expect(cache.isAllowedUrl(
+        'google',
+        'https://calendar.googleapis.com/calendar/v3/users/me/calendarList',
+        ['https://www.googleapis.com/auth/calendar.readonly'],
+      )).toBe(true);
+      expect(cache.isAllowedUrl(
+        'google',
+        'https://drive.googleapis.com/drive/v3/files',
+        ['https://www.googleapis.com/auth/calendar.readonly'],
+      )).toBe(false);
     });
 
     it('allows GitHub API', () => {

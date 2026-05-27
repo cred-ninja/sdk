@@ -18,6 +18,7 @@ describe('handleUse Web Bot Auth integration', () => {
       accessToken: 'ya29.test-token',
       service: 'google',
       userId: 'default',
+      scopes: ['calendar.readonly'],
       expiresAt: Date.now() + 60_000,
     });
 
@@ -107,6 +108,10 @@ describe('handleUse Web Bot Auth integration', () => {
         Signature: 'sig1=:forged:',
         'Signature-Input': 'sig1=(\"@authority\")',
         'Signature-Agent': '"https://evil.example.com/.well-known/http-message-signatures-directory"',
+        Host: 'attacker.com',
+        Cookie: 'session=secret',
+        'Content-Length': '999',
+        'X-Forwarded-For': '127.0.0.1',
         'X-Test': '1',
       },
     }, {
@@ -121,6 +126,46 @@ describe('handleUse Web Bot Auth integration', () => {
     expect(headers['Signature-Agent']).toBe('"https://cred.example.com/.well-known/http-message-signatures-directory"');
     expect(headers.Signature).not.toBe('sig1=:forged:');
     expect(headers['Signature-Input']).not.toBe('sig1=("@authority")');
+    expect(headers.Host).toBeUndefined();
+    expect(headers.Cookie).toBeUndefined();
+    expect(headers['Content-Length']).toBeUndefined();
+    expect(headers['X-Forwarded-For']).toBeUndefined();
     expect(headers['X-Test']).toBe('1');
+  });
+
+  it('routes brokered handles through the Cred server without local fetch', async () => {
+    const brokeredId = tokenCache.store({
+      brokered: true,
+      serverDelegationId: 'del_server',
+      service: 'google',
+      userId: 'default',
+      scopes: ['calendar.readonly'],
+      expiresAt: Date.now() + 60_000,
+    });
+    const use = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      contentType: 'application/json',
+      body: { items: [] },
+    });
+
+    const result = await handleUse({
+      delegation_id: brokeredId,
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+    }, {
+      tokenCache,
+      cred: { use } as any,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(use).toHaveBeenCalledWith({
+      delegationId: 'del_server',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+      body: undefined,
+      extraHeaders: undefined,
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

@@ -1,9 +1,10 @@
 /**
  * TokenCache — in-process store for short-lived delegation tokens.
  *
- * Tokens are stored here so the LLM never sees the raw access_token.
- * cred_delegate returns a handle (del_xxxx); cred_use exchanges it here
- * and makes the upstream API call on the LLM's behalf.
+ * Local-mode tokens and remote-mode broker handles are stored here so the LLM
+ * never sees a raw access_token. cred_delegate returns a handle (del_xxxx);
+ * cred_use exchanges it here or through the Cred server and makes the upstream
+ * API call on the LLM's behalf.
  *
  * SSRF protection: isAllowedUrl() validates the target URL against a
  * per-service allowlist so an injected prompt can't redirect the token
@@ -13,9 +14,12 @@
 import crypto from 'crypto';
 
 export interface TokenEntry {
-  accessToken: string;
+  accessToken?: string;
+  serverDelegationId?: string;
   service: string;
   userId: string;
+  scopes?: string[];
+  brokered?: boolean;
   expiresAt: number; // Unix ms
 }
 
@@ -47,6 +51,58 @@ const SERVICE_ALLOWLIST: Record<string, string[]> = {
   // We allow any HTTPS *.salesforce.com or *.force.com origin
   salesforce: [],
 };
+
+const GOOGLE_SCOPE_ENDPOINTS: Array<{ scopes: string[]; bases: string[] }> = [
+  {
+    scopes: ['calendar', 'calendar.readonly', 'calendar.events'],
+    bases: ['https://www.googleapis.com/calendar/', 'https://calendar.googleapis.com/'],
+  },
+  {
+    scopes: ['gmail.readonly', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
+    bases: ['https://gmail.googleapis.com/', 'https://www.googleapis.com/gmail/'],
+  },
+  {
+    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata.readonly'],
+    bases: ['https://www.googleapis.com/drive/', 'https://www.googleapis.com/upload/drive/', 'https://drive.googleapis.com/'],
+  },
+  {
+    scopes: ['spreadsheets', 'spreadsheets.readonly'],
+    bases: ['https://sheets.googleapis.com/'],
+  },
+  {
+    scopes: ['documents', 'documents.readonly'],
+    bases: ['https://docs.googleapis.com/'],
+  },
+  {
+    scopes: ['admin', 'admin.directory.user.readonly', 'admin.directory.group.readonly'],
+    bases: ['https://admin.googleapis.com/'],
+  },
+  {
+    scopes: ['openid', 'email', 'profile', 'userinfo.email', 'userinfo.profile'],
+    bases: ['https://www.googleapis.com/oauth2/', 'https://openidconnect.googleapis.com/'],
+  },
+  {
+    scopes: ['contacts', 'contacts.readonly'],
+    bases: ['https://people.googleapis.com/'],
+  },
+];
+
+function scopeMatches(grantedScope: string, requiredScope: string): boolean {
+  const normalized = grantedScope.toLowerCase().replace(/\/$/, '');
+  const required = requiredScope.toLowerCase();
+  return normalized === required ||
+    normalized.endsWith(`/${required}`) ||
+    normalized.endsWith(`auth/${required}`) ||
+    normalized.includes(`//${required}`);
+}
+
+function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[]): boolean {
+  if (!scopes || scopes.length === 0) return false;
+  return GOOGLE_SCOPE_ENDPOINTS.some(({ scopes: requiredScopes, bases }) => (
+    bases.some((base) => normalizedUrl.startsWith(base)) &&
+    requiredScopes.some((requiredScope) => scopes.some((scope) => scopeMatches(scope, requiredScope)))
+  ));
+}
 
 export class TokenCache {
   private readonly entries = new Map<string, TokenEntry>();
@@ -99,7 +155,7 @@ export class TokenCache {
    * Raw string matching is vulnerable to null bytes, tab characters,
    * and encoded separators that satisfy startsWith() but confuse fetch().
    */
-  isAllowedUrl(service: string, url: string): boolean {
+  isAllowedUrl(service: string, url: string, scopes?: string[]): boolean {
     // 1. Parse through WHATWG URL parser first.
     //    This rejects null bytes, control characters, and malformed URLs
     //    that could pass a naive startsWith() check.
@@ -140,7 +196,11 @@ export class TokenCache {
     //    This avoids matching against the raw string (which may contain control chars
     //    or encoding tricks that passed the URL parser).
     const normalizedUrl = `https://${hostname}${parsed.pathname}`;
-    return allowed.some(base => normalizedUrl.startsWith(base));
+    if (!allowed.some(base => normalizedUrl.startsWith(base))) return false;
+    if (service === 'google') {
+      return isAllowedGoogleScopeEndpoint(normalizedUrl, scopes);
+    }
+    return true;
   }
 
   /** Remove all expired entries */

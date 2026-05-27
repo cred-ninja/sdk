@@ -59,7 +59,7 @@ describe('SSRF dynamic bypass suite — isAllowedUrl()', () => {
     it('google: null byte in PATH after hostname — NOT a bypass (hostname still correct)', () => {
       // "\x00" is in the path, not the authority. Parser keeps hostname as googleapis.com.
       // This is correctly ALLOWED — the null byte doesn't redirect the request.
-      expect(cache.isAllowedUrl('google', 'https://www.googleapis.com/\x00@attacker.com')).toBe(true);
+      expect(cache.isAllowedUrl('google', 'https://www.googleapis.com/calendar/v3/\x00@attacker.com', ['calendar.readonly'])).toBe(true);
     });
     it('github: tab in PATH after hostname — NOT a bypass (hostname still correct)', () => {
       // Same reasoning — tab in path doesn't affect hostname resolution
