@@ -1,7 +1,7 @@
 {
   "name": "@credninja/tofu",
   "version": "1.0.0",
-  "description": "Trust-on-first-use agent identity primitives for Cred",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Trust-on-first-use agent identity primitives for Cred",
   "license": "Apache-2.0",
   "author": "Cred",
   "engines": {

@@ -1,7 +1,7 @@
 {
   "name": "@credninja/server",
   "version": "1.0.0",
-  "description": "Self-hosted credential delegation server for AI agents. Uses @credninja/oauth + @credninja/vault",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Self-hosted credential delegation server for AI agents. Uses @credninja/oauth + @credninja/vault",
   "private": false,
   "type": "module",
   "main": "dist/index.js",

@@ -1,7 +1,7 @@
 {
   "name": "@credninja/guard",
   "version": "1.0.0",
-  "description": "Policy engine for credential delegation guardrails. Rate limiting, scope filtering, time windows, and more.",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Policy engine for credential delegation guardrails. Rate limiting, scope filtering, time windows, and more.",
   "license": "Apache-2.0",
   "author": "CredNinja",
   "type": "module",

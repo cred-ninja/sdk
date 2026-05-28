@@ -1,7 +1,7 @@
 {
   "name": "@credninja/vault",
   "version": "1.0.0",
-  "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
   "license": "Apache-2.0",
   "author": "Cred",
   "engines": {

@@ -1,7 +1,7 @@
 {
   "name": "@credninja/mcp",
   "version": "1.0.0",
-  "description": "MCP server for OAuth2 credential delegation. Secure token brokering for AI agents",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. MCP server for OAuth2 credential delegation. Secure token brokering for AI agents",
   "private": false,
   "type": "module",
   "main": "dist/index.js",

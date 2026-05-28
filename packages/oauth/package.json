@@ -1,7 +1,7 @@
 {
   "name": "@credninja/oauth",
   "version": "1.0.0",
-  "description": "Zero-dependency OAuth2 client for AI agents. 5 provider adapters, PKCE, Express middleware",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Zero-dependency OAuth2 client for AI agents. 5 provider adapters, PKCE, Express middleware",
   "license": "Apache-2.0",
   "author": "CredNinja",
   "engines": {

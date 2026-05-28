@@ -1,7 +1,7 @@
 {
   "name": "@credninja/ai",
   "version": "1.0.0",
-  "description": "Cred Vercel AI SDK integration — credential delegation tool for Vercel AI agents",
+  "description": "DEPRECATED: use cred-ninja/daemon. Current package continues to work; security fixes only until daemon v0; migration guidance is not yet available. Cred Vercel AI SDK integration — credential delegation tool for Vercel AI agents",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
   "types": "dist/cjs/index.d.ts",
