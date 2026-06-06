@@ -1,0 +1,47 @@
+name: auto-approve
+
+# Solo-maintainer convenience: provides a bot approving review so PRs from the
+# maintainer (or trusted bots) satisfy a "require N approving reviews" gate
+# without a second human collaborator.
+#
+# IMPORTANT — this does NOT bypass CI. If branch protection requires status
+# checks, they are enforced independently of this approval, so an early approval
+# cannot merge a red PR.
+#
+# CAVEAT — a github-actions[bot] approval does NOT satisfy
+# `require_code_owner_reviews`. NOTE: as of this commit, `main` on this repo has
+# NO branch protection at all, so there is no review gate for this workflow to
+# clear yet. It is included so the gate is already covered if/when protection is
+# enabled. See the PR description for details.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Least privilege: only what's needed to submit a review.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-approve:
+    runs-on: ubuntu-latest
+    # Guards:
+    #  - Same-repo PRs only. Fork PRs receive a read-only GITHUB_TOKEN, so an
+    #    approval would fail anyway; we skip them explicitly rather than relying
+    #    on that, and we never use pull_request_target (which would hand a
+    #    write token to untrusted fork code).
+    #  - Author allowlist: the maintainer and trusted automation only.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["kierandotai","dependabot[bot]","github-actions[bot]"]'), github.event.pull_request.user.login)
+    steps:
+      - name: Approve pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr review "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --approve \
+            --body "Auto-approved by the auto-approve workflow. Merge remains gated on any required status checks."
