@@ -205,4 +205,24 @@ describe('RateLimitPolicy', () => {
       expect(result.reason).toMatch(/Retry after \d+s/);
     });
   });
+
+  describe('memory eviction', () => {
+    it('evicts records for agents that go idle past the window', () => {
+      vi.useFakeTimers();
+      try {
+        policy.evaluate(makeContext({ agentTokenHash: 'agent-a' }));
+        policy.evaluate(makeContext({ agentTokenHash: 'agent-b' }));
+        expect(policy.size()).toBe(2);
+
+        // Both agents go idle past the window; a new agent's request triggers
+        // the sweep, which drops the two dead records instead of leaking them.
+        vi.advanceTimersByTime(61_000);
+        policy.evaluate(makeContext({ agentTokenHash: 'agent-c' }));
+
+        expect(policy.size()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

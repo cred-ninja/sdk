@@ -2923,6 +2923,36 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // ── Enforce the child agent's scope ceiling ──────────────────────────
+      // Mirror the direct-delegation path (a non-empty scopeCeiling is a hard
+      // per-agent cap; empty means unbounded). Without this, sub-delegation
+      // could grant an agent scopes above the ceiling that the same agent is
+      // capped to on direct delegation.
+      if (agentRecord?.scopeCeiling.length) {
+        const withinCeiling = validation.grantedScopes.filter((scope) =>
+          agentRecord!.scopeCeiling.includes(scope),
+        );
+        if (withinCeiling.length === 0) {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${service}/${userId}` },
+            outcome: 'denied',
+            scopesRequested: requestedScopes,
+            errorMessage: 'Requested scopes exceed agent scope ceiling',
+            correlationId,
+          });
+          res.status(403).json({
+            error: 'Requested scopes exceed agent scope ceiling',
+            code: 'scope_ceiling_exceeded',
+          });
+          return;
+        }
+        validation.grantedScopes = withinCeiling;
+      }
+
       // ── Retrieve token from vault ────────────────────────────────────────
 
       const providerConfig = getProviderConfig(service);

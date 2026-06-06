@@ -67,6 +67,7 @@ describe('credDelegateTool factory', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     expect(t.description).toBeDefined();
@@ -87,12 +88,45 @@ describe('credDelegateTool factory', () => {
     expect(t.description!.toLowerCase()).not.toContain('access_token');
   });
 
+  it('defaults to brokered handle mode (keeps tokens out of the model)', async () => {
+    mockDelegateHandle.mockResolvedValue({
+      tokenType: 'Delegation',
+      expiresIn: 900,
+      expiresAt: new Date(Date.now() + 900_000),
+      service: 'google',
+      userId: USER_ID,
+      scopes: ['calendar.readonly'],
+      delegationId: 'del_default',
+    });
+
+    // No tokenFormat → secure default.
+    const t = credDelegateTool({
+      agentToken: TOKEN,
+      baseUrl: BASE_URL,
+      userId: USER_ID,
+      appClientId: APP_CLIENT_ID,
+    });
+
+    expect(t.description!.toLowerCase()).toContain('delegation handle');
+
+    const result: any = await t.execute!(
+      { service: 'google', scopes: ['calendar.readonly'] },
+      { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal },
+    );
+
+    expect(result.accessToken).toBeUndefined();
+    expect(result.delegationId).toBe('del_default');
+    expect(mockDelegateHandle).toHaveBeenCalled();
+    expect(mockDelegate).not.toHaveBeenCalled();
+  });
+
   it('returns a tool with input schema', () => {
     const t = credDelegateTool({
       agentToken: TOKEN,
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     expect(t.inputSchema).toBeDefined();
@@ -104,6 +138,7 @@ describe('credDelegateTool factory', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     expect(t.execute).toBeDefined();
@@ -129,6 +164,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     const result = await t.execute!(
@@ -160,6 +196,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     await t.execute!(
@@ -231,6 +268,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     await t.execute!(
@@ -262,6 +300,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     const first = await t.execute!(
@@ -304,6 +343,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     await t.execute!(
@@ -331,6 +371,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     await expect(
@@ -350,6 +391,7 @@ describe('credDelegateTool execute', () => {
       baseUrl: BASE_URL,
       userId: USER_ID,
       appClientId: APP_CLIENT_ID,
+      tokenFormat: 'raw',
     });
 
     await expect(

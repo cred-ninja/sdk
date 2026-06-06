@@ -15,9 +15,18 @@ export class RateLimitPolicy implements CredPolicy {
   readonly name = 'rate-limit';
   private readonly config: RateLimitPolicyConfig;
   private readonly requests: Map<string, RequestRecord> = new Map();
+  /** Largest configured window — the horizon past which a record is dead. */
+  private readonly maxWindowMs: number;
+  private lastSweepAt = 0;
 
   constructor(config: RateLimitPolicyConfig) {
     this.config = config;
+    const windows: number[] = [];
+    if (typeof config.windowMs === 'number') windows.push(config.windowMs);
+    for (const limit of Object.values(config.perProvider ?? {})) {
+      if (typeof limit?.windowMs === 'number') windows.push(limit.windowMs);
+    }
+    this.maxWindowMs = windows.length > 0 ? Math.max(...windows) : 0;
   }
 
   evaluate(ctx: GuardContext): PolicyResult {
@@ -36,6 +45,9 @@ export class RateLimitPolicy implements CredPolicy {
 
     const key = `${agentTokenHash}:${provider}`;
     const now = Date.now();
+    // Bound memory: without eviction the map grows once per unique
+    // agent/provider pair forever. Sweep dead records at most once per window.
+    this.evictStale(now);
     const windowStart = now - limits.windowMs;
 
     // Get or create request record
@@ -71,6 +83,31 @@ export class RateLimitPolicy implements CredPolicy {
       policy: this.name,
       reason: `${record.timestamps.length}/${limits.maxRequests} requests in window`,
     };
+  }
+
+  /**
+   * Drop records whose most recent request has aged out of the largest window.
+   * Runs at most once per `maxWindowMs` to keep the amortized cost negligible.
+   */
+  private evictStale(now: number): void {
+    if (this.maxWindowMs <= 0) return;
+    if (now - this.lastSweepAt < this.maxWindowMs) return;
+    this.lastSweepAt = now;
+    const cutoff = now - this.maxWindowMs;
+    for (const [key, record] of this.requests) {
+      const newest = record.timestamps[record.timestamps.length - 1];
+      if (newest === undefined || newest <= cutoff) {
+        this.requests.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Number of agent/provider records currently tracked. Useful for tests and
+   * for observing that eviction is bounding memory.
+   */
+  size(): number {
+    return this.requests.size;
   }
 
   /**
