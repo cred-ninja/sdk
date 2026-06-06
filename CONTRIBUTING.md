@@ -218,6 +218,24 @@ We squash-merge PRs.
 
 ESLint and Prettier run in CI: `npm run lint`, `npm run format`.
 
+### Sample secrets and scanners
+
+Documentation, examples, and tests use **self-identifying placeholders**, never
+real or real-looking credentials. Follow these conventions so that secret
+scanners (and reviewers) can tell a sample from a leak at a glance:
+
+- Use an obvious placeholder form: `cred_at_YOUR_AGENT_TOKEN`,
+  `cred_admin_YOUR_ADMIN_TOKEN`, `'your_agent_token'`, or an `EXAMPLE_*` value.
+- Prefer reading real tokens from the environment in runnable code
+  (`process.env.CRED_AGENT_TOKEN`).
+- Never paste a value that could be a live credential, even "expired" ones.
+
+Known-safe placeholders, test fixtures, generated lockfiles, and the
+`cred_at_` / `cred_admin_` token *prefixes* (the scaffold appends random bytes
+to these at runtime) are allowlisted in [`.gitleaks.toml`](.gitleaks.toml). Run
+`gitleaks detect` locally to verify a change introduces no new findings; extend
+the allowlist there (with a justification) if you add a new intentional sample.
+
 ---
 
 ## Good First Issues

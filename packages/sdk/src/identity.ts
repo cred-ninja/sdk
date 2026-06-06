@@ -132,57 +132,6 @@ function encodeBase58(bytes: Uint8Array): string {
   return result;
 }
 
-function decodeBase58(str: string): Uint8Array {
-  if (str.length === 0) return new Uint8Array(0);
-
-  // Build alphabet lookup
-  const lookup: Record<string, number> = {};
-  for (let i = 0; i < BASE58_ALPHABET.length; i++) {
-    lookup[BASE58_ALPHABET[i]] = i;
-  }
-
-  // Count leading '1's (zeros)
-  let zeros = 0;
-  for (const char of str) {
-    if (char !== '1') break;
-    zeros++;
-  }
-
-  // Decode to bytes
-  const size = Math.ceil(str.length * 733 / 1000) + 1;
-  const bytes = new Uint8Array(size);
-  let length = 0;
-
-  for (const char of str) {
-    const value = lookup[char];
-    if (value === undefined) {
-      throw new Error(`Invalid base58 character: ${char}`);
-    }
-
-    let carry = value;
-    let i = 0;
-    for (let j = size - 1; (carry !== 0 || i < length) && j >= 0; j--, i++) {
-      carry += 58 * bytes[j];
-      bytes[j] = carry % 256;
-      carry = Math.floor(carry / 256);
-    }
-    length = i;
-  }
-
-  // Skip leading zeros in byte array
-  let start = size - length;
-  while (start < size && bytes[start] === 0) {
-    start++;
-  }
-
-  // Prepend zeros and return
-  const result = new Uint8Array(zeros + (size - start));
-  result.fill(0, 0, zeros);
-  result.set(bytes.slice(start), zeros);
-
-  return result;
-}
-
 // ── Ed25519 multicodec prefix ────────────────────────────────────────────────
 
 // did:key multicodec prefix for Ed25519 public keys: 0xed01

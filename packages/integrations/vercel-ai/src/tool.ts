@@ -20,16 +20,6 @@ interface CredDelegateToolInput {
   scopes: string[];
 }
 
-interface CredDelegateToolResult {
-  accessToken?: string;
-  tokenType: string;
-  expiresIn: number;
-  service: string;
-  scopes: string[];
-  delegationId: string;
-  userId?: string;
-  note?: string;
-}
 
 export interface CredDelegateToolOptions {
   /** Agent token issued by Cred (starts with cred_at_) */

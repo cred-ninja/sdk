@@ -1,0 +1,45 @@
+# gitleaks configuration for cred-ninja/sdk
+#
+# Purpose: keep secret scanning useful by allowlisting the known-safe sample,
+# test, and generated values that automated scanners repeatedly flag as
+# "hardcoded secrets" (they are not). This is auto-discovered by gitleaks
+# (https://github.com/gitleaks/gitleaks) wherever it runs: CI, pre-commit hooks,
+# or local `gitleaks detect`.
+#
+# Real secrets are NEVER committed. `cred_at_` / `cred_admin_` literals in this
+# repo are either documentation placeholders, test fixtures, or runtime-random
+# token generation (e.g. `'cred_at_' + randomBytes(16).toString('hex')`).
+
+title = "cred-ninja/sdk gitleaks config"
+
+[extend]
+# Start from gitleaks' default ruleset, then add the allowlist below.
+useDefault = true
+
+[allowlist]
+description = "Known-safe sample, test, and generated values"
+
+# Path patterns (matched against the file path). These trees contain only
+# examples, tests, generated lockfiles, and documentation, never live secrets.
+paths = [
+  '''package-lock\.json''',
+  '''pnpm-lock\.yaml''',
+  '''yarn\.lock''',
+  '''(^|/)examples/''',
+  '''.*\.test\.ts$''',
+  '''(^|/)__tests__/''',
+  '''(^|/)docs/''',
+  '''(^|/)packages/create-cred-app/template/''',
+]
+
+# Content patterns (matched against the candidate secret). These cover the
+# self-identifying placeholders and the deterministic token *prefixes* that the
+# scaffold appends random bytes to. The prefixes alone are not secrets.
+regexes = [
+  '''cred_at_(\.\.\.|YOUR_AGENT_TOKEN|EXAMPLE[A-Z0-9_]*)''',
+  '''cred_admin_(\.\.\.|YOUR_ADMIN_TOKEN|EXAMPLE[A-Z0-9_]*)''',
+  '''['"]cred_at_['"] \+ randomBytes''',
+  '''['"]cred_admin_['"] \+ randomBytes''',
+  '''test-agent-token''',
+  '''your_agent_token''',
+]

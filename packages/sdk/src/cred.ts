@@ -7,7 +7,6 @@
 
 import {
   CredConfig,
-  CredCloudConfig,
   CredLocalConfig,
   DelegateParams,
   TofuDelegateParams,
