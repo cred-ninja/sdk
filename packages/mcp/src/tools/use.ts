@@ -185,21 +185,58 @@ export async function handleUse(
       : {}),
   };
 
-  const signedHeaders = context.webBotAuthSigner
-    ? context.webBotAuthSigner.signRequest({
-        url: input.url,
-        method: input.method,
-        headers,
-      })
-    : headers;
-
+  // Execute with manual redirect handling. fetch() follows redirects by
+  // default, which would forward the Authorization: Bearer token to whatever
+  // Location a (possibly compromised or DNS-hijacked) allowed host returns —
+  // exfiltrating the token to an arbitrary URL. We re-validate every hop
+  // against the same per-service allowlist and refuse to follow a redirect to
+  // a non-allowlisted target.
+  const MAX_REDIRECTS = 5;
   let response: Response;
+  let currentUrl = input.url;
   try {
-    response = await fetch(input.url, {
-      method: input.method,
-      headers: signedHeaders,
-      body: hasBody ? JSON.stringify(input.body) : undefined,
-    });
+    for (let hop = 0; ; hop++) {
+      const hopHeaders = context.webBotAuthSigner
+        ? context.webBotAuthSigner.signRequest({
+            url: currentUrl,
+            method: input.method,
+            headers,
+          })
+        : headers;
+
+      response = await fetch(currentUrl, {
+        method: input.method,
+        headers: hopHeaders,
+        body: hasBody ? JSON.stringify(input.body) : undefined,
+        redirect: 'manual',
+      });
+
+      const isRedirect =
+        response.status >= 300 && response.status < 400 && response.headers.has('location');
+      if (!isRedirect) {
+        break;
+      }
+
+      if (hop >= MAX_REDIRECTS) {
+        return {
+          content: [{ type: 'text', text: 'Error: too many redirects from upstream.' }],
+          isError: true,
+        };
+      }
+
+      const nextUrl = new URL(response.headers.get('location')!, currentUrl).toString();
+      if (!context.tokenCache.isAllowedUrl(entry.service, nextUrl, entry.scopes)) {
+        // Refuse to forward the token to a redirect target outside the allowlist.
+        return {
+          content: [{
+            type: 'text',
+            text: 'Error: upstream redirect to a non-allowlisted URL was blocked.',
+          }],
+          isError: true,
+        };
+      }
+      currentUrl = nextUrl;
+    }
   } catch (err) {
     // Network error — don't include the URL in the message to avoid reflecting
     // any injected URL back into LLM context

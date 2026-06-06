@@ -51,7 +51,9 @@ export class RateLimitPolicy implements CredPolicy {
     // Check if limit exceeded
     if (record.timestamps.length >= limits.maxRequests) {
       const oldestInWindow = record.timestamps[0];
-      const retryAfterMs = oldestInWindow + limits.windowMs - now;
+      // Clamp to 0: the oldest in-window request can age out between the filter
+      // above and this calculation, which would otherwise yield a negative value.
+      const retryAfterMs = Math.max(0, oldestInWindow + limits.windowMs - now);
       const retryAfterSec = Math.ceil(retryAfterMs / 1000);
 
       return {

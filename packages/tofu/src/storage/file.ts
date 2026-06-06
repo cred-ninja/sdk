@@ -21,6 +21,15 @@ export class FileBackend implements AgentIdentityBackend {
 
   insertAgent(row: AgentIdentityStoredRow): void {
     const data = this.readAll();
+    // Enforce fingerprint uniqueness, matching the SQLite backend's
+    // `fingerprint TEXT NOT NULL UNIQUE` constraint. Without this, two agentIds
+    // could share a fingerprint and getAgentByFingerprint would resolve to a
+    // non-deterministic identity.
+    for (const existing of Object.values(data)) {
+      if (existing.fingerprint === row.fingerprint && existing.agentId !== row.agentId) {
+        throw new Error(`Fingerprint already registered to a different agent: ${row.fingerprint}`);
+      }
+    }
     data[row.agentId] = row;
     this.writeAll(data);
   }

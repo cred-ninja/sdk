@@ -26,6 +26,61 @@ describe('webBotAuthPolicy', () => {
     });
   });
 
+  it('denies a Signature-Agent on an attacker-controlled subdomain suffix', () => {
+    const policy = webBotAuthPolicy({
+      allowedSignatureAgentPrefixes: ['https://cred.example.com/'],
+    });
+
+    const result = policy.evaluate({
+      provider: 'google',
+      agentTokenHash: 'abc',
+      requestedScopes: ['calendar.readonly'],
+      consentedScopes: ['calendar.readonly'],
+      timestamp: new Date().toISOString(),
+      identitySource: 'web-bot-auth',
+      signatureAgent: 'https://cred.example.com.evil.com/.well-known/dir',
+    });
+
+    expect(result.decision).toBe('DENY');
+    expect(result.reason).toContain('not allowed');
+  });
+
+  it('denies a Signature-Agent using the userinfo host trick', () => {
+    const policy = webBotAuthPolicy({
+      allowedSignatureAgentPrefixes: ['https://cred.example.com/'],
+    });
+
+    const result = policy.evaluate({
+      provider: 'google',
+      agentTokenHash: 'abc',
+      requestedScopes: ['calendar.readonly'],
+      consentedScopes: ['calendar.readonly'],
+      timestamp: new Date().toISOString(),
+      identitySource: 'web-bot-auth',
+      signatureAgent: 'https://cred.example.com@evil.com/dir',
+    });
+
+    expect(result.decision).toBe('DENY');
+  });
+
+  it('still allows a legitimate same-origin Signature-Agent path', () => {
+    const policy = webBotAuthPolicy({
+      allowedSignatureAgentPrefixes: ['https://cred.example.com/'],
+    });
+
+    const result = policy.evaluate({
+      provider: 'google',
+      agentTokenHash: 'abc',
+      requestedScopes: ['calendar.readonly'],
+      consentedScopes: ['calendar.readonly'],
+      timestamp: new Date().toISOString(),
+      identitySource: 'web-bot-auth',
+      signatureAgent: 'https://cred.example.com/.well-known/http-message-signatures-directory',
+    });
+
+    expect(result.decision).toBe('ALLOW');
+  });
+
   it('denies when key id is required and missing', () => {
     const policy = webBotAuthPolicy({ requireKeyId: true });
 
