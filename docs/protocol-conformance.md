@@ -30,6 +30,7 @@ The protocol README advertises these capabilities. Against the SDK:
 | Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Scope strings, not RFC 9396 `authorization_details`. |
 | Fast revocation (<5s propagation) | **Partial** | Revoke endpoints exist (`/api/v1/agents/:agentId/revoke-all`, `DELETE /api/token/:provider`, `DELETE /api/v1/connections/:provider`). Propagation latency is not measured or asserted by tests. |
 | Cross-provider interoperability | **Implemented** | OAuth provider adapters in `packages/oauth/src/adapters` (Google, GitHub, Slack, Notion, Salesforce, Linear, HubSpot, …) |
+| Protocol-version handshake | **Implemented** (advisory) | `packages/sdk/src/protocol.ts` (`CRED_PROTOCOL_VERSION`, `CRED_PROTOCOL_VERSION_HEADER`); SDK advertises via `Cred.headers()`, server echoes via early middleware. See section below. |
 
 ## RFC profile conformance
 
@@ -57,28 +58,31 @@ delegation token format:
 | Identity document | `did:key` + agent records | SVID minting | Map `did:key` ↔ SVID claims. |
 | Authorization enforcement | `@credninja/guard` (fail-closed, scope attenuation) | Guard component (fail-closed, monotonic attenuation) | Aligned in spirit; converge the attenuation algebra. |
 
-## Proposed: protocol-version handshake
+## Protocol-version handshake — Implemented (advisory)
 
-There is currently **no** protocol-version identifier exchanged between SDK, server,
-and (future) daemon (`grep` for `PROTOCOL_VERSION` / `Cred-Protocol` returns nothing).
-A version handshake is the smallest concrete step toward conformance tracking. Proposed
-shape (not yet implemented — pending a canonical version string from the spec):
+A protocol-version identifier is now exchanged between the SDK client and server
+via the `Cred-Protocol-Version` HTTP header. The v0 handshake is **advisory**:
+peers advertise and echo the version, but neither side rejects on mismatch.
 
-1. Export a constant, e.g. `CRED_PROTOCOL_VERSION = '0.1-draft'`, from `@credninja/sdk`.
-2. SDK client sends `Cred-Protocol-Version: <v>` on delegation/use requests.
-3. Server echoes the version it supports; on mismatch beyond a negotiated floor, it
-   returns a structured `protocol_version_unsupported` error so clients fail loud.
-4. The daemon's ACRP server advertises the same header, giving one negotiation path
-   across all three implementations.
-
-This is intentionally left as a proposal: the version string and negotiation rules are
-protocol decisions that belong in `cred-ninja/protocol`, not invented here. Wiring is a
-~1-file change in the SDK client once the string is fixed.
+- **Version constant:** `CRED_PROTOCOL_VERSION = '0.1.0'`, exported from
+  `@credninja/sdk` (`packages/sdk/src/protocol.ts`). The value is **provisional**
+  (`@provisional pre-submission`) and tracks the spec; do not pin behavior to it.
+- **Advertise (SDK client):** `@credninja/sdk` sends `Cred-Protocol-Version: 0.1.0`
+  on every outbound request via `Cred.headers()`.
+- **Echo (server):** `@credninja/server` sets `Cred-Protocol-Version: 0.1.0` on
+  every response through an early middleware (registered after `express.json()`).
+- **No rejection (v0):** version mismatch is not an error. The header exists so
+  peers can detect drift and log it; structured rejection (e.g. a
+  `protocol_version_unsupported` error beyond a negotiated floor) is deferred to a
+  future protocol version, once the negotiation rules are fixed in
+  `cred-ninja/protocol`.
+- **Future daemon path:** the daemon's ACRP server can advertise the same header,
+  giving one negotiation path across all three implementations.
 
 ## Open questions / next steps
 
 - [ ] Reconcile this table against the protocol repo's formal conformance section (needs that repo in scope, or its `CONFORMANCE` doc).
 - [ ] Decide biscuit vs Ed25519-receipt token profile (SDK ↔ daemon convergence).
-- [ ] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake.
+- [x] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake. *(Done — advisory v0 at `0.1.0` (provisional); enforcement/negotiation still pending a spec decision.)*
 - [ ] Decide whether RAR (`authorization_details`) replaces or augments scope strings.
 - [ ] Add a revocation-propagation latency test to back the "<5s" claim.

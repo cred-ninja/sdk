@@ -33,6 +33,7 @@ import {
   RotationStrategy,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
+import { CRED_PROTOCOL_VERSION, CRED_PROTOCOL_VERSION_HEADER } from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
@@ -1404,6 +1405,7 @@ export class Cred {
       'Authorization': `Bearer ${this.agentToken}`,
       'Content-Type': 'application/json',
       'Accept': 'application/json',
+      [CRED_PROTOCOL_VERSION_HEADER]: CRED_PROTOCOL_VERSION,
     };
   }
 

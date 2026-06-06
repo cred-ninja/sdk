@@ -114,6 +114,16 @@ describe('Cred.delegate()', () => {
     expect(init.headers['Authorization']).toBe(`Bearer ${TOKEN}`);
   });
 
+  it('advertises the Cred-Protocol-Version header on requests', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'at', token_type: 'Bearer', service: 'google',
+      scopes: [], delegation_id: 'del_1',
+    }));
+    await cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers['Cred-Protocol-Version']).toBe('0.1.0');
+  });
+
   it('throws ConsentRequiredError on 403 consent_required', async () => {
     mockFetch.mockResolvedValue(mockResponse(403, {
       error: 'consent_required',

@@ -158,6 +158,17 @@ describe('@credninja/server', () => {
     });
   });
 
+  describe('protocol-version handshake', () => {
+    it('echoes the Cred-Protocol-Version header on every response', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/health');
+
+      expect(res.headers['cred-protocol-version']).toBe('0.1.0');
+    });
+  });
+
   describe('agent auth configuration', () => {
     it('supports a custom request verifier without a static agent token', async () => {
       const { app, tofu } = createServer(makeTestConfig({

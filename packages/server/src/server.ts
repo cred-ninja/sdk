@@ -107,6 +107,12 @@ interface VerifiedWebBotAuthIdentity {
   fingerprint?: string;
 }
 
+// Wire-protocol version advertised/echoed on every response. v0 handshake is
+// advisory only — the server echoes the version but never rejects on mismatch.
+// Keep in sync with CRED_PROTOCOL_VERSION in @credninja/sdk (provisional).
+const CRED_PROTOCOL_VERSION = '0.1.0';
+const CRED_PROTOCOL_VERSION_HEADER = 'Cred-Protocol-Version';
+
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_DELEGATION_TTL_SECONDS = 900;
@@ -204,6 +210,13 @@ export function createServer(config: ServerConfig) {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+
+  // Advertise the wire-protocol version on every response. Advisory in v0 —
+  // clients read this to detect drift, but the server never rejects on mismatch.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader(CRED_PROTOCOL_VERSION_HEADER, CRED_PROTOCOL_VERSION);
+    next();
+  });
 
   // ── State ──────────────────────────────────────────────────────────────────
 
