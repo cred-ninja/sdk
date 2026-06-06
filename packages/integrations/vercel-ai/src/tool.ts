@@ -30,7 +30,13 @@ export interface CredDelegateToolOptions {
   appClientId: string;
   /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl: string;
-  /** Use `handle` to avoid returning provider access tokens to the model. Defaults to `raw` for backwards compatibility. */
+  /**
+   * Token delivery mode. Defaults to `handle` (brokered): the provider access
+   * token stays on the Cred server and only a delegation handle is returned to
+   * the model — use it with `credUseTool`. Set to `raw` only if you explicitly
+   * need the access token returned to the model; this exposes a live OAuth
+   * token to the LLM context and defeats the brokered security model.
+   */
   tokenFormat?: 'raw' | 'handle';
 }
 
@@ -75,7 +81,7 @@ interface CredUseToolInput {
  * ```
  */
 export function credDelegateTool(options: CredDelegateToolOptions) {
-  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'raw' } = options;
+  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle' } = options;
   const inputSchema = z.object({
     service: z
       .string()
