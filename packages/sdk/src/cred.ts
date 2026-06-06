@@ -33,7 +33,14 @@ import {
   RotationStrategy,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
-import { CRED_PROTOCOL_VERSION, CRED_PROTOCOL_VERSION_HEADER } from './protocol.js';
+import {
+  CRED_PROTOCOL_SUPPORTED_VERSIONS,
+  CRED_PROTOCOL_VERSION,
+  CRED_PROTOCOL_VERSION_HEADER,
+  CRED_PROTOCOL_VERSION_MINIMUM,
+  CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+  isCredProtocolVersionSupported,
+} from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
@@ -1472,6 +1479,8 @@ export class Cred {
   }
 
   private async handleResponse<T>(res: Response): Promise<T> {
+    this.assertSelectedProtocolVersion(res);
+
     if (res.ok) {
       return res.json() as Promise<T>;
     }
@@ -1499,6 +1508,21 @@ export class Cred {
     }
 
     throw new CredError(message, String(body.error ?? 'unknown'), res.status);
+  }
+
+  private assertSelectedProtocolVersion(res: Response): void {
+    const selectedVersion = res.headers?.get?.(CRED_PROTOCOL_VERSION_HEADER);
+    if (!selectedVersion || isCredProtocolVersionSupported(selectedVersion)) {
+      return;
+    }
+
+    throw new CredError(
+      `Cred Protocol version ${selectedVersion} is not supported by this SDK. ` +
+      `Supported versions: ${CRED_PROTOCOL_SUPPORTED_VERSIONS.join(', ')}; ` +
+      `minimum version: ${CRED_PROTOCOL_VERSION_MINIMUM}.`,
+      CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+      res.status,
+    );
   }
 
   // ── Rotation ─────────────────────────────────────────────────────────────────

@@ -1,15 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
-import { Cred, CredError, ConsentRequiredError } from '../index';
+import {
+  CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+  Cred,
+  CredError,
+  ConsentRequiredError,
+} from '../index';
 
 // Mock global fetch
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-function mockResponse(status: number, body: unknown) {
+function mockResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
+  const normalizedHeaders = new Map(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: {
+      get: vi.fn((name: string) => normalizedHeaders.get(name.toLowerCase()) ?? null),
+    },
     json: vi.fn().mockResolvedValue(body),
   };
 }
@@ -122,6 +134,22 @@ describe('Cred.delegate()', () => {
     await cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' });
     const [, init] = mockFetch.mock.calls[0];
     expect(init.headers['Cred-Protocol-Version']).toBe('0.1.0');
+  });
+
+  it('rejects unsupported server-selected protocol versions', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'at', token_type: 'Bearer', service: 'google',
+      scopes: [], delegation_id: 'del_1',
+    }, {
+      'Cred-Protocol-Version': '0.2.0',
+    }));
+
+    await expect(
+      cred.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' }),
+    ).rejects.toMatchObject({
+      code: CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+      statusCode: 200,
+    });
   });
 
   it('throws ConsentRequiredError on 403 consent_required', async () => {

@@ -167,6 +167,37 @@ describe('@credninja/server', () => {
 
       expect(res.headers['cred-protocol-version']).toBe('0.1.0');
     });
+
+    it('accepts the canonical Cred-Protocol-Version request header', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/health')
+        .set('Cred-Protocol-Version', '0.1.0');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cred-protocol-version']).toBe('0.1.0');
+    });
+
+    it('rejects explicit unsupported protocol versions before route handling', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/health')
+        .set('Cred-Protocol-Version', '0.0.9');
+
+      expect(res.status).toBe(426);
+      expect(res.headers['cred-protocol-version']).toBe('0.1.0');
+      expect(res.body).toMatchObject({
+        error: 'protocol_version_unsupported',
+        requested_version: '0.0.9',
+        supported_versions: ['0.1.0'],
+        minimum_version: '0.1.0',
+        current_version: '0.1.0',
+      });
+    });
   });
 
   describe('agent auth configuration', () => {
