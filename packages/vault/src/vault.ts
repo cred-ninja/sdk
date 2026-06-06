@@ -17,7 +17,6 @@ import type {
   Permission,
   Rotation,
   RotationStrategy,
-  RotationFailureAction,
 } from './types.js';
 import type { AuditEvent, AuditFilter } from './audit.js';
 import { RotationEngine } from './rotation.js';

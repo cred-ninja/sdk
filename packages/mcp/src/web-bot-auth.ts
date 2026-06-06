@@ -1,6 +1,5 @@
 import {
   createWebBotAuthSigner as createSdkWebBotAuthSigner,
-  rawPrivateKeyToPublicKeyHex,
 } from '@credninja/sdk';
 import type { CredMcpWebBotAuthConfig } from './config.js';
 

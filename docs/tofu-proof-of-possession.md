@@ -74,7 +74,7 @@ await fetch('http://localhost:3456/api/v1/tofu/register', {
 // The current HTTP registration route expects base64 under `public_key`.
 
 const cred = new Cred({
-  agentToken: 'cred_at_...',
+  agentToken: 'cred_at_YOUR_AGENT_TOKEN', // sample placeholder, not a real token
   baseUrl: 'http://localhost:3456',
 });
 
@@ -96,7 +96,7 @@ Registration request:
 ```http
 POST /api/v1/tofu/register HTTP/1.1
 Host: localhost:3456
-Authorization: Bearer cred_at_...
+Authorization: Bearer cred_at_YOUR_AGENT_TOKEN
 Content-Type: application/json
 
 {
@@ -113,7 +113,7 @@ Delegation request:
 ```http
 POST /api/v1/delegate HTTP/1.1
 Host: localhost:3456
-Authorization: Bearer cred_at_...
+Authorization: Bearer cred_at_YOUR_AGENT_TOKEN
 Content-Type: application/json
 
 {

@@ -13,7 +13,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 
-import { CredMcpConfig, CredMcpCloudConfig, CredMcpLocalConfig } from './config.js';
+import { CredMcpConfig } from './config.js';
 import { TokenCache } from './token-cache.js';
 import { createWebBotAuthSigner } from './web-bot-auth.js';
 import {

@@ -9,7 +9,7 @@
  */
 
 import { mkdirSync, writeFileSync, copyFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve, dirname, basename } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
@@ -40,7 +40,6 @@ if (!name || name === '--help' || name === '-h') {
 }
 
 const targetDir = resolve(process.cwd(), name);
-const projectName = name === '.' ? basename(process.cwd()) : name;
 const skipInstall = process.env.CREATE_CRED_APP_SKIP_INSTALL === '1';
 
 console.log();
