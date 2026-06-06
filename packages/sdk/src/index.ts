@@ -1,5 +1,12 @@
 export { Cred } from './cred.js';
-export { CRED_PROTOCOL_VERSION, CRED_PROTOCOL_VERSION_HEADER } from './protocol.js';
+export {
+  CRED_PROTOCOL_SUPPORTED_VERSIONS,
+  CRED_PROTOCOL_VERSION,
+  CRED_PROTOCOL_VERSION_HEADER,
+  CRED_PROTOCOL_VERSION_MINIMUM,
+  CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+  isCredProtocolVersionSupported,
+} from './protocol.js';
 export { CredError, ConsentRequiredError } from './errors.js';
 export { createWebBotAuthSigner, rawPrivateKeyToPublicKeyHex } from './web-bot-auth.js';
 export {

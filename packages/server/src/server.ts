@@ -107,11 +107,13 @@ interface VerifiedWebBotAuthIdentity {
   fingerprint?: string;
 }
 
-// Wire-protocol version advertised/echoed on every response. v0 handshake is
-// advisory only — the server echoes the version but never rejects on mismatch.
-// Keep in sync with CRED_PROTOCOL_VERSION in @credninja/sdk (provisional).
+// Wire-protocol version selected on every response. Keep in sync with
+// CRED_PROTOCOL_VERSION in @credninja/sdk.
 const CRED_PROTOCOL_VERSION = '0.1.0';
 const CRED_PROTOCOL_VERSION_HEADER = 'Cred-Protocol-Version';
+const CRED_PROTOCOL_VERSION_MINIMUM = '0.1.0';
+const CRED_PROTOCOL_SUPPORTED_VERSIONS = [CRED_PROTOCOL_VERSION] as const;
+const CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR = 'protocol_version_unsupported';
 
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
@@ -200,6 +202,26 @@ function isForwardableBrokerHeader(key: string, value: unknown): value is string
   return !BLOCKED_BROKER_EXTRA_HEADERS.has(key.trim().toLowerCase());
 }
 
+function isSupportedProtocolVersion(version: string): boolean {
+  return (CRED_PROTOCOL_SUPPORTED_VERSIONS as readonly string[]).includes(version);
+}
+
+function requestedProtocolVersion(req: Request): string | undefined {
+  const advertised = req.get(CRED_PROTOCOL_VERSION_HEADER);
+  return advertised === undefined ? undefined : advertised.trim();
+}
+
+function sendProtocolVersionUnsupported(res: Response, requestedVersion: string): void {
+  res.status(426).json({
+    error: CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+    message: `Cred Protocol version ${requestedVersion || '<empty>'} is not supported`,
+    requested_version: requestedVersion,
+    supported_versions: [...CRED_PROTOCOL_SUPPORTED_VERSIONS],
+    minimum_version: CRED_PROTOCOL_VERSION_MINIMUM,
+    current_version: CRED_PROTOCOL_VERSION,
+  });
+}
+
 // ── Server factory ───────────────────────────────────────────────────────────
 
 export function createServer(config: ServerConfig) {
@@ -211,10 +233,17 @@ export function createServer(config: ServerConfig) {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  // Advertise the wire-protocol version on every response. Advisory in v0 —
-  // clients read this to detect drift, but the server never rejects on mismatch.
-  app.use((_req: Request, res: Response, next: NextFunction) => {
+  // Advertise the selected wire-protocol version on every response. During the
+  // 0.1.0 compatibility window, missing version headers are accepted because
+  // there is no earlier wire version to downgrade to. Explicit unsupported
+  // versions fail before auth, guard policy, or credential handling.
+  app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader(CRED_PROTOCOL_VERSION_HEADER, CRED_PROTOCOL_VERSION);
+    const version = requestedProtocolVersion(req);
+    if (version !== undefined && !isSupportedProtocolVersion(version)) {
+      sendProtocolVersionUnsupported(res, version);
+      return;
+    }
     next();
   });
 
