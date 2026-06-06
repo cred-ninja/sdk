@@ -60,8 +60,42 @@ export class UrlAllowlistPolicy implements CredPolicy {
     if (pattern instanceof RegExp) {
       return pattern.test(url);
     }
-    // String patterns are treated as prefixes
-    return url.startsWith(pattern);
+    // String patterns are treated as path prefixes scoped to a single origin.
+    // A raw `url.startsWith(pattern)` check is unsafe: an allowlist entry of
+    // `https://api.github.com/` would also match `https://api.github.com.evil.com/`
+    // (attacker-controlled subdomain) or `https://api.github.com@evil.com/`
+    // (userinfo trick, where the request actually targets evil.com). We instead
+    // parse both URLs and require an exact origin match before comparing paths.
+    return this.matchesStringPrefix(url, pattern);
+  }
+
+  private matchesStringPrefix(url: string, pattern: string): boolean {
+    let target: URL;
+    let allowed: URL;
+    try {
+      target = new URL(url);
+      allowed = new URL(pattern);
+    } catch {
+      // Unparseable target or pattern — fail closed.
+      return false;
+    }
+
+    // Reject embedded credentials (e.g. https://api.github.com@evil.com or
+    // https://user:pass@host); these are a common allowlist-bypass vector.
+    if (target.username || target.password) {
+      return false;
+    }
+
+    // Scheme + host + port must match exactly. This closes subdomain-suffix and
+    // userinfo bypasses while preserving same-origin path-prefix matching.
+    if (target.origin !== allowed.origin || target.protocol !== allowed.protocol) {
+      return false;
+    }
+
+    // Within the same origin, keep the documented prefix semantics on path+query.
+    const targetPathRef = target.pathname + target.search;
+    const allowedPathRef = allowed.pathname + allowed.search;
+    return targetPathRef.startsWith(allowedPathRef);
   }
 
   private patternToString(pattern: string | RegExp): string {
