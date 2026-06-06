@@ -182,6 +182,106 @@ describe('UrlAllowlistPolicy', () => {
     });
   });
 
+  describe('origin bypass protection', () => {
+    it('denies attacker-controlled subdomain suffix', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'https://api.github.com.evil.com/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('denies userinfo-embedded host trick', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'https://api.github.com@evil.com/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('denies credentials embedded against the legitimate host', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/repos/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'https://user:pass@api.github.com/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('denies a scheme downgrade to the allowed host', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'http://api.github.com/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('denies a different port on the allowed host', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'https://api.github.com:8443/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('denies an unparseable target URL (fail closed)', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'not-a-valid-url',
+      }));
+
+      expect(result.decision).toBe('DENY');
+    });
+
+    it('still allows the legitimate same-origin host', () => {
+      const policy = new UrlAllowlistPolicy({
+        allowedUrls: {
+          github: ['https://api.github.com/'],
+        },
+      });
+
+      const result = policy.evaluate(makeContext({
+        targetUrl: 'https://api.github.com/repos/owner/repo',
+      }));
+
+      expect(result.decision).toBe('ALLOW');
+    });
+  });
+
   describe('edge cases', () => {
     it('handles URLs with query parameters', () => {
       const policy = new UrlAllowlistPolicy({
