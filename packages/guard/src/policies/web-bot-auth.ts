@@ -37,7 +37,9 @@ export function webBotAuthPolicy(config: WebBotAuthPolicyConfig = {}): CredPolic
             reason: 'Missing Signature-Agent URL',
           };
         }
-        const allowed = config.allowedSignatureAgentPrefixes.some((prefix) => ctx.signatureAgent!.startsWith(prefix));
+        const allowed = config.allowedSignatureAgentPrefixes.some(
+          (prefix) => signatureAgentMatchesPrefix(ctx.signatureAgent!, prefix),
+        );
         if (!allowed) {
           return {
             decision: 'DENY',
@@ -53,4 +55,39 @@ export function webBotAuthPolicy(config: WebBotAuthPolicyConfig = {}): CredPolic
       };
     },
   };
+}
+
+/**
+ * Match a Signature-Agent URL against an allowed prefix.
+ *
+ * A raw `signatureAgent.startsWith(prefix)` is unsafe: an allowed prefix of
+ * `https://agents.example.com` would also match `https://agents.example.com.evil.com`
+ * (attacker-controlled subdomain) or `https://agents.example.com@evil.com`
+ * (userinfo trick). We require an exact origin (scheme + host + port) match and
+ * reject embedded credentials before applying the prefix on the path.
+ */
+function signatureAgentMatchesPrefix(signatureAgent: string, prefix: string): boolean {
+  let agent: URL;
+  let allowed: URL;
+  try {
+    agent = new URL(signatureAgent);
+    allowed = new URL(prefix);
+  } catch {
+    // Unparseable Signature-Agent or prefix — fail closed.
+    return false;
+  }
+
+  // Reject embedded credentials (e.g. https://host@evil.com); a common bypass.
+  if (agent.username || agent.password) {
+    return false;
+  }
+
+  if (agent.origin !== allowed.origin || agent.protocol !== allowed.protocol) {
+    return false;
+  }
+
+  // Within the same origin, keep prefix semantics on path + query.
+  const agentPath = agent.pathname + agent.search;
+  const allowedPath = allowed.pathname + allowed.search;
+  return agentPath.startsWith(allowedPath);
 }

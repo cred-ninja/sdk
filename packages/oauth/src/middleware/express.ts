@@ -131,6 +131,13 @@ export function credOAuth(
 
         const codeVerifier = session[`${pkceKey}:${provider}`] as string | undefined;
 
+        // State and PKCE verifier are single-use: clear them so a captured
+        // state value cannot be replayed against a second callback.
+        if (req.session) {
+          delete req.session[`${stateKey}:${provider}`];
+          delete req.session[`${pkceKey}:${provider}`];
+        }
+
         const client = new OAuthClient({
           adapter: config.adapter,
           clientId: config.clientId,
