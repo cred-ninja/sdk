@@ -165,13 +165,19 @@ describe('SSRF dynamic bypass suite — isAllowedUrl()', () => {
     it('rejects attacker.com with salesforce.com in path', () => {
       expect(cache.isAllowedUrl('salesforce', 'https://attacker.com/.salesforce.com')).toBe(false);
     });
-    it('rejects private IP as salesforce subdomain label', () => {
-      // "192.168.1.1.salesforce.com" — technically matches endsWith but resolves locally
-      // This is the DNS rebinding risk — flag it
-      const result = cache.isAllowedUrl('salesforce', 'https://192.168.1.1.salesforce.com/');
-      // Document the result — if true, it's a DNS rebinding risk worth noting
-      console.log(`[SSRF-AUDIT] 192.168.1.1.salesforce.com allowed: ${result}`);
-      // We don't assert a specific value here — we're documenting behavior
+    it('rejects private-IP-shaped subdomain label (DNS rebinding mitigation)', () => {
+      // "192.168.1.1.salesforce.com" matches the .salesforce.com suffix but the
+      // leftmost labels look like a private IPv4. token-cache.ts rejects this
+      // explicitly so an attacker who can resolve a private-IP-shaped hostname
+      // cannot exfiltrate the Salesforce token to a local network target.
+      // If the isPrivateIpSubdomain guard is removed this test fails immediately.
+      expect(cache.isAllowedUrl('salesforce', 'https://192.168.1.1.salesforce.com/')).toBe(false);
+    });
+    it('rejects loopback-IP-shaped subdomain label', () => {
+      expect(cache.isAllowedUrl('salesforce', 'https://127.0.0.1.salesforce.com/')).toBe(false);
+    });
+    it('rejects AWS-metadata-IP-shaped subdomain label', () => {
+      expect(cache.isAllowedUrl('salesforce', 'https://169.254.169.254.force.com/')).toBe(false);
     });
   });
 
