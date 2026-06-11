@@ -37,6 +37,14 @@ import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './conf
 import { createExpressMiddleware, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
+import {
+  CRED_PROTOCOL_SUPPORTED_VERSIONS,
+  CRED_PROTOCOL_VERSION,
+  CRED_PROTOCOL_VERSION_HEADER,
+  CRED_PROTOCOL_VERSION_MINIMUM,
+  CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+  isCredProtocolVersionSupported,
+} from '@credninja/protocol';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -106,14 +114,6 @@ interface VerifiedWebBotAuthIdentity {
   agentId?: string;
   fingerprint?: string;
 }
-
-// Wire-protocol version selected on every response. Keep in sync with
-// CRED_PROTOCOL_VERSION in @credninja/sdk.
-const CRED_PROTOCOL_VERSION = '0.1.0';
-const CRED_PROTOCOL_VERSION_HEADER = 'Cred-Protocol-Version';
-const CRED_PROTOCOL_VERSION_MINIMUM = '0.1.0';
-const CRED_PROTOCOL_SUPPORTED_VERSIONS = [CRED_PROTOCOL_VERSION] as const;
-const CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR = 'protocol_version_unsupported';
 
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
@@ -202,10 +202,6 @@ function isForwardableBrokerHeader(key: string, value: unknown): value is string
   return !BLOCKED_BROKER_EXTRA_HEADERS.has(key.trim().toLowerCase());
 }
 
-function isSupportedProtocolVersion(version: string): boolean {
-  return (CRED_PROTOCOL_SUPPORTED_VERSIONS as readonly string[]).includes(version);
-}
-
 function requestedProtocolVersion(req: Request): string | undefined {
   const advertised = req.get(CRED_PROTOCOL_VERSION_HEADER);
   return advertised === undefined ? undefined : advertised.trim();
@@ -240,7 +236,7 @@ export function createServer(config: ServerConfig) {
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader(CRED_PROTOCOL_VERSION_HEADER, CRED_PROTOCOL_VERSION);
     const version = requestedProtocolVersion(req);
-    if (version !== undefined && !isSupportedProtocolVersion(version)) {
+    if (version !== undefined && !isCredProtocolVersionSupported(version)) {
       sendProtocolVersionUnsupported(res, version);
       return;
     }
