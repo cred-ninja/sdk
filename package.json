@@ -36,13 +36,19 @@
     "typescript-eslint": "8.60.1"
   },
   "overrides": {
-    "esbuild": "0.27.4",
+    "@hono/node-server": "2.0.12",
+    "body-parser": "2.3.0",
+    "esbuild": "0.28.1",
     "express-rate-limit": "8.5.2",
-    "fast-uri": "3.1.2",
-    "hono": "4.12.23",
+    "fast-uri": "3.1.4",
+    "form-data": "4.0.6",
+    "hono": "4.12.27",
     "path-to-regexp": "8.4.2",
     "qs": "6.15.2",
-    "vite": "8.0.14"
+    "vite": "8.0.16",
+    "@typescript-eslint/typescript-estree": {
+      "brace-expansion": "5.0.8"
+    }
   },
   "engines": {
     "node": ">=18"
