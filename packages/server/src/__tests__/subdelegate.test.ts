@@ -391,8 +391,10 @@ describe('POST /api/v1/subdelegate', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.access_token).toBe('ya29.test-access-token');
-    expect(res.body.token_type).toBe('Bearer');
+    // Sub-delegation always returns a brokered handle, never the raw
+    // provider token — see the "sub-delegation is always brokered" tests.
+    expect(res.body.access_token).toBeUndefined();
+    expect(res.body.token_type).toBe('Delegation');
     expect(res.body.service).toBe('google');
     expect(res.body.scopes).toEqual(['openid', 'email']);
     expect(res.body.delegation_id).toMatch(/^del_/);
@@ -491,6 +493,370 @@ describe('POST /api/v1/subdelegate', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('depth_exceeded');
+  });
+
+  it('always returns a brokered handle even when raw token_format is requested', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_raw_request',
+      chainDepth: 0,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+        token_format: 'raw',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.access_token).toBeUndefined();
+    expect(res.body.token_type).toBe('Delegation');
+    expect(res.body.token_format_enforced).toBe('brokered');
+    expect(res.body.requested_token_format).toBe('raw');
+  });
+
+  it('rejects sub-delegation for services with no brokered-use path', async () => {
+    const { app, vault } = createServer(makeTestConfig());
+    await vault.init();
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: 'irrelevant.receipt.value',
+        agent_did: 'did:key:z6MkChild',
+        service: 'linear',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('brokered_format_unsupported');
+  });
+
+  it('denies sub-delegation when the parent agent has been revoked', async () => {
+    const { app, vault } = await setupVaultWithTokenAndPermissions();
+    await vault.revokeAgent('agt_parent');
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_revoked',
+      chainDepth: 0,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('ancestor_agent_revoked');
+  });
+
+  it('denies sub-delegation when the parent agent is suspended', async () => {
+    const { app, vault } = await setupVaultWithTokenAndPermissions();
+    const now = new Date().toISOString();
+    await vault.registerAgent({
+      id: 'agt_parent',
+      did: 'did:key:z6MkParent',
+      name: 'parent-agent',
+      fingerprint: 'fp_parent',
+      scopeCeiling: ['openid', 'email', 'profile', 'calendar.readonly'],
+      status: 'suspended',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_suspended',
+      chainDepth: 0,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('ancestor_agent_suspended');
+  });
+
+  it('still allows sub-delegation when the parent DID has no agent record (unknown-agent behavior)', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkUnknownParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_unknown',
+      chainDepth: 0,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('denies a two-hop-removed sub-delegation when a revoked grandparent is still in the chain', async () => {
+    // Regression test for the full-lineage ancestor check: a revoked
+    // grandparent must block new descendants even when the immediate
+    // parent presenting the receipt is still active. This exercises the
+    // real POST /api/v1/subdelegate route end-to-end for both hops so the
+    // `lineage` claim is populated exactly as it would be in production
+    // (not hand-forged in the test).
+    const { app, vault } = createServer(makeTestConfig());
+    await vault.init();
+
+    await vault.store({
+      provider: 'google',
+      userId: 'default',
+      accessToken: 'ya29.grandparent-chain-token',
+      scopes: ['openid', 'email'],
+    });
+
+    const now = new Date().toISOString();
+    await vault.registerAgent({
+      id: 'agt_grandparent',
+      did: 'did:key:z6MkGrandparent',
+      name: 'grandparent-agent',
+      fingerprint: 'fp_grandparent',
+      scopeCeiling: ['openid', 'email'],
+      status: 'active',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await vault.registerAgent({
+      id: 'agt_parent',
+      did: 'did:key:z6MkParent',
+      name: 'parent-agent',
+      fingerprint: 'fp_parent',
+      scopeCeiling: ['openid', 'email'],
+      status: 'active',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await vault.registerAgent({
+      id: 'agt_child',
+      did: 'did:key:z6MkChild',
+      name: 'child-agent',
+      fingerprint: 'fp_child',
+      scopeCeiling: ['openid', 'email'],
+      status: 'active',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await vault.createPermission({
+      agentId: 'agt_parent',
+      connectionId: 'google',
+      allowedScopes: ['openid', 'email'],
+      delegatable: true,
+      maxDelegationDepth: 5,
+      requiresApproval: false,
+      createdBy: 'admin',
+    });
+    await vault.createPermission({
+      agentId: 'agt_child',
+      connectionId: 'google',
+      allowedScopes: ['openid', 'email'],
+      delegatable: true,
+      maxDelegationDepth: 5,
+      requiresApproval: false,
+      createdBy: 'admin',
+    });
+
+    // Root receipt, signed by the grandparent (chainDepth 0, no ancestors).
+    const grandparentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkGrandparent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_grandparent',
+      chainDepth: 0,
+    });
+
+    // Hop 1: grandparent -> parent. Minted for real by the server, so its
+    // `lineage` claim is exactly what production would produce.
+    const hop1 = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: grandparentReceipt,
+        agent_did: 'did:key:z6MkParent',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+    expect(hop1.status).toBe(200);
+    expect(hop1.body.chain_depth).toBe(1);
+    const parentReceipt = hop1.body.receipt as string;
+
+    // Sanity check: the parent's own receipt now carries the grandparent in
+    // its lineage claim.
+    const parentPayload = JSON.parse(Buffer.from(parentReceipt.split('.')[1], 'base64url').toString('utf8'));
+    expect(parentPayload.lineage).toEqual(['did:key:z6MkGrandparent']);
+
+    // The grandparent is revoked *after* the parent receipt was minted —
+    // the parent agent itself remains active throughout.
+    await vault.revokeAgent('agt_grandparent');
+
+    // Hop 2: parent (still active) attempts to sub-delegate to a fresh
+    // child two hops down from the now-revoked grandparent.
+    const hop2 = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(hop2.status).toBe(403);
+    expect(hop2.body.error).toBe('ancestor_agent_revoked');
+    expect(JSON.stringify(hop2.body)).not.toContain('ya29.grandparent-chain-token');
+  });
+
+  it('rejects an expired parent receipt', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_expired',
+      chainDepth: 0,
+      exp: Math.floor(Date.now() / 1000) - 3600,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('expired');
+  });
+
+  it('rejects a legacy receipt (no exp claim) older than the configured receipt TTL', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions({ receiptTtlSeconds: 5 });
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_legacy',
+      chainDepth: 0,
+      iat: Math.floor(Date.now() / 1000) - 60, // no exp field, well past the 5s TTL
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('expired');
+  });
+
+  it('accepts a legacy receipt (no exp claim) within the configured receipt TTL', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions({ receiptTtlSeconds: 3600 });
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_legacy_fresh',
+      chainDepth: 0,
+      iat: Math.floor(Date.now() / 1000) - 5,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid', 'email'],
+      });
+
+    expect(res.status).toBe(200);
   });
 
   it('child receipt can be verified and contains lineage fields', async () => {

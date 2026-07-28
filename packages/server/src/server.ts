@@ -19,7 +19,7 @@
  *   POST /api/v1/use                      — brokered upstream API call (agent, Bearer auth)
  *   GET  /api/token/:provider             — compatibility token access route (agent, Bearer auth)
  *   POST /api/v1/delegate                 — delegate token or handle (agent, Bearer auth)
- *   POST /api/v1/subdelegate              — sub-delegate from a parent receipt (agent, Bearer auth)
+ *   POST /api/v1/subdelegate              — sub-delegate from a parent receipt; always brokered handle (agent, Bearer auth)
  *   DELETE /api/v1/connections/:provider  — revoke stored token (agent, Bearer auth)
  *   DELETE /api/token/:provider           — revoke stored token (agent, Bearer auth)
  */
@@ -118,6 +118,8 @@ const CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR = 'protocol_version_unsupported';
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_DELEGATION_TTL_SECONDS = 900;
+const DEFAULT_RECEIPT_TTL_SECONDS = 3600;
+const RECEIPT_CLOCK_SKEW_SECONDS = 60;
 const MAX_BROKER_RESPONSE_BYTES = 32_768;
 const ED25519_PUBLIC_KEY_BYTES = 32;
 
@@ -200,6 +202,17 @@ const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
 function isForwardableBrokerHeader(key: string, value: unknown): value is string {
   if (typeof value !== 'string') return false;
   return !BLOCKED_BROKER_EXTRA_HEADERS.has(key.trim().toLowerCase());
+}
+
+/**
+ * Whether a service has a brokered-use path (`POST /api/v1/use`) at all.
+ * Sub-delegated tokens are always issued as brokered handles — never raw
+ * provider tokens — so a service outside this allowlist cannot be the
+ * target of a sub-delegation, since the resulting handle could never be
+ * redeemed.
+ */
+function isBrokerableService(service: string): boolean {
+  return Object.prototype.hasOwnProperty.call(SERVICE_ALLOWLIST, service);
 }
 
 function isSupportedProtocolVersion(version: string): boolean {
@@ -1112,6 +1125,14 @@ export function createServer(config: ServerConfig) {
     return publicKey;
   }
 
+  function getReceiptTtlSeconds(): number {
+    return config.receiptTtlSeconds ?? DEFAULT_RECEIPT_TTL_SECONDS;
+  }
+
+  function getReceiptAudience(): string | undefined {
+    return config.receiptAudience ?? config.redirectBaseUri ?? undefined;
+  }
+
   function createReceipt(input: {
     agentDid: string;
     service: string;
@@ -1123,12 +1144,26 @@ export function createServer(config: ServerConfig) {
     parentDelegationId?: string;
     parentReceiptHash?: string;
     receiptClaims?: string[];
+    /**
+     * DIDs of every ancestor above `agentDid` in the delegation chain,
+     * oldest (root) first — i.e. the parent's own `lineage` plus the
+     * parent's DID. Carried forward (and re-signed) at every hop so that
+     * `/api/v1/subdelegate` can check the live status of the *entire*
+     * chain, not just the immediate parent, without needing a persisted
+     * delegation-chain store: the signed receipt chain itself is the
+     * source of truth, since only the trusted issuer can add to it.
+     */
+    lineage?: string[];
   }): string {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const aud = getReceiptAudience();
     const payload = Buffer.from(JSON.stringify({
       iss: 'did:key:local-cred',
       sub: input.agentDid,
-      iat: Math.floor(Date.now() / 1000),
+      iat: nowSeconds,
+      exp: nowSeconds + getReceiptTtlSeconds(),
+      ...(aud ? { aud } : {}),
       service: input.service,
       scopes: input.scopes,
       userId: input.userId,
@@ -1138,6 +1173,7 @@ export function createServer(config: ServerConfig) {
       ...(input.receiptClaims && input.receiptClaims.length > 0 ? { receiptClaims: input.receiptClaims } : {}),
       ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
       ...(input.parentReceiptHash ? { parentReceiptHash: input.parentReceiptHash } : {}),
+      ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
     })).toString('base64url');
 
     const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
@@ -1154,6 +1190,8 @@ export function createServer(config: ServerConfig) {
     delegationId: string;
     chainDepth: number;
     receiptClaims: string[];
+    /** Ancestor DIDs above `sub`, oldest (root) first. See createReceipt(). */
+    lineage: string[];
   } {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
@@ -1175,6 +1213,22 @@ export function createServer(config: ServerConfig) {
       throw new Error('Receipt is missing delegationId');
     }
 
+    // Expiry enforcement. Receipts minted with an `exp` claim are rejected
+    // once they age past it (with a small allowance for clock skew).
+    // Legacy receipts (minted before `exp` existed) fall back to aging out
+    // based on `iat` + the configured receipt TTL, so they don't live
+    // forever.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (typeof payload.exp === 'number') {
+      if (nowSeconds > payload.exp + RECEIPT_CLOCK_SKEW_SECONDS) {
+        throw new Error('Receipt has expired');
+      }
+    } else if (typeof payload.iat === 'number') {
+      if (nowSeconds > payload.iat + getReceiptTtlSeconds()) {
+        throw new Error('Receipt has expired');
+      }
+    }
+
     return {
       sub: payload.sub,
       service: payload.service,
@@ -1185,6 +1239,13 @@ export function createServer(config: ServerConfig) {
       chainDepth: payload.chainDepth ?? 0,
       receiptClaims: Array.isArray(payload.receiptClaims)
         ? payload.receiptClaims.filter((claim: unknown): claim is string => typeof claim === 'string' && claim.trim().length > 0)
+        : [],
+      // Legacy receipts (minted before this claim existed) carry no lineage
+      // — they degrade to a parent-only ancestor check at the next hop
+      // (see the subdelegate route), which naturally self-heals as those
+      // receipts age out under the receipt TTL.
+      lineage: Array.isArray(payload.lineage)
+        ? payload.lineage.filter((did: unknown): did is string => typeof did === 'string' && did.trim().length > 0)
         : [],
     };
   }
@@ -2795,6 +2856,24 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * (scope attenuation, depth limits, service/user/app matching), retrieves a
    * fresh token from the vault, and issues a signed child receipt.
    *
+   * Responses are always returned as brokered handles (never a raw provider
+   * access token), regardless of the requested `token_format` — scope
+   * attenuation on a raw provider token can't be enforced once it has left
+   * the server, so every hop past the root delegation is broker-only. If the
+   * caller asked for `token_format: 'raw'`, the response is still brokered
+   * and carries `token_format_enforced: 'brokered'` to flag the downgrade.
+   * If the service has no brokered-use path at all, the request is rejected
+   * with 400 rather than minting an unusable handle.
+   *
+   * Ancestor revocation: every receipt carries a signed `lineage` of its
+   * ancestors' DIDs (root first), extended at each hop. Before minting a
+   * child receipt, every DID in `[...parent.lineage, parent.sub]` is
+   * checked against the vault's agent records — a revoked or suspended
+   * agent anywhere in the chain (not just the immediate parent) blocks the
+   * sub-delegation. Receipts minted before this claim existed carry no
+   * lineage and degrade to a parent-only check until they age out under the
+   * receipt TTL.
+   *
    * Request body:
    *   parent_receipt  — signed parent delegation receipt (JWS)
    *   agent_did       — DID of the child agent
@@ -2825,7 +2904,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         scopes?: string[];
       };
       const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
-      const tokenFormat = tokenFormatFromBody(req);
+      // Sub-delegation always returns a brokered handle — see route doc
+      // comment above. `requestedTokenFormat` is only used to detect (and
+      // flag) a caller asking for the raw provider token.
+      const requestedTokenFormat = tokenFormatFromBody(req);
 
       // ── Input validation ──────────────────────────────────────────────────
 
@@ -2839,6 +2921,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       if (!service || typeof service !== 'string') {
         res.status(400).json({ error: 'service is required' });
+        return;
+      }
+      if (!isBrokerableService(service)) {
+        res.status(400).json({
+          error: 'brokered_format_unsupported',
+          message: `Sub-delegation requires a brokered handle for '${service}', which has no brokered-use path.`,
+        });
         return;
       }
 
@@ -2876,6 +2965,53 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (parent.appClientId !== appClientId) {
         res.status(403).json({ error: 'App does not match parent receipt' });
         return;
+      }
+
+      // ── Ancestor status check (if vault supports agents) ─────────────────
+      // A revoked/suspended ancestor anywhere in the chain — not just the
+      // immediate parent — must not be able to anchor a fresh sub-delegation
+      // to a still-active descendant DID. There's no persisted table of
+      // delegations keyed by delegationId to walk here, so this walks the
+      // chain embedded in the signed receipt itself: every receipt carries a
+      // `lineage` of its ancestors' DIDs (oldest/root first), appended to
+      // and re-signed at each hop by this same trusted issuer, so a
+      // requesting agent cannot forge or truncate it. Checking
+      // `[...parent.lineage, parent.sub]` therefore checks every ancestor
+      // back to the root, not just the presenter.
+      //
+      // Legacy receipts minted before the `lineage` claim existed carry an
+      // empty lineage, so this degrades to a parent-only check for those —
+      // that gap self-heals as those receipts age out under the receipt TTL
+      // (see parseAndVerifyReceipt).
+      //
+      // If the vault has no agent record for a given ancestor DID, that
+      // ancestor is treated as allowed (matches the existing unknown-agent
+      // behavior for the child check below).
+
+      const ancestorDids = Array.from(new Set([...parent.lineage, parent.sub]));
+      for (const ancestorDid of ancestorDids) {
+        let ancestorAgentRecord: AgentRecord | null = null;
+        if (vault.getAgentByDid) {
+          ancestorAgentRecord = await vault.getAgentByDid(ancestorDid);
+        }
+        if (ancestorAgentRecord?.status === 'revoked' || ancestorAgentRecord?.status === 'suspended') {
+          const errorCode = ancestorAgentRecord.status === 'revoked' ? 'ancestor_agent_revoked' : 'ancestor_agent_suspended';
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${service}/${userId}` },
+            outcome: 'denied',
+            errorMessage: errorCode,
+            correlationId,
+          });
+          res.status(403).json({
+            error: errorCode,
+            message: `Ancestor agent ${ancestorDid} has been ${ancestorAgentRecord.status}`,
+          });
+          return;
+        }
       }
 
       // ── Agent status check (if vault supports agents) ────────────────────
@@ -3048,6 +3184,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         parentDelegationId: validation.parentDelegationId,
         parentReceiptHash,
         receiptClaims: parent.receiptClaims,
+        lineage: ancestorDids,
       });
 
       // ── Audit event ──────────────────────────────────────────────────────
@@ -3081,18 +3218,30 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
         : DEFAULT_DELEGATION_TTL_SECONDS;
 
-      res.json(buildDelegationResponse({
-        tokenFormat,
-        accessToken: entry.accessToken,
-        expiresIn,
-        service,
-        userId,
-        scopes: validation.grantedScopes,
-        delegationId,
-        receipt,
-        chainDepth: validation.chainDepth,
-        parentDelegationId: validation.parentDelegationId,
-      }));
+      // Sub-delegated responses are always brokered handles — chainDepth is
+      // always >= 1 here — regardless of the requested token_format, since
+      // scope attenuation on a raw provider token can't be enforced once
+      // it's left the server. `isBrokerableService` above already rejected
+      // services with no brokered-use path, so 'handle' is always safe here.
+      res.json({
+        ...buildDelegationResponse({
+          tokenFormat: 'handle',
+          accessToken: entry.accessToken,
+          expiresIn,
+          service,
+          userId,
+          scopes: validation.grantedScopes,
+          delegationId,
+          receipt,
+          chainDepth: validation.chainDepth,
+          parentDelegationId: validation.parentDelegationId,
+        }),
+        // Always present: sub-delegation is broker-only at every depth, so
+        // this both confirms the format and flags any downgrade from a
+        // caller-requested 'raw' token_format.
+        token_format_enforced: 'brokered',
+        ...(requestedTokenFormat !== 'handle' ? { requested_token_format: requestedTokenFormat } : {}),
+      });
     } catch (err) {
       console.error('[POST /api/v1/subdelegate] Error:', err);
       res.status(500).json({ error: 'Sub-delegation failed' });

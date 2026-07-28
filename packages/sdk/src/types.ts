@@ -40,6 +40,14 @@ export interface CredLocalConfig {
   providers: Record<string, CredProviderConfig>;
   /** Require the configured local vault backend to persist audit events. */
   requireAudit?: boolean;
+  /**
+   * Delegation receipt TTL, in seconds. Controls the `exp` claim minted onto
+   * new local receipts, and the age at which legacy receipts (no `exp`
+   * claim) are treated as expired. Defaults to 3600 (1 hour) when unset.
+   */
+  receiptTtlSeconds?: number;
+  /** Delegation receipt audience (`aud` claim). Omitted when unset. */
+  receiptAudience?: string;
 }
 
 // ── Union config ─────────────────────────────────────────────────────────────

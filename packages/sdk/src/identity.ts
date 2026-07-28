@@ -17,6 +17,11 @@ const generateKeyPairAsync = promisify(generateKeyPair);
  */
 export const CRED_PUBLIC_KEY_HEX = 'ed50f12caeed3e3054be071c2884fda47752a02b5d98e37dfd79db5fd502699f';
 
+// Default max age for legacy receipts (no `exp` claim), matching the
+// server's default receipt TTL. Allowed clock skew when checking `exp`.
+const DEFAULT_RECEIPT_MAX_AGE_SECONDS = 3600;
+const RECEIPT_CLOCK_SKEW_SECONDS = 60;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type AgentStatus = 'active' | 'suspended' | 'revoked';
@@ -60,6 +65,13 @@ export interface VerifyReceiptOptions {
   expectedDid: string;
   /** Cred's public key in hex format (defaults to CRED_PUBLIC_KEY_HEX) */
   credPublicKey?: string;
+  /**
+   * Max age (seconds) allowed for legacy receipts that predate the `exp`
+   * claim (falls back to `iat` + this value). Defaults to 3600 (1 hour) to
+   * match the server's default receipt TTL. Ignored for receipts that carry
+   * an `exp` claim — those are checked against `exp` directly.
+   */
+  maxAgeSeconds?: number;
 }
 
 export interface DelegationReceiptPayload {
@@ -85,6 +97,10 @@ export interface DelegationReceiptPayload {
   chainDepth?: number;
   /** SHA-256 of the parent receipt when this is a child delegation */
   parentReceiptHash?: string;
+  /** Expiry (Unix timestamp). Absent on legacy receipts minted before this claim existed. */
+  exp?: number;
+  /** Intended audience for the receipt (e.g. the issuing server's base URI) */
+  aud?: string;
 }
 
 // ── Base58btc alphabet (Bitcoin) ─────────────────────────────────────────────
@@ -246,15 +262,11 @@ export async function verifyDelegationReceipt(
       return false;
     }
 
-    // Decode payload and verify DID matches
-    const payload: DelegationReceiptPayload = JSON.parse(
-      base64UrlDecode(payloadB64).toString('utf8'),
-    );
-    if (payload.sub !== opts.expectedDid) {
-      return false;
-    }
-
-    // Verify signature
+    // Verify signature FIRST, before trusting anything in the payload —
+    // defense-in-depth: an attacker-controlled/unsigned payload should
+    // never influence a claims/expiry decision. Only decode and act on the
+    // payload once the signature is confirmed to have come from
+    // `credPublicKeyHex`.
     const signatureInput = Buffer.from(`${headerB64}.${payloadB64}`, 'utf8');
     const signature = base64UrlDecode(signatureB64);
 
@@ -274,7 +286,36 @@ export async function verifyDelegationReceipt(
       type: 'spki',
     });
 
-    return verify(null, signatureInput, publicKeyObject, signature);
+    const signatureValid = verify(null, signatureInput, publicKeyObject, signature);
+    if (!signatureValid) {
+      return false;
+    }
+
+    // Only now decode and trust claims from the payload.
+    const payload: DelegationReceiptPayload = JSON.parse(
+      base64UrlDecode(payloadB64).toString('utf8'),
+    );
+    if (payload.sub !== opts.expectedDid) {
+      return false;
+    }
+
+    // Expiry check. Receipts with an `exp` claim are rejected once they age
+    // past it (with a small allowance for clock skew). Legacy receipts
+    // (minted before `exp` existed) fall back to `iat` + maxAgeSeconds, so
+    // they age out rather than remaining valid forever.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const maxAgeSeconds = opts.maxAgeSeconds ?? DEFAULT_RECEIPT_MAX_AGE_SECONDS;
+    if (typeof payload.exp === 'number') {
+      if (nowSeconds > payload.exp + RECEIPT_CLOCK_SKEW_SECONDS) {
+        return false;
+      }
+    } else if (typeof payload.iat === 'number') {
+      if (nowSeconds > payload.iat + maxAgeSeconds) {
+        return false;
+      }
+    }
+
+    return true;
   } catch {
     return false;
   }

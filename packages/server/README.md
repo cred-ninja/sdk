@@ -56,6 +56,7 @@ npm run dev
 | GET | `/connect/:provider` | Admin | Start OAuth flow (browser) |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
+| POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
 | POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
@@ -66,6 +67,22 @@ npm run dev
 | POST | `/api/v1/agents/:agentId/revoke-all` | Bearer | Revoke a stored agent record |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
+
+> **Sub-delegation is broker-only.** Scope attenuation on a raw provider access token can't be
+> enforced once it has left the server, so every response from `/api/v1/subdelegate`
+> (chain depth ≥ 1) is a brokered handle, even if the request sends `"token_format": "raw"`.
+> A downgraded request gets `token_format_enforced: "brokered"` (and `requested_token_format`)
+> in the response instead of an error. If the target service has no brokered-use path
+> (`POST /api/v1/use`) at all, the request is rejected with `400 brokered_format_unsupported`
+> rather than minting a handle that could never be redeemed. `/api/v1/subdelegate` also checks
+> the status of *every* ancestor agent in the delegation chain — not just the immediate parent —
+> before minting a child receipt, so revoking a grandparent (or any earlier ancestor) still blocks
+> new descendants even if the presenting parent agent is itself still active. This is enforced via
+> a signed `lineage` claim each receipt carries (extended at every hop), since there's no
+> persisted delegation-chain table to walk; receipts minted before this claim existed carry no
+> lineage and degrade to a parent-only check for that hop until they age out under
+> `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
+> `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
 
 ## Configuration
 
@@ -81,6 +98,8 @@ All configuration via environment variables (or `.env` file):
 | `VAULT_STORAGE` | No | `sqlite` (default, audit-capable) or `file` |
 | `VAULT_PATH` | No | Path to vault file (default: `./data/vault.sqlite`) |
 | `REDIRECT_BASE_URI` | No | OAuth redirect base (default: `http://localhost:3456`) |
+| `RECEIPT_TTL_SECONDS` | No | TTL (seconds) for the `exp` claim on delegation receipts, and the max age for legacy receipts minted without one (default: `3600`) |
+| `RECEIPT_AUDIENCE` | No | Audience (`aud` claim) for delegation receipts (default: `REDIRECT_BASE_URI`) |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |

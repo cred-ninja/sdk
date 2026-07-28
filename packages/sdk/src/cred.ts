@@ -46,6 +46,13 @@ import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:cr
 
 // No default base URL — users must explicitly set their server URL.
 
+// Local-mode delegation receipts: default TTL (seconds) for the `exp` claim
+// and for aging out legacy receipts minted without one, and the allowed
+// clock skew when checking `exp`. Mirrors the server's receipt TTL defaults
+// (packages/server/src/server.ts).
+const DEFAULT_LOCAL_RECEIPT_TTL_SECONDS = 3600;
+const LOCAL_RECEIPT_CLOCK_SKEW_SECONDS = 60;
+
 /**
  * Type helpers for dynamic imports (avoids requiring these at module load).
  */
@@ -448,6 +455,19 @@ export class Cred {
     };
   }
 
+  /**
+   * Issue a child delegation from a verified parent receipt.
+   *
+   * In local mode, parent receipts always carry an `exp` claim (or, for
+   * legacy receipts without one, age out based on `iat` + the configured
+   * receipt TTL) and are rejected once expired. When the configured vault
+   * supports agent records, every ancestor in the delegation chain — not
+   * just the immediate parent — is checked via the receipt's signed
+   * `lineage` claim, so a revoked/suspended agent anywhere upstream (e.g. a
+   * revoked grandparent with a still-active parent presenting the receipt)
+   * blocks the sub-delegation — see `subDelegateLocal` for the exact scope
+   * of that check.
+   */
   async subDelegate(params: SubDelegateParams): Promise<SubDelegationResult> {
     if (this.isLocal) {
       return this.subDelegateLocal(params);
@@ -874,6 +894,35 @@ export class Cred {
       throw new CredError('Parent receipt app does not match request', 'app_mismatch', 403);
     }
 
+    // ── Ancestor status check ─────────────────────────────────────────────
+    // A revoked/suspended ancestor anywhere in the chain — not just the
+    // immediate parent — must not be able to anchor a fresh sub-delegation
+    // to a still-active descendant DID, mirroring the server's
+    // `/api/v1/subdelegate` check. Local mode has no persisted table of
+    // delegations to walk, so this walks the chain embedded in the signed
+    // receipt itself: every receipt carries a `lineage` of its ancestors'
+    // DIDs (oldest/root first), appended to and re-signed at each hop by
+    // this same trusted local signer, so a requesting agent cannot forge or
+    // truncate it. This also relies on the configured vault supporting
+    // agent records (`getAgentByDid`) — when it doesn't, this check is a
+    // no-op and the parent receipt's own expiry (enforced above in
+    // parseDelegationReceipt) is the only backstop against a stale/revoked
+    // lineage. Legacy receipts minted before the `lineage` claim existed
+    // carry an empty lineage and degrade to a parent-only check.
+    const ancestorDids = Array.from(new Set([...parent.lineage, parent.sub]));
+    for (const ancestorDid of ancestorDids) {
+      let ancestorAgentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
+      if (vault.getAgentByDid) {
+        ancestorAgentRecord = await vault.getAgentByDid(ancestorDid);
+      }
+      if (ancestorAgentRecord?.status === 'revoked') {
+        throw new CredError(`Ancestor agent ${ancestorDid} has been revoked`, 'ancestor_agent_revoked', 403);
+      }
+      if (ancestorAgentRecord?.status === 'suspended') {
+        throw new CredError(`Ancestor agent ${ancestorDid} is suspended`, 'ancestor_agent_suspended', 403);
+      }
+    }
+
     let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
     if (vault.getAgentByDid) {
       agentRecord = await vault.getAgentByDid(params.agentDid);
@@ -938,6 +987,7 @@ export class Cred {
       parentDelegationId: validation.parentDelegationId,
       parentReceipt: params.parentReceipt,
       receiptClaims: parent.receiptClaims,
+      lineage: ancestorDids,
     });
 
     this.writeAuditEvent({
@@ -990,6 +1040,14 @@ export class Cred {
     }
   }
 
+  private getLocalReceiptTtlSeconds(): number {
+    return this.localConfig?.receiptTtlSeconds ?? DEFAULT_LOCAL_RECEIPT_TTL_SECONDS;
+  }
+
+  private getLocalReceiptAudience(): string | undefined {
+    return this.localConfig?.receiptAudience;
+  }
+
   private createLocalDelegationReceipt(input: {
     agentDid: string;
     service: string;
@@ -1001,12 +1059,26 @@ export class Cred {
     parentDelegationId?: string;
     parentReceipt?: string;
     receiptClaims?: string[];
+    /**
+     * DIDs of every ancestor above `agentDid` in the delegation chain,
+     * oldest (root) first — the parent's own `lineage` plus the parent's
+     * DID. Carried forward (and re-signed) at every hop so `subDelegateLocal`
+     * can check the live status of the *entire* chain, not just the
+     * immediate parent, without a persisted delegation-chain store: the
+     * signed receipt chain is the source of truth, since only this same
+     * trusted local signer can extend it.
+     */
+    lineage?: string[];
   }): string {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const aud = this.getLocalReceiptAudience();
     const payload = Buffer.from(JSON.stringify({
       iss: 'did:key:local-cred',
       sub: input.agentDid,
-      iat: Math.floor(Date.now() / 1000),
+      iat: nowSeconds,
+      exp: nowSeconds + this.getLocalReceiptTtlSeconds(),
+      ...(aud ? { aud } : {}),
       service: input.service,
       scopes: input.scopes,
       userId: input.userId,
@@ -1018,6 +1090,7 @@ export class Cred {
       ...(input.parentReceipt ? {
         parentReceiptHash: crypto.createHash('sha256').update(input.parentReceipt).digest('hex'),
       } : {}),
+      ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
     })).toString('base64url');
 
     const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
@@ -1035,6 +1108,8 @@ export class Cred {
     delegationId: string;
     chainDepth?: number;
     receiptClaims: string[];
+    /** Ancestor DIDs above `sub`, oldest (root) first. See createLocalDelegationReceipt(). */
+    lineage: string[];
   } {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
@@ -1051,6 +1126,9 @@ export class Cred {
         delegationId?: string;
         chainDepth?: number;
         receiptClaims?: string[];
+        iat?: number;
+        exp?: number;
+        lineage?: string[];
       };
 
       const publicKey = this.getLocalReceiptPublicKeyHex();
@@ -1074,11 +1152,35 @@ export class Cred {
       if (!payload.delegationId) {
         throw new CredError('Parent receipt is missing delegationId', 'invalid_parent', 400);
       }
+
+      // Expiry enforcement. Receipts minted with an `exp` claim are rejected
+      // once they age past it (with a small allowance for clock skew).
+      // Legacy receipts (minted before `exp` existed) fall back to aging out
+      // based on `iat` + the configured receipt TTL, so they don't remain
+      // valid forever.
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (typeof payload.exp === 'number') {
+        if (nowSeconds > payload.exp + LOCAL_RECEIPT_CLOCK_SKEW_SECONDS) {
+          throw new CredError('Parent receipt has expired', 'receipt_expired', 403);
+        }
+      } else if (typeof payload.iat === 'number') {
+        if (nowSeconds > payload.iat + this.getLocalReceiptTtlSeconds()) {
+          throw new CredError('Parent receipt has expired', 'receipt_expired', 403);
+        }
+      }
+
       return {
         ...payload,
         delegationId: payload.delegationId,
         receiptClaims: Array.isArray(payload.receiptClaims)
           ? payload.receiptClaims.filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0)
+          : [],
+        // Legacy receipts (minted before this claim existed) carry no
+        // lineage — they degrade to a parent-only ancestor check at the
+        // next hop (see subDelegateLocal), which self-heals as those
+        // receipts age out under the receipt TTL.
+        lineage: Array.isArray(payload.lineage)
+          ? payload.lineage.filter((did): did is string => typeof did === 'string' && did.trim().length > 0)
           : [],
       };
     } catch (error) {

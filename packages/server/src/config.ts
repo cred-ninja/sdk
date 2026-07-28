@@ -53,6 +53,15 @@ export interface ServerConfig {
   // Redirect base URI (e.g. http://localhost:3456 or https://cred.example.com)
   redirectBaseUri: string;
 
+  // Delegation receipt TTL, in seconds. Controls the `exp` claim minted onto
+  // new receipts, and the age at which legacy receipts (no `exp` claim) are
+  // treated as expired. Defaults to 3600 (1 hour) when unset.
+  receiptTtlSeconds?: number;
+
+  // Delegation receipt audience (`aud` claim). Defaults to redirectBaseUri
+  // when unset.
+  receiptAudience?: string;
+
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
@@ -124,6 +133,16 @@ export function loadConfig(): ServerConfig {
     .map((origin) => origin.trim())
     .filter(Boolean);
 
+  const receiptTtlSecondsRaw = process.env.RECEIPT_TTL_SECONDS;
+  let receiptTtlSeconds: number | undefined;
+  if (receiptTtlSecondsRaw !== undefined) {
+    receiptTtlSeconds = parseInt(receiptTtlSecondsRaw, 10);
+    if (!Number.isFinite(receiptTtlSeconds) || receiptTtlSeconds <= 0) {
+      throw new Error('RECEIPT_TTL_SECONDS must be a positive integer');
+    }
+  }
+  const receiptAudience = process.env.RECEIPT_AUDIENCE || undefined;
+
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
   for (const { env, slug } of KNOWN_PROVIDERS) {
@@ -150,6 +169,8 @@ export function loadConfig(): ServerConfig {
     agentToken,
     providers,
     redirectBaseUri,
+    receiptTtlSeconds,
+    receiptAudience,
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,
