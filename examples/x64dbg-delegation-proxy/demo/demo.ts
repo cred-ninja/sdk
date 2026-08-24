@@ -180,6 +180,22 @@ async function main(): Promise<void> {
     check('unauthenticated request rejected', r.status === 401 && r.body?.error?.code === -32001);
   }
 
+  // --- SSRF: a smuggled host in the request target cannot redirect upstream ---
+  banner('SSRF   request target host is forced to the configured upstream');
+  {
+    // req.url arrives as "//evil.example.com/" (protocol-relative). The proxy
+    // must take only the path and keep the upstream host from config, so this
+    // still reaches the mock rather than evil.example.com.
+    const res = await fetch(`http://127.0.0.1:${proxyPort}//evil.example.com/`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${readOnly}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' }),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    console.log(`  smuggled "//evil.example.com/" -> status ${res.status}, tools returned: ${Array.isArray(body?.result?.tools)}`);
+    check('smuggled host ignored; request still served by the configured upstream', res.status === 200 && Array.isArray(body?.result?.tools));
+  }
+
   // --- SSE: the stream is terminated when its token expires ---
   banner('SSE    stream terminated when the delegated token expires (ttl=2s)');
   {

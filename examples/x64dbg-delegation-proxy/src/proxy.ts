@@ -47,9 +47,12 @@ function nowIso(): string {
 function bearerFrom(req: IncomingMessage): string | undefined {
   const auth = req.headers['authorization'];
   if (!auth) return undefined;
-  const value = Array.isArray(auth) ? auth[0] : auth;
-  const m = /^Bearer\s+(.+)$/i.exec(value.trim());
-  return m ? m[1].trim() : undefined;
+  const value = (Array.isArray(auth) ? auth[0] : auth).trim();
+  // Fixed-prefix check + slice, not a backtracking regex (avoids polynomial
+  // ReDoS on an attacker-controlled Authorization header).
+  if (!/^Bearer\b/i.test(value)) return undefined;
+  const token = value.slice('Bearer'.length).trim();
+  return token.length > 0 ? token : undefined;
 }
 
 interface JsonRpcErrorObject {
@@ -128,7 +131,25 @@ function methodLabel(parsed: unknown): string {
   return 'unparsed';
 }
 
-function upstreamHeaders(req: IncomingMessage, upstream: URL, bodyLength: number): http.OutgoingHttpHeaders {
+/**
+ * Build the outbound request target. The host, port, and protocol come only
+ * from cfg.upstreamUrl (operator-configured, constant). Only the path and query
+ * are taken from the incoming request, and they are extracted via a throwaway
+ * base so that an absolute-form, protocol-relative, or backslash-smuggled
+ * request target cannot redirect the request off the configured upstream. This
+ * keeps the proxy from becoming an open forwarder (SSRF).
+ */
+function upstreamTarget(cfg: ProxyConfig, reqUrl: string | undefined): { options: http.RequestOptions; hostHeader: string } {
+  const base = new URL(cfg.upstreamUrl);
+  const incoming = new URL(reqUrl || '/', 'http://proxy.invalid');
+  const path = incoming.pathname + incoming.search;
+  return {
+    options: { protocol: base.protocol, hostname: base.hostname, port: base.port || undefined, path },
+    hostHeader: base.host,
+  };
+}
+
+function upstreamHeaders(req: IncomingMessage, hostHeader: string, bodyLength: number): http.OutgoingHttpHeaders {
   const h: http.OutgoingHttpHeaders = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase();
@@ -138,7 +159,7 @@ function upstreamHeaders(req: IncomingMessage, upstream: URL, bodyLength: number
     if (lk === 'content-length') continue;
     if (v !== undefined) h[k] = v as string | string[];
   }
-  h['host'] = upstream.host;
+  h['host'] = hostHeader;
   if (bodyLength > 0) h['content-length'] = String(bodyLength);
   return h;
 }
@@ -268,9 +289,9 @@ function forward(
   body: Buffer,
   opts: ForwardOptions,
 ): void {
-  const upstream = new URL(req.url || '/', cfg.upstreamUrl);
-  const headers = upstreamHeaders(req, upstream, body.length);
-  const upReq = http.request(upstream, { method: req.method, headers }, (upRes) => {
+  const { options, hostHeader } = upstreamTarget(cfg, req.url);
+  const headers = upstreamHeaders(req, hostHeader, body.length);
+  const upReq = http.request({ ...options, method: req.method, headers }, (upRes) => {
     const status = upRes.statusCode ?? 502;
 
     if (opts.decisions) {
@@ -439,9 +460,9 @@ async function handleGet(
     return;
   }
 
-  const upstream = new URL(req.url || '/', cfg.upstreamUrl);
-  const headers = upstreamHeaders(req, upstream, 0);
-  const upReq = http.request(upstream, { method: 'GET', headers }, (upRes) => {
+  const { options, hostHeader } = upstreamTarget(cfg, req.url);
+  const headers = upstreamHeaders(req, hostHeader, 0);
+  const upReq = http.request({ ...options, method: 'GET', headers }, (upRes) => {
     const status = upRes.statusCode ?? 502;
     const ct = String(upRes.headers['content-type'] ?? '');
     const isStream = ct.includes('text/event-stream');
@@ -518,9 +539,9 @@ async function handleGet(
 
 function passthrough(req: IncomingMessage, res: ServerResponse, cfg: ProxyConfig): void {
   // OPTIONS/HEAD: no credential (CORS preflight carries none). Forward verbatim.
-  const upstream = new URL(req.url || '/', cfg.upstreamUrl);
-  const headers = upstreamHeaders(req, upstream, 0);
-  const upReq = http.request(upstream, { method: req.method, headers }, (upRes) => {
+  const { options, hostHeader } = upstreamTarget(cfg, req.url);
+  const headers = upstreamHeaders(req, hostHeader, 0);
+  const upReq = http.request({ ...options, method: req.method, headers }, (upRes) => {
     res.writeHead(upRes.statusCode ?? 502, copyResponseHeaders(upRes));
     upRes.pipe(res);
   });
