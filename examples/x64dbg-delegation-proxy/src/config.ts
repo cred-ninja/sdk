@@ -24,7 +24,13 @@ export interface ProxyConfig {
   service: string;
   /** Ed25519 public key (hex) of the delegation issuer that signs receipts. */
   issuerPublicKeyHex: string;
-  /** If set, receipts must have this exact `sub` (agent DID). Unset = accept any validly signed receipt (bearer mode). */
+  /**
+   * Optional subject allowlist: if set, the receipt `sub` (agent DID) must match.
+   * This is an extra constraint on top of the mandatory proof-of-possession check
+   * (which already proves the caller holds the subject's key); it is not a bearer
+   * escape hatch. Unset = accept any validly signed receipt whose holder proves
+   * possession of its subject key.
+   */
   expectedAgentDid?: string;
   /** Max age (s) for legacy receipts without an `exp` claim. */
   receiptMaxAgeSeconds?: number;
@@ -38,6 +44,8 @@ export interface ProxyConfig {
   filterToolsList: boolean;
   /** Mirror audit lines to stdout (in addition to the optional audit file). */
   auditStdout: boolean;
+  /** Freshness window (seconds) for a proof-of-possession `iat`. Also the replay-cache TTL. */
+  popWindowSeconds: number;
 }
 
 function envInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -80,5 +88,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ProxyConfig {
     sseOnExpiry: sseOnExpiryRaw,
     filterToolsList: (env.X64DBG_FILTER_TOOLS_LIST ?? 'true').toLowerCase() !== 'false',
     auditStdout: (env.X64DBG_AUDIT_STDOUT ?? 'true').toLowerCase() !== 'false',
+    popWindowSeconds: envInt(env, 'X64DBG_POP_WINDOW_SECONDS', 30),
   };
 }

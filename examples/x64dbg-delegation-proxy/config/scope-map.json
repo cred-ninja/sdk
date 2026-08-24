@@ -2,8 +2,9 @@
   "$schema": "./scope-map.schema.json",
   "service": "x64dbg",
   "mcpProtocolVersion": "2024-11-05",
-  "description": "Delegated-scope map for duty1g/x64dbg-mcp-server (71 tools). Every tool is placed. Unmapped tool names are denied (unmappedPolicy=deny). This file is the reviewable authorization artifact; the proxy loads it, it is not hardcoded.",
+  "description": "Delegated-scope map for duty1g/x64dbg-mcp-server (71 tools). Every tool is placed. Unmapped tool names are denied (unmappedPolicy=deny). This file is the reviewable authorization artifact; the proxy loads it, it is not hardcoded. A tool entry may be a scope string, a deny object, or an object {scope, args} where args declares per-argument constraints (argument-level policy).",
   "unmappedPolicy": "deny",
+  "argumentPolicyNote": "Tool-name scope decides WHICH tools a credential may call; the optional per-tool `args` object decides HOW MUCH within a granted tool. Matchers: required, enum, max/min (numeric, accepts 0x-hex), maxLength, prefixOneOf, pattern, denyPattern. Evaluation is fail-closed. Examples below: ReadMemory caps size to 4096 bytes per call so a read scope cannot bulk-extract; DumpMemory/DumpModule confine the output path to a sandbox prefix and reject traversal.",
   "classificationPrinciples": [
     "read is strictly non-mutating: it observes process/debugger state and returns data. Nothing that changes state (including analysis-DB annotations or clearing logs) is read.",
     "control changes execution flow and breakpoint state but does not write process memory/registers or move bytes to disk.",
@@ -40,7 +41,7 @@
     "GetCurrentAddress": "x64dbg:read",
     "Disassemble": "x64dbg:read",
     "DisassembleFunction": "x64dbg:read",
-    "ReadMemory": "x64dbg:read",
+    "ReadMemory": { "scope": "x64dbg:read", "args": { "size": { "max": 4096 } } },
     "WaitForPause": "x64dbg:read",
     "ListBreakpoints": "x64dbg:read",
     "GetAllRegisters": "x64dbg:read",
@@ -104,8 +105,8 @@
     "StopDebug": "x64dbg:session",
     "RestartDebug": "x64dbg:session",
 
-    "DumpMemory": "x64dbg:exfil",
-    "DumpModule": "x64dbg:exfil",
+    "DumpMemory": { "scope": "x64dbg:exfil", "args": { "path": { "required": true, "prefixOneOf": ["C:/cred-sandbox/", "/var/cred-sandbox/"], "denyPattern": "\\.\\." } } },
+    "DumpModule": { "scope": "x64dbg:exfil", "args": { "path": { "required": true, "prefixOneOf": ["C:/cred-sandbox/", "/var/cred-sandbox/"], "denyPattern": "\\.\\." } } },
 
     "ExecuteDebuggerCommand": { "deny": true, "reason": "arbitrary-command catch-all; denied outright (see ADR-0001)" }
   }

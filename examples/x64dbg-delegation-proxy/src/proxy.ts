@@ -21,6 +21,7 @@ import { ScopeMap } from './scope-map.js';
 import { verifyReceipt, type VerifiedToken } from './receipt.js';
 import { evaluateToolCall, type ToolDecision } from './policy.js';
 import { configureAudit, emitAudit, log } from './audit.js';
+import { verifyPop, NonceStore, sha256Base64Url } from './pop.js';
 
 /** JSON-RPC error codes (server-defined range). */
 const ERR_UNAUTHORIZED = -32001; // credential missing/invalid/expired
@@ -53,6 +54,13 @@ function bearerFrom(req: IncomingMessage): string | undefined {
   if (!/^Bearer\b/i.test(value)) return undefined;
   const token = value.slice('Bearer'.length).trim();
   return token.length > 0 ? token : undefined;
+}
+
+function popFrom(req: IncomingMessage): string | undefined {
+  const h = req.headers['x64dbg-pop'];
+  if (!h) return undefined;
+  const value = Array.isArray(h) ? h[0] : h;
+  return value.trim() || undefined;
 }
 
 interface JsonRpcErrorObject {
@@ -105,6 +113,7 @@ function tryParse(body: Buffer): unknown {
 interface RpcToolCall {
   id: string | number | null;
   name: string;
+  args: Record<string, unknown>;
 }
 
 function extractToolCalls(parsed: unknown): RpcToolCall[] {
@@ -115,8 +124,11 @@ function extractToolCalls(parsed: unknown): RpcToolCall[] {
       const rec = it as Record<string, unknown>;
       const params = (rec.params ?? {}) as Record<string, unknown>;
       const name = typeof params.name === 'string' ? params.name : '';
+      const args = (params.arguments && typeof params.arguments === 'object')
+        ? (params.arguments as Record<string, unknown>)
+        : {};
       const id = (rec.id as string | number | null | undefined) ?? null;
-      out.push({ id, name });
+      out.push({ id, name, args });
     }
   }
   return out;
@@ -183,11 +195,13 @@ function collect(stream: IncomingMessage): Promise<Buffer> {
 }
 
 function denyMessage(d: ToolDecision, token: VerifiedToken): string {
-  if (d.requiredScope) {
+  if (d.policy === 'scope-filter' && d.requiredScope) {
     const granted = token.scopes.length ? token.scopes.join(', ') : 'none';
     return `Delegated access denied: tool "${d.tool}" requires scope "${d.requiredScope}", which this credential was not granted. Granted scopes: [${granted}].`;
   }
-  return `Delegated access denied: tool "${d.tool}" is not permitted (${d.reason}).`;
+  // tool-disposition (catch-all/unmapped) or argument-policy: the deciding
+  // reason is the specific violation, so surface it directly.
+  return `Delegated access denied: tool "${d.tool}" -- ${d.reason}.`;
 }
 
 function denyData(d: ToolDecision, token: VerifiedToken): Record<string, unknown> {
@@ -349,25 +363,31 @@ async function handlePost(
   res: ServerResponse,
   cfg: ProxyConfig,
   map: ScopeMap,
+  nonce: NonceStore,
 ): Promise<void> {
-  const token = await verifyReceipt(bearerFrom(req), cfg);
+  const receiptJws = bearerFrom(req);
+  const token = await verifyReceipt(receiptJws, cfg);
   const method = `POST ${req.url || '/'}`;
 
-  if (!token.ok) {
+  const denyAuth = (reason: string): void => {
     emitAudit({
       ts: nowIso(),
       event: 'x64dbg.proxy.decision',
       transport: 'streamable-http',
       method,
-      subject: token.subject ?? null,
-      tokenHash: token.tokenHash ?? null,
+      subject: token.ok ? token.subject : (token.subject ?? null),
+      tokenHash: token.ok ? token.tokenHash : (token.tokenHash ?? null),
       tool: null,
       requiredScope: null,
       decision: 'deny',
-      reason: token.reason,
+      reason,
       upstreamStatus: null,
     });
-    sendJson(res, 401, jsonRpcError(null, ERR_UNAUTHORIZED, `Delegation rejected: ${token.reason}`, { reason: token.reason }));
+    sendJson(res, 401, jsonRpcError(null, ERR_UNAUTHORIZED, `Delegation rejected: ${reason}`, { reason }));
+  };
+
+  if (!token.ok) {
+    denyAuth(token.reason);
     return;
   }
 
@@ -376,6 +396,23 @@ async function handlePost(
     body = await readBody(req);
   } catch {
     sendJson(res, 413, jsonRpcError(null, ERR_BAD_REQUEST, 'request body too large'));
+    return;
+  }
+
+  // Mandatory proof-of-possession: the caller must prove it holds the receipt
+  // subject's key, bound to this method/path/body. A stolen receipt is inert.
+  const pop = verifyPop(popFrom(req), {
+    method: 'POST',
+    path: req.url || '/',
+    subjectDid: token.subject,
+    receipt: receiptJws!,
+    bodyHashB64: sha256Base64Url(body),
+    windowSeconds: cfg.popWindowSeconds,
+    nonceStore: nonce,
+    nowMs: Date.now(),
+  });
+  if (!pop.ok) {
+    denyAuth(`pop:${pop.reason}`);
     return;
   }
 
@@ -403,7 +440,7 @@ async function handlePost(
     return;
   }
 
-  const decisions = await Promise.all(calls.map((c) => evaluateToolCall(c.name, token, cfg.service, map)));
+  const decisions = await Promise.all(calls.map((c) => evaluateToolCall(c.name, c.args, token, cfg.service, map)));
   const anyDenied = decisions.some((d) => !d.allowed);
 
   if (anyDenied) {
@@ -438,25 +475,46 @@ async function handleGet(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ProxyConfig,
+  nonce: NonceStore,
 ): Promise<void> {
-  const token = await verifyReceipt(bearerFrom(req), cfg);
+  const receiptJws = bearerFrom(req);
+  const token = await verifyReceipt(receiptJws, cfg);
   const method = `GET ${req.url || '/'}`;
 
-  if (!token.ok) {
+  const denyAuth = (reason: string): void => {
     emitAudit({
       ts: nowIso(),
       event: 'x64dbg.proxy.decision',
       transport: 'sse',
       method,
-      subject: token.subject ?? null,
-      tokenHash: token.tokenHash ?? null,
+      subject: token.ok ? token.subject : (token.subject ?? null),
+      tokenHash: token.ok ? token.tokenHash : (token.tokenHash ?? null),
       tool: null,
       requiredScope: null,
       decision: 'deny',
-      reason: token.reason,
+      reason,
       upstreamStatus: null,
     });
-    sendJson(res, 401, jsonRpcError(null, ERR_UNAUTHORIZED, `Delegation rejected: ${token.reason}`, { reason: token.reason }));
+    sendJson(res, 401, jsonRpcError(null, ERR_UNAUTHORIZED, `Delegation rejected: ${reason}`, { reason }));
+  };
+
+  if (!token.ok) {
+    denyAuth(token.reason);
+    return;
+  }
+
+  // Mandatory proof-of-possession for opening the stream (no body to bind).
+  const pop = verifyPop(popFrom(req), {
+    method: 'GET',
+    path: req.url || '/',
+    subjectDid: token.subject,
+    receipt: receiptJws!,
+    windowSeconds: cfg.popWindowSeconds,
+    nonceStore: nonce,
+    nowMs: Date.now(),
+  });
+  if (!pop.ok) {
+    denyAuth(`pop:${pop.reason}`);
     return;
   }
 
@@ -553,18 +611,25 @@ function passthrough(req: IncomingMessage, res: ServerResponse, cfg: ProxyConfig
   upReq.end();
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, cfg: ProxyConfig, map: ScopeMap): Promise<void> {
+async function handle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ProxyConfig,
+  map: ScopeMap,
+  nonce: NonceStore,
+): Promise<void> {
   const method = req.method ?? 'GET';
   if (method === 'OPTIONS' || method === 'HEAD') return passthrough(req, res, cfg);
-  if (method === 'POST') return handlePost(req, res, cfg, map);
-  if (method === 'GET') return handleGet(req, res, cfg);
+  if (method === 'POST') return handlePost(req, res, cfg, map, nonce);
+  if (method === 'GET') return handleGet(req, res, cfg, nonce);
   sendJson(res, 405, jsonRpcError(null, ERR_BAD_REQUEST, `method ${method} not supported by proxy`));
 }
 
 export function createProxy(cfg: ProxyConfig, map: ScopeMap): http.Server {
   configureAudit(cfg.auditLogPath, { stdout: cfg.auditStdout });
+  const nonce = new NonceStore(cfg.popWindowSeconds * 1000);
   return http.createServer((req, res) => {
-    handle(req, res, cfg, map).catch((err: Error) => {
+    handle(req, res, cfg, map, nonce).catch((err: Error) => {
       log(`unhandled error: ${err.message}`);
       if (!res.headersSent) sendJson(res, 500, jsonRpcError(null, ERR_UPSTREAM, 'internal proxy error'));
       else res.destroy();
@@ -578,7 +643,7 @@ export function startProxy(cfg: ProxyConfig): http.Server {
   server.listen(cfg.listenPort, cfg.listenHost, () => {
     log(`listening on http://${cfg.listenHost}:${cfg.listenPort} -> upstream ${cfg.upstreamUrl}`);
     log(`service="${cfg.service}" scopeMap=${cfg.scopeMapPath} (${map.toolCount()} tools) unmapped=${map.unmappedPolicy}`);
-    log(`sseOnExpiry=${cfg.sseOnExpiry} filterToolsList=${cfg.filterToolsList} pinnedDid=${cfg.expectedAgentDid ?? '(bearer mode)'}`);
+    log(`sseOnExpiry=${cfg.sseOnExpiry} filterToolsList=${cfg.filterToolsList} PoP=required(window=${cfg.popWindowSeconds}s) subject=${cfg.expectedAgentDid ?? 'any-with-proof'}`);
     log('REMINDER: the proxy only controls who asks. Bind the plugin to 127.0.0.1 and add a host firewall rule, or this is advisory only. See README.');
   });
   return server;

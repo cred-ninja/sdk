@@ -1,6 +1,6 @@
 # ADRs - x64dbg delegation proxy
 
-Two decisions had real alternatives and shape the security of the proxy. They
+These decisions had real alternatives and shape the security of the proxy. They
 are recorded here.
 
 ---
@@ -120,3 +120,93 @@ holds.
 - `ride` remains available for operators who want stream continuity and accept
   that the stream may outlive the credential (still safe for tool calls, which
   are re-checked per POST).
+
+---
+
+## ADR-0003: argument-level policy, in addition to tool-name scope
+
+**Status:** Accepted.
+
+**Context.**
+Tool-name scope answers "which tools may this credential call". It does not
+answer "how much may it do within a granted tool". A credential with
+`x64dbg:read` can call `ReadMemory` on any address for any size; a credential
+with `x64dbg:exfil` can `DumpMemory` to any path on disk. Scope alone leaves the
+*extent* of a granted capability unbounded, which for a debugger is most of the
+risk (bulk memory scraping, writing a dump to a world-readable location).
+
+**Decision.**
+Add an argument-level policy layer, declared per tool in the scope map as an
+optional `args` object, evaluated as a third guard policy that runs only after
+the scope check passes. Matchers: `required`, `enum`, `max`/`min` (numeric,
+accepts `0x`-hex), `maxLength`, `prefixOneOf`, `pattern`, `denyPattern`.
+Evaluation is fail-closed: an argument that cannot be evaluated against its
+declared matcher is a violation, and the denial names the specific argument.
+
+The shipped map uses this to cap `ReadMemory.size` at 4096 bytes per call and to
+confine `DumpMemory`/`DumpModule.path` to a sandbox prefix while rejecting
+traversal (`..`). These are examples, not a complete policy; the point is that
+extent is now expressible and reviewable as data.
+
+**Why this altitude.**
+The constraints live in the same reviewable artifact as the scope map, so an
+operator reads one file to understand both which tools and how much. Argument
+policy runs after scope so it only ever sees calls the scope already permits,
+and it reuses the same guard chain, so every argument denial produces the same
+structured audit line as a scope denial.
+
+**Consequences.**
+- Extent within a scope is now bounded per operator policy. A read credential
+  can still be prevented from pulling megabytes per call; an exfil credential can
+  be pinned to a quarantine directory.
+- The matchers are general but not exhaustive. Address-range allowlisting for
+  `ReadMemory.address` is expressible via `pattern` today but a first-class
+  range/CIDR matcher would be a natural extension.
+- Argument policy is only as good as the operator's declarations; the shipped
+  values are a sane default, not a guarantee.
+
+---
+
+## ADR-0004: proof-of-possession is mandatory
+
+**Status:** Accepted.
+
+**Context.**
+A delegation receipt is a signed statement that a subject (an agent did:key) was
+granted some scopes. If the proxy accepts the receipt on presentation alone
+(bearer), then a receipt captured from logs, memory, a proxy, or a compromised
+process grants its bearer the full scope of that receipt until it expires. In the
+real deployment the agent, the local model, and the unauthenticated MCP all run
+on one machine, so a receipt in process memory is squarely in reach of local
+malware. Bearer is not good enough there.
+
+**Decision.**
+Require proof-of-possession on every credentialed request, with no bearer
+fallback. The receipt binds a subject did:key (an Ed25519 public key). Each
+request must also carry a PoP proof (`X64dbg-PoP` header): a short-lived compact
+JWS, signed by the subject's *private* key, binding this request. The proof's
+payload carries `htm` (method), `htu` (path), `iat` (freshness), `jti`
+(single-use nonce), `ath` (hash of this receipt), and `bh` (hash of the body).
+The verifying key is taken from the receipt's verified subject, never from the
+proof, so the proof cannot assert its own identity. This is DPoP (RFC 9449) in
+spirit, with the key pinned by the receipt rather than presented in the proof.
+
+**What each binding buys.**
+- Signature over the subject key: possession, so a stolen receipt without the key
+  is inert.
+- `ath`: ties the proof to one receipt, so a proof cannot be moved to another.
+- `htm`/`htu`/`bh`: ties the proof to one request, so it cannot authorize a
+  different call.
+- `iat` window + `jti` replay cache: a captured proof is useless outside a narrow
+  window and cannot be replayed even once.
+
+**Consequences.**
+- Clients must hold the subject private key and sign every request. This is the
+  standard cost of PoP and is what makes credential theft ineffective.
+- The demo shows all three failure modes refused: a receipt with no proof, a
+  stolen receipt signed with the wrong key, and a replayed proof.
+- The replay cache is in-process here; a multi-instance deployment needs a shared
+  nonce store. Path binding (`htu`) covers the path, not the host; host binding
+  belongs in the receipt `aud` and is left as a hardening.
+- `X64DBG_POP_WINDOW_SECONDS` tunes the freshness window; there is no switch to
+  disable PoP.

@@ -29,15 +29,21 @@ the proxy:
 1. Verifies the delegated token (a Cred delegation receipt: an Ed25519 JWS
    carrying granted `scopes`, the agent `sub`, `service`, and `exp`), reusing
    `@credninja/sdk`'s `verifyDelegationReceipt`.
-2. On `tools/call`, parses the JSON-RPC body, reads `params.name`, resolves the
+2. Verifies a **mandatory proof-of-possession** bound to the receipt's subject
+   key and to this exact request (see [Proof of possession](#proof-of-possession-mandatory)).
+   A stolen receipt without the subject's key is inert.
+3. On `tools/call`, parses the JSON-RPC body, reads `params.name`, resolves the
    required scope from `config/scope-map.json`, and checks it against the token's
    granted scopes, reusing `@credninja/guard`'s `CredGuard` + `scopeFilterPolicy`.
-3. Forwards the request upstream, or rejects it with a **JSON-RPC error** (not a
+   Then applies **argument-level policy** to bound *how much* the call may do
+   (see [Argument-level policy](#argument-level-policy)).
+4. Forwards the request upstream, or rejects it with a **JSON-RPC error** (not a
    bare HTTP 403) so MCP clients surface something readable.
-4. Emits a structured **audit line** for the decision.
+5. Emits a structured **audit line** for the decision.
 
 Scope enforcement is **per tool call**, not per connection. One credential can
-read across a whole session and never be able to write.
+read across a whole session and never be able to write, and even a read cannot
+pull more than its argument policy allows.
 
 ```
 $ curl ... WriteMemToAddress   (credential holds x64dbg:read)
@@ -67,6 +73,21 @@ and the proxy only helps if the plugin will *only* take requests from the proxy.
 By default the plugin binds `0.0.0.0:9094` (x64) / `0.0.0.0:9095` (x32) - every
 interface. The proxy is **advisory only** until the direct path to the plugin is
 closed.
+
+### The real deployment: everything is local
+
+The expected setup runs the agent, a local model, and the unauthenticated MCP on
+one machine. That changes the dominant threat from "someone on the network" to
+"another process on this host". Two consequences shape the design:
+
+- The network boundary is loopback plus a host firewall (below), because there is
+  no remote client to serve. This makes the plugin reachable only from the host.
+- The attacker who matters is local, so a delegated credential sitting in the
+  agent's process memory is within reach. A bearer credential would be enough for
+  local malware to lift and replay. That is exactly why **proof-of-possession is
+  mandatory** here: the receipt is useless without the subject's private key, and
+  a captured proof cannot be replayed. Scope and argument policy then bound what
+  even a legitimately-held credential can do.
 
 ### Closing the bypass (required for real enforcement)
 
@@ -106,13 +127,18 @@ locally.
 - **The proxy is who-asks, not what-x64dbg-can-do.** See the threat model. It
   adds an authorization boundary that did not exist; it does not sandbox the
   debugger.
-- **Bearer credential by default.** A valid receipt is accepted from whoever
-  presents it (this is how OAuth bearer tokens work). Proof-of-possession -
-  binding the receipt to the agent's key so a leaked receipt is useless - is the
-  production hardening. Cred already ships the pieces for it (Web Bot Auth
-  request signing in `@credninja/mcp` / `@credninja/server`). For single-agent
-  deployments you can also pin the subject with `X64DBG_EXPECTED_AGENT_DID`, so
-  only a receipt issued to that DID is accepted.
+- **Proof-of-possession is mandatory, with residuals.** A stolen receipt is
+  inert without the subject's key, and a captured proof cannot be replayed. The
+  residuals are honest ones: the replay nonce cache is in-process (a
+  multi-instance deployment needs a shared store), and the proof binds the
+  request path but not the host (host binding belongs in the receipt `aud`, left
+  as a hardening). Optionally pin the subject with `X64DBG_EXPECTED_AGENT_DID`
+  as an extra allowlist on top of PoP.
+- **Argument policy is operator-declared and general.** It bounds extent within a
+  scope (size caps, path prefixes, patterns), but it is only as good as the
+  declared constraints, and the matchers are general-purpose. First-class
+  address-range/CIDR matching for memory operations is expressible via `pattern`
+  today but would be a natural next matcher.
 - **`EvalExpression` is a residual catch-all.** x64dbg's expression engine is
   narrower than its command processor but still not provably side-effect-free
   from outside the plugin. It is mapped to `x64dbg:read` for analyst usefulness
@@ -144,6 +170,43 @@ Two tools get explicit handling beyond a plain scope:
 
 All 71 tools are placed. The map is a standalone, reviewable file:
 [`config/scope-map.json`](./config/scope-map.json).
+
+## Argument-level policy
+
+Scope decides *which* tools; argument policy decides *how much* within a granted
+tool. Declared per tool in the scope map as an optional `args` object, evaluated
+as a third guard policy that runs only after the scope check passes. Fail-closed,
+and the denial names the specific argument.
+
+Matchers: `required`, `enum`, `max`/`min` (numeric, accepts `0x`-hex),
+`maxLength`, `prefixOneOf`, `pattern`, `denyPattern`. The shipped map, as
+examples:
+
+```json
+"ReadMemory": { "scope": "x64dbg:read", "args": { "size": { "max": 4096 } } },
+"DumpMemory": { "scope": "x64dbg:exfil",
+  "args": { "path": { "required": true,
+    "prefixOneOf": ["C:/cred-sandbox/", "/var/cred-sandbox/"], "denyPattern": "\\.\\." } } }
+```
+
+So a read credential cannot pull more than 4096 bytes per call, and an exfil
+credential can only dump under a sandbox prefix, with traversal rejected. See
+ADR-0003.
+
+## Proof of possession (mandatory)
+
+Holding a receipt is not enough. Every credentialed request must also carry a PoP
+proof in the `X64dbg-PoP` header: a short-lived compact JWS signed by the
+subject's did:key **private** key. The proof binds `htm` (method), `htu` (path),
+`iat` (freshness), `jti` (single-use nonce), `ath` (hash of this receipt), and
+`bh` (hash of the body). The verifying key is taken from the receipt's verified
+subject, never from the proof itself.
+
+This is DPoP (RFC 9449) in spirit, with the key pinned by the receipt. The result:
+a stolen receipt without the key is inert; a proof cannot be moved to another
+receipt or another request; and a captured proof cannot be replayed. There is no
+bearer fallback and no switch to disable PoP; `X64DBG_POP_WINDOW_SECONDS` only
+tunes the freshness window. See ADR-0004.
 
 ## Delegated token
 
@@ -184,8 +247,10 @@ authenticated channel. See ADR-0002.
 ## Run the demo (under 90 seconds)
 
 Runs entirely in-process against a mock upstream, so it needs no Windows host and
-no live x64dbg. It shows allow, deny (scope and catch-all), least-privilege
-`tools/list`, an unauthenticated rejection, SSE expiry termination, and prints
+no live x64dbg. It shows allow; deny by scope, catch-all, and **argument policy**
+(oversized read, path traversal); **mandatory PoP** refusing a missing proof, a
+stolen receipt signed with the wrong key, and a replayed proof; least-privilege
+`tools/list`; an unauthenticated rejection; SSE expiry termination; and prints
 the resulting audit lines. It asserts every expectation and exits non-zero on
 failure.
 
@@ -241,7 +306,8 @@ This prints the issuer public key (feed it to the proxy) and a matching receipt.
 | `X64DBG_ISSUER_PUBLIC_KEY_HEX` | Cred's pinned key | Ed25519 public key that signs receipts. |
 | `X64DBG_SERVICE` | `x64dbg` | Required `service` claim. |
 | `X64DBG_SCOPE_MAP` | `config/scope-map.json` | Path to the scope map. |
-| `X64DBG_EXPECTED_AGENT_DID` | (unset) | Pin the subject; unset = bearer mode. |
+| `X64DBG_EXPECTED_AGENT_DID` | (unset) | Extra subject allowlist on top of PoP. Unset = any subject that proves possession. |
+| `X64DBG_POP_WINDOW_SECONDS` | `30` | PoP freshness window and replay-cache TTL. PoP itself cannot be disabled. |
 | `X64DBG_SSE_ON_EXPIRY` | `terminate` | `terminate` or `ride`. |
 | `X64DBG_FILTER_TOOLS_LIST` | `true` | Narrow `tools/list` to callable tools. |
 | `X64DBG_AUDIT_LOG` | (unset) | Append audit lines to this file. |
@@ -249,9 +315,9 @@ This prints the issuer public key (feed it to the proxy) and a matching receipt.
 
 ## Decisions
 
-The two decisions with real alternatives are recorded in [`ADR.md`](./ADR.md):
-`ExecuteDebuggerCommand` disposition (ADR-0001) and SSE expiry behavior
-(ADR-0002).
+The decisions with real alternatives are recorded in [`ADR.md`](./ADR.md):
+`ExecuteDebuggerCommand` disposition (ADR-0001), SSE expiry behavior (ADR-0002),
+argument-level policy (ADR-0003), and mandatory proof-of-possession (ADR-0004).
 
 ## Deviations from the initial scope-map draft
 

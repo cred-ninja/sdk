@@ -57,7 +57,9 @@ export async function verifyReceipt(jws: string | undefined, cfg: ProxyConfig): 
   if (!untrusted) return { ok: false, reason: 'malformed_receipt', tokenHash };
 
   // Pin to the configured agent DID if set; otherwise accept any validly signed
-  // receipt and trust its own `sub` (bearer mode - see README threat model).
+  // receipt and read its own `sub`. This is NOT bearer trust: the proxy layer
+  // then requires a proof-of-possession bound to this `sub`, so a stolen receipt
+  // without the subject's key is useless (see src/pop.ts, README threat model).
   const expectedDid = cfg.expectedAgentDid ?? untrusted.sub;
   if (!expectedDid) return { ok: false, reason: 'missing_subject', tokenHash };
 

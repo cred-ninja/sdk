@@ -7,24 +7,27 @@
  */
 
 import { readFileSync } from 'node:fs';
+import type { ArgConstraints } from './arg-policy.js';
 
 export type ToolDisposition =
   | { kind: 'scope'; scope: string }
   | { kind: 'deny'; reason: string }
   | { kind: 'unknown' };
 
+type ToolEntry = string | { deny?: boolean; scope?: string; reason?: string; args?: ArgConstraints };
+
 interface RawScopeMap {
   service: string;
   unmappedPolicy: 'deny' | 'allow';
   scopes?: Record<string, string>;
-  tools: Record<string, string | { deny?: boolean; scope?: string; reason?: string }>;
+  tools: Record<string, ToolEntry>;
 }
 
 export class ScopeMap {
   readonly service: string;
   readonly unmappedPolicy: 'deny' | 'allow';
   readonly scopeNames: string[];
-  private readonly tools: Record<string, string | { deny?: boolean; scope?: string; reason?: string }>;
+  private readonly tools: Record<string, ToolEntry>;
 
   private constructor(raw: RawScopeMap) {
     this.service = raw.service;
@@ -81,5 +84,12 @@ export class ScopeMap {
     }
     // Malformed entry -> fail closed.
     return { kind: 'deny', reason: `tool "${tool}" has a malformed scope-map entry` };
+  }
+
+  /** Per-argument constraints declared for a tool, if any. */
+  argConstraints(tool: string): ArgConstraints | undefined {
+    const entry = this.tools[tool];
+    if (entry && typeof entry === 'object') return entry.args;
+    return undefined;
   }
 }

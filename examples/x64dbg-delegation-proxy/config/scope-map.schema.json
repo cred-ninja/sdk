@@ -41,6 +41,32 @@
               "reason": { "type": "string" }
             },
             "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "required": ["scope"],
+            "properties": {
+              "scope": { "type": "string", "description": "Required scope" },
+              "args": {
+                "type": "object",
+                "description": "Per-argument constraints (argument-level policy).",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "required": { "type": "boolean" },
+                    "enum": { "type": "array" },
+                    "max": { "type": "number" },
+                    "min": { "type": "number" },
+                    "maxLength": { "type": "number" },
+                    "prefixOneOf": { "type": "array", "items": { "type": "string" } },
+                    "pattern": { "type": "string" },
+                    "denyPattern": { "type": "string" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
           }
         ]
       }

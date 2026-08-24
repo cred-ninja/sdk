@@ -10,7 +10,7 @@
  * exactly as it would verify real Cred receipts.
  */
 
-import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, createHash, randomUUID, type KeyObject } from 'node:crypto';
 
 // Ed25519 PKCS#8 DER prefix (same as @credninja/sdk identity.ts), used to wrap a
 // raw 32-byte private key into a KeyObject for signing.
@@ -77,6 +77,33 @@ export function mintReceipt(params: MintParams): string {
     ...(params.delegationId ? { delegationId: params.delegationId } : {}),
     ...(params.audience ? { aud: params.audience } : {}),
   };
+  const signingInput = `${b64url(header)}.${b64url(payload)}`;
+  const signature = sign(null, Buffer.from(signingInput, 'utf8'), privateKeyFromHex(params.privateKeyHex));
+  return `${signingInput}.${signature.toString('base64url')}`;
+}
+
+/**
+ * Sign a proof-of-possession for one request, with the agent's did:key private
+ * key. Binds the request (method, path, body) to a specific receipt (ath).
+ */
+export function signPop(params: {
+  privateKeyHex: string;
+  method: string;
+  path: string;
+  receipt: string;
+  body?: Buffer | string;
+}): string {
+  const header = { alg: 'EdDSA', typ: 'x64dbg-pop+jwt' };
+  const payload: Record<string, unknown> = {
+    htm: params.method,
+    htu: params.path,
+    iat: Math.floor(Date.now() / 1000),
+    jti: randomUUID(),
+    ath: createHash('sha256').update(params.receipt).digest('base64url'),
+  };
+  if (params.body !== undefined) {
+    payload.bh = createHash('sha256').update(params.body).digest('base64url');
+  }
   const signingInput = `${b64url(header)}.${b64url(payload)}`;
   const signature = sign(null, Buffer.from(signingInput, 'utf8'), privateKeyFromHex(params.privateKeyHex));
   return `${signingInput}.${signature.toString('base64url')}`;

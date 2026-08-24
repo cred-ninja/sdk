@@ -24,6 +24,7 @@ import {
 } from '@credninja/guard';
 import type { ScopeMap } from './scope-map.js';
 import type { VerifiedToken } from './receipt.js';
+import { checkArgs } from './arg-policy.js';
 
 export interface ToolDecision {
   allowed: boolean;
@@ -57,8 +58,29 @@ function toolDispositionPolicy(map: ScopeMap): CredPolicy {
   };
 }
 
+/**
+ * Argument-level policy: after scope passes, bound *how much* the call may do.
+ * Runs last so it only sees calls the scope already permits, and denies with the
+ * specific argument violation.
+ */
+function argumentPolicy(map: ScopeMap): CredPolicy {
+  return {
+    name: 'argument-policy',
+    evaluate(ctx: GuardContext) {
+      const tool = typeof ctx.metadata?.tool === 'string' ? ctx.metadata.tool : '';
+      const args = (ctx.metadata?.args ?? {}) as Record<string, unknown>;
+      const result = checkArgs(map.argConstraints(tool), args);
+      if (!result.ok) {
+        return { decision: 'DENY', policy: this.name, reason: result.violations.join('; ') };
+      }
+      return { decision: 'ALLOW', policy: this.name, reason: 'arguments within policy' };
+    },
+  };
+}
+
 export async function evaluateToolCall(
   tool: string,
+  args: Record<string, unknown>,
   token: VerifiedToken,
   service: string,
   map: ScopeMap,
@@ -70,6 +92,7 @@ export async function evaluateToolCall(
     policies: [
       toolDispositionPolicy(map),
       scopeFilterPolicy({ allowedScopes: { [service]: token.scopes } }),
+      argumentPolicy(map),
     ],
     onError: 'deny',
   });
@@ -83,7 +106,7 @@ export async function evaluateToolCall(
     delegationId: token.payload.delegationId,
     agentDid: token.subject,
     identitySource: 'did',
-    metadata: { tool },
+    metadata: { tool, args },
   };
 
   const decision = await guard.evaluate(ctx);
