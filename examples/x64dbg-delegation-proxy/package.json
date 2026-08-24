@@ -1,0 +1,20 @@
+{
+  "name": "@credninja/example-x64dbg-delegation-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Worked example: a scoped, delegated, audited reverse proxy in front of the unauthenticated x64dbg-mcp-server. Demonstrates draft-sweeney-wimse-credential-delegation.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "proxy": "npx tsx src/proxy.ts",
+    "mock-upstream": "npx tsx demo/mock-x64dbg.ts",
+    "mint": "npx tsx demo/mint-receipt.ts",
+    "demo": "npx tsx demo/demo.ts"
+  },
+  "comment": "Run with `npx tsx <file>`. This directory is NOT an npm workspace member; do not run `npm install` here (it would reach the monorepo root). tsx and the @credninja/* source resolve via ../../packages and tsconfig paths. devDependencies below are only for copying this example OUT of the monorepo to run standalone.",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cred.ninja/schemas/x64dbg-scope-map.schema.json",
+  "title": "x64dbg delegated-scope map",
+  "description": "Maps each MCP tool name to the delegated scope required to call it, for the x64dbg delegation proxy.",
+  "type": "object",
+  "required": ["service", "unmappedPolicy", "tools"],
+  "additionalProperties": true,
+  "properties": {
+    "service": {
+      "type": "string",
+      "description": "Service slug that receipts must carry in their `service` claim."
+    },
+    "mcpProtocolVersion": { "type": "string" },
+    "description": { "type": "string" },
+    "unmappedPolicy": {
+      "enum": ["deny", "allow"],
+      "description": "What to do with a tools/call whose name is not in `tools`. Must be deny for fail-closed behavior."
+    },
+    "classificationPrinciples": { "type": "array", "items": { "type": "string" } },
+    "scopes": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Scope name -> human description."
+    },
+    "specialDispositions": {
+      "type": "object",
+      "description": "Documentation for tools that need explicit handling beyond a plain scope (catch-all risks)."
+    },
+    "tools": {
+      "type": "object",
+      "description": "Tool name -> required scope (string) or a disposition object.",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string", "description": "Required scope, e.g. x64dbg:read" },
+          {
+            "type": "object",
+            "required": ["deny"],
+            "properties": {
+              "deny": { "const": true },
+              "reason": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        ]
+      }
+    }
+  }
+}
