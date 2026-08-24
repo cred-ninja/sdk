@@ -48,7 +48,7 @@
   "devDependencies": {
     "@credninja/sdk": "^1.0.0",
     "@types/node": "^20.10.6",
-    "ai": "^5.0.52",
+    "ai": "^7.0.77",
     "typescript": "^5.3.3",
     "vitest": "^4.1.7",
     "zod": "^3.22.0"
