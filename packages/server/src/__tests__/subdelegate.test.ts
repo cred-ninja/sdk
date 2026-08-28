@@ -859,6 +859,148 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.status).toBe(200);
   });
 
+  // ── Monotonic expiry ────────────────────────────────────────────────────
+  // A child receipt never outlives its parent. Mirrors
+  // attenu-guard tests/vectors/reject_nonmonotonic_exp.json.
+
+  // Server-minted receipts always carry numeric exp and iat; the cast keeps
+  // the assertions below type-sound without an `any`.
+  function decodeReceiptPayload(receipt: string): { exp: number; iat: number } & Record<string, unknown> {
+    return JSON.parse(
+      Buffer.from(receipt.split('.')[1], 'base64url').toString('utf8'),
+    ) as { exp: number; iat: number } & Record<string, unknown>;
+  }
+
+  it('bounds the child receipt exp by the parent exp', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const parentExp = nowSeconds + 120; // well under the default receipt TTL
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_short_exp',
+      chainDepth: 0,
+      exp: parentExp,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.exp).toBeLessThanOrEqual(parentExp);
+    expect(child.exp).toBeGreaterThan(nowSeconds);
+  });
+
+  it('keeps the TTL-derived exp when the parent expires later than the TTL', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions({ receiptTtlSeconds: 300 });
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_long_exp',
+      chainDepth: 0,
+      exp: nowSeconds + 86400,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.exp).toBeLessThanOrEqual(nowSeconds + 300 + 5);
+  });
+
+  it('bounds a child by iat plus TTL when the parent is a legacy receipt without exp', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions({ receiptTtlSeconds: 600 });
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const parentIat = nowSeconds - 500; // 100 seconds of life left under a 600 second TTL
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_legacy',
+      chainDepth: 0,
+      iat: parentIat,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.exp).toBeLessThanOrEqual(parentIat + 600);
+  });
+
+  it('rejects a parent that verifies inside clock skew but has no life left to delegate', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_expiring',
+      chainDepth: 0,
+      exp: nowSeconds - 10, // past exp, inside the 60 second skew allowance
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('parent_expiring');
+  });
+
   it('child receipt can be verified and contains lineage fields', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
 

@@ -1150,15 +1150,25 @@ export function createServer(config: ServerConfig) {
      * source of truth, since only the trusted issuer can add to it.
      */
     lineage?: string[];
+    /**
+     * Upper bound on this receipt's `exp`, in Unix seconds. Sub-delegation
+     * passes the parent's expiry here so a child receipt can never outlive
+     * the receipt it was derived from (monotonic expiry down the chain).
+     */
+    expiresAtSecondsCeiling?: number;
   }): string {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const nowSeconds = Math.floor(Date.now() / 1000);
     const aud = getReceiptAudience();
+    const ttlExp = nowSeconds + getReceiptTtlSeconds();
+    const exp = typeof input.expiresAtSecondsCeiling === 'number'
+      ? Math.min(ttlExp, input.expiresAtSecondsCeiling)
+      : ttlExp;
     const payload = Buffer.from(JSON.stringify({
       iss: 'did:key:local-cred',
       sub: input.agentDid,
       iat: nowSeconds,
-      exp: nowSeconds + getReceiptTtlSeconds(),
+      exp,
       ...(aud ? { aud } : {}),
       service: input.service,
       scopes: input.scopes,
@@ -1188,6 +1198,9 @@ export function createServer(config: ServerConfig) {
     receiptClaims: string[];
     /** Ancestor DIDs above `sub`, oldest (root) first. See createReceipt(). */
     lineage: string[];
+    /** Unix seconds. Absent only on legacy receipts minted before these claims existed. */
+    iat?: number;
+    exp?: number;
   } {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
@@ -1243,7 +1256,21 @@ export function createServer(config: ServerConfig) {
       lineage: Array.isArray(payload.lineage)
         ? payload.lineage.filter((did: unknown): did is string => typeof did === 'string' && did.trim().length > 0)
         : [],
+      ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
+      ...(typeof payload.exp === 'number' ? { exp: payload.exp } : {}),
     };
+  }
+
+  /**
+   * The instant a parent receipt stops being valid, in Unix seconds, as the
+   * bound for any child minted from it. Receipts carry `exp`; legacy receipts
+   * without one age out at `iat` + the configured receipt TTL, which is the
+   * same rule parseAndVerifyReceipt() applies when checking them.
+   */
+  function receiptExpiryBound(parent: { iat?: number; exp?: number }): number | undefined {
+    if (typeof parent.exp === 'number') return parent.exp;
+    if (typeof parent.iat === 'number') return parent.iat + getReceiptTtlSeconds();
+    return undefined;
   }
 
   function extractTrustedReceiptClaims(req: Request): string[] | undefined {
@@ -3169,12 +3196,39 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // ── Monotonic expiry ─────────────────────────────────────────────────
+      // A child receipt must not outlive its parent. parseAndVerifyReceipt()
+      // tolerates a small clock skew past `exp`, so a parent can verify while
+      // having nothing left to hand down; that case is rejected here rather
+      // than minting a receipt that is already expired.
+
+      const parentExpiryBound = receiptExpiryBound(parent);
+      const nowSecondsForChild = Math.floor(Date.now() / 1000);
+      if (parentExpiryBound !== undefined && parentExpiryBound <= nowSecondsForChild) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'token', id: `${service}/${userId}` },
+          outcome: 'denied',
+          errorMessage: 'parent_expiring',
+          correlationId,
+        });
+        res.status(403).json({
+          error: 'parent_expiring',
+          message: 'Parent receipt expires before a child receipt could be issued',
+        });
+        return;
+      }
+
       // ── Issue child receipt ──────────────────────────────────────────────
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
       const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');
 
       const receipt = createReceipt({
+        expiresAtSecondsCeiling: parentExpiryBound,
         agentDid,
         service,
         userId,
