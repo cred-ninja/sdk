@@ -28,7 +28,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy } from '@credninja/vault';
 import type { AgentRecord } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
@@ -1985,6 +1985,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     };
   }
 
+  // Stored provider consent is compared exact-match on purpose (scopeEquivalent,
+  // not scopeCovers): these are provider-defined identifiers, not Cred
+  // delegation scopes, and are not expected to use the ".*" wildcard form.
+  // Delegation-chain narrowing is wildcard-aware separately, in
+  // validateSubDelegation and the per-agent scopeCeiling checks.
   function resolveGrantedScopes(storedScopes: string[], requestedScopes?: string[]) {
     if (!requestedScopes || requestedScopes.length === 0) {
       return { grantedScopes: storedScopes, widenedScopes: [] as string[] };
@@ -2396,7 +2401,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
         if (didAgentRecord?.scopeCeiling.length && effectiveRequestedScopes?.length) {
-          const unauthorizedScopes = effectiveRequestedScopes.filter((scope) => !didAgentRecord!.scopeCeiling.includes(scope));
+          const unauthorizedScopes = effectiveRequestedScopes.filter((scope) => !scopeCoveredBy(didAgentRecord!.scopeCeiling, scope));
           if (unauthorizedScopes.length > 0) {
             res.status(403).json({
               error: 'scope_ceiling_exceeded',
@@ -2450,7 +2455,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(
         (entry.scopes ?? [])
           .filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope))
-          .filter((scope) => !didAgentRecord?.scopeCeiling.length || didAgentRecord.scopeCeiling.includes(scope)),
+          .filter((scope) => !didAgentRecord?.scopeCeiling.length || scopeCoveredBy(didAgentRecord.scopeCeiling, scope)),
         effectiveRequestedScopes,
       );
 
@@ -3104,7 +3109,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // capped to on direct delegation.
       if (agentRecord?.scopeCeiling.length) {
         const withinCeiling = validation.grantedScopes.filter((scope) =>
-          agentRecord!.scopeCeiling.includes(scope),
+          scopeCoveredBy(agentRecord!.scopeCeiling, scope),
         );
         if (withinCeiling.length === 0) {
           writeAuditEventIfSupported({
