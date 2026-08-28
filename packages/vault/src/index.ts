@@ -13,6 +13,8 @@ export type { RotationResult as RotationEngineResult, RefreshAdapter as Rotation
 export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
 export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope } from './delegation-chain.js';
+export { verifyDelegationChain } from './chain-verify.js';
+export type { DelegationChainHop, ChainVerifyReason, ChainVerifyResult, VerifyDelegationChainOptions } from './chain-verify.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 

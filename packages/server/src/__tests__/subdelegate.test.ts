@@ -1001,6 +1001,142 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.body.error).toBe('parent_expiring');
   });
 
+  // ── ancestor_receipts: offline chain verification at the route ──────────
+  // Mirrors attenu-guard tests/vectors/reject_spliced_parent.json.
+
+  function sha256Hex(receipt: string): string {
+    return crypto.createHash('sha256').update(receipt).digest('hex');
+  }
+
+  it('accepts ancestor_receipts when the parent is the leaf of a chain the server would have minted', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    const rootReceipt = createTestReceipt({
+      sub: 'did:key:z6MkRoot',
+      service: 'google',
+      scopes: ['openid', 'email', 'profile'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_root',
+      chainDepth: 0,
+      exp: nowSeconds + 3600,
+    });
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_linked',
+      chainDepth: 1,
+      exp: nowSeconds + 900,
+      parentDelegationId: 'del_root',
+      parentReceiptHash: sha256Hex(rootReceipt),
+      lineage: ['did:key:z6MkRoot'],
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        ancestor_receipts: [rootReceipt],
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.chain_depth).toBe(2);
+  });
+
+  it('rejects ancestor_receipts that splice the parent under a root it was never derived from', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    const realRoot = createTestReceipt({
+      sub: 'did:key:z6MkRoot',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_root_real',
+      chainDepth: 0,
+      exp: nowSeconds + 3600,
+    });
+    const broaderRoot = createTestReceipt({
+      sub: 'did:key:z6MkOtherRoot',
+      service: 'google',
+      scopes: ['openid', 'email', 'profile', 'calendar.readonly'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_root_broad',
+      chainDepth: 0,
+      exp: nowSeconds + 3600,
+    });
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_spliced',
+      chainDepth: 1,
+      exp: nowSeconds + 900,
+      parentDelegationId: 'del_root_real',
+      parentReceiptHash: sha256Hex(realRoot),
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        ancestor_receipts: [broaderRoot],
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('chain_invalid');
+    expect(res.body.reason).toBe('parent_hash_mismatch');
+    expect(res.body.hop).toBe(1);
+  });
+
+  it('rejects a malformed ancestor_receipts value', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId: 'del_parent_badancestors',
+      chainDepth: 0,
+    });
+
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({
+        parent_receipt: parentReceipt,
+        ancestor_receipts: 'not-an-array',
+        agent_did: 'did:key:z6MkChild',
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'local',
+        scopes: ['openid'],
+      });
+
+    expect(res.status).toBe(400);
+  });
+
   it('child receipt can be verified and contains lineage fields', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
 
