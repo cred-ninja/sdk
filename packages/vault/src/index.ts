@@ -12,7 +12,7 @@ export { RotationEngine } from './rotation.js';
 export type { RotationResult as RotationEngineResult, RefreshAdapter as RotationRefreshAdapter } from './rotation.js';
 export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
-export { validateSubDelegation, DelegationChainError } from './delegation-chain.js';
+export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope } from './delegation-chain.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 
