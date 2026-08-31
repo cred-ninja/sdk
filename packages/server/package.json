@@ -41,6 +41,7 @@
   "dependencies": {
     "@credninja/guard": "^1.0.0",
     "@credninja/oauth": "^1.0.0",
+    "@credninja/protocol": "^1.0.0",
     "@credninja/tofu": "^1.0.0",
     "@credninja/vault": "^1.0.0",
     "better-sqlite3": "^11.8.1",

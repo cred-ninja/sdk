@@ -49,6 +49,7 @@ jobs:
       - name: Build Node workspaces
         if: matrix.language == 'javascript-typescript'
         run: |
+          npm run build --workspace=packages/protocol
           npm run build --workspace=packages/oauth
           npm run build --workspace=packages/tofu
           npm run build --workspace=packages/vault

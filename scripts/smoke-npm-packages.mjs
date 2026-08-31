@@ -12,6 +12,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
+  'packages/protocol',
   'packages/oauth',
   'packages/tofu',
   'packages/vault',
@@ -93,17 +94,34 @@ async function waitForHealth(port, child) {
 }
 
 async function stopChild(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (child.pid === undefined) return;
 
-  child.kill('SIGTERM');
+  const processGroup = -child.pid;
+  const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+  const waitForExit = () => (
+    hasExited()
+      ? Promise.resolve()
+      : new Promise((resolve) => child.once('exit', resolve))
+  );
+  const signalGroup = (signal) => {
+    try {
+      process.kill(processGroup, signal);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ESRCH') return false;
+      throw error;
+    }
+  };
+
+  signalGroup('SIGTERM');
   await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
+    waitForExit(),
     delay(2_000),
   ]);
 
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill('SIGKILL');
-    await new Promise((resolve) => child.once('exit', resolve));
+  if (signalGroup(0)) {
+    signalGroup('SIGKILL');
+    await waitForExit();
   }
 }
 
@@ -240,6 +258,7 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
   packageJson.dependencies = {
     '@credninja/server': `file:${tarballsByWorkspace['packages/server']}`,
+    '@credninja/protocol': `file:${tarballsByWorkspace['packages/protocol']}`,
     '@credninja/oauth': `file:${tarballsByWorkspace['packages/oauth']}`,
     '@credninja/tofu': `file:${tarballsByWorkspace['packages/tofu']}`,
     '@credninja/vault': `file:${tarballsByWorkspace['packages/vault']}`,
@@ -257,6 +276,7 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
       HOST: '127.0.0.1',
       REDIRECT_BASE_URI: `http://127.0.0.1:${port}`,
     },
+    detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
