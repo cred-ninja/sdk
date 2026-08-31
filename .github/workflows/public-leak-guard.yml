@@ -18,6 +18,7 @@ jobs:
   leak-guard:
     name: Block Private Artifact Leakage
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
