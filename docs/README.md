@@ -7,6 +7,7 @@ This folder is the top-level documentation index for the open-source Cred repo.
 - [Web Bot Auth overview](./web-bot-auth.md)
 - [Cloudflare submission checklist](./cloudflare-submission-checklist.md)
 - [TOFU proof of possession](./tofu-proof-of-possession.md)
+- [Delegation constraint ceilings design note](./design/delegation-constraints.md)
 
 ## Package Docs
 
