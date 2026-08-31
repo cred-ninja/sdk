@@ -7,6 +7,8 @@
 
 export { createServer } from './server.js';
 export { loadConfig } from './config.js';
+export { verifyReceiptChain, receiptHash, parseReceiptPayload } from './receipt-chain.js';
+export type { ReceiptChainResult, ReceiptChainReason, ParsedReceipt, VerifyReceiptChainOptions } from './receipt-chain.js';
 export type {
   ServerConfig,
   ProviderConfig,

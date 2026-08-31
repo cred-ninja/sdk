@@ -45,6 +45,7 @@ import {
   CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
   isCredProtocolVersionSupported,
 } from '@credninja/protocol';
+import { verifyReceiptChain } from './receipt-chain.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -2923,6 +2924,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id: requestedUserId,
         appClientId = 'local',
         scopes: requestedScopes,
+        ancestor_receipts: ancestorReceipts,
       } = req.body as {
         parent_receipt?: string;
         agent_did?: string;
@@ -2930,6 +2932,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id?: string;
         appClientId?: string;
         scopes?: string[];
+        /**
+         * Optional. Every receipt above parent_receipt, root first. When
+         * present the whole chain is verified offline (signatures, linkage
+         * through parentReceiptHash, depth, scope subsumption, expiry
+         * ordering) before the parent is used. Absent means the existing
+         * parent-only behavior.
+         */
+        ancestor_receipts?: string[];
       };
       const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
       // Sub-delegation always returns a brokered handle — see route doc
@@ -2993,6 +3003,44 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (parent.appClientId !== appClientId) {
         res.status(403).json({ error: 'App does not match parent receipt' });
         return;
+      }
+
+      // ── Optional full-chain verification ─────────────────────────────────
+      // If the caller presents the ancestors, the parent must be provably the
+      // leaf of that chain: each receipt's parentReceiptHash has to equal the
+      // hash of the receipt before it. This is the offline check that
+      // parentReceiptHash exists for; it was written on every hop but never
+      // read before this.
+
+      if (ancestorReceipts !== undefined) {
+        if (!Array.isArray(ancestorReceipts) || ancestorReceipts.some((r) => typeof r !== 'string' || r.trim() === '')) {
+          res.status(400).json({ error: 'ancestor_receipts must be an array of receipt strings' });
+          return;
+        }
+        if (ancestorReceipts.length > 0) {
+          const chain = verifyReceiptChain([...ancestorReceipts, parentReceipt], getReceiptPublicKey(), {
+            clockSkewSeconds: RECEIPT_CLOCK_SKEW_SECONDS,
+          });
+          if (!chain.ok) {
+            writeAuditEventIfSupported({
+              id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+              timestamp: new Date(),
+              actor: { type: 'agent', id: agentDid },
+              action: 'deny',
+              resource: { type: 'token', id: `${service}/${userId}` },
+              outcome: 'denied',
+              errorMessage: `chain_invalid:${chain.reason}`,
+              correlationId,
+            });
+            res.status(403).json({
+              error: 'chain_invalid',
+              reason: chain.reason,
+              hop: chain.hop,
+              message: chain.message,
+            });
+            return;
+          }
+        }
       }
 
       // ── Ancestor status check (if vault supports agents) ─────────────────
