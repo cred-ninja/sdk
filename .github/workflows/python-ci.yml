@@ -27,6 +27,7 @@ jobs:
   sdk-python:
     name: SDK Python (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +56,7 @@ jobs:
   integrations:
     name: Python Integration (${{ matrix.package }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +89,7 @@ jobs:
   wheel-smoke:
     name: Python Wheel Smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
