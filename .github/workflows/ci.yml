@@ -51,6 +51,9 @@ jobs:
       - run: npm ci
 
       # Build dependencies first — SDK and server tests import vault/oauth at runtime
+      - name: Build @credninja/protocol
+        run: npm run build --workspace=packages/protocol
+
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth
 
@@ -100,6 +103,9 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
+
+      - name: Build @credninja/protocol
+        run: npm run build --workspace=packages/protocol
 
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth

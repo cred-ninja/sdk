@@ -14,6 +14,7 @@ const npmPackagePaths = [
   'packages/integrations/vercel-ai/package.json',
   'packages/mcp/package.json',
   'packages/oauth/package.json',
+  'packages/protocol/package.json',
   'packages/sdk/package.json',
   'packages/server/package.json',
   'packages/tofu/package.json',
