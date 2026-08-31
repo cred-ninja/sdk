@@ -36,7 +36,8 @@
     "typescript-eslint": "8.60.1"
   },
   "overrides": {
-    "esbuild": "0.27.4",
+    "body-parser": "2.3.0",
+    "esbuild": "0.28.2",
     "express-rate-limit": "8.5.2",
     "fast-uri": "3.1.6",
     "hono": "4.13.4",
