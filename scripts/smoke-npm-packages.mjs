@@ -24,11 +24,19 @@ const workspaces = [
   'packages/create-cred-app',
 ];
 
+// npm/npx child processes (install, pack, postinstall native-binary fetches)
+// have no bound of their own -- a stalled registry or GitHub-releases fetch
+// hangs execFileSync indefinitely. Fail fast with a clear "which command"
+// error instead of relying solely on the CI job-level timeout-minutes.
+const CHILD_PROCESS_TIMEOUT_MS = 5 * 60 * 1000;
+
 function run(command, args, options = {}) {
   execFileSync(command, args, {
     cwd: options.cwd ?? repoRoot,
     env: { ...process.env, ...(options.env ?? {}) },
     stdio: options.stdio ?? 'inherit',
+    timeout: options.timeout ?? CHILD_PROCESS_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
 }
 
@@ -38,6 +46,8 @@ function runOutput(command, args, options = {}) {
     env: { ...process.env, ...(options.env ?? {}) },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit'],
+    timeout: options.timeout ?? CHILD_PROCESS_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
 }
 
