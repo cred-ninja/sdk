@@ -11,7 +11,7 @@
  * agent-controlled inputs.
  */
 
-import { tool } from 'ai';
+import { tool, type Tool } from 'ai';
 import { z } from 'zod';
 import { Cred } from '@credninja/sdk';
 
@@ -80,7 +80,7 @@ interface CredUseToolInput {
  * });
  * ```
  */
-export function credDelegateTool(options: CredDelegateToolOptions) {
+export function credDelegateTool(options: CredDelegateToolOptions): Tool {
   const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle' } = options;
   const inputSchema = z.object({
     service: z
@@ -191,7 +191,7 @@ export function credDelegateTool(options: CredDelegateToolOptions) {
  *
  * Use this with `credDelegateTool({ tokenFormat: 'handle', ... })`.
  */
-export function credUseTool(options: CredUseToolOptions) {
+export function credUseTool(options: CredUseToolOptions): Tool {
   const { agentToken, baseUrl } = options;
   const cred = new Cred({
     agentToken,
