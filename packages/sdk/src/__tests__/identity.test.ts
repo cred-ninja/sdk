@@ -261,6 +261,154 @@ describe('verifyDelegationReceipt()', () => {
     expect(result).toBe(true);
   });
 
+  it('returns false for a receipt with an expired exp claim', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = spki.slice(-32);
+    const credPublicKeyHex = Buffer.from(rawPublicKey).toString('hex');
+
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:web:cred.ninja',
+      sub: agentDid,
+      iat: nowSeconds - 7200,
+      exp: nowSeconds - 3600, // expired well past the clock-skew allowance
+      service: 'google',
+      scopes: ['calendar.read'],
+      userId: 'user_hash_123',
+      appClientId: 'app_xxx',
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, privateKey);
+    const receipt = `${header}.${payload}.${signature.toString('base64url')}`;
+
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+      credPublicKey: credPublicKeyHex,
+    });
+    expect(result).toBe(false);
+  });
+
+  it('returns true for a receipt with an exp claim within the clock-skew allowance', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = spki.slice(-32);
+    const credPublicKeyHex = Buffer.from(rawPublicKey).toString('hex');
+
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:web:cred.ninja',
+      sub: agentDid,
+      iat: nowSeconds - 3600,
+      exp: nowSeconds - 10, // expired, but within the 60s clock-skew allowance
+      service: 'google',
+      scopes: ['calendar.read'],
+      userId: 'user_hash_123',
+      appClientId: 'app_xxx',
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, privateKey);
+    const receipt = `${header}.${payload}.${signature.toString('base64url')}`;
+
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+      credPublicKey: credPublicKeyHex,
+    });
+    expect(result).toBe(true);
+  });
+
+  it('returns false for a legacy receipt (no exp) older than the default max age', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = spki.slice(-32);
+    const credPublicKeyHex = Buffer.from(rawPublicKey).toString('hex');
+
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:web:cred.ninja',
+      sub: agentDid,
+      iat: nowSeconds - 7200, // 2 hours old, no exp claim, default max age is 1 hour
+      service: 'google',
+      scopes: ['calendar.read'],
+      userId: 'user_hash_123',
+      appClientId: 'app_xxx',
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, privateKey);
+    const receipt = `${header}.${payload}.${signature.toString('base64url')}`;
+
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+      credPublicKey: credPublicKeyHex,
+    });
+    expect(result).toBe(false);
+  });
+
+  it('returns false for a legacy receipt (no exp) older than a custom maxAgeSeconds', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = spki.slice(-32);
+    const credPublicKeyHex = Buffer.from(rawPublicKey).toString('hex');
+
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:web:cred.ninja',
+      sub: agentDid,
+      iat: nowSeconds - 30,
+      service: 'google',
+      scopes: ['calendar.read'],
+      userId: 'user_hash_123',
+      appClientId: 'app_xxx',
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, privateKey);
+    const receipt = `${header}.${payload}.${signature.toString('base64url')}`;
+
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+      credPublicKey: credPublicKeyHex,
+      maxAgeSeconds: 10,
+    });
+    expect(result).toBe(false);
+  });
+
+  it('returns true for a legacy receipt (no exp) within the default max age', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const rawPublicKey = spki.slice(-32);
+    const credPublicKeyHex = Buffer.from(rawPublicKey).toString('hex');
+
+    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'did:web:cred.ninja',
+      sub: agentDid,
+      iat: nowSeconds - 30,
+      service: 'google',
+      scopes: ['calendar.read'],
+      userId: 'user_hash_123',
+      appClientId: 'app_xxx',
+    })).toString('base64url');
+
+    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
+    const signature = sign(null, signatureInput, privateKey);
+    const receipt = `${header}.${payload}.${signature.toString('base64url')}`;
+
+    const result = await verifyDelegationReceipt(receipt, {
+      expectedDid: agentDid,
+      credPublicKey: credPublicKeyHex,
+    });
+    expect(result).toBe(true);
+  });
+
   it('returns false when signature is invalid', async () => {
     // Generate a key pair
     const { publicKey } = await generateKeyPairAsync('ed25519');
