@@ -1,0 +1,38 @@
+{
+  "name": "@credninja/protocol",
+  "version": "1.0.0",
+  "description": "Cred wire-protocol constants shared by Cred clients and servers",
+  "license": "Apache-2.0",
+  "author": "Cred",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm && node ../../scripts/write-package-types.cjs",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

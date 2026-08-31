@@ -44,6 +44,9 @@
     "@credninja/oauth": "^1.0.0",
     "@credninja/vault": "^1.0.0"
   },
+  "dependencies": {
+    "@credninja/protocol": "^1.0.0"
+  },
   "peerDependenciesMeta": {
     "@credninja/oauth": {
       "optional": true
