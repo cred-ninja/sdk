@@ -49,6 +49,24 @@ import {
   handleSubdelegate,
   SubdelegateToolInput,
 } from './tools/subdelegate.js';
+import {
+  REGISTER_IDENTITY_TOOL_NAME,
+  REGISTER_IDENTITY_TOOL_DEFINITION,
+  handleRegisterIdentity,
+  RegisterIdentityToolInput,
+} from './tools/register-identity.js';
+import {
+  ROTATE_KEY_TOOL_NAME,
+  ROTATE_KEY_TOOL_DEFINITION,
+  handleRotateKey,
+  RotateKeyToolInput,
+} from './tools/rotate-key.js';
+import {
+  REVOKE_IDENTITY_TOOL_NAME,
+  REVOKE_IDENTITY_TOOL_DEFINITION,
+  handleRevokeIdentity,
+  RevokeIdentityToolInput,
+} from './tools/revoke-identity.js';
 
 const MCP_SERVER_VERSION = '1.0.0';
 
@@ -97,6 +115,7 @@ function buildServerState(config: CredMcpConfig) {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     agentDid: config.agentDid,
+    selfAgentId: config.selfAgentId,
     tokenCache,
     webBotAuthSigner,
     useServerBroker: config.mode === 'cloud',
@@ -141,6 +160,10 @@ function registerTools(
     handleUse,
     (input: UseToolInput, ctx: UseToolContext) => ({
       provider: ctx.tokenCache.get(input.delegation_id)?.service ?? syntheticProvider(USE_TOOL_NAME),
+      // The delegated scopes, not anything from this call's own input — UseToolInput
+      // has no scopes field. UrlAllowlistPolicy's scopeGate hook (U2) needs the
+      // scopes granted at delegation time to gate the target URL correctly.
+      scopes: ctx.tokenCache.get(input.delegation_id)?.scopes ?? [],
       targetUrl: input.url,
       targetMethod: input.method,
       delegationId: input.delegation_id,
@@ -160,6 +183,27 @@ function registerTools(
     handleRevoke,
     (input: RevokeToolInput) => ({ provider: input.service }),
   );
+  const guardedHandleRegisterIdentity = wireGuardedTool(
+    REGISTER_IDENTITY_TOOL_NAME,
+    mode,
+    guard,
+    handleRegisterIdentity,
+    () => ({ provider: syntheticProvider(REGISTER_IDENTITY_TOOL_NAME) }),
+  );
+  const guardedHandleRotateKey = wireGuardedTool(
+    ROTATE_KEY_TOOL_NAME,
+    mode,
+    guard,
+    handleRotateKey,
+    () => ({ provider: syntheticProvider(ROTATE_KEY_TOOL_NAME) }),
+  );
+  const guardedHandleRevokeIdentity = wireGuardedTool(
+    REVOKE_IDENTITY_TOOL_NAME,
+    mode,
+    guard,
+    handleRevokeIdentity,
+    () => ({ provider: syntheticProvider(REVOKE_IDENTITY_TOOL_NAME) }),
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -168,6 +212,9 @@ function registerTools(
       USE_TOOL_DEFINITION,
       STATUS_TOOL_DEFINITION,
       REVOKE_TOOL_DEFINITION,
+      REGISTER_IDENTITY_TOOL_DEFINITION,
+      ROTATE_KEY_TOOL_DEFINITION,
+      REVOKE_IDENTITY_TOOL_DEFINITION,
     ],
   }));
 
@@ -189,6 +236,15 @@ function registerTools(
 
       case USE_TOOL_NAME:
         return guardedHandleUse(args as unknown as UseToolInput, toolContext);
+
+      case REGISTER_IDENTITY_TOOL_NAME:
+        return guardedHandleRegisterIdentity(args as unknown as RegisterIdentityToolInput, toolContext);
+
+      case ROTATE_KEY_TOOL_NAME:
+        return guardedHandleRotateKey(args as unknown as RotateKeyToolInput, toolContext);
+
+      case REVOKE_IDENTITY_TOOL_NAME:
+        return guardedHandleRevokeIdentity(args as unknown as RevokeIdentityToolInput, toolContext);
 
       default:
         return {

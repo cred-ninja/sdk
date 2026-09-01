@@ -36,6 +36,17 @@ export interface CredMcpCloudConfig {
    * tools get wrapped in which mode.
    */
   guard?: CredGuard;
+  /**
+   * The operator-provisioned agentId that `cred_rotate_key` and
+   * `cred_revoke_identity` target when the caller doesn't supply one
+   * explicitly. This is a distinct field from `agentDid` above — `agentDid`
+   * is used for TOFU fingerprint lookup on delegation receipts, a different
+   * namespace than the TOFU `agentId` (rotate) / Vault `AgentRecord.id`
+   * (revoke) these two tools operate in per the companion ownership-check
+   * plan's routes. See U4 in
+   * docs/plans/2026-08-31-003-feat-guard-mcp-agent-surface-plan.md.
+   */
+  selfAgentId?: string;
 }
 
 export interface CredMcpLocalConfig {
@@ -59,6 +70,17 @@ export interface CredMcpLocalConfig {
    * instance even when `guard` is set here.
    */
   guard?: CredGuard;
+  /**
+   * The operator-provisioned agentId that `cred_rotate_key` and
+   * `cred_revoke_identity` target when the caller doesn't supply one
+   * explicitly. This is a distinct field from `agentDid` above — `agentDid`
+   * is used for TOFU fingerprint lookup on delegation receipts, a different
+   * namespace than the TOFU `agentId` (rotate) / Vault `AgentRecord.id`
+   * (revoke) these two tools operate in per the companion ownership-check
+   * plan's routes. See U4 in
+   * docs/plans/2026-08-31-003-feat-guard-mcp-agent-surface-plan.md.
+   */
+  selfAgentId?: string;
 }
 
 export type CredMcpConfig = CredMcpCloudConfig | CredMcpLocalConfig;

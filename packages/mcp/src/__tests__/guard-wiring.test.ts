@@ -134,7 +134,10 @@ describe('guard wiring (U1)', () => {
 
     expect(names).toEqual([
       'cred_delegate',
+      'cred_register_identity',
       'cred_revoke',
+      'cred_revoke_identity',
+      'cred_rotate_key',
       'cred_status',
       'cred_subdelegate',
       'cred_use',
