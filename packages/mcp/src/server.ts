@@ -73,6 +73,12 @@ import {
   handleAuditLog,
   AuditLogToolInput,
 } from './tools/audit-log.js';
+import {
+  CAPABILITIES_TOOL_NAME,
+  CAPABILITIES_TOOL_DEFINITION,
+  handleCapabilities,
+  CapabilitiesToolInput,
+} from './tools/capabilities.js';
 
 const MCP_SERVER_VERSION = '1.0.0';
 
@@ -220,6 +226,13 @@ function registerTools(
     handleAuditLog,
     () => ({ provider: syntheticProvider(AUDIT_LOG_TOOL_NAME) }),
   );
+  const guardedHandleCapabilities = wireGuardedTool(
+    CAPABILITIES_TOOL_NAME,
+    mode,
+    guard,
+    handleCapabilities,
+    () => ({ provider: syntheticProvider(CAPABILITIES_TOOL_NAME) }),
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -232,6 +245,7 @@ function registerTools(
       ROTATE_KEY_TOOL_DEFINITION,
       REVOKE_IDENTITY_TOOL_DEFINITION,
       AUDIT_LOG_TOOL_DEFINITION,
+      CAPABILITIES_TOOL_DEFINITION,
     ],
   }));
 
@@ -265,6 +279,9 @@ function registerTools(
 
       case AUDIT_LOG_TOOL_NAME:
         return guardedHandleAuditLog(args as unknown as AuditLogToolInput, toolContext);
+
+      case CAPABILITIES_TOOL_NAME:
+        return guardedHandleCapabilities(args as unknown as CapabilitiesToolInput, toolContext);
 
       default:
         return {
