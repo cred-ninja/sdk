@@ -9,6 +9,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
 import { summarizeGuardDecision } from '../guard-wiring.js';
+import { toolErrorResult } from '../tool-errors.js';
 
 export const SUBDELEGATE_TOOL_NAME = 'cred_subdelegate';
 
@@ -116,15 +117,6 @@ export async function handleSubdelegate(
       ],
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${message}`,
-        },
-      ],
-      isError: true,
-    };
+    return toolErrorResult(error);
   }
 }

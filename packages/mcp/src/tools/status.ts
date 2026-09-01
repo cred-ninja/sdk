@@ -7,6 +7,7 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { summarizeGuardDecision } from '../guard-wiring.js';
+import { toolErrorResult } from '../tool-errors.js';
 
 export const STATUS_TOOL_NAME = 'cred_status';
 
@@ -79,16 +80,6 @@ export async function handleStatus(
       ],
     };
   } catch (error) {
-    // Handle errors — return error message, don't crash
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${message}`,
-        },
-      ],
-      isError: true,
-    };
+    return toolErrorResult(error);
   }
 }
