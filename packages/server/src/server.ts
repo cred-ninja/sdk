@@ -1183,6 +1183,8 @@ export function createServer(config: ServerConfig) {
   const healthRateLimiter = makeRateLimiter(120);    // /health       — cheap but still DoS-able
   const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
   const adminPermissionsRateLimiter = makeRateLimiter(30);  // /admin/permissions* — sqlite query per request
+  const adminAuditRateLimiter = makeRateLimiter(30);  // /admin/audit          — vault audit query per request
+  const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     try {
@@ -1706,6 +1708,151 @@ export function createServer(config: ServerConfig) {
       res.status(204).send();
     } catch (err) {
       mapPermissionErrorResponse(res, err, 'Failed to revoke permission');
+    }
+  });
+
+  /**
+   * GET /admin/audit — query audit events across ALL agents/users
+   * (admin-authenticated).
+   *
+   * These are new routes, not modifications to the existing agent-facing
+   * GET /api/v1/audit — that route continues to scope results to a single
+   * `userId` exactly as before. This admin route reads the same underlying
+   * vault instance (no new storage plumbing) but applies no userId
+   * scoping, so an operator can see the full cross-agent audit trail.
+   * Supports the same `service`/`limit` filters as the agent-facing route.
+   */
+  app.get('/admin/audit', adminAuditRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const service = typeof req.query.service === 'string' ? req.query.service : undefined;
+      const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+      const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        res.status(400).json({ error: 'Invalid limit: must be between 1 and 200' });
+        return;
+      }
+
+      let events;
+      try {
+        events = vault.queryAuditEvents({ limit });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('not supported')) {
+          res.status(501).json({ error: 'Audit query not supported by this vault backend' });
+          return;
+        }
+        throw err;
+      }
+
+      const entries = events
+        .filter((event) => {
+          if (!service) return true;
+          const [eventService] = event.resource.id.split('/');
+          return eventService === service;
+        })
+        .map((event) => {
+          const [eventService, eventUserId] = event.resource.id.split('/');
+          return {
+            id: event.id,
+            action: event.action,
+            resourceType: event.resource.type,
+            service: eventService || event.resource.type,
+            userId: eventUserId ?? null,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            metadata: {
+              outcome: event.outcome,
+              scopesRequested: event.scopesRequested,
+              scopesGranted: event.scopesGranted,
+              correlationId: event.correlationId,
+              errorMessage: event.errorMessage,
+              ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+            },
+          };
+        });
+
+      res.json({ entries });
+    } catch (err) {
+      console.error('[/admin/audit] Error:', err);
+      res.status(500).json({ error: 'Failed to fetch audit log' });
+    }
+  });
+
+  /**
+   * GET /admin/agents — list registered agent identities with their status
+   * (admin-authenticated).
+   *
+   * This is the admin-authenticated equivalent of the existing
+   * agent-facing GET /api/v1/web-bot-auth/keys route — same TOFU identity
+   * registry, same response shape (mapAgentToWebBotAuthKey), just reachable
+   * without holding an agent Bearer token. The agent-facing route is
+   * unchanged.
+   */
+  app.get('/admin/agents', adminAgentsRateLimiter, requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const agents = await tofu.listAgents();
+      res.json({
+        keys: agents.map((agent) => mapAgentToWebBotAuthKey(agent)),
+      });
+    } catch (err) {
+      console.error('[/admin/agents] Error:', err);
+      res.status(500).json({ error: 'Failed to list agent identities' });
+    }
+  });
+
+  /**
+   * DELETE /admin/agents/:agentId — revoke the target agent identity
+   * (admin-authenticated).
+   *
+   * Mirrors POST /api/v1/agents/:agentId/revoke-all (vault-side, now
+   * ownership-checked for agent-initiated revocation) but via admin auth
+   * instead of requiring the agent to prove its own identity — an admin
+   * can revoke ANY agent, which is the whole point of this route existing.
+   * Writes a `revoke` audit event via writeAuditEventIfSupported, actor
+   * recorded as the admin principal, matching the existing agent-facing
+   * revoke route's action name — without this, an admin-initiated
+   * revocation would leave no audit trail and would not appear on a
+   * future observability unit's revoke-event stream.
+   */
+  app.delete('/admin/agents/:agentId', adminAgentsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const agentIdParam = req.params.agentId;
+      if (typeof agentIdParam !== 'string') {
+        res.status(400).json({ error: 'agentId must be a string' });
+        return;
+      }
+      const agentId = agentIdParam;
+      const agent = await vault.getAgent(agentId);
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+
+      await vault.revokeAgent(agentId);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'revoke',
+        resource: { type: 'agent', id: agent.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          agentDid: agent.did,
+        },
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'Agent storage not supported by this vault backend' });
+        return;
+      }
+      console.error('[/admin/agents/:agentId] Error:', err);
+      res.status(500).json({ error: 'Failed to revoke agent' });
     }
   });
 
