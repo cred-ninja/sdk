@@ -3,6 +3,7 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
 import { verify as verifySignature, createPublicKey, createPrivateKey, sign, generateKeyPairSync } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
@@ -48,6 +49,60 @@ function adminGet(app: any, route: string) {
   return request(app)
     .get(route)
     .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+}
+
+// ── SSE test helpers ─────────────────────────────────────────────────────────
+//
+// supertest buffers the full response body, so it can't observe an SSE stream
+// incrementally. These helpers use Node's raw `http` client against a real
+// listening server instead, matching the plan's guidance for testing U9's
+// live-streaming behavior end-to-end rather than only at the unit level.
+
+interface OpenSseStreamResult {
+  req: http.ClientRequest;
+  chunks: string[];
+}
+
+/** Opens a raw HTTP connection to an SSE route and accumulates decoded chunks. */
+function openSseStream(server: http.Server, urlPath: string, token: string): Promise<OpenSseStreamResult> {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const chunks: string[] = [];
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: urlPath,
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      (res) => {
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          chunks.push(chunk);
+        });
+        resolve({ req, chunks });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** Polls `fn` until it returns true, or throws once `timeoutMs` elapses. */
+async function waitUntil(fn: () => boolean, timeoutMs = 8000, intervalMs = 100): Promise<void> {
+  const start = Date.now();
+  while (!fn()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('waitUntil: condition not met within timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+function closeServer(server: http.Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
 }
 
 function verifyDirectoryResponseSignature(
@@ -2428,6 +2483,272 @@ describe('@credninja/server', () => {
       expect(res.body.entries.length).toBeGreaterThan(0);
       expect(res.body.entries[0].service).toBe('google');
       expect(res.body.entries[0].action).toBe('access');
+    });
+
+    it('a cursor-bearing request returns only events after the given cursor', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const t1 = new Date('2026-01-01T00:00:00.000Z');
+      const t2 = new Date('2026-01-01T00:00:01.000Z');
+      const t3 = new Date('2026-01-01T00:00:02.000Z');
+
+      for (const [id, timestamp] of [['evt_cursor_1', t1], ['evt_cursor_2', t2], ['evt_cursor_3', t3]] as const) {
+        vault.writeAuditEvent({
+          id,
+          timestamp,
+          actor: { type: 'agent', id: 'cursor-test-agent' },
+          action: 'access',
+          resource: { type: 'token', id: 'cursor-svc/default' },
+          outcome: 'success',
+          correlationId: `corr_${id}`,
+        });
+      }
+
+      const res = await request(app)
+        .get(`/api/v1/audit?user_id=default&service=cursor-svc&since=${t2.toISOString()}`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.entries.map((e: any) => e.id)).toEqual(['evt_cursor_3']);
+    });
+
+    it('an omitted cursor preserves today\'s behavior (most recent N events, unfiltered by time)', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const t1 = new Date('2026-02-01T00:00:00.000Z');
+      const t2 = new Date('2026-02-01T00:00:01.000Z');
+
+      for (const [id, timestamp] of [['evt_nocursor_1', t1], ['evt_nocursor_2', t2]] as const) {
+        vault.writeAuditEvent({
+          id,
+          timestamp,
+          actor: { type: 'agent', id: 'no-cursor-test-agent' },
+          action: 'access',
+          resource: { type: 'token', id: 'nocursor-svc/default' },
+          outcome: 'success',
+          correlationId: `corr_${id}`,
+        });
+      }
+
+      const res = await request(app)
+        .get('/api/v1/audit?user_id=default&service=nocursor-svc')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      // Both events are returned — omitting `since` does not filter by time,
+      // matching pre-cursor behavior exactly.
+      expect(res.body.entries.map((e: any) => e.id).sort()).toEqual(['evt_nocursor_1', 'evt_nocursor_2']);
+    });
+  });
+
+  describe('GET /api/v1/audit/stream', () => {
+    function makeSseTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
+      return makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        // Lets a test prove ownership of a target agent for revoke-all without
+        // hand-rolling Web Bot Auth signatures — mirrors the pattern used by
+        // the "revokes stored DID agents..." test above.
+        agentRequestVerifier: (req) => {
+          if (req.get('Authorization') !== `Bearer ${TEST_TOKEN}`) {
+            return { ok: false, status: 401, error: 'Unauthorized. Provide a valid Bearer token.' };
+          }
+          const actingAsAgentId = req.get('X-Test-Acting-Agent-Id');
+          return {
+            ok: true,
+            principal: { type: 'test-verifier', principalId: actingAsAgentId ?? undefined },
+          };
+        },
+        ...overrides,
+      });
+    }
+
+    async function registerRevokableAgent(vault: any): Promise<string> {
+      const now = new Date().toISOString();
+      const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      await vault.registerAgent({
+        id: agentId,
+        did: `did:key:${agentId}`,
+        fingerprint: `fp_${agentId}`,
+        name: 'sse-test-agent',
+        scopeCeiling: ['calendar.readonly'],
+        status: 'active',
+        createdBy: 'test',
+        createdAt: now,
+        updatedAt: now,
+      });
+      return agentId;
+    }
+
+    it('delivers a revoke event over SSE shortly after it occurs', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      let stream: OpenSseStreamResult | undefined;
+      try {
+        const agentId = await registerRevokableAgent(vault);
+
+        stream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => stream!.chunks.join('').includes('"action":"revoke"'));
+
+        const dataLine = stream.chunks
+          .join('')
+          .split('\n\n')
+          .find((line) => line.includes('"action":"revoke"'));
+        expect(dataLine).toBeDefined();
+        const payload = JSON.parse(dataLine!.replace(/^data: /, '').trim());
+        expect(payload.action).toBe('revoke');
+        expect(payload.service).toBe('agent');
+      } finally {
+        stream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('only delivers events scoped to the connecting caller\'s own identity, not other agents\' revocations', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      let ownStream: OpenSseStreamResult | undefined;
+      let otherStream: OpenSseStreamResult | undefined;
+      try {
+        const agentId = await registerRevokableAgent(vault);
+
+        ownStream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+        otherStream = await openSseStream(server, '/api/v1/audit/stream?user_id=someone-else', TEST_TOKEN);
+
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => ownStream!.chunks.join('').includes('"action":"revoke"'));
+        // Give the other, differently-scoped connection at least one more
+        // poll cycle to prove it's excluded, not merely slower.
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+
+        expect(otherStream.chunks.join('')).not.toContain('"action":"revoke"');
+      } finally {
+        ownStream?.req.destroy();
+        otherStream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('does not stream a delegate action (confirms minimal revoke-only scope)', async () => {
+      const config = makeSseTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+      const server = app.listen(0);
+
+      let stream: OpenSseStreamResult | undefined;
+      try {
+        await vault.store({
+          provider: 'google',
+          userId: 'default',
+          accessToken: 'ya29.sse-delegate-test',
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          scopes: ['calendar.readonly'],
+        });
+
+        stream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+
+        const delegateRes = await request(app)
+          .post('/api/v1/delegate')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({
+            service: 'google',
+            user_id: 'default',
+            appClientId: 'app_sse_test',
+            scopes: ['calendar.readonly'],
+          });
+        expect(delegateRes.status).toBe(200);
+
+        // Longer than one poll cycle, so a wrongly-streamed delegate event
+        // would have had time to arrive.
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+        expect(stream.chunks.join('')).not.toContain('"action":"delegate"');
+
+        // Confirm the stream itself is live (not silently broken) by
+        // following up with a revoke, which should still arrive.
+        const agentId = await registerRevokableAgent(vault);
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => stream!.chunks.join('').includes('"action":"revoke"'));
+      } finally {
+        stream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('rejects an unauthenticated connection attempt (no stream is opened)', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/v1/audit/stream?user_id=default');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('responds with correct SSE headers for an authenticated connection', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      try {
+        const address = server.address();
+        const port = typeof address === 'object' && address ? address.port : 0;
+
+        const { statusCode, headers } = await new Promise<{ statusCode: number | undefined; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+          const req = http.request(
+            {
+              host: '127.0.0.1',
+              port,
+              path: '/api/v1/audit/stream?user_id=default',
+              method: 'GET',
+              headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+            },
+            (res) => {
+              resolve({ statusCode: res.statusCode, headers: res.headers });
+              res.destroy();
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(statusCode).toBe(200);
+        expect(headers['content-type']).toMatch(/^text\/event-stream/);
+        expect(headers['cache-control']).toMatch(/no-cache/);
+        expect(headers['connection']).toMatch(/keep-alive/i);
+      } finally {
+        await closeServer(server);
+      }
     });
   });
 

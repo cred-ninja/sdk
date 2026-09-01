@@ -30,7 +30,7 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy } from '@credninja/vault';
-import type { AgentRecord, UpdatePermissionInput } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput, AuditEvent } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -3309,10 +3309,73 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   });
 
   /**
+   * Shared by `GET /api/v1/audit` and `GET /api/v1/audit/stream` — decides
+   * whether an audit event is visible to a caller scoped to `userId`
+   * (optionally further narrowed by `service`). Agent-identity events
+   * (register/rotate/revoke) carry no `userId` in their resource id, so —
+   * matching the pre-existing behavior of `GET /api/v1/audit` — they are
+   * only visible to the `default` logical user and never alongside a
+   * `service` filter.
+   */
+  function isAuditEventVisibleToCaller(event: AuditEvent, userId: string, service: string | undefined): boolean {
+    if (event.resource.type === 'agent') {
+      return userId === 'default' && !service;
+    }
+    const [eventService, eventUserId] = event.resource.id.split('/');
+    if (eventUserId !== userId) return false;
+    if (service && eventService !== service) return false;
+    return true;
+  }
+
+  /** Shapes a raw `AuditEvent` into the response entry used by both audit routes above. */
+  function auditEventToEntry(event: AuditEvent, userId: string) {
+    if (event.resource.type === 'agent') {
+      return {
+        id: event.id,
+        action: event.action,
+        service: 'agent',
+        userId,
+        timestamp: event.timestamp.toISOString(),
+        metadata: {
+          outcome: event.outcome,
+          scopesRequested: event.scopesRequested,
+          scopesGranted: event.scopesGranted,
+          correlationId: event.correlationId,
+          errorMessage: event.errorMessage,
+          ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+        },
+      };
+    }
+    const [eventService, eventUserId] = event.resource.id.split('/');
+    return {
+      id: event.id,
+      action: event.action,
+      service: eventService ?? '',
+      userId: eventUserId ?? 'default',
+      timestamp: event.timestamp.toISOString(),
+      metadata: {
+        outcome: event.outcome,
+        scopesRequested: event.scopesRequested,
+        scopesGranted: event.scopesGranted,
+        correlationId: event.correlationId,
+        errorMessage: event.errorMessage,
+        ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+      },
+    };
+  }
+
+  /**
    * GET /api/v1/audit — query audit events when the vault backend supports audit.
    *
    * Requires Bearer auth. Events are filtered by logical `user_id` and optional
    * service when the backend supports audit queries.
+   *
+   * Accepts an optional `since` query parameter — an ISO-8601 timestamp cursor.
+   * When provided, only events with a timestamp strictly after `since` are
+   * returned (in place of the default "most recent `limit` events" behavior),
+   * letting a poller re-fetch just the events it hasn't seen instead of
+   * re-fetching and diffing the last N rows. Omitting `since` preserves
+   * today's behavior exactly.
    */
   app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
@@ -3326,9 +3389,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      const sinceRaw = typeof req.query.since === 'string' ? req.query.since : undefined;
+      let since: Date | undefined;
+      if (sinceRaw) {
+        const parsedSince = new Date(sinceRaw);
+        if (Number.isNaN(parsedSince.getTime())) {
+          res.status(400).json({ error: 'Invalid since: must be an ISO-8601 timestamp' });
+          return;
+        }
+        since = parsedSince;
+      }
+
       let events;
       try {
-        events = vault.queryAuditEvents({ limit });
+        events = vault.queryAuditEvents({ limit, ...(since ? { since } : {}) });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (message.includes('not supported')) {
@@ -3339,56 +3413,108 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const entries = events
-        .filter((event) => {
-          if (event.resource.type === 'agent') {
-            return userId === 'default' && !service;
-          }
-          const [eventService, eventUserId] = event.resource.id.split('/');
-          if (eventUserId !== userId) return false;
-          if (service && eventService !== service) return false;
-          return true;
-        })
-        .map((event) => {
-          if (event.resource.type === 'agent') {
-            return {
-              id: event.id,
-              action: event.action,
-              service: 'agent',
-              userId,
-              timestamp: event.timestamp.toISOString(),
-              metadata: {
-                outcome: event.outcome,
-                scopesRequested: event.scopesRequested,
-                scopesGranted: event.scopesGranted,
-                correlationId: event.correlationId,
-                errorMessage: event.errorMessage,
-                ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-              },
-            };
-          }
-          const [eventService, eventUserId] = event.resource.id.split('/');
-          return {
-            id: event.id,
-            action: event.action,
-            service: eventService ?? '',
-            userId: eventUserId ?? 'default',
-            timestamp: event.timestamp.toISOString(),
-            metadata: {
-              outcome: event.outcome,
-              scopesRequested: event.scopesRequested,
-              scopesGranted: event.scopesGranted,
-              correlationId: event.correlationId,
-              errorMessage: event.errorMessage,
-              ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-            },
-          };
-        });
+        .filter((event) => isAuditEventVisibleToCaller(event, userId, service))
+        .map((event) => auditEventToEntry(event, userId));
 
       res.json({ entries });
     } catch (err) {
       console.error('[/api/v1/audit] Error:', err);
       res.status(500).json({ error: 'Failed to fetch audit log' });
     }
+  });
+
+  /**
+   * GET /api/v1/audit/stream — Server-Sent Events stream of the connecting
+   * caller's own `revoke`-action audit events, delivered as they happen.
+   *
+   * Deliberately minimal, per docs/plans/2026-08-31-003-feat-guard-mcp-agent-surface-plan.md
+   * (U9): scoped to `revoke` only — delegate/use/subdelegate events are not
+   * streamed by this route, and this is not a general pub/sub mechanism.
+   *
+   * Auth is the same header-based Bearer `requireAgentAuth`/`verifyWebBotAuth`
+   * used by `GET /api/v1/audit`, established once at connection time. This is
+   * not designed for browser `EventSource` clients (which cannot set an
+   * `Authorization` header) — a token-in-query-string workaround for browser
+   * compatibility is explicitly out of scope.
+   *
+   * No event-emitter/pub-sub hook exists anywhere in this codebase to attach
+   * to, so this is implemented as a short internal poll against
+   * `vault.queryAuditEvents` (every 1.5s) rather than a push from the audit
+   * write path — intentionally simple, not a production-grade event bus.
+   * Visibility uses the exact same `isAuditEventVisibleToCaller` scoping as
+   * `GET /api/v1/audit`, so a connecting caller only ever sees revoke events
+   * visible to its own logical `userId` (see that function's docs above).
+   *
+   * Operational note: SSE is new long-lived-connection surface for this
+   * codebase. Any reverse proxy fronting this service — not just the
+   * documented Caddy setup in packages/server/README.md — needs verified
+   * idle/read timeouts (and disabled response buffering) for this connection
+   * to survive; see the plan's System-Wide Impact section.
+   *
+   * Rate limiting: `auditRateLimiter` gates new *connection attempts* (a
+   * per-IP window, same as `GET /api/v1/audit`) rather than capping
+   * concurrent open streams — express-rate-limit counts at request start,
+   * so it does nothing once a stream is already open. A connection-count
+   * limit would be the more precise protection for a long-lived route, but
+   * is deliberately left out of this minimal unit; the connect-rate limit
+   * plus required auth is the accepted protection level for now.
+   */
+  app.get('/api/v1/audit/stream', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, (req: Request, res: Response) => {
+    const userId = requestUserId(req);
+
+    // Fail fast with the same 501 GET /api/v1/audit would give, rather than
+    // opening a stream that can never emit anything.
+    try {
+      vault.queryAuditEvents({ limit: 1 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'Audit query not supported by this vault backend' });
+        return;
+      }
+      console.error('[/api/v1/audit/stream] Error:', err);
+      res.status(500).json({ error: 'Failed to open audit stream' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    res.flushHeaders();
+
+    // Cursor starts at connection time — this stream delivers revocations
+    // going forward, not a historical backlog (use GET /api/v1/audit for that).
+    let cursor = new Date();
+
+    const poll = () => {
+      let events: AuditEvent[];
+      try {
+        events = vault.queryAuditEvents({ action: 'revoke', since: cursor });
+      } catch {
+        // Backend became unavailable mid-stream — skip this tick rather
+        // than crashing the poll loop; the client can reconnect.
+        return;
+      }
+      if (events.length === 0) return;
+
+      // queryAuditEvents orders newest-first; replay oldest-first so the
+      // cursor advances monotonically and events arrive in chronological order.
+      const chronological = [...events].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      for (const event of chronological) {
+        if (!isAuditEventVisibleToCaller(event, userId, undefined)) continue;
+        const entry = auditEventToEntry(event, userId);
+        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      }
+      cursor = chronological[chronological.length - 1]!.timestamp;
+    };
+
+    const interval = setInterval(poll, 1500);
+
+    req.on('close', () => {
+      clearInterval(interval);
+    });
   });
 
   /**
