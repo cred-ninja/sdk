@@ -63,8 +63,8 @@ npm run dev
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |
-| POST | `/api/v1/web-bot-auth/keys/:agentId/rotate` | Bearer | Rotate a registered Web Bot Auth key |
-| POST | `/api/v1/agents/:agentId/revoke-all` | Bearer | Revoke a stored agent record |
+| POST | `/api/v1/web-bot-auth/keys/:agentId/rotate` | Bearer + verified identity | Rotate a registered Web Bot Auth key — see [Security](#security) |
+| POST | `/api/v1/agents/:agentId/revoke-all` | Bearer + verified identity | Revoke a stored agent record — see [Security](#security) |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
 
@@ -223,6 +223,10 @@ curl https://cred.yourdomain.com/api/v1/use \
 - **Provider-management routes require admin auth.** Browser login posts `ADMIN_TOKEN`, then sets an HttpOnly same-site session cookie.
 - **Brokered upstream calls are bounded.** `/api/v1/use` enforces service URL allowlists, delegated Google scope checks, configured Guard policies, and strips caller-supplied auth, cookie, proxy, forwarding, signature, and hop-by-hop headers before forwarding.
 - **Optional ingress Web Bot Auth verification** validates `Signature`, `Signature-Input`, and `Signature-Agent` on incoming agent requests and rejects replayed nonces within the signature validity window.
+- **`POST /api/v1/web-bot-auth/keys/:agentId/rotate` and `POST /api/v1/agents/:agentId/revoke-all` always require a verified caller identity**, regardless of `WEB_BOT_AUTH_MODE`. A caller must present either a valid Web Bot Auth signature for the target agent, or (with a custom `agentRequestVerifier`) a `principalId` equal to the target agent's id — the shared static bearer token alone is not sufficient. Static-bearer-only deployments (`WEB_BOT_AUTH_MODE=off`, no custom `agentRequestVerifier`) will receive `403` on these two routes until one of those identity sources is configured. Requirements for each identity source:
+  - **Custom `agentRequestVerifier`:** `principalId` must equal the internal id these routes compare against — the registered Web Bot Auth `agent_id` for `rotate`, or the vault `AgentRecord.id` for `revoke-all` — not merely a stable, unforgeable identifier in the verifier's own scheme.
+  - **Vault `AgentRecord.fingerprint`** (used by `revoke-all`) must be provisioned as `sha256(hex(publicKey))`, matching the Web Bot Auth key's fingerprint exactly — a different encoding or digest denies every legitimate owner, not only after a key rotation.
+  - There is currently no supported tool to update an `AgentRecord`'s `fingerprint` after a key rotation; an owner locked out of `revoke-all` after rotating their key needs the record refreshed via direct storage-layer access, the same way `AgentRecord`s are provisioned today.
 - **Shared replay defense is available** with `WEB_BOT_AUTH_NONCE_STORE=sqlite`, allowing multiple Cred instances to reject the same nonce when they share the same nonce database.
 - **Remote `Signature-Agent` fetches are origin-gated.** Cred only resolves remote directories from `WEB_BOT_AUTH_ALLOWED_ORIGINS`, requires the canonical well-known directory path, and rejects redirects during fetch.
 - **HTTPS required for remote access.** The SDK refuses to send agent tokens over HTTP to non-localhost servers.
