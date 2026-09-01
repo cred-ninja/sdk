@@ -18,6 +18,7 @@ import {
   SubDelegationResult,
   SubDelegationHandleResult,
   Connection,
+  ProviderInfo,
   AuditEntry,
   AuditParams,
   WebBotAuthIdentity,
@@ -1315,6 +1316,29 @@ export class Cred {
       `/api/v1/connections?${params.toString()}`,
     );
     return data.connections;
+  }
+
+  /**
+   * List the providers configured on this deployment, so an agent can
+   * discover what's available before calling delegate()/subdelegate()
+   * instead of guessing and hitting consent_required/scope_ceiling_exceeded.
+   *
+   * Cloud mode: Calls GET /api/v1/providers (agent-authenticated — distinct
+   * from the admin-only GET /providers route).
+   * Local mode: Reads directly from the configured `providers` — there's no
+   * server to call, and the local config already has the real answer.
+   */
+  async listProviders(): Promise<ProviderInfo[]> {
+    if (this.isLocal) {
+      const providers = this.localConfig!.providers;
+      return Object.keys(providers).map((slug) => ({
+        slug,
+        defaultScopes: [],
+      }));
+    }
+
+    const data = await this.get<{ providers: ProviderInfo[] }>('/api/v1/providers');
+    return data.providers;
   }
 
   /**

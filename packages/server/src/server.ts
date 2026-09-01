@@ -15,6 +15,7 @@
  *   GET  /providers                       — list configured providers (admin auth)
  *   GET  /connect/:provider               — start OAuth flow (browser, admin auth)
  *   GET  /connect/:provider/callback      — OAuth callback (browser)
+ *   GET  /api/v1/providers                — list configured provider slugs (agent, Bearer auth)
  *   GET  /api/v1/connections              — list connections (agent, Bearer auth)
  *   POST /api/v1/use                      — brokered upstream API call (agent, Bearer auth)
  *   GET  /api/token/:provider             — compatibility token access route (agent, Bearer auth)
@@ -2294,6 +2295,29 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     } catch (err) {
       console.error('[/api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to retrieve token' });
+    }
+  });
+
+  /**
+   * GET /api/v1/providers — agent-facing provider discovery.
+   *
+   * Distinct from the admin-only GET /providers above: agent-Bearer auth
+   * instead of admin auth, and the response is stripped down to only
+   * non-secret fields (slug, defaultScopes) an agent can use to discover
+   * what's available before calling cred_delegate — never client
+   * id/secret or any other admin-only configuration.
+   */
+  app.get('/api/v1/providers', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (_req: Request, res: Response) => {
+    try {
+      const providers = config.providers.map((p) => ({
+        slug: p.slug,
+        defaultScopes: p.defaultScopes,
+      }));
+
+      res.json({ providers });
+    } catch (err) {
+      console.error('[/api/v1/providers] Error:', err);
+      res.status(500).json({ error: 'Failed to list providers' });
     }
   });
 

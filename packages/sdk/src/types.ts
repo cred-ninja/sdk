@@ -112,6 +112,12 @@ export interface Connection {
   appClientId: string | null;
 }
 
+export interface ProviderInfo {
+  slug: string;
+  /** Default OAuth scopes configured for this provider, if any. */
+  defaultScopes: string[];
+}
+
 export interface DelegateParams {
   service: string;
   userId: string;

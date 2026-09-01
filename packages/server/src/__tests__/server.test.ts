@@ -701,6 +701,66 @@ describe('@credninja/server', () => {
     });
   });
 
+  describe('GET /api/v1/providers', () => {
+    it('requires agent auth (401 without a Bearer token)', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/v1/providers');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('is served by agent-Bearer auth alone — admin auth is not required', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+    });
+
+    it('lists configured provider slugs without exposing client id/secret or admin-only fields', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.providers).toHaveLength(1);
+      expect(res.body.providers[0]).toMatchObject({
+        slug: 'google',
+        defaultScopes: ['openid', 'email', 'profile'],
+      });
+      expect(res.body.providers[0].clientId).toBeUndefined();
+      expect(res.body.providers[0].clientSecret).toBeUndefined();
+
+      // Assert no credential material leaks anywhere in the response body.
+      const serialized = JSON.stringify(res.body);
+      expect(serialized).not.toContain('test-google-client-secret');
+      expect(serialized).not.toContain('test-google-client-id');
+    });
+
+    it('is a distinct route from the admin-only GET /providers (agent token alone does not satisfy admin auth there)', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const adminRouteRes = await request(app)
+        .get('/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(adminRouteRes.status).toBe(401);
+
+      const agentRouteRes = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(agentRouteRes.status).toBe(200);
+    });
+  });
+
   describe('GET /connect/:provider', () => {
     it('returns 404 for unconfigured provider', async () => {
       const { app, vault } = createServer(makeTestConfig());
