@@ -673,6 +673,10 @@ export class SQLiteBackend implements StorageBackend {
       conditions.push('timestamp >= @after');
       params.after = filter.after.toISOString();
     }
+    if (filter.since) {
+      conditions.push('timestamp > @since');
+      params.since = filter.since.toISOString();
+    }
     if (filter.before) {
       conditions.push('timestamp <= @before');
       params.before = filter.before.toISOString();
