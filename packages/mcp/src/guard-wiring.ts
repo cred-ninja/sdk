@@ -36,7 +36,11 @@ const GUARD_EXEMPT_TOOLS = new Set(['cred_audit_log', 'cred_whoami']);
 /** Tools already covered by packages/server's own guard middleware in cloud
  * mode (/api/v1/delegate, /api/v1/subdelegate) — wrapping them again here
  * would create a second, independently-configured enforcement point that can
- * drift out of sync with the server-side one (see U1's Non-Goals). */
+ * drift out of sync with the server-side one (see U1's Non-Goals). Keep this
+ * in sync with `delegateRouteHandlers`/`subdelegateRouteHandlers` in
+ * packages/server/src/server.ts, which carries the matching cross-reference
+ * comment — if a new agent-facing route there gets `guardMiddleware`, its
+ * corresponding MCP tool name belongs in this Set too. */
 const CLOUD_SERVER_GUARDED_TOOLS = new Set(['cred_delegate', 'cred_subdelegate']);
 
 export function shouldWrapWithGuard(toolName: string, mode: 'cloud' | 'local'): boolean {
@@ -166,7 +170,18 @@ export function wireGuardedTool<TInput extends object, TContext>(
 
   return async (input: TInput, ctx: TContext): Promise<CallToolResult> => {
     const guardInput = { ...input, ...toGuardInput(input, ctx) } as unknown as CredToolInput;
-    const result = await wrapped(guardInput, ctx as unknown as McpToolContext);
+    // wrapMcpToolHandler mutates its ctx argument in place (sets
+    // guardDecision/guardAuditEvent) before calling the wrapped handler. `ctx`
+    // here is normally the single toolContext object built once per MCP
+    // server instance and shared across every call — mutating it directly
+    // would let concurrent in-flight tool calls (the MCP SDK does not
+    // serialize CallToolRequestSchema dispatch) clobber each other's guard
+    // decision before the handler reads it back via summarizeGuardDecision.
+    // A per-call shallow copy isolates each call's guard state while still
+    // sharing the same underlying services (cred, tokenCache, etc.) by
+    // reference.
+    const perCallCtx = { ...ctx } as TContext;
+    const result = await wrapped(guardInput, perCallCtx as unknown as McpToolContext);
     return result as unknown as CallToolResult;
   };
 }

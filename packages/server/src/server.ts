@@ -1508,6 +1508,24 @@ export function createServer(config: ServerConfig) {
   const PERMISSION_STORAGE_NOT_SUPPORTED_MESSAGE =
     'Permission storage not supported by this vault backend. This deployment must use vaultStorage: "sqlite".';
 
+  /**
+   * Parses an optional `expiresAt` request-body field into a Date, or throws
+   * a plain Error with a 400-worthy message on an unparseable value. Unlike
+   * `new Date(value)` alone, this rejects invalid-date strings up front
+   * instead of letting an Invalid Date reach vault.createPermission /
+   * updatePermission, where `.toISOString()` throws a RangeError that
+   * mapPermissionErrorResponse doesn't recognize and surfaces as an opaque
+   * 500.
+   */
+  function parseOptionalExpiresAt(value: string | null | undefined): Date | undefined {
+    if (!value) return undefined;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error(`expiresAt is not a valid date: ${value}`);
+    }
+    return parsed;
+  }
+
   function mapPermissionErrorResponse(res: Response, err: unknown, fallbackMessage: string): void {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes('not supported')) {
@@ -1516,6 +1534,10 @@ export function createServer(config: ServerConfig) {
     }
     if (message.includes('not found')) {
       res.status(404).json({ error: 'Permission not found' });
+      return;
+    }
+    if (message.includes('not a valid date')) {
+      res.status(400).json({ error: message });
       return;
     }
     console.error(`[admin/permissions] Error:`, err);
@@ -1569,7 +1591,7 @@ export function createServer(config: ServerConfig) {
         requiresApproval: body.requiresApproval ?? false,
         delegatable: body.delegatable ?? false,
         maxDelegationDepth: body.maxDelegationDepth ?? 1,
-        expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        expiresAt: parseOptionalExpiresAt(body.expiresAt),
         createdBy: typeof body.createdBy === 'string' && body.createdBy ? body.createdBy : 'admin',
       });
 
@@ -1661,7 +1683,7 @@ export function createServer(config: ServerConfig) {
       if ('requiresApproval' in body) input.requiresApproval = body.requiresApproval;
       if ('delegatable' in body) input.delegatable = body.delegatable;
       if ('maxDelegationDepth' in body) input.maxDelegationDepth = body.maxDelegationDepth;
-      if ('expiresAt' in body) input.expiresAt = body.expiresAt ? new Date(body.expiresAt) : undefined;
+      if ('expiresAt' in body) input.expiresAt = parseOptionalExpiresAt(body.expiresAt);
 
       const permission = await vault.updatePermission(id, input);
 
@@ -1761,14 +1783,7 @@ export function createServer(config: ServerConfig) {
             userId: eventUserId ?? null,
             actor: event.actor,
             timestamp: event.timestamp.toISOString(),
-            metadata: {
-              outcome: event.outcome,
-              scopesRequested: event.scopesRequested,
-              scopesGranted: event.scopesGranted,
-              correlationId: event.correlationId,
-              errorMessage: event.errorMessage,
-              ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-            },
+            metadata: buildAuditEntryMetadata(event),
           };
         });
 
@@ -2579,6 +2594,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     tokenRouteHandlers.push(guardMiddleware);
   }
 
+  // If you add guardMiddleware to a new agent-facing route here, also add its
+  // MCP tool name to CLOUD_SERVER_GUARDED_TOOLS in
+  // packages/mcp/src/guard-wiring.ts — that Set exists specifically to stop
+  // packages/mcp from double-wrapping a route already guarded here with a
+  // second, independently-configured CredGuard.
   const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
@@ -3328,6 +3348,23 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   }
 
   /** Shapes a raw `AuditEvent` into the response entry used by both audit routes above. */
+  /**
+   * The `metadata` sub-object is identical across every audit-entry mapper
+   * in this file (the agent-facing GET /api/v1/audit route, the admin GET
+   * /admin/audit route, and auditEventToEntry's two branches below) — factored
+   * out once so a future field addition doesn't need to be applied in 3+ places.
+   */
+  function buildAuditEntryMetadata(event: AuditEvent) {
+    return {
+      outcome: event.outcome,
+      scopesRequested: event.scopesRequested,
+      scopesGranted: event.scopesGranted,
+      correlationId: event.correlationId,
+      errorMessage: event.errorMessage,
+      ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+    };
+  }
+
   function auditEventToEntry(event: AuditEvent, userId: string) {
     if (event.resource.type === 'agent') {
       return {
@@ -3336,14 +3373,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         service: 'agent',
         userId,
         timestamp: event.timestamp.toISOString(),
-        metadata: {
-          outcome: event.outcome,
-          scopesRequested: event.scopesRequested,
-          scopesGranted: event.scopesGranted,
-          correlationId: event.correlationId,
-          errorMessage: event.errorMessage,
-          ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-        },
+        metadata: buildAuditEntryMetadata(event),
       };
     }
     const [eventService, eventUserId] = event.resource.id.split('/');
@@ -3353,14 +3383,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       service: eventService ?? '',
       userId: eventUserId ?? 'default',
       timestamp: event.timestamp.toISOString(),
-      metadata: {
-        outcome: event.outcome,
-        scopesRequested: event.scopesRequested,
-        scopesGranted: event.scopesGranted,
-        correlationId: event.correlationId,
-        errorMessage: event.errorMessage,
-        ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-      },
+      metadata: buildAuditEntryMetadata(event),
     };
   }
 
@@ -3484,9 +3507,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
     res.flushHeaders();
 
-    // Cursor starts at connection time — this stream delivers revocations
-    // going forward, not a historical backlog (use GET /api/v1/audit for that).
-    let cursor = new Date();
+    // Cursor starts just before connection time (1ms back) — this stream
+    // delivers revocations going forward, not a historical backlog (use
+    // GET /api/v1/audit for that). The 1ms backdate matters because the
+    // query below is a strict `timestamp > since` (see audit.ts) and Date
+    // has only millisecond resolution: without it, a revoke whose audit
+    // write lands in the same millisecond as this connection would never
+    // satisfy the comparison and would be silently dropped for the life of
+    // the stream, not just delayed.
+    let cursor = new Date(Date.now() - 1);
 
     const poll = () => {
       let events: AuditEvent[];

@@ -66,11 +66,7 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_audit_action    ON vault_audit_events(action, timestamp);
     `);
 
-    const auditColumns = this.db.prepare('PRAGMA table_info(vault_audit_events)')
-      .all() as Array<{ name: string }>;
-    if (!auditColumns.some((column) => column.name === 'metadata_json')) {
-      this.db.exec('ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
-    }
+    this.ensureColumn('vault_audit_events', 'metadata_json', 'ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
@@ -88,11 +84,7 @@ export class SQLiteBackend implements StorageBackend {
       )
     `);
 
-    const agentColumns = this.db.prepare('PRAGMA table_info(vault_agents)')
-      .all() as Array<{ name: string }>;
-    if (!agentColumns.some((column) => column.name === 'did')) {
-      this.db.exec('ALTER TABLE vault_agents ADD COLUMN did TEXT');
-    }
+    this.ensureColumn('vault_agents', 'did', 'ALTER TABLE vault_agents ADD COLUMN did TEXT');
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_did ON vault_agents(did) WHERE did IS NOT NULL');
 
     this.db.exec(`
@@ -117,13 +109,9 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_permissions_connection ON vault_permissions(connection_id);
     `);
 
-    const permissionColumns = this.db.prepare('PRAGMA table_info(vault_permissions)')
-      .all() as Array<{ name: string }>;
-    if (!permissionColumns.some((column) => column.name === 'updated_at')) {
-      // No DEFAULT — pre-migration rows get NULL here. PermissionStore falls
-      // back to created_at when reading a legacy row's updatedAt.
-      this.db.exec('ALTER TABLE vault_permissions ADD COLUMN updated_at TEXT');
-    }
+    // No DEFAULT — pre-migration rows get NULL here. PermissionStore falls
+    // back to created_at when reading a legacy row's updatedAt.
+    this.ensureColumn('vault_permissions', 'updated_at', 'ALTER TABLE vault_permissions ADD COLUMN updated_at TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rate_limit_counters (
@@ -154,6 +142,24 @@ export class SQLiteBackend implements StorageBackend {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_rotations_connection_unique ON vault_rotations(connection_id);
       CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
     `);
+  }
+
+  /**
+   * Adds `column` to `table` via `alterStatement` if it isn't already
+   * present — the shared shape behind every additive column migration in
+   * this file (`vault_audit_events.metadata_json`, `vault_agents.did`,
+   * `vault_permissions.updated_at`, and any future one). `CREATE TABLE IF
+   * NOT EXISTS` already declares the column for a fresh database; this only
+   * does work against a database created before the column existed.
+   */
+  private ensureColumn(table: string, column: string, alterStatement: string): void {
+    if (!this.db) {
+      throw new Error('SQLiteBackend not initialized — call init() first');
+    }
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(alterStatement);
+    }
   }
 
   private ensureDb(): import('better-sqlite3').Database {

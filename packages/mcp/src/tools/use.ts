@@ -134,7 +134,7 @@ export async function handleUse(
         isError: !result.ok,
       };
     } catch (err) {
-      return toolErrorResult(err);
+      return toolErrorResult(err, 'Brokered upstream request failed');
     }
   }
 

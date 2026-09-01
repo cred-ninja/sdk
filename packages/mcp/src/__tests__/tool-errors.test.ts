@@ -29,6 +29,19 @@ describe('toolErrorResult', () => {
     expect(result.isError).toBe(true);
     expect(String((result.content as any[])[0].text)).toBe('Error: a string was thrown');
   });
+
+  it('uses a caller-supplied fallback message for a non-Error thrown value, instead of a raw String(error)', () => {
+    const result = toolErrorResult({ some: 'non-error-object' }, 'Brokered upstream request failed');
+
+    expect(result.isError).toBe(true);
+    expect(String((result.content as any[])[0].text)).toBe('Error: Brokered upstream request failed');
+  });
+
+  it('ignores the fallback message when the thrown value is a real Error', () => {
+    const result = toolErrorResult(new Error('boom'), 'should not appear');
+
+    expect(String((result.content as any[])[0].text)).toBe('Error: boom');
+  });
 });
 
 describe('cred_delegate error handling (U3)', () => {

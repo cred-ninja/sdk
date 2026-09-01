@@ -14,9 +14,13 @@ import { CredError } from '@credninja/sdk';
 /**
  * When `error` is a CredError, includes its `code` and `statusCode`
  * alongside `message` as structured JSON. Non-CredError failures keep the
- * flattened-message-only shape (existing behavior, unchanged).
+ * flattened-message-only shape (existing behavior, unchanged), falling back
+ * to `nonErrorFallbackMessage` (default: `String(error)`) when a non-Error
+ * value was thrown — callers with a more specific fallback for their own
+ * call site (e.g. "Brokered upstream request failed") can supply one instead
+ * of a raw stringified value.
  */
-export function toolErrorResult(error: unknown): CallToolResult {
+export function toolErrorResult(error: unknown, nonErrorFallbackMessage?: string): CallToolResult {
   if (error instanceof CredError) {
     return {
       content: [
@@ -29,7 +33,7 @@ export function toolErrorResult(error: unknown): CallToolResult {
     };
   }
 
-  const message = error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : (nonErrorFallbackMessage ?? String(error));
   return {
     content: [{ type: 'text', text: `Error: ${message}` }],
     isError: true,

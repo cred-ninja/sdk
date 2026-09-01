@@ -180,6 +180,16 @@ export interface AuditParams {
 
 // ── Permission (admin-facing CRUD, cloud mode only) ─────────────────────────
 
+/**
+ * Structurally identical to @credninja/vault's own `PermissionRateLimit` —
+ * intentionally duplicated, not imported, following this file's existing
+ * pattern of never type-importing from @credninja/vault (see the local
+ * structural interface `cred.ts` already uses in place of `CredVault` for
+ * the same reason). `@credninja/vault` is an optional peer dependency of
+ * this package; a real `import type` from it here would force every SDK
+ * consumer's type-check to resolve vault even if they never install it. If
+ * the vault-side shape changes, update this one to match by hand.
+ */
 export interface PermissionRateLimit {
   maxRequests: number;
   windowMs: number;

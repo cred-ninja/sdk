@@ -24,6 +24,11 @@ export interface StoreInput {
   scopes?: string[];
 }
 
+/**
+ * Structurally duplicated (not shared) in @credninja/sdk's types.ts, since
+ * that package deliberately never type-imports from @credninja/vault (an
+ * optional peer dependency there). Keep the two definitions in sync by hand.
+ */
 export interface PermissionRateLimit {
   maxRequests: number;
   windowMs: number;

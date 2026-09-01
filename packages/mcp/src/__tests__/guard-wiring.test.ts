@@ -7,7 +7,7 @@ import { CredGuard, rateLimitPolicy, maxTtlPolicy } from '@credninja/guard';
 import type { CredPolicy } from '@credninja/guard';
 import { createCredMcpServer } from '../server.js';
 import type { CredMcpLocalConfig } from '../config.js';
-import { shouldWrapWithGuard } from '../guard-wiring.js';
+import { shouldWrapWithGuard, wireGuardedTool } from '../guard-wiring.js';
 
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-guard-vault.json');
 
@@ -93,6 +93,44 @@ describe('guard wiring (U1)', () => {
     const guardJson = JSON.parse(text.slice(text.indexOf('guard=') + 'guard='.length));
     expect(guardJson.ttl).toEqual({ maxTtlSeconds: 900, expiresAt: expect.any(String) });
     expect(guardJson.rateLimit).toMatchObject({ limit: 5, windowMs: 60_000, remaining: 4 });
+  });
+
+  it('isolates guardDecision per call when the same context object is passed to concurrent calls (regression: shared toolContext mutation race)', async () => {
+    // Reproduces the scenario in server.ts: toolContext is one object shared
+    // across every tool call. wrapMcpToolHandler mutates its ctx argument in
+    // place, so if wireGuardedTool passed that shared object straight
+    // through, two calls in flight at once could clobber each other's
+    // guardDecision before either handler reads it back.
+    const guard = new CredGuard({ policies: [rateLimitPolicy({ maxRequests: 100, windowMs: 60_000 })] });
+    const sharedCtx: any = { marker: 'shared-toolContext', agentTokenHash: 'test-agent-hash' };
+
+    let releaseFirst!: () => void;
+    const firstIsBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const captured: Record<string, any> = {};
+
+    const slowHandler = async (input: any, ctx: any) => {
+      if (input.which === 'first') {
+        // Blocks here — the second call runs to completion and mutates
+        // `sharedCtx` before this handler ever reads ctx.guardDecision.
+        await firstIsBlocked;
+      }
+      captured[input.which] = ctx.guardDecision;
+      return { content: [{ type: 'text', text: 'ok' }] };
+    };
+
+    const wrapped = wireGuardedTool('test-tool', 'local', guard, slowHandler, () => ({ provider: 'test' }));
+
+    const firstCall = wrapped({ which: 'first' }, sharedCtx);
+    await wrapped({ which: 'second' }, sharedCtx);
+    releaseFirst();
+    await firstCall;
+
+    expect(captured.first).toBeDefined();
+    expect(captured.second).toBeDefined();
+    // Before the fix these would be the same object reference (both
+    // mutations landed on the one shared ctx) — after the per-call-copy
+    // fix, each call captures its own independent decision.
+    expect(captured.first).not.toBe(captured.second);
   });
 
   it('returns a structured denial via the custom onDeny, not a generic string', async () => {

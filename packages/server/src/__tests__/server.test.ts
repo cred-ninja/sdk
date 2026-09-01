@@ -3525,6 +3525,40 @@ describe('@credninja/server', () => {
       expect(afterRevoke.status).toBe(404);
     });
 
+    it('rejects an unparseable expiresAt with 400, on both create and update, instead of an opaque 500', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_bad_date',
+          connectionId: 'google',
+          allowedScopes: ['calendar.readonly'],
+          expiresAt: 'not-a-date',
+        });
+      expect(createRes.status).toBe(400);
+      expect(createRes.body.error).toMatch(/not a valid date/);
+
+      const goodCreateRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_bad_date',
+          connectionId: 'slack',
+          allowedScopes: ['chat.write'],
+        });
+      expect(goodCreateRes.status).toBe(201);
+
+      const updateRes = await request(app)
+        .patch(`/admin/permissions/${goodCreateRes.body.permission.id}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ expiresAt: 'also-not-a-date' });
+      expect(updateRes.status).toBe(400);
+      expect(updateRes.body.error).toMatch(/not a valid date/);
+    });
+
     it('PATCH on a nonexistent permission returns 404, not a silent create', async () => {
       const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
       await vault.init();
