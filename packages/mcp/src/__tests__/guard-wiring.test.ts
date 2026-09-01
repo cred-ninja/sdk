@@ -133,6 +133,7 @@ describe('guard wiring (U1)', () => {
     const names = tools.map((t) => t.name).sort();
 
     expect(names).toEqual([
+      'cred_audit_log',
       'cred_delegate',
       'cred_register_identity',
       'cred_revoke',
@@ -142,6 +143,21 @@ describe('guard wiring (U1)', () => {
       'cred_subdelegate',
       'cred_use',
     ].sort());
+  });
+
+  it('cred_audit_log remains callable when a configured CredGuard would deny everything (U1 outage-survival guarantee)', async () => {
+    const guard = new CredGuard({ policies: [denyAllPolicy('everything denied for test')] });
+    const { client } = await connectedClient(makeLocalConfig({ agentDid: 'agent:test-owner', guard }));
+
+    const result = await client.callTool({ name: 'cred_audit_log', arguments: { user_id: 'default' } });
+
+    // Local mode's getAuditLog() is cloud-only, so this returns the SDK's
+    // "not_supported" CredError — the point under test is that the guard's
+    // deny-all policy never runs against this tool, so the response is that
+    // structured not_supported error, never guard's `policy_denied` shape.
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(String((result.content as any[])[0].text));
+    expect(payload.error).not.toBe('policy_denied');
   });
 });
 

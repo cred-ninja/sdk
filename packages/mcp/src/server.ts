@@ -67,6 +67,12 @@ import {
   handleRevokeIdentity,
   RevokeIdentityToolInput,
 } from './tools/revoke-identity.js';
+import {
+  AUDIT_LOG_TOOL_NAME,
+  AUDIT_LOG_TOOL_DEFINITION,
+  handleAuditLog,
+  AuditLogToolInput,
+} from './tools/audit-log.js';
 
 const MCP_SERVER_VERSION = '1.0.0';
 
@@ -204,6 +210,16 @@ function registerTools(
     handleRevokeIdentity,
     () => ({ provider: syntheticProvider(REVOKE_IDENTITY_TOOL_NAME) }),
   );
+  // cred_audit_log is in GUARD_EXEMPT_TOOLS, so wireGuardedTool is a no-op
+  // passthrough here — wrapping it anyway keeps registration uniform across
+  // all tools (see U5 in the plan).
+  const guardedHandleAuditLog = wireGuardedTool(
+    AUDIT_LOG_TOOL_NAME,
+    mode,
+    guard,
+    handleAuditLog,
+    () => ({ provider: syntheticProvider(AUDIT_LOG_TOOL_NAME) }),
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -215,6 +231,7 @@ function registerTools(
       REGISTER_IDENTITY_TOOL_DEFINITION,
       ROTATE_KEY_TOOL_DEFINITION,
       REVOKE_IDENTITY_TOOL_DEFINITION,
+      AUDIT_LOG_TOOL_DEFINITION,
     ],
   }));
 
@@ -245,6 +262,9 @@ function registerTools(
 
       case REVOKE_IDENTITY_TOOL_NAME:
         return guardedHandleRevokeIdentity(args as unknown as RevokeIdentityToolInput, toolContext);
+
+      case AUDIT_LOG_TOOL_NAME:
+        return guardedHandleAuditLog(args as unknown as AuditLogToolInput, toolContext);
 
       default:
         return {
