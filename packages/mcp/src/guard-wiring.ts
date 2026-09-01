@@ -65,6 +65,21 @@ export function agentTokenHashForLocalMode(agentDid: string): string {
   return crypto.createHash('sha256').update(`agent-did:${agentDid}`).digest('hex');
 }
 
+/**
+ * Cloud mode's identity source (the agent's Bearer token) is already what
+ * `wrapMcpToolHandler` hashes internally (`ctx.agentTokenHash ||
+ * hashToken(ctx.agentToken)`) when a tool call is guard-wrapped — this
+ * mirrors that exact algorithm (sha256 of the raw token) so a value
+ * precomputed here and placed on `toolContext.agentTokenHash` keys to the
+ * same rate-limit bucket a guarded tool call would use. Needed so
+ * `cred_whoami` (never wrapped) can read the same agent's rate-limit
+ * counters directly, without guessing at a hash guard's own middleware
+ * computes lazily per-call.
+ */
+export function agentTokenHashForCloudMode(agentToken: string): string {
+  return crypto.createHash('sha256').update(agentToken).digest('hex');
+}
+
 export interface GuardResponseSummary {
   ttl?: { maxTtlSeconds: number; expiresAt: string };
   rateLimit?: { limit: number; windowMs: number; remaining: number };

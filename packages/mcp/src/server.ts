@@ -17,7 +17,12 @@ import type { CredGuard } from '@credninja/guard';
 import { CredMcpConfig } from './config.js';
 import { TokenCache } from './token-cache.js';
 import { createWebBotAuthSigner } from './web-bot-auth.js';
-import { agentTokenHashForLocalMode, wireGuardedTool, syntheticProvider } from './guard-wiring.js';
+import {
+  agentTokenHashForLocalMode,
+  agentTokenHashForCloudMode,
+  wireGuardedTool,
+  syntheticProvider,
+} from './guard-wiring.js';
 import {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,
@@ -79,6 +84,12 @@ import {
   handleCapabilities,
   CapabilitiesToolInput,
 } from './tools/capabilities.js';
+import {
+  WHOAMI_TOOL_NAME,
+  WHOAMI_TOOL_DEFINITION,
+  handleWhoami,
+  WhoamiToolInput,
+} from './tools/whoami.js';
 
 const MCP_SERVER_VERSION = '1.0.0';
 
@@ -123,6 +134,18 @@ function buildServerState(config: CredMcpConfig) {
   const guard: CredGuard | undefined =
     config.mode === 'local' && !config.agentDid ? undefined : config.guard;
 
+  // Computed the same way in both modes so cred_whoami (never guard-wrapped,
+  // so it can't rely on wrapMcpToolHandler computing this lazily per-call)
+  // can read the exact same agent's rate-limit counters a guarded tool call
+  // would key on. Cloud mode always has an agentToken; local mode only has
+  // an identity to hash when agentDid is configured.
+  const agentTokenHash =
+    config.mode === 'cloud'
+      ? agentTokenHashForCloudMode(config.agentToken)
+      : config.agentDid
+        ? agentTokenHashForLocalMode(config.agentDid)
+        : undefined;
+
   const toolContext = {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
@@ -131,10 +154,9 @@ function buildServerState(config: CredMcpConfig) {
     tokenCache,
     webBotAuthSigner,
     useServerBroker: config.mode === 'cloud',
+    guard,
     ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
-    ...(config.mode === 'local' && config.agentDid
-      ? { agentTokenHash: agentTokenHashForLocalMode(config.agentDid) }
-      : {}),
+    ...(agentTokenHash ? { agentTokenHash } : {}),
   };
 
   return { cred, tokenCache, toolContext, guard, mode: config.mode };
@@ -233,6 +255,16 @@ function registerTools(
     handleCapabilities,
     () => ({ provider: syntheticProvider(CAPABILITIES_TOOL_NAME) }),
   );
+  // cred_whoami is in GUARD_EXEMPT_TOOLS, so wireGuardedTool is a no-op
+  // passthrough here — wrapping it anyway keeps registration uniform across
+  // all tools (see U5's cred_audit_log precedent, mirrored for U10).
+  const guardedHandleWhoami = wireGuardedTool(
+    WHOAMI_TOOL_NAME,
+    mode,
+    guard,
+    handleWhoami,
+    () => ({ provider: syntheticProvider(WHOAMI_TOOL_NAME) }),
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -246,6 +278,7 @@ function registerTools(
       REVOKE_IDENTITY_TOOL_DEFINITION,
       AUDIT_LOG_TOOL_DEFINITION,
       CAPABILITIES_TOOL_DEFINITION,
+      WHOAMI_TOOL_DEFINITION,
     ],
   }));
 
@@ -282,6 +315,9 @@ function registerTools(
 
       case CAPABILITIES_TOOL_NAME:
         return guardedHandleCapabilities(args as unknown as CapabilitiesToolInput, toolContext);
+
+      case WHOAMI_TOOL_NAME:
+        return guardedHandleWhoami(args as unknown as WhoamiToolInput, toolContext);
 
       default:
         return {

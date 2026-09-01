@@ -143,6 +143,7 @@ describe('guard wiring (U1)', () => {
       'cred_status',
       'cred_subdelegate',
       'cred_use',
+      'cred_whoami',
     ].sort());
   });
 
@@ -159,6 +160,21 @@ describe('guard wiring (U1)', () => {
     expect(result.isError).toBe(true);
     const payload = JSON.parse(String((result.content as any[])[0].text));
     expect(payload.error).not.toBe('policy_denied');
+  });
+
+  it('cred_whoami remains callable when a configured CredGuard would deny everything (U1/U10 outage-survival guarantee)', async () => {
+    const guard = new CredGuard({ policies: [denyAllPolicy('everything denied for test')] });
+    const { client } = await connectedClient(makeLocalConfig({ agentDid: 'agent:test-owner', guard }));
+
+    const result = await client.callTool({ name: 'cred_whoami', arguments: {} });
+
+    // The deny-all policy never runs against cred_whoami — the response is
+    // whoami's normal introspection payload (including the deny-all policy's
+    // own name, since getPolicyNames() just reads config), never guard's
+    // `policy_denied` shape.
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(String((result.content as any[])[0].text));
+    expect(payload.guardPolicies).toEqual(['deny-all']);
   });
 });
 
