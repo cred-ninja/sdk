@@ -140,6 +140,24 @@ export interface TimeWindowPolicyConfig {
 export interface UrlAllowlistPolicyConfig {
   /** Per-provider list of allowed URL patterns (string prefix or RegExp) */
   allowedUrls: Record<string, (string | RegExp)[]>;
+  /**
+   * Per-provider list of allowed hostname suffixes for providers whose API
+   * origin varies per tenant (e.g. Salesforce's `mycompany.salesforce.com`).
+   * A hostname matches when it ends with the suffix (`.salesforce.com`
+   * matches `mycompany.salesforce.com`, not `salesforce.com` itself unless
+   * the suffix omits the leading dot). Guards against DNS-rebinding via a
+   * numeric-looking leading label (e.g. `192.168.1.1.salesforce.com`) the
+   * same way the fixed-origin `allowedUrls` prefix match does implicitly.
+   */
+  wildcardSubdomains?: Record<string, string[]>;
+  /**
+   * Optional per-provider predicate gating an otherwise-allowed URL by the
+   * request's scopes — e.g. a provider whose API surface is broader than
+   * what any single OAuth scope grants. Runs only after a URL already
+   * matches an `allowedUrls` pattern; providers with no entry here are
+   * ungated beyond the base URL match.
+   */
+  scopeGate?: Record<string, (requestedScopes: string[], targetUrl: string) => boolean>;
 }
 
 /** Cap how long a delegated token can live */
