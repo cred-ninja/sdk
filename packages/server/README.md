@@ -63,8 +63,8 @@ npm run dev
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |
-| POST | `/api/v1/web-bot-auth/keys/:agentId/rotate` | Bearer | Rotate a registered Web Bot Auth key |
-| POST | `/api/v1/agents/:agentId/revoke-all` | Bearer | Revoke a stored agent record |
+| POST | `/api/v1/web-bot-auth/keys/:agentId/rotate` | Bearer + verified identity | Rotate a registered Web Bot Auth key — see [Security](#security) |
+| POST | `/api/v1/agents/:agentId/revoke-all` | Bearer + verified identity | Revoke a stored agent record — see [Security](#security) |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
 

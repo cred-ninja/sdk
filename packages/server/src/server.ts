@@ -622,11 +622,14 @@ export function createServer(config: ServerConfig) {
    * Runs Web Bot Auth signature verification when Signature headers are present,
    * independent of `config.webBotAuthMode`. Populates `req.webBotAuthIdentity` on
    * success; no-ops (does not throw) when no signature headers are present at all.
+   * Returns whether signature headers were present, so callers with their own
+   * mode-specific behavior (e.g. `require` mode's 401-when-absent) don't need to
+   * re-derive header presence themselves.
    */
-  async function attemptWebBotAuthIdentity(req: Request): Promise<void> {
+  async function attemptWebBotAuthIdentity(req: Request): Promise<boolean> {
     const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
     if (!hasHeaders) {
-      return;
+      return false;
     }
 
     const verifiedIdentity = await verifyIncomingWebBotAuthRequest(req);
@@ -641,6 +644,7 @@ export function createServer(config: ServerConfig) {
         body.signature_agent = verifiedIdentity.signatureAgent;
       }
     }
+    return true;
   }
 
   async function verifyWebBotAuth(req: Request, res: Response, next: NextFunction) {
@@ -650,18 +654,12 @@ export function createServer(config: ServerConfig) {
       return;
     }
 
-    const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
-    if (!hasHeaders) {
-      if (mode === 'require') {
+    try {
+      const hadHeaders = await attemptWebBotAuthIdentity(req);
+      if (!hadHeaders && mode === 'require') {
         res.status(401).json({ error: 'Web Bot Auth signature required' });
         return;
       }
-      next();
-      return;
-    }
-
-    try {
-      await attemptWebBotAuthIdentity(req);
       next();
     } catch (err) {
       res.status(401).json({
@@ -690,6 +688,20 @@ export function createServer(config: ServerConfig) {
   }
 
   type OwnershipCheckResult = { ok: true } | { ok: false; status: number; error: string };
+
+  /**
+   * The caller's custom-verifier principalId, but only when it came from an
+   * actual custom `agentRequestVerifier` — never from the shared static-bearer
+   * principal (which never populates `principalId` today, but this guards
+   * against that invariant silently changing later). Shared by
+   * `assertOwnsAgentId` and deny-audit-event actor attribution so a
+   * static-bearer-tagged principal can never be trusted as an identity in
+   * either place.
+   */
+  function verifiedPrincipalId(req: Request): string | undefined {
+    const agentPrincipal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    return agentPrincipal && agentPrincipal.type !== 'static-bearer' ? agentPrincipal.principalId : undefined;
+  }
 
   /**
    * Verifies the calling principal's verified identity matches `targetAgentId` in
@@ -725,13 +737,7 @@ export function createServer(config: ServerConfig) {
       }
     }
 
-    // Custom-verifier path: principalId is only trusted from an actual custom
-    // agentRequestVerifier, never from the shared static-bearer principal (which
-    // never populates principalId today, but this guards against that invariant
-    // silently changing later).
-    const agentPrincipal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
-    const principalId =
-      agentPrincipal && agentPrincipal.type !== 'static-bearer' ? agentPrincipal.principalId : undefined;
+    const principalId = verifiedPrincipalId(req);
     if (principalId && principalId === targetAgentId) {
       return { ok: true };
     }
@@ -2802,7 +2808,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           timestamp: new Date(),
           actor: {
             type: 'agent',
-            id: (req as any).agentPrincipal?.principalId ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
+            id: verifiedPrincipalId(req) ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
             fingerprint: (req as any).webBotAuthIdentity?.fingerprint,
           },
           action: 'deny',
@@ -2884,7 +2890,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           timestamp: new Date(),
           actor: {
             type: 'agent',
-            id: (req as any).agentPrincipal?.principalId ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
+            id: verifiedPrincipalId(req) ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
             fingerprint: (req as any).webBotAuthIdentity?.fingerprint,
           },
           action: 'deny',
