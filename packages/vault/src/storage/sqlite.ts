@@ -1,5 +1,5 @@
 import type { StorageBackend } from './interface.js';
-import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
+import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 import Database from 'better-sqlite3';
 
@@ -110,11 +110,20 @@ export class SQLiteBackend implements StorageBackend {
         expires_at           TEXT,
         created_at           TEXT NOT NULL,
         created_by           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
         UNIQUE(agent_id, connection_id)
       );
       CREATE INDEX IF NOT EXISTS idx_permissions_agent ON vault_permissions(agent_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_permissions_connection ON vault_permissions(connection_id);
     `);
+
+    const permissionColumns = this.db.prepare('PRAGMA table_info(vault_permissions)')
+      .all() as Array<{ name: string }>;
+    if (!permissionColumns.some((column) => column.name === 'updated_at')) {
+      // No DEFAULT — pre-migration rows get NULL here. PermissionStore falls
+      // back to created_at when reading a legacy row's updatedAt.
+      this.db.exec('ALTER TABLE vault_permissions ADD COLUMN updated_at TEXT');
+    }
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rate_limit_counters (
@@ -414,12 +423,12 @@ export class SQLiteBackend implements StorageBackend {
         id, agent_id, connection_id, allowed_scopes,
         rate_limit_max, rate_limit_window_ms, ttl_override,
         requires_approval, delegatable, max_delegation_depth,
-        expires_at, created_at, created_by
+        expires_at, created_at, created_by, updated_at
       ) VALUES (
         @id, @agent_id, @connection_id, @allowed_scopes,
         @rate_limit_max, @rate_limit_window_ms, @ttl_override,
         @requires_approval, @delegatable, @max_delegation_depth,
-        @expires_at, @created_at, @created_by
+        @expires_at, @created_at, @created_by, @updated_at
       )
       ON CONFLICT(agent_id, connection_id) DO UPDATE SET
         id                   = excluded.id,
@@ -431,7 +440,8 @@ export class SQLiteBackend implements StorageBackend {
         delegatable          = excluded.delegatable,
         max_delegation_depth = excluded.max_delegation_depth,
         expires_at           = excluded.expires_at,
-        created_by           = excluded.created_by
+        created_by           = excluded.created_by,
+        updated_at           = excluded.updated_at
     `).run(row);
   }
 
@@ -452,7 +462,8 @@ export class SQLiteBackend implements StorageBackend {
         max_delegation_depth,
         expires_at,
         created_at,
-        created_by
+        created_by,
+        updated_at
       FROM vault_permissions
       WHERE agent_id = ? AND connection_id = ?
     `).get(agentId, connectionId) as PermissionRow | undefined;
@@ -477,11 +488,71 @@ export class SQLiteBackend implements StorageBackend {
         max_delegation_depth,
         expires_at,
         created_at,
-        created_by
+        created_by,
+        updated_at
       FROM vault_permissions
       WHERE agent_id = ?
       ORDER BY created_at DESC
     `).all(agentId) as PermissionRow[];
+  }
+
+  /**
+   * Atomically apply a partial update to a single permission row, keyed
+   * strictly by `id`. A single UPDATE statement (not read-merge-write) so
+   * two concurrent partial updates to distinct fields don't race. Throws
+   * when `id` doesn't exist — never silently creates a row.
+   */
+  updatePermission(id: string, updates: PermissionRowUpdate): PermissionRow {
+    const db = this.ensureDb();
+    const now = new Date().toISOString();
+
+    const fields: string[] = ['updated_at = @updatedAt'];
+    const params: Record<string, unknown> = { id, updatedAt: now };
+
+    if (updates.allowed_scopes !== undefined) { fields.push('allowed_scopes = @allowedScopes'); params.allowedScopes = updates.allowed_scopes; }
+    if (updates.rate_limit_max !== undefined) { fields.push('rate_limit_max = @rateLimitMax'); params.rateLimitMax = updates.rate_limit_max; }
+    if (updates.rate_limit_window_ms !== undefined) { fields.push('rate_limit_window_ms = @rateLimitWindowMs'); params.rateLimitWindowMs = updates.rate_limit_window_ms; }
+    if (updates.ttl_override !== undefined) { fields.push('ttl_override = @ttlOverride'); params.ttlOverride = updates.ttl_override; }
+    if (updates.requires_approval !== undefined) { fields.push('requires_approval = @requiresApproval'); params.requiresApproval = updates.requires_approval; }
+    if (updates.delegatable !== undefined) { fields.push('delegatable = @delegatable'); params.delegatable = updates.delegatable; }
+    if (updates.max_delegation_depth !== undefined) { fields.push('max_delegation_depth = @maxDelegationDepth'); params.maxDelegationDepth = updates.max_delegation_depth; }
+    if (updates.expires_at !== undefined) { fields.push('expires_at = @expiresAt'); params.expiresAt = updates.expires_at; }
+
+    const result = db.prepare(`
+      UPDATE vault_permissions
+      SET ${fields.join(', ')}
+      WHERE id = @id
+    `).run(params);
+
+    if (result.changes === 0) {
+      throw new Error(`Permission not found: ${id}`);
+    }
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        agent_id,
+        connection_id,
+        allowed_scopes,
+        rate_limit_max,
+        rate_limit_window_ms,
+        ttl_override,
+        requires_approval,
+        delegatable,
+        max_delegation_depth,
+        expires_at,
+        created_at,
+        created_by,
+        updated_at
+      FROM vault_permissions
+      WHERE id = ?
+    `).get(id) as PermissionRow | undefined;
+
+    if (!row) {
+      throw new Error(`Permission not found: ${id}`);
+    }
+
+    return row;
   }
 
   revokePermission(permissionId: string): void {

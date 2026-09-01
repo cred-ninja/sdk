@@ -1,4 +1,4 @@
-import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow } from '../types.js';
+import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter } from '../audit.js';
 
 /**
@@ -56,6 +56,14 @@ export interface StorageBackend {
   getPermission?(agentId: string, connectionId: string): PermissionRow | null | Promise<PermissionRow | null>;
   listPermissions?(agentId: string): PermissionRow[] | Promise<PermissionRow[]>;
   revokePermission?(permissionId: string): void | Promise<void>;
+  /**
+   * Atomically apply a partial update to a single permission row, keyed
+   * strictly by `id` (never by agent_id/connection_id). Must be a single
+   * UPDATE statement, not a read-merge-write, so two concurrent partial
+   * updates to distinct fields don't lose one write to the other. Throws
+   * (does not silently create) when `id` doesn't exist.
+   */
+  updatePermission?(id: string, updates: PermissionRowUpdate): PermissionRow | Promise<PermissionRow>;
   checkPermissionRateLimit?(
     permissionId: string,
     maxRequests: number,

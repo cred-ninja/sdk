@@ -29,7 +29,7 @@ export interface AuditEvent {
   /** UTC timestamp with sub-second precision */
   timestamp: Date;
   actor: AuditActor;
-  action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
+  action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'update' | 'delete' | 'deny';
   resource: AuditResource;
   outcome: 'pending' | 'success' | 'denied' | 'error';
   delegationChain?: Array<{ delegatorId: string; delegateeId: string; scopes: string[] }>;
