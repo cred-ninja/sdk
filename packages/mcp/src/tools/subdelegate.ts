@@ -8,6 +8,7 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
+import { summarizeGuardDecision } from '../guard-wiring.js';
 
 export const SUBDELEGATE_TOOL_NAME = 'cred_subdelegate';
 
@@ -96,6 +97,7 @@ export async function handleSubdelegate(
           expiresAt: now + expiresIn * 1000,
         });
 
+    const guard = summarizeGuardDecision(context);
     return {
       content: [
         {
@@ -107,6 +109,7 @@ export async function handleSubdelegate(
             receipt: result.receipt,
             chainDepth: result.chainDepth,
             parentDelegationId: result.parentDelegationId,
+            ...(guard ? { guard } : {}),
             note: 'Pass delegationId to cred_use to make authenticated API calls.',
           }),
         },

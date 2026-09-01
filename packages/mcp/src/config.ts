@@ -5,6 +5,8 @@
  * Supports cloud mode (default) and local mode (CRED_MODE=local).
  */
 
+import type { CredGuard } from '@credninja/guard';
+
 export interface CredMcpWebBotAuthConfig {
   /** Raw 32-byte Ed25519 private key encoded as hex */
   privateKeyHex: string;
@@ -26,6 +28,14 @@ export interface CredMcpCloudConfig {
   baseUrl: string;
   /** Optional native Web Bot Auth request signing config */
   webBotAuth?: CredMcpWebBotAuthConfig;
+  /**
+   * Optional pre-built CredGuard instance. When configured, MCP tool calls
+   * are evaluated against its policies before executing (opt-in — omitting
+   * this preserves today's unguarded behavior). See
+   * docs/plans/2026-08-31-003-feat-guard-mcp-agent-surface-plan.md for which
+   * tools get wrapped in which mode.
+   */
+  guard?: CredGuard;
 }
 
 export interface CredMcpLocalConfig {
@@ -42,6 +52,13 @@ export interface CredMcpLocalConfig {
   providers: Record<string, { clientId: string; clientSecret: string }>;
   /** Optional native Web Bot Auth request signing config */
   webBotAuth?: CredMcpWebBotAuthConfig;
+  /**
+   * Optional pre-built CredGuard instance. Local mode has no agent token, so
+   * guard wrapping requires `agentDid` to also be configured (see U1's Key
+   * Technical Decisions) — without it, guard is skipped for this server
+   * instance even when `guard` is set here.
+   */
+  guard?: CredGuard;
 }
 
 export type CredMcpConfig = CredMcpCloudConfig | CredMcpLocalConfig;

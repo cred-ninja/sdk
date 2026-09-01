@@ -16,6 +16,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
+import { summarizeGuardDecision } from '../guard-wiring.js';
 
 export const USE_TOOL_NAME = 'cred_use';
 
@@ -261,12 +262,14 @@ export async function handleUse(
     parsedBody = body;
   }
 
+  const guard = summarizeGuardDecision(context);
   const result = {
     status: response.status,
     ok: response.ok,
     contentType: contentType.split(';')[0].trim(),
     body: parsedBody,
     ...(truncated ? { truncated: true, truncatedAt: MAX_RESPONSE_BYTES } : {}),
+    ...(guard ? { guard } : {}),
   };
 
   return {

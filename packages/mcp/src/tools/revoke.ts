@@ -6,6 +6,7 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
+import { summarizeGuardDecision } from '../guard-wiring.js';
 
 export const REVOKE_TOOL_NAME = 'cred_revoke';
 
@@ -51,11 +52,13 @@ export async function handleRevoke(
       appClientId: context.appClientId,
     });
 
+    const guard = summarizeGuardDecision(context);
     return {
       content: [
         {
           type: 'text',
-          text: `Successfully revoked ${input.service} connection for user.`,
+          text: `Successfully revoked ${input.service} connection for user.`
+            + (guard ? ` guard=${JSON.stringify(guard)}` : ''),
         },
       ],
     };

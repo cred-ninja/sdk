@@ -206,6 +206,35 @@ describe('RateLimitPolicy', () => {
     });
   });
 
+  describe('structured headroom fields', () => {
+    it('reports limit, windowMs, and remaining on ALLOW', () => {
+      const result = policy.evaluate(makeContext()) as any;
+      expect(result.limit).toBe(3);
+      expect(result.windowMs).toBe(60_000);
+      expect(result.remaining).toBe(2);
+    });
+
+    it('decrements remaining as requests are consumed', () => {
+      const first = policy.evaluate(makeContext()) as any;
+      const second = policy.evaluate(makeContext()) as any;
+      expect(first.remaining).toBe(2);
+      expect(second.remaining).toBe(1);
+    });
+
+    it('reports limit, windowMs, and retryAfterSeconds on DENY', () => {
+      policy.evaluate(makeContext());
+      policy.evaluate(makeContext());
+      policy.evaluate(makeContext());
+
+      const result = policy.evaluate(makeContext()) as any;
+      expect(result.decision).toBe('DENY');
+      expect(result.limit).toBe(3);
+      expect(result.windowMs).toBe(60_000);
+      expect(typeof result.retryAfterSeconds).toBe('number');
+      expect(result.retryAfterSeconds).toBeGreaterThanOrEqual(0);
+    });
+  });
+
   describe('memory eviction', () => {
     it('evicts records for agents that go idle past the window', () => {
       vi.useFakeTimers();

@@ -12,10 +12,12 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
+import type { CredGuard } from '@credninja/guard';
 
 import { CredMcpConfig } from './config.js';
 import { TokenCache } from './token-cache.js';
 import { createWebBotAuthSigner } from './web-bot-auth.js';
+import { agentTokenHashForLocalMode, wireGuardedTool, syntheticProvider } from './guard-wiring.js';
 import {
   DELEGATE_TOOL_NAME,
   DELEGATE_TOOL_DEFINITION,
@@ -39,6 +41,7 @@ import {
   USE_TOOL_DEFINITION,
   handleUse,
   UseToolInput,
+  UseToolContext,
 } from './tools/use.js';
 import {
   SUBDELEGATE_TOOL_NAME,
@@ -69,18 +72,27 @@ function createCredClient(config: CredMcpConfig): Cred {
 }
 
 /**
- * Create and configure the Cred MCP server.
+ * Shared per-server-instance state: the Cred client, token cache, and the
+ * tool context object passed to every handler. Built once and consumed by
+ * both `createCredMcpServer()` and `startServer()` so the two entry points
+ * can never register a different tool set or wiring — see U1's Key Technical
+ * Decisions on why the previous line-for-line-duplicated construction was a
+ * drift risk.
  */
-export function createCredMcpServer(config: CredMcpConfig): Server {
+function buildServerState(config: CredMcpConfig) {
   const cred = createCredClient(config);
   const webBotAuthSigner = config.webBotAuth
     ? createWebBotAuthSigner(config.webBotAuth)
     : undefined;
-
-  // In-process token cache — tokens never leave this process
   const tokenCache = new TokenCache();
 
-  // Tool context passed to all handlers
+  // Local mode has no agent token; wrapMcpToolHandler needs an identity to
+  // hash rate limits against, so it's derived from agentDid instead. When
+  // agentDid isn't configured, guard wrapping is skipped for this instance
+  // entirely rather than every tool call failing with "Missing agent token".
+  const guard: CredGuard | undefined =
+    config.mode === 'local' && !config.agentDid ? undefined : config.guard;
+
   const toolContext = {
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
@@ -88,52 +100,95 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
     tokenCache,
     webBotAuthSigner,
     useServerBroker: config.mode === 'cloud',
+    ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
+    ...(config.mode === 'local' && config.agentDid
+      ? { agentTokenHash: agentTokenHashForLocalMode(config.agentDid) }
+      : {}),
   };
 
-  const server = new Server(
-    {
-      name: 'cred-mcp',
-      version: MCP_SERVER_VERSION,
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    },
+  return { cred, tokenCache, toolContext, guard, mode: config.mode };
+}
+
+/**
+ * Registers the tool-list and tool-call handlers on `server`. The single
+ * registration point both `createCredMcpServer()` and `startServer()` call
+ * — see `buildServerState` for why this collapse matters.
+ */
+function registerTools(
+  server: Server,
+  toolContext: ReturnType<typeof buildServerState>['toolContext'],
+  guard: CredGuard | undefined,
+  mode: 'cloud' | 'local',
+) {
+  const guardedHandleDelegate = wireGuardedTool(
+    DELEGATE_TOOL_NAME,
+    mode,
+    guard,
+    handleDelegate,
+    (input: DelegateToolInput) => ({ provider: input.service, scopes: input.scopes ?? [] }),
+  );
+  const guardedHandleSubdelegate = wireGuardedTool(
+    SUBDELEGATE_TOOL_NAME,
+    mode,
+    guard,
+    handleSubdelegate,
+    (input: SubdelegateToolInput) => ({ provider: input.service, scopes: input.scopes ?? [] }),
+  );
+  const guardedHandleUse = wireGuardedTool(
+    USE_TOOL_NAME,
+    mode,
+    guard,
+    handleUse,
+    (input: UseToolInput, ctx: UseToolContext) => ({
+      provider: ctx.tokenCache.get(input.delegation_id)?.service ?? syntheticProvider(USE_TOOL_NAME),
+      targetUrl: input.url,
+      targetMethod: input.method,
+      delegationId: input.delegation_id,
+    }),
+  );
+  const guardedHandleStatus = wireGuardedTool(
+    STATUS_TOOL_NAME,
+    mode,
+    guard,
+    handleStatus,
+    () => ({ provider: syntheticProvider(STATUS_TOOL_NAME) }),
+  );
+  const guardedHandleRevoke = wireGuardedTool(
+    REVOKE_TOOL_NAME,
+    mode,
+    guard,
+    handleRevoke,
+    (input: RevokeToolInput) => ({ provider: input.service }),
   );
 
-  // Register tool list handler
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        DELEGATE_TOOL_DEFINITION,
-        SUBDELEGATE_TOOL_DEFINITION,
-        USE_TOOL_DEFINITION,
-        STATUS_TOOL_DEFINITION,
-        REVOKE_TOOL_DEFINITION,
-      ],
-    };
-  });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      DELEGATE_TOOL_DEFINITION,
+      SUBDELEGATE_TOOL_DEFINITION,
+      USE_TOOL_DEFINITION,
+      STATUS_TOOL_DEFINITION,
+      REVOKE_TOOL_DEFINITION,
+    ],
+  }));
 
-  // Register tool call handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     switch (name) {
       case DELEGATE_TOOL_NAME:
-        return handleDelegate(args as unknown as DelegateToolInput, toolContext);
+        return guardedHandleDelegate(args as unknown as DelegateToolInput, toolContext);
 
       case SUBDELEGATE_TOOL_NAME:
-        return handleSubdelegate(args as unknown as SubdelegateToolInput, toolContext);
+        return guardedHandleSubdelegate(args as unknown as SubdelegateToolInput, toolContext);
 
       case STATUS_TOOL_NAME:
-        return handleStatus(args as unknown as StatusToolInput, toolContext);
+        return guardedHandleStatus(args as unknown as StatusToolInput, toolContext);
 
       case REVOKE_TOOL_NAME:
-        return handleRevoke(args as unknown as RevokeToolInput, toolContext);
+        return guardedHandleRevoke(args as unknown as RevokeToolInput, toolContext);
 
       case USE_TOOL_NAME:
-        return handleUse(args as unknown as UseToolInput, toolContext);
+        return guardedHandleUse(args as unknown as UseToolInput, toolContext);
 
       default:
         return {
@@ -147,8 +202,41 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
         };
     }
   });
+}
 
-  return server;
+/**
+ * Builds a fully-registered MCP `Server` instance plus the `tokenCache`
+ * backing it, so a caller needing to clean up the cache on shutdown (see
+ * `startServer`) has the exact instance wired into the running server, not a
+ * second, independently constructed one. Both `createCredMcpServer()` and
+ * `startServer()` call this single function — there is exactly one
+ * registration path, not two independently maintained ones.
+ */
+export function buildMcpServer(config: CredMcpConfig): { server: Server; tokenCache: TokenCache } {
+  const { toolContext, guard, mode, tokenCache } = buildServerState(config);
+
+  const server = new Server(
+    {
+      name: 'cred-mcp',
+      version: MCP_SERVER_VERSION,
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    },
+  );
+
+  registerTools(server, toolContext, guard, mode);
+
+  return { server, tokenCache };
+}
+
+/**
+ * Create and configure the Cred MCP server.
+ */
+export function createCredMcpServer(config: CredMcpConfig): Server {
+  return buildMcpServer(config).server;
 }
 
 /**
@@ -156,43 +244,7 @@ export function createCredMcpServer(config: CredMcpConfig): Server {
  * Handles SIGTERM/SIGINT for graceful shutdown and cache cleanup.
  */
 export async function startServer(config: CredMcpConfig): Promise<void> {
-  const cred = createCredClient(config);
-  const webBotAuthSigner = config.webBotAuth
-    ? createWebBotAuthSigner(config.webBotAuth)
-    : undefined;
-
-  const tokenCache = new TokenCache();
-
-  const toolContext = {
-    cred,
-    appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
-    agentDid: config.agentDid,
-    tokenCache,
-    webBotAuthSigner,
-    useServerBroker: config.mode === 'cloud',
-  };
-
-  const server = new Server(
-    { name: 'cred-mcp', version: MCP_SERVER_VERSION },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [DELEGATE_TOOL_DEFINITION, SUBDELEGATE_TOOL_DEFINITION, USE_TOOL_DEFINITION, STATUS_TOOL_DEFINITION, REVOKE_TOOL_DEFINITION],
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    switch (name) {
-      case DELEGATE_TOOL_NAME: return handleDelegate(args as unknown as DelegateToolInput, toolContext);
-      case SUBDELEGATE_TOOL_NAME: return handleSubdelegate(args as unknown as SubdelegateToolInput, toolContext);
-      case USE_TOOL_NAME:      return handleUse(args as unknown as UseToolInput, toolContext);
-      case STATUS_TOOL_NAME:   return handleStatus(args as unknown as StatusToolInput, toolContext);
-      case REVOKE_TOOL_NAME:   return handleRevoke(args as unknown as RevokeToolInput, toolContext);
-      default:
-        return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
-    }
-  });
+  const { server, tokenCache } = buildMcpServer(config);
 
   const transport = new StdioServerTransport();
 

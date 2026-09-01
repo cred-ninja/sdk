@@ -11,6 +11,17 @@ interface RequestRecord {
   timestamps: number[];
 }
 
+export interface RateLimitPolicyResult extends PolicyResult {
+  /** Requests allowed per window for this provider */
+  limit: number;
+  /** Window size in milliseconds for this provider */
+  windowMs: number;
+  /** Requests remaining in the current window (present on ALLOW) */
+  remaining?: number;
+  /** Seconds until the oldest in-window request ages out (present on DENY) */
+  retryAfterSeconds?: number;
+}
+
 export class RateLimitPolicy implements CredPolicy {
   readonly name = 'rate-limit';
   private readonly config: RateLimitPolicyConfig;
@@ -29,7 +40,7 @@ export class RateLimitPolicy implements CredPolicy {
     this.maxWindowMs = windows.length > 0 ? Math.max(...windows) : 0;
   }
 
-  evaluate(ctx: GuardContext): PolicyResult {
+  evaluate(ctx: GuardContext): RateLimitPolicyResult | PolicyResult {
     const { provider, agentTokenHash } = ctx;
 
     // Get provider-specific or global limits
@@ -72,6 +83,9 @@ export class RateLimitPolicy implements CredPolicy {
         decision: 'DENY',
         policy: this.name,
         reason: `Rate limit exceeded: ${limits.maxRequests} requests per ${limits.windowMs}ms. Retry after ${retryAfterSec}s`,
+        limit: limits.maxRequests,
+        windowMs: limits.windowMs,
+        retryAfterSeconds: retryAfterSec,
       };
     }
 
@@ -82,6 +96,9 @@ export class RateLimitPolicy implements CredPolicy {
       decision: 'ALLOW',
       policy: this.name,
       reason: `${record.timestamps.length}/${limits.maxRequests} requests in window`,
+      limit: limits.maxRequests,
+      windowMs: limits.windowMs,
+      remaining: Math.max(0, limits.maxRequests - record.timestamps.length),
     };
   }
 
