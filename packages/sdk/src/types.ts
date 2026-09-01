@@ -178,6 +178,64 @@ export interface AuditParams {
   limit?: number;
 }
 
+// ── Permission (admin-facing CRUD, cloud mode only) ─────────────────────────
+
+export interface PermissionRateLimit {
+  maxRequests: number;
+  windowMs: number;
+}
+
+/**
+ * A Permission record — the mechanism that enforces an agent's scope
+ * ceiling, rate limit, TTL override, and delegation depth for a given
+ * connection. Managed exclusively through the server's admin-authenticated
+ * `/admin/permissions*` routes; not available in local mode.
+ */
+export interface PermissionRecord {
+  id: string;
+  agentId: string;
+  connectionId: string;
+  allowedScopes: string[];
+  rateLimit?: PermissionRateLimit;
+  ttlOverride?: number;
+  requiresApproval: boolean;
+  delegatable: boolean;
+  maxDelegationDepth: number;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt?: string | null;
+  createdBy: string;
+}
+
+export interface CreatePermissionParams {
+  agentId: string;
+  connectionId: string;
+  allowedScopes: string[];
+  rateLimit?: PermissionRateLimit;
+  ttlOverride?: number;
+  requiresApproval?: boolean;
+  delegatable?: boolean;
+  maxDelegationDepth?: number;
+  expiresAt?: string;
+  /** Defaults to 'admin' server-side when omitted. */
+  createdBy?: string;
+}
+
+/**
+ * Partial update to an existing Permission. Structurally cannot carry
+ * `agentId`/`connectionId` — those are immutable once a permission is
+ * created. Only fields actually present are applied.
+ */
+export interface UpdatePermissionParams {
+  allowedScopes?: string[];
+  rateLimit?: PermissionRateLimit | null;
+  ttlOverride?: number | null;
+  requiresApproval?: boolean;
+  delegatable?: boolean;
+  maxDelegationDepth?: number;
+  expiresAt?: string | null;
+}
+
 export interface WebBotAuthIdentity {
   agentId: string;
   fingerprint: string;

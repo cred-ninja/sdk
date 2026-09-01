@@ -32,6 +32,9 @@ import {
   ScheduleRotationParams,
   RotationStatus,
   RotationStrategy,
+  PermissionRecord,
+  CreatePermissionParams,
+  UpdatePermissionParams,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
 import {
@@ -1531,6 +1534,113 @@ export class Cred {
     await this.post<void>(`/api/v1/agents/${agentId}/revoke-all`, {});
   }
 
+  // ── Permission CRUD (admin-facing, cloud mode only) ─────────────────────────
+  //
+  // Permission records enforce an agent's scope ceiling, rate limit, TTL
+  // override, and delegation depth for a given connection. These are admin
+  // operations — they go through the server's admin-authenticated
+  // `/admin/permissions*` routes, not the per-agent `/api/v1/*` surface, and
+  // are not available in local mode (there is no server to hold an admin
+  // token against).
+
+  /**
+   * Create a Permission record for an agent/connection pair.
+   */
+  async createPermission(params: CreatePermissionParams): Promise<PermissionRecord> {
+    if (this.isLocal) {
+      throw new CredError(
+        'createPermission() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const data = await this.post<{ permission: PermissionRecord }>('/admin/permissions', params);
+    return data.permission;
+  }
+
+  /**
+   * Fetch a single Permission for an agent/connection pair.
+   * Returns null if none exists (mirrors CredVault.getPermission's semantics).
+   */
+  async getPermission(agentId: string, connectionId: string): Promise<PermissionRecord | null> {
+    if (this.isLocal) {
+      throw new CredError(
+        'getPermission() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const query = new URLSearchParams({ agent_id: agentId, connection_id: connectionId });
+    try {
+      const data = await this.get<{ permission: PermissionRecord }>(`/admin/permissions?${query.toString()}`);
+      return data.permission;
+    } catch (err) {
+      if (err instanceof CredError && err.statusCode === 404) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * List all Permission records for an agent.
+   */
+  async listPermissions(agentId: string): Promise<PermissionRecord[]> {
+    if (this.isLocal) {
+      throw new CredError(
+        'listPermissions() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const query = new URLSearchParams({ agent_id: agentId });
+    const data = await this.get<{ permissions: PermissionRecord[] }>(`/admin/permissions?${query.toString()}`);
+    return data.permissions;
+  }
+
+  /**
+   * Atomically update a subset of an existing permission's fields.
+   *
+   * Prospective-only: narrowing `allowedScopes` constrains future
+   * delegate()/subdelegate() calls but has no effect on a delegation handle
+   * already brokered through `/api/v1/use`, which resolves scopes from an
+   * in-memory snapshot taken at delegation time and is never re-checked
+   * against the Permission row.
+   */
+  async updatePermission(id: string, input: UpdatePermissionParams): Promise<PermissionRecord> {
+    if (this.isLocal) {
+      throw new CredError(
+        'updatePermission() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    const data = await this.patch<{ permission: PermissionRecord }>(
+      `/admin/permissions/${encodeURIComponent(id)}`,
+      input,
+    );
+    return data.permission;
+  }
+
+  /**
+   * Revoke (delete) a Permission record by id.
+   */
+  async revokePermission(id: string): Promise<void> {
+    if (this.isLocal) {
+      throw new CredError(
+        'revokePermission() is only supported in cloud mode in this version',
+        'not_supported',
+        501,
+      );
+    }
+
+    await this.delete(`/admin/permissions/${encodeURIComponent(id)}`);
+  }
+
   // ── Private HTTP helpers (cloud mode only) ──────────────────────────────────
 
   private headers(): Record<string, string> {
@@ -1565,6 +1675,15 @@ export class Cred {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
       headers: this.requestHeaders(path, 'GET'),
+    });
+    return this.handleResponse<T>(res);
+  }
+
+  private async patch<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PATCH',
+      headers: this.requestHeaders(path, 'PATCH'),
+      body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);
   }
