@@ -141,6 +141,8 @@ For production with automatic TLS:
 
 Caddy auto-provisions Let's Encrypt certificates. Agents connect via `https://cred.yourdomain.com`.
 
+**SSE endpoint (`GET /api/v1/audit/stream`):** this is a long-lived HTTP connection, not a request/response call. Caddy's defaults work here, but if you front this service with a different reverse proxy (ALB, nginx, k8s ingress, etc.), verify its idle/read timeouts are long enough to keep the connection open and that it doesn't buffer the response — an aggressively-timed-out or buffered proxy will silently kill or delay the stream.
+
 ### Updating
 
 ```bash

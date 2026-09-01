@@ -24,6 +24,11 @@ export interface StoreInput {
   scopes?: string[];
 }
 
+/**
+ * Structurally duplicated (not shared) in @credninja/sdk's types.ts, since
+ * that package deliberately never type-imports from @credninja/vault (an
+ * optional peer dependency there). Keep the two definitions in sync by hand.
+ */
 export interface PermissionRateLimit {
   maxRequests: number;
   windowMs: number;
@@ -43,9 +48,27 @@ export interface Permission {
   delegatable: boolean;
   maxDelegationDepth: number;
   createdAt: Date;
+  /**
+   * ISO timestamp of the last modification. Required — every permission has
+   * one from creation (set equal to createdAt.toISOString() at insert time).
+   * Mirrors the AgentRecord.updatedAt precedent (string, not optional).
+   */
+  updatedAt: string;
   expiresAt?: Date;
   createdBy: string;
 }
+
+/**
+ * Input for `PermissionStore.update()` / `CredVault.updatePermission()`.
+ *
+ * Structurally cannot carry `agentId`/`connectionId`/`createdBy`/`createdAt`/
+ * `id` — these are immutable once a permission is created. Every field is
+ * optional; only the fields actually present should be applied (a partial,
+ * single-statement update — never a read-merge-write).
+ */
+export type UpdatePermissionInput = Partial<
+  Omit<Permission, 'id' | 'agentId' | 'connectionId' | 'createdBy' | 'createdAt' | 'updatedAt'>
+>;
 
 export interface DelegationAuthority {
   delegationId: string;
@@ -173,7 +196,26 @@ export interface PermissionRow {
   expires_at: string | null;
   created_at: string;
   created_by: string;
+  /**
+   * Nullable at the type level because rows written before the `updated_at`
+   * migration (ALTER TABLE ADD COLUMN, no default) have NULL here until they
+   * are next updated. `PermissionStore.rowToPermission()` falls back to
+   * `created_at` for those legacy rows.
+   */
+  updated_at: string | null;
 }
+
+/**
+ * Partial update to an existing vault_permissions row.
+ *
+ * `id`/`agent_id`/`connection_id`/`created_at`/`created_by` are excluded at
+ * the type level — the update surface structurally cannot move a permission
+ * to a different agent/connection or rewrite its creation provenance.
+ */
+export type PermissionRowUpdate = Omit<
+  Partial<PermissionRow>,
+  'id' | 'agent_id' | 'connection_id' | 'created_at' | 'created_by'
+>;
 
 /**
  * Encrypted payload returned by encrypt().

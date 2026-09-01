@@ -3,6 +3,7 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
 import { verify as verifySignature, createPublicKey, createPrivateKey, sign, generateKeyPairSync } from 'node:crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
@@ -48,6 +49,60 @@ function adminGet(app: any, route: string) {
   return request(app)
     .get(route)
     .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+}
+
+// ── SSE test helpers ─────────────────────────────────────────────────────────
+//
+// supertest buffers the full response body, so it can't observe an SSE stream
+// incrementally. These helpers use Node's raw `http` client against a real
+// listening server instead, matching the plan's guidance for testing U9's
+// live-streaming behavior end-to-end rather than only at the unit level.
+
+interface OpenSseStreamResult {
+  req: http.ClientRequest;
+  chunks: string[];
+}
+
+/** Opens a raw HTTP connection to an SSE route and accumulates decoded chunks. */
+function openSseStream(server: http.Server, urlPath: string, token: string): Promise<OpenSseStreamResult> {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const chunks: string[] = [];
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: urlPath,
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      (res) => {
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          chunks.push(chunk);
+        });
+        resolve({ req, chunks });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** Polls `fn` until it returns true, or throws once `timeoutMs` elapses. */
+async function waitUntil(fn: () => boolean, timeoutMs = 8000, intervalMs = 100): Promise<void> {
+  const start = Date.now();
+  while (!fn()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('waitUntil: condition not met within timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+function closeServer(server: http.Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
 }
 
 function verifyDirectoryResponseSignature(
@@ -698,6 +753,66 @@ describe('@credninja/server', () => {
       expect(res.body.providers).toHaveLength(1);
       expect(res.body.providers[0].slug).toBe('google');
       expect(res.body.providers[0].connected).toBe(false);
+    });
+  });
+
+  describe('GET /api/v1/providers', () => {
+    it('requires agent auth (401 without a Bearer token)', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/v1/providers');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('is served by agent-Bearer auth alone — admin auth is not required', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+    });
+
+    it('lists configured provider slugs without exposing client id/secret or admin-only fields', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const res = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.providers).toHaveLength(1);
+      expect(res.body.providers[0]).toMatchObject({
+        slug: 'google',
+        defaultScopes: ['openid', 'email', 'profile'],
+      });
+      expect(res.body.providers[0].clientId).toBeUndefined();
+      expect(res.body.providers[0].clientSecret).toBeUndefined();
+
+      // Assert no credential material leaks anywhere in the response body.
+      const serialized = JSON.stringify(res.body);
+      expect(serialized).not.toContain('test-google-client-secret');
+      expect(serialized).not.toContain('test-google-client-id');
+    });
+
+    it('is a distinct route from the admin-only GET /providers (agent token alone does not satisfy admin auth there)', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const adminRouteRes = await request(app)
+        .get('/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(adminRouteRes.status).toBe(401);
+
+      const agentRouteRes = await request(app)
+        .get('/api/v1/providers')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(agentRouteRes.status).toBe(200);
     });
   });
 
@@ -2369,6 +2484,272 @@ describe('@credninja/server', () => {
       expect(res.body.entries[0].service).toBe('google');
       expect(res.body.entries[0].action).toBe('access');
     });
+
+    it('a cursor-bearing request returns only events after the given cursor', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const t1 = new Date('2026-01-01T00:00:00.000Z');
+      const t2 = new Date('2026-01-01T00:00:01.000Z');
+      const t3 = new Date('2026-01-01T00:00:02.000Z');
+
+      for (const [id, timestamp] of [['evt_cursor_1', t1], ['evt_cursor_2', t2], ['evt_cursor_3', t3]] as const) {
+        vault.writeAuditEvent({
+          id,
+          timestamp,
+          actor: { type: 'agent', id: 'cursor-test-agent' },
+          action: 'access',
+          resource: { type: 'token', id: 'cursor-svc/default' },
+          outcome: 'success',
+          correlationId: `corr_${id}`,
+        });
+      }
+
+      const res = await request(app)
+        .get(`/api/v1/audit?user_id=default&service=cursor-svc&since=${t2.toISOString()}`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.entries.map((e: any) => e.id)).toEqual(['evt_cursor_3']);
+    });
+
+    it('an omitted cursor preserves today\'s behavior (most recent N events, unfiltered by time)', async () => {
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+      }));
+      await vault.init();
+
+      const t1 = new Date('2026-02-01T00:00:00.000Z');
+      const t2 = new Date('2026-02-01T00:00:01.000Z');
+
+      for (const [id, timestamp] of [['evt_nocursor_1', t1], ['evt_nocursor_2', t2]] as const) {
+        vault.writeAuditEvent({
+          id,
+          timestamp,
+          actor: { type: 'agent', id: 'no-cursor-test-agent' },
+          action: 'access',
+          resource: { type: 'token', id: 'nocursor-svc/default' },
+          outcome: 'success',
+          correlationId: `corr_${id}`,
+        });
+      }
+
+      const res = await request(app)
+        .get('/api/v1/audit?user_id=default&service=nocursor-svc')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+
+      expect(res.status).toBe(200);
+      // Both events are returned — omitting `since` does not filter by time,
+      // matching pre-cursor behavior exactly.
+      expect(res.body.entries.map((e: any) => e.id).sort()).toEqual(['evt_nocursor_1', 'evt_nocursor_2']);
+    });
+  });
+
+  describe('GET /api/v1/audit/stream', () => {
+    function makeSseTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
+      return makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        // Lets a test prove ownership of a target agent for revoke-all without
+        // hand-rolling Web Bot Auth signatures — mirrors the pattern used by
+        // the "revokes stored DID agents..." test above.
+        agentRequestVerifier: (req) => {
+          if (req.get('Authorization') !== `Bearer ${TEST_TOKEN}`) {
+            return { ok: false, status: 401, error: 'Unauthorized. Provide a valid Bearer token.' };
+          }
+          const actingAsAgentId = req.get('X-Test-Acting-Agent-Id');
+          return {
+            ok: true,
+            principal: { type: 'test-verifier', principalId: actingAsAgentId ?? undefined },
+          };
+        },
+        ...overrides,
+      });
+    }
+
+    async function registerRevokableAgent(vault: any): Promise<string> {
+      const now = new Date().toISOString();
+      const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      await vault.registerAgent({
+        id: agentId,
+        did: `did:key:${agentId}`,
+        fingerprint: `fp_${agentId}`,
+        name: 'sse-test-agent',
+        scopeCeiling: ['calendar.readonly'],
+        status: 'active',
+        createdBy: 'test',
+        createdAt: now,
+        updatedAt: now,
+      });
+      return agentId;
+    }
+
+    it('delivers a revoke event over SSE shortly after it occurs', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      let stream: OpenSseStreamResult | undefined;
+      try {
+        const agentId = await registerRevokableAgent(vault);
+
+        stream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => stream!.chunks.join('').includes('"action":"revoke"'));
+
+        const dataLine = stream.chunks
+          .join('')
+          .split('\n\n')
+          .find((line) => line.includes('"action":"revoke"'));
+        expect(dataLine).toBeDefined();
+        const payload = JSON.parse(dataLine!.replace(/^data: /, '').trim());
+        expect(payload.action).toBe('revoke');
+        expect(payload.service).toBe('agent');
+      } finally {
+        stream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('only delivers events scoped to the connecting caller\'s own identity, not other agents\' revocations', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      let ownStream: OpenSseStreamResult | undefined;
+      let otherStream: OpenSseStreamResult | undefined;
+      try {
+        const agentId = await registerRevokableAgent(vault);
+
+        ownStream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+        otherStream = await openSseStream(server, '/api/v1/audit/stream?user_id=someone-else', TEST_TOKEN);
+
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => ownStream!.chunks.join('').includes('"action":"revoke"'));
+        // Give the other, differently-scoped connection at least one more
+        // poll cycle to prove it's excluded, not merely slower.
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+
+        expect(otherStream.chunks.join('')).not.toContain('"action":"revoke"');
+      } finally {
+        ownStream?.req.destroy();
+        otherStream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('does not stream a delegate action (confirms minimal revoke-only scope)', async () => {
+      const config = makeSseTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+      const server = app.listen(0);
+
+      let stream: OpenSseStreamResult | undefined;
+      try {
+        await vault.store({
+          provider: 'google',
+          userId: 'default',
+          accessToken: 'ya29.sse-delegate-test',
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          scopes: ['calendar.readonly'],
+        });
+
+        stream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
+
+        const delegateRes = await request(app)
+          .post('/api/v1/delegate')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({
+            service: 'google',
+            user_id: 'default',
+            appClientId: 'app_sse_test',
+            scopes: ['calendar.readonly'],
+          });
+        expect(delegateRes.status).toBe(200);
+
+        // Longer than one poll cycle, so a wrongly-streamed delegate event
+        // would have had time to arrive.
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+        expect(stream.chunks.join('')).not.toContain('"action":"delegate"');
+
+        // Confirm the stream itself is live (not silently broken) by
+        // following up with a revoke, which should still arrive.
+        const agentId = await registerRevokableAgent(vault);
+        const revokeRes = await request(app)
+          .post(`/api/v1/agents/${agentId}/revoke-all`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .set('X-Test-Acting-Agent-Id', agentId)
+          .send({});
+        expect(revokeRes.status).toBe(204);
+
+        await waitUntil(() => stream!.chunks.join('').includes('"action":"revoke"'));
+      } finally {
+        stream?.req.destroy();
+        await closeServer(server);
+      }
+    }, 15000);
+
+    it('rejects an unauthenticated connection attempt (no stream is opened)', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+
+      const res = await request(app).get('/api/v1/audit/stream?user_id=default');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('responds with correct SSE headers for an authenticated connection', async () => {
+      const { app, vault } = createServer(makeSseTestConfig());
+      await vault.init();
+      const server = app.listen(0);
+
+      try {
+        const address = server.address();
+        const port = typeof address === 'object' && address ? address.port : 0;
+
+        const { statusCode, headers } = await new Promise<{ statusCode: number | undefined; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+          const req = http.request(
+            {
+              host: '127.0.0.1',
+              port,
+              path: '/api/v1/audit/stream?user_id=default',
+              method: 'GET',
+              headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+            },
+            (res) => {
+              resolve({ statusCode: res.statusCode, headers: res.headers });
+              res.destroy();
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(statusCode).toBe(200);
+        expect(headers['content-type']).toMatch(/^text\/event-stream/);
+        expect(headers['cache-control']).toMatch(/no-cache/);
+        expect(headers['connection']).toMatch(/keep-alive/i);
+      } finally {
+        await closeServer(server);
+      }
+    });
   });
 
   describe('Security', () => {
@@ -3036,6 +3417,509 @@ describe('@credninja/server', () => {
       expect(body).not.toContain('rt_');
       expect(body).not.toContain('accessToken');
       expect(body).not.toContain('refreshToken');
+    });
+  });
+
+  describe('Admin Permission CRUD (/admin/permissions*)', () => {
+    it('requires admin auth on every route (rejects agent-Bearer-only callers)', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createNoAuth = await request(app).post('/admin/permissions').send({});
+      expect(createNoAuth.status).toBe(401);
+      const createAgentAuth = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ agentId: 'agt_1', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      expect(createAgentAuth.status).toBe(401);
+
+      const listNoAuth = await request(app).get('/admin/permissions?agent_id=agt_1');
+      expect(listNoAuth.status).toBe(401);
+      const listAgentAuth = await request(app)
+        .get('/admin/permissions?agent_id=agt_1')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(listAgentAuth.status).toBe(401);
+
+      const updateNoAuth = await request(app).patch('/admin/permissions/perm_x').send({});
+      expect(updateNoAuth.status).toBe(401);
+      const updateAgentAuth = await request(app)
+        .patch('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({});
+      expect(updateAgentAuth.status).toBe(401);
+
+      const revokeNoAuth = await request(app).delete('/admin/permissions/perm_x');
+      expect(revokeNoAuth.status).toBe(401);
+      const revokeAgentAuth = await request(app)
+        .delete('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(revokeAgentAuth.status).toBe(401);
+    });
+
+    it('is rate-limited like every other route in this file', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      let lastStatus = 200;
+      // adminPermissionsRateLimiter allows 30 requests/60s — the 31st trips it.
+      for (let i = 0; i < 31; i++) {
+        const res = await adminGet(app, '/admin/permissions?agent_id=agt_1');
+        lastStatus = res.status;
+      }
+      expect(lastStatus).toBe(429);
+    });
+
+    it('full CRUD round trip against the sqlite backend, preserving id and bumping updatedAt', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_crud',
+          connectionId: 'google',
+          allowedScopes: ['calendar.readonly'],
+          requiresApproval: false,
+          delegatable: true,
+          maxDelegationDepth: 1,
+        });
+
+      expect(createRes.status).toBe(201);
+      const permissionId = createRes.body.permission.id;
+      expect(permissionId).toMatch(/^perm_/);
+      expect(createRes.body.permission.updatedAt).toBe(createRes.body.permission.createdAt);
+
+      const getRes = await request(app)
+        .get(`/admin/permissions?agent_id=agt_crud&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.permission.id).toBe(permissionId);
+
+      const listRes = await request(app)
+        .get('/admin/permissions?agent_id=agt_crud')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.permissions).toHaveLength(1);
+      expect(listRes.body.permissions[0].id).toBe(permissionId);
+
+      const updateRes = await request(app)
+        .patch(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly', 'gmail.readonly'] });
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.permission.id).toBe(permissionId);
+      expect(updateRes.body.permission.agentId).toBe('agt_crud');
+      expect(updateRes.body.permission.connectionId).toBe('google');
+      expect(updateRes.body.permission.allowedScopes).toEqual(['calendar.readonly', 'gmail.readonly']);
+      expect(updateRes.body.permission.updatedAt).not.toBe(createRes.body.permission.updatedAt);
+
+      const revokeRes = await request(app)
+        .delete(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(revokeRes.status).toBe(204);
+
+      const afterRevoke = await request(app)
+        .get(`/admin/permissions?agent_id=agt_crud&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(afterRevoke.status).toBe(404);
+    });
+
+    it('rejects an unparseable expiresAt with 400, on both create and update, instead of an opaque 500', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_bad_date',
+          connectionId: 'google',
+          allowedScopes: ['calendar.readonly'],
+          expiresAt: 'not-a-date',
+        });
+      expect(createRes.status).toBe(400);
+      expect(createRes.body.error).toMatch(/not a valid date/);
+
+      const goodCreateRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_bad_date',
+          connectionId: 'slack',
+          allowedScopes: ['chat.write'],
+        });
+      expect(goodCreateRes.status).toBe(201);
+
+      const updateRes = await request(app)
+        .patch(`/admin/permissions/${goodCreateRes.body.permission.id}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ expiresAt: 'also-not-a-date' });
+      expect(updateRes.status).toBe(400);
+      expect(updateRes.body.error).toMatch(/not a valid date/);
+    });
+
+    it('PATCH on a nonexistent permission returns 404, not a silent create', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const res = await request(app)
+        .patch('/admin/permissions/perm_does_not_exist')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly'] });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('writes an audit event recording the admin actor on create/update/revoke, but not on reads', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ agentId: 'agt_audit', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      const permissionId = createRes.body.permission.id;
+
+      await request(app)
+        .get(`/admin/permissions?agent_id=agt_audit&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+
+      await request(app)
+        .patch(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ ttlOverride: 3600 });
+
+      await request(app)
+        .delete(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+
+      const events = vault.queryAuditEvents!({ resourceId: permissionId });
+      const actions = events.map((e) => e.action).sort();
+      expect(actions).toEqual(['create', 'revoke', 'update']);
+      for (const event of events) {
+        expect(event.actor).toMatchObject({ type: 'system', id: 'admin' });
+      }
+    });
+
+    it('returns a 501 naming the required backend when the vault uses the file storage backend', async () => {
+      // makeTestConfig() defaults to vaultStorage: 'file' — no Permission support.
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ agentId: 'agt_1', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      expect(createRes.status).toBe(501);
+      expect(createRes.body.error).toMatch(/sqlite/);
+
+      const listRes = await request(app)
+        .get('/admin/permissions?agent_id=agt_1')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(listRes.status).toBe(501);
+      expect(listRes.body.error).toMatch(/sqlite/);
+
+      const updateRes = await request(app)
+        .patch('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly'] });
+      expect(updateRes.status).toBe(501);
+      expect(updateRes.body.error).toMatch(/sqlite/);
+
+      const revokeRes = await request(app)
+        .delete('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(revokeRes.status).toBe(501);
+      expect(revokeRes.body.error).toMatch(/sqlite/);
+    });
+
+    it('narrowing allowedScopes via PATCH does not retroactively affect an already-brokered /api/v1/use handle (prospective-only)', async () => {
+      const config = makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite',
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.prospective-only',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+      await tofu.claimAgent({ fingerprint: registration.fingerprint, ownerUserId: 'user-prospective' });
+
+      const permission = await vault.createPermission({
+        agentId: `tofu:${registration.agentId}`,
+        connectionId: 'google',
+        allowedScopes: ['calendar.readonly'],
+        delegatable: true,
+        maxDelegationDepth: 1,
+        requiresApproval: false,
+        createdBy: 'admin',
+      });
+
+      const proof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date().toISOString(),
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+      expect(delegateRes.status).toBe(200);
+      const delegationId = delegateRes.body.delegation_id;
+      expect(delegationId).toMatch(/^del_/);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      // Narrow the permission to an empty scope set through the new admin
+      // route — if /api/v1/use re-checked the Permission row live, the
+      // second call below would now be denied.
+      const narrowRes = await request(app)
+        .patch(`/admin/permissions/${permission.id}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: [] });
+      expect(narrowRes.status).toBe(200);
+      expect(narrowRes.body.permission.allowedScopes).toEqual([]);
+
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegationId,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(200);
+      expect(useRes.body.body).toEqual({ items: [] });
+      fetchSpy.mockRestore();
+    });
+  });
+
+  describe('Admin audit and identity-management routes (/admin/audit, /admin/agents)', () => {
+    describe('GET /admin/audit', () => {
+      it('requires admin auth, rejecting an agent-Bearer-only caller', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        const noAuth = await request(app).get('/admin/audit');
+        expect(noAuth.status).toBe(401);
+
+        const agentAuth = await request(app)
+          .get('/admin/audit')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`);
+        expect(agentAuth.status).toBe(401);
+
+        const adminAuth = await adminGet(app, '/admin/audit');
+        expect(adminAuth.status).toBe(200);
+      });
+
+      it('returns audit events across agents/users, not scoped to a single userId like the agent-facing route', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        await vault.store({
+          provider: 'google',
+          userId: 'default',
+          accessToken: 'ya29.admin-audit-default',
+          scopes: ['calendar.readonly'],
+        });
+        await vault.store({
+          provider: 'google',
+          userId: 'user-admin-audit',
+          accessToken: 'ya29.admin-audit-other-user',
+          scopes: ['calendar.readonly'],
+        });
+
+        await request(app)
+          .get('/api/token/google?user_id=default')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .expect(200);
+        await request(app)
+          .get('/api/token/google?user_id=user-admin-audit')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .expect(200);
+
+        // The existing agent-facing route stays scoped to a single userId —
+        // unchanged by this unit.
+        const agentScoped = await request(app)
+          .get('/api/v1/audit?user_id=default')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`);
+        expect(agentScoped.status).toBe(200);
+        expect(agentScoped.body.entries.length).toBeGreaterThan(0);
+        expect(agentScoped.body.entries.every((e: any) => e.userId === 'default')).toBe(true);
+
+        const adminRes = await adminGet(app, '/admin/audit');
+        expect(adminRes.status).toBe(200);
+        const userIds = adminRes.body.entries.map((e: any) => e.userId);
+        expect(userIds).toContain('default');
+        expect(userIds).toContain('user-admin-audit');
+      });
+
+      it('supports the service and limit filters', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        await vault.store({
+          provider: 'google',
+          userId: 'default',
+          accessToken: 'ya29.admin-audit-filter',
+          scopes: ['calendar.readonly'],
+        });
+        await request(app)
+          .get('/api/token/google')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .expect(200);
+
+        const serviceFiltered = await adminGet(app, '/admin/audit?service=google');
+        expect(serviceFiltered.status).toBe(200);
+        expect(serviceFiltered.body.entries.length).toBeGreaterThan(0);
+        expect(serviceFiltered.body.entries.every((e: any) => e.service === 'google')).toBe(true);
+
+        const serviceMismatch = await adminGet(app, '/admin/audit?service=does-not-exist');
+        expect(serviceMismatch.status).toBe(200);
+        expect(serviceMismatch.body.entries).toEqual([]);
+
+        const limited = await adminGet(app, '/admin/audit?limit=1');
+        expect(limited.status).toBe(200);
+        expect(limited.body.entries.length).toBeLessThanOrEqual(1);
+      });
+    });
+
+    describe('GET /admin/agents', () => {
+      it('requires admin auth, rejecting an agent-Bearer-only caller', async () => {
+        const { app, tofu } = createServer(makeTestConfig());
+        await tofu.init();
+
+        const noAuth = await request(app).get('/admin/agents');
+        expect(noAuth.status).toBe(401);
+
+        const agentAuth = await request(app)
+          .get('/admin/agents')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`);
+        expect(agentAuth.status).toBe(401);
+      });
+
+      it('lists registered agent identities with their status, mirroring GET /api/v1/web-bot-auth/keys', async () => {
+        const { app, tofu } = createServer(makeTestConfig());
+        await tofu.init();
+
+        const keypair = generateKeyPairSync('ed25519');
+        const rawPublicKey = keypair.publicKey.export({ type: 'spki', format: 'der' }).slice(-32);
+
+        const createRes = await request(app)
+          .post('/api/v1/web-bot-auth/keys')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({ public_key: Buffer.from(rawPublicKey).toString('base64') });
+        expect(createRes.status).toBe(201);
+
+        const adminRes = await adminGet(app, '/admin/agents');
+        expect(adminRes.status).toBe(200);
+        const match = adminRes.body.keys.find((key: any) => key.agent_id === createRes.body.agent_id);
+        expect(match).toBeDefined();
+        expect(match.status).toBe('unclaimed');
+        expect(match.key_id).toBe(createRes.body.key_id);
+      });
+    });
+
+    describe('DELETE /admin/agents/:agentId', () => {
+      it('requires admin auth, rejecting an agent-Bearer-only caller', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        const now = new Date().toISOString();
+        const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+        await vault.registerAgent({
+          id: agentId,
+          fingerprint: `fp_${agentId}`,
+          name: 'admin-revoke-auth-target',
+          scopeCeiling: ['calendar.readonly'],
+          status: 'active',
+          createdBy: 'test',
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        const noAuth = await request(app).delete(`/admin/agents/${agentId}`);
+        expect(noAuth.status).toBe(401);
+
+        const agentAuth = await request(app)
+          .delete(`/admin/agents/${agentId}`)
+          .set('Authorization', `Bearer ${TEST_TOKEN}`);
+        expect(agentAuth.status).toBe(401);
+
+        await expect(vault.getAgent(agentId)).resolves.toMatchObject({ status: 'active' });
+      });
+
+      it('revokes the target identity and writes a revoke audit event with the admin as actor', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        const now = new Date().toISOString();
+        const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+        const agentDid = `did:key:${agentId}`;
+        await vault.registerAgent({
+          id: agentId,
+          did: agentDid,
+          fingerprint: `fp_${agentId}`,
+          name: 'admin-revoke-target',
+          scopeCeiling: ['calendar.readonly'],
+          status: 'active',
+          createdBy: 'test',
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        const revokeRes = await request(app)
+          .delete(`/admin/agents/${agentId}`)
+          .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+        expect(revokeRes.status).toBe(204);
+
+        await expect(vault.getAgent(agentId)).resolves.toMatchObject({ status: 'revoked' });
+
+        const events = vault.queryAuditEvents!({ resourceId: agentId, action: 'revoke' });
+        expect(events.length).toBeGreaterThan(0);
+        expect(events[0].actor).toMatchObject({ type: 'system', id: 'admin' });
+      });
+
+      it('returns 404 for a nonexistent agent', async () => {
+        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        await vault.init();
+
+        const res = await request(app)
+          .delete('/admin/agents/does-not-exist')
+          .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+        expect(res.status).toBe(404);
+      });
     });
   });
 });

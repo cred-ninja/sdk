@@ -57,4 +57,8 @@ export type {
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
+  PermissionRateLimit,
+  PermissionRecord,
+  CreatePermissionParams,
+  UpdatePermissionParams,
 } from './types.js';

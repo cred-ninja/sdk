@@ -7,6 +7,8 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred, ConsentRequiredError } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
+import { summarizeGuardDecision } from '../guard-wiring.js';
+import { toolErrorResult } from '../tool-errors.js';
 
 export const DELEGATE_TOOL_NAME = 'cred_delegate';
 
@@ -89,6 +91,7 @@ export async function handleDelegate(
           expiresAt: now + expiresIn * 1000,
         });
 
+    const guard = summarizeGuardDecision(context);
     return {
       content: [
         {
@@ -98,6 +101,7 @@ export async function handleDelegate(
             service: result.service,
             expiresIn,
             ...(result.receipt ? { receipt: result.receipt } : {}),
+            ...(guard ? { guard } : {}),
             note: 'Pass delegationId to cred_use to make authenticated API calls.',
           }),
         },
@@ -116,16 +120,7 @@ export async function handleDelegate(
       };
     }
 
-    // Handle other errors — return error message, don't crash
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${message}`,
-        },
-      ],
-      isError: true,
-    };
+    // Handle other errors — return a structured error, don't crash
+    return toolErrorResult(error);
   }
 }

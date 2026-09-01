@@ -546,6 +546,131 @@ describe('Cred.getAuditLog()', () => {
   });
 });
 
+// ── Permission CRUD (admin-facing) ──────────────────────────────────────────
+
+describe('Cred.createPermission()', () => {
+  it('posts to /admin/permissions and returns the created permission', async () => {
+    mockFetch.mockResolvedValue(mockResponse(201, {
+      permission: {
+        id: 'perm_1',
+        agentId: 'agt_1',
+        connectionId: 'github',
+        allowedScopes: ['repo'],
+        requiresApproval: false,
+        delegatable: true,
+        maxDelegationDepth: 1,
+        createdAt: '2026-03-23T00:00:00.000Z',
+        updatedAt: '2026-03-23T00:00:00.000Z',
+        createdBy: 'admin',
+      },
+    }));
+
+    const permission = await cred.createPermission({
+      agentId: 'agt_1',
+      connectionId: 'github',
+      allowedScopes: ['repo'],
+    });
+
+    expect(permission.id).toBe('perm_1');
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/admin/permissions');
+    expect(init.method).toBe('POST');
+  });
+});
+
+describe('Cred.getPermission()', () => {
+  it('returns the permission on 200', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      permission: {
+        id: 'perm_1',
+        agentId: 'agt_1',
+        connectionId: 'github',
+        allowedScopes: ['repo'],
+        requiresApproval: false,
+        delegatable: true,
+        maxDelegationDepth: 1,
+        createdAt: '2026-03-23T00:00:00.000Z',
+        updatedAt: '2026-03-23T00:00:00.000Z',
+        createdBy: 'admin',
+      },
+    }));
+
+    const permission = await cred.getPermission('agt_1', 'github');
+    expect(permission?.id).toBe('perm_1');
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain('agent_id=agt_1');
+    expect(url).toContain('connection_id=github');
+  });
+
+  it('returns null on 404', async () => {
+    mockFetch.mockResolvedValue(mockResponse(404, { error: 'Permission not found' }));
+    const permission = await cred.getPermission('agt_1', 'github');
+    expect(permission).toBeNull();
+  });
+});
+
+describe('Cred.listPermissions()', () => {
+  it('returns the list of permissions for an agent', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      permissions: [
+        {
+          id: 'perm_1',
+          agentId: 'agt_1',
+          connectionId: 'github',
+          allowedScopes: ['repo'],
+          requiresApproval: false,
+          delegatable: true,
+          maxDelegationDepth: 1,
+          createdAt: '2026-03-23T00:00:00.000Z',
+          updatedAt: '2026-03-23T00:00:00.000Z',
+          createdBy: 'admin',
+        },
+      ],
+    }));
+
+    const permissions = await cred.listPermissions('agt_1');
+    expect(permissions).toHaveLength(1);
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain('agent_id=agt_1');
+  });
+});
+
+describe('Cred.updatePermission()', () => {
+  it('sends a PATCH to /admin/permissions/:id and returns the updated permission', async () => {
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      permission: {
+        id: 'perm_1',
+        agentId: 'agt_1',
+        connectionId: 'github',
+        allowedScopes: ['repo', 'issues'],
+        requiresApproval: false,
+        delegatable: true,
+        maxDelegationDepth: 1,
+        createdAt: '2026-03-23T00:00:00.000Z',
+        updatedAt: '2026-03-23T00:01:00.000Z',
+        createdBy: 'admin',
+      },
+    }));
+
+    const permission = await cred.updatePermission('perm_1', { allowedScopes: ['repo', 'issues'] });
+    expect(permission.allowedScopes).toEqual(['repo', 'issues']);
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/admin/permissions/perm_1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({ allowedScopes: ['repo', 'issues'] });
+  });
+});
+
+describe('Cred.revokePermission()', () => {
+  it('sends a DELETE to /admin/permissions/:id', async () => {
+    mockFetch.mockResolvedValue(mockResponse(204, {}));
+    await cred.revokePermission('perm_1');
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/admin/permissions/perm_1');
+    expect(init.method).toBe('DELETE');
+  });
+});
+
 // ── Web Bot Auth key management ───────────────────────────────────────────────
 
 describe('Cred.listWebBotAuthKeys()', () => {
@@ -704,5 +829,31 @@ describe('Cred local mode', () => {
       scopes: ['cal'],
       redirectUri: 'https://example.com/cb',
     })).toThrow('not available in local mode');
+  });
+
+  it('Permission CRUD methods are cloud-mode-only and reject in local mode', async () => {
+    const local = new Cred({
+      mode: 'local',
+      vault: { passphrase: 'test-pass', path: '/tmp/test-vault.json' },
+      providers: {},
+    });
+
+    await expect(local.createPermission({
+      agentId: 'agt_1',
+      connectionId: 'github',
+      allowedScopes: ['repo'],
+    })).rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
+
+    await expect(local.getPermission('agt_1', 'github'))
+      .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
+
+    await expect(local.listPermissions('agt_1'))
+      .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
+
+    await expect(local.updatePermission('perm_1', { allowedScopes: ['repo'] }))
+      .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
+
+    await expect(local.revokePermission('perm_1'))
+      .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
   });
 });

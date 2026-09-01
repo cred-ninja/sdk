@@ -64,7 +64,7 @@ export {
   webBotAuthPolicy,
   receiptClaimsPolicy,
 } from './policies/index.js';
-export type { MaxTtlPolicyResult } from './policies/index.js';
+export type { MaxTtlPolicyResult, RateLimitPolicyResult } from './policies/index.js';
 
 // Audit
 export { buildAuditEvent, formatAuditLog } from './audit.js';

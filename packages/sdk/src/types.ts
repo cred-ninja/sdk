@@ -112,6 +112,12 @@ export interface Connection {
   appClientId: string | null;
 }
 
+export interface ProviderInfo {
+  slug: string;
+  /** Default OAuth scopes configured for this provider, if any. */
+  defaultScopes: string[];
+}
+
 export interface DelegateParams {
   service: string;
   userId: string;
@@ -170,6 +176,74 @@ export interface AuditParams {
   appClientId?: string;
   service?: string;
   limit?: number;
+}
+
+// ── Permission (admin-facing CRUD, cloud mode only) ─────────────────────────
+
+/**
+ * Structurally identical to @credninja/vault's own `PermissionRateLimit` —
+ * intentionally duplicated, not imported, following this file's existing
+ * pattern of never type-importing from @credninja/vault (see the local
+ * structural interface `cred.ts` already uses in place of `CredVault` for
+ * the same reason). `@credninja/vault` is an optional peer dependency of
+ * this package; a real `import type` from it here would force every SDK
+ * consumer's type-check to resolve vault even if they never install it. If
+ * the vault-side shape changes, update this one to match by hand.
+ */
+export interface PermissionRateLimit {
+  maxRequests: number;
+  windowMs: number;
+}
+
+/**
+ * A Permission record — the mechanism that enforces an agent's scope
+ * ceiling, rate limit, TTL override, and delegation depth for a given
+ * connection. Managed exclusively through the server's admin-authenticated
+ * `/admin/permissions*` routes; not available in local mode.
+ */
+export interface PermissionRecord {
+  id: string;
+  agentId: string;
+  connectionId: string;
+  allowedScopes: string[];
+  rateLimit?: PermissionRateLimit;
+  ttlOverride?: number;
+  requiresApproval: boolean;
+  delegatable: boolean;
+  maxDelegationDepth: number;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt?: string | null;
+  createdBy: string;
+}
+
+export interface CreatePermissionParams {
+  agentId: string;
+  connectionId: string;
+  allowedScopes: string[];
+  rateLimit?: PermissionRateLimit;
+  ttlOverride?: number;
+  requiresApproval?: boolean;
+  delegatable?: boolean;
+  maxDelegationDepth?: number;
+  expiresAt?: string;
+  /** Defaults to 'admin' server-side when omitted. */
+  createdBy?: string;
+}
+
+/**
+ * Partial update to an existing Permission. Structurally cannot carry
+ * `agentId`/`connectionId` — those are immutable once a permission is
+ * created. Only fields actually present are applied.
+ */
+export interface UpdatePermissionParams {
+  allowedScopes?: string[];
+  rateLimit?: PermissionRateLimit | null;
+  ttlOverride?: number | null;
+  requiresApproval?: boolean;
+  delegatable?: boolean;
+  maxDelegationDepth?: number;
+  expiresAt?: string | null;
 }
 
 export interface WebBotAuthIdentity {

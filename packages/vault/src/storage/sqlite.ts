@@ -1,5 +1,5 @@
 import type { StorageBackend } from './interface.js';
-import type { StoredRow, AgentRow, PermissionRow, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
+import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 import Database from 'better-sqlite3';
 
@@ -66,11 +66,7 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_audit_action    ON vault_audit_events(action, timestamp);
     `);
 
-    const auditColumns = this.db.prepare('PRAGMA table_info(vault_audit_events)')
-      .all() as Array<{ name: string }>;
-    if (!auditColumns.some((column) => column.name === 'metadata_json')) {
-      this.db.exec('ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
-    }
+    this.ensureColumn('vault_audit_events', 'metadata_json', 'ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
@@ -88,11 +84,7 @@ export class SQLiteBackend implements StorageBackend {
       )
     `);
 
-    const agentColumns = this.db.prepare('PRAGMA table_info(vault_agents)')
-      .all() as Array<{ name: string }>;
-    if (!agentColumns.some((column) => column.name === 'did')) {
-      this.db.exec('ALTER TABLE vault_agents ADD COLUMN did TEXT');
-    }
+    this.ensureColumn('vault_agents', 'did', 'ALTER TABLE vault_agents ADD COLUMN did TEXT');
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_did ON vault_agents(did) WHERE did IS NOT NULL');
 
     this.db.exec(`
@@ -110,11 +102,16 @@ export class SQLiteBackend implements StorageBackend {
         expires_at           TEXT,
         created_at           TEXT NOT NULL,
         created_by           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
         UNIQUE(agent_id, connection_id)
       );
       CREATE INDEX IF NOT EXISTS idx_permissions_agent ON vault_permissions(agent_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_permissions_connection ON vault_permissions(connection_id);
     `);
+
+    // No DEFAULT — pre-migration rows get NULL here. PermissionStore falls
+    // back to created_at when reading a legacy row's updatedAt.
+    this.ensureColumn('vault_permissions', 'updated_at', 'ALTER TABLE vault_permissions ADD COLUMN updated_at TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_rate_limit_counters (
@@ -145,6 +142,24 @@ export class SQLiteBackend implements StorageBackend {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_rotations_connection_unique ON vault_rotations(connection_id);
       CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
     `);
+  }
+
+  /**
+   * Adds `column` to `table` via `alterStatement` if it isn't already
+   * present — the shared shape behind every additive column migration in
+   * this file (`vault_audit_events.metadata_json`, `vault_agents.did`,
+   * `vault_permissions.updated_at`, and any future one). `CREATE TABLE IF
+   * NOT EXISTS` already declares the column for a fresh database; this only
+   * does work against a database created before the column existed.
+   */
+  private ensureColumn(table: string, column: string, alterStatement: string): void {
+    if (!this.db) {
+      throw new Error('SQLiteBackend not initialized — call init() first');
+    }
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(alterStatement);
+    }
   }
 
   private ensureDb(): import('better-sqlite3').Database {
@@ -414,12 +429,12 @@ export class SQLiteBackend implements StorageBackend {
         id, agent_id, connection_id, allowed_scopes,
         rate_limit_max, rate_limit_window_ms, ttl_override,
         requires_approval, delegatable, max_delegation_depth,
-        expires_at, created_at, created_by
+        expires_at, created_at, created_by, updated_at
       ) VALUES (
         @id, @agent_id, @connection_id, @allowed_scopes,
         @rate_limit_max, @rate_limit_window_ms, @ttl_override,
         @requires_approval, @delegatable, @max_delegation_depth,
-        @expires_at, @created_at, @created_by
+        @expires_at, @created_at, @created_by, @updated_at
       )
       ON CONFLICT(agent_id, connection_id) DO UPDATE SET
         id                   = excluded.id,
@@ -431,7 +446,8 @@ export class SQLiteBackend implements StorageBackend {
         delegatable          = excluded.delegatable,
         max_delegation_depth = excluded.max_delegation_depth,
         expires_at           = excluded.expires_at,
-        created_by           = excluded.created_by
+        created_by           = excluded.created_by,
+        updated_at           = excluded.updated_at
     `).run(row);
   }
 
@@ -452,7 +468,8 @@ export class SQLiteBackend implements StorageBackend {
         max_delegation_depth,
         expires_at,
         created_at,
-        created_by
+        created_by,
+        updated_at
       FROM vault_permissions
       WHERE agent_id = ? AND connection_id = ?
     `).get(agentId, connectionId) as PermissionRow | undefined;
@@ -477,11 +494,71 @@ export class SQLiteBackend implements StorageBackend {
         max_delegation_depth,
         expires_at,
         created_at,
-        created_by
+        created_by,
+        updated_at
       FROM vault_permissions
       WHERE agent_id = ?
       ORDER BY created_at DESC
     `).all(agentId) as PermissionRow[];
+  }
+
+  /**
+   * Atomically apply a partial update to a single permission row, keyed
+   * strictly by `id`. A single UPDATE statement (not read-merge-write) so
+   * two concurrent partial updates to distinct fields don't race. Throws
+   * when `id` doesn't exist — never silently creates a row.
+   */
+  updatePermission(id: string, updates: PermissionRowUpdate): PermissionRow {
+    const db = this.ensureDb();
+    const now = new Date().toISOString();
+
+    const fields: string[] = ['updated_at = @updatedAt'];
+    const params: Record<string, unknown> = { id, updatedAt: now };
+
+    if (updates.allowed_scopes !== undefined) { fields.push('allowed_scopes = @allowedScopes'); params.allowedScopes = updates.allowed_scopes; }
+    if (updates.rate_limit_max !== undefined) { fields.push('rate_limit_max = @rateLimitMax'); params.rateLimitMax = updates.rate_limit_max; }
+    if (updates.rate_limit_window_ms !== undefined) { fields.push('rate_limit_window_ms = @rateLimitWindowMs'); params.rateLimitWindowMs = updates.rate_limit_window_ms; }
+    if (updates.ttl_override !== undefined) { fields.push('ttl_override = @ttlOverride'); params.ttlOverride = updates.ttl_override; }
+    if (updates.requires_approval !== undefined) { fields.push('requires_approval = @requiresApproval'); params.requiresApproval = updates.requires_approval; }
+    if (updates.delegatable !== undefined) { fields.push('delegatable = @delegatable'); params.delegatable = updates.delegatable; }
+    if (updates.max_delegation_depth !== undefined) { fields.push('max_delegation_depth = @maxDelegationDepth'); params.maxDelegationDepth = updates.max_delegation_depth; }
+    if (updates.expires_at !== undefined) { fields.push('expires_at = @expiresAt'); params.expiresAt = updates.expires_at; }
+
+    const result = db.prepare(`
+      UPDATE vault_permissions
+      SET ${fields.join(', ')}
+      WHERE id = @id
+    `).run(params);
+
+    if (result.changes === 0) {
+      throw new Error(`Permission not found: ${id}`);
+    }
+
+    const row = db.prepare(`
+      SELECT
+        id,
+        agent_id,
+        connection_id,
+        allowed_scopes,
+        rate_limit_max,
+        rate_limit_window_ms,
+        ttl_override,
+        requires_approval,
+        delegatable,
+        max_delegation_depth,
+        expires_at,
+        created_at,
+        created_by,
+        updated_at
+      FROM vault_permissions
+      WHERE id = ?
+    `).get(id) as PermissionRow | undefined;
+
+    if (!row) {
+      throw new Error(`Permission not found: ${id}`);
+    }
+
+    return row;
   }
 
   revokePermission(permissionId: string): void {
@@ -601,6 +678,10 @@ export class SQLiteBackend implements StorageBackend {
     if (filter.after) {
       conditions.push('timestamp >= @after');
       params.after = filter.after.toISOString();
+    }
+    if (filter.since) {
+      conditions.push('timestamp > @since');
+      params.since = filter.since.toISOString();
     }
     if (filter.before) {
       conditions.push('timestamp <= @before');

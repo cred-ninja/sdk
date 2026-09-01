@@ -15,6 +15,7 @@
  *   GET  /providers                       — list configured providers (admin auth)
  *   GET  /connect/:provider               — start OAuth flow (browser, admin auth)
  *   GET  /connect/:provider/callback      — OAuth callback (browser)
+ *   GET  /api/v1/providers                — list configured provider slugs (agent, Bearer auth)
  *   GET  /api/v1/connections              — list connections (agent, Bearer auth)
  *   POST /api/v1/use                      — brokered upstream API call (agent, Bearer auth)
  *   GET  /api/token/:provider             — compatibility token access route (agent, Bearer auth)
@@ -29,7 +30,7 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy } from '@credninja/vault';
-import type { AgentRecord } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput, AuditEvent } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -1181,6 +1182,9 @@ export function createServer(config: ServerConfig) {
   const directoryRateLimiter = makeRateLimiter(60);  // /.well-known/… — crypto work per request
   const healthRateLimiter = makeRateLimiter(120);    // /health       — cheap but still DoS-able
   const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
+  const adminPermissionsRateLimiter = makeRateLimiter(30);  // /admin/permissions* — sqlite query per request
+  const adminAuditRateLimiter = makeRateLimiter(30);  // /admin/audit          — vault audit query per request
+  const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     try {
@@ -1498,6 +1502,372 @@ export function createServer(config: ServerConfig) {
     } catch (err) {
       console.error('[/providers] Error:', err);
       res.status(500).json({ error: 'Failed to list providers' });
+    }
+  });
+
+  const PERMISSION_STORAGE_NOT_SUPPORTED_MESSAGE =
+    'Permission storage not supported by this vault backend. This deployment must use vaultStorage: "sqlite".';
+
+  /**
+   * Parses an optional `expiresAt` request-body field into a Date, or throws
+   * a plain Error with a 400-worthy message on an unparseable value. Unlike
+   * `new Date(value)` alone, this rejects invalid-date strings up front
+   * instead of letting an Invalid Date reach vault.createPermission /
+   * updatePermission, where `.toISOString()` throws a RangeError that
+   * mapPermissionErrorResponse doesn't recognize and surfaces as an opaque
+   * 500.
+   */
+  function parseOptionalExpiresAt(value: string | null | undefined): Date | undefined {
+    if (!value) return undefined;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error(`expiresAt is not a valid date: ${value}`);
+    }
+    return parsed;
+  }
+
+  function mapPermissionErrorResponse(res: Response, err: unknown, fallbackMessage: string): void {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('not supported')) {
+      res.status(501).json({ error: PERMISSION_STORAGE_NOT_SUPPORTED_MESSAGE });
+      return;
+    }
+    if (message.includes('not found')) {
+      res.status(404).json({ error: 'Permission not found' });
+      return;
+    }
+    if (message.includes('not a valid date')) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    console.error(`[admin/permissions] Error:`, err);
+    res.status(500).json({ error: fallbackMessage });
+  }
+
+  /**
+   * POST /admin/permissions — create a Permission record (admin-authenticated).
+   *
+   * Permission records enforce an agent's scope ceiling, rate limit, TTL
+   * override, and delegation depth for a given connection — this is the
+   * only way to manage them without reaching into @credninja/vault
+   * directly. Sqlite-only: the file storage backend has no Permission
+   * support, so an operator on the file backend gets an explicit 501 (see
+   * mapPermissionErrorResponse) rather than a generic 500 on first use.
+   */
+  app.post('/admin/permissions', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as {
+        agentId?: unknown;
+        connectionId?: unknown;
+        allowedScopes?: unknown;
+        rateLimit?: { maxRequests: number; windowMs: number };
+        ttlOverride?: number;
+        requiresApproval?: boolean;
+        delegatable?: boolean;
+        maxDelegationDepth?: number;
+        expiresAt?: string;
+        createdBy?: unknown;
+      };
+
+      if (typeof body.agentId !== 'string' || !body.agentId) {
+        res.status(400).json({ error: 'agentId is required' });
+        return;
+      }
+      if (typeof body.connectionId !== 'string' || !body.connectionId) {
+        res.status(400).json({ error: 'connectionId is required' });
+        return;
+      }
+      if (!Array.isArray(body.allowedScopes) || !body.allowedScopes.every((s) => typeof s === 'string')) {
+        res.status(400).json({ error: 'allowedScopes must be an array of strings' });
+        return;
+      }
+
+      const permission = await vault.createPermission({
+        agentId: body.agentId,
+        connectionId: body.connectionId,
+        allowedScopes: body.allowedScopes,
+        rateLimit: body.rateLimit,
+        ttlOverride: body.ttlOverride,
+        requiresApproval: body.requiresApproval ?? false,
+        delegatable: body.delegatable ?? false,
+        maxDelegationDepth: body.maxDelegationDepth ?? 1,
+        expiresAt: parseOptionalExpiresAt(body.expiresAt),
+        createdBy: typeof body.createdBy === 'string' && body.createdBy ? body.createdBy : 'admin',
+      });
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'create',
+        resource: { type: 'permission', id: permission.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: { agentId: permission.agentId, connectionId: permission.connectionId },
+      });
+
+      res.status(201).json({ permission });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to create permission');
+    }
+  });
+
+  /**
+   * GET /admin/permissions — list permissions for an agent, or fetch a
+   * single permission for an agent/connection pair (admin-authenticated).
+   *
+   * Mirrors CredVault.listPermissions(agentId) / getPermission(agentId,
+   * connectionId) exactly — query-param shaped rather than an `/:id` lookup,
+   * since neither underlying vault method supports fetching a permission by
+   * id alone.
+   */
+  app.get('/admin/permissions', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const agentId = queryStringValue(req.query.agent_id);
+      const connectionId = queryStringValue(req.query.connection_id);
+
+      if (!agentId) {
+        res.status(400).json({ error: 'agent_id query parameter is required' });
+        return;
+      }
+
+      if (connectionId) {
+        const permission = await vault.getPermission(agentId, connectionId);
+        if (!permission) {
+          res.status(404).json({ error: 'Permission not found' });
+          return;
+        }
+        res.json({ permission });
+        return;
+      }
+
+      const permissions = await vault.listPermissions(agentId);
+      res.json({ permissions });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to list permissions');
+    }
+  });
+
+  /**
+   * PATCH /admin/permissions/:id — update an existing Permission record
+   * (admin-authenticated).
+   *
+   * Prospective-only: narrowing allowedScopes here constrains future
+   * delegate()/subdelegate() calls, but does not affect a delegation handle
+   * already brokered through POST /api/v1/use — that route resolves scopes
+   * from an in-memory snapshot taken at issuance and never re-reads the
+   * Permission row.
+   */
+  app.patch('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = routeParam(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Missing permission id' });
+        return;
+      }
+
+      const body = (req.body ?? {}) as {
+        allowedScopes?: string[];
+        rateLimit?: { maxRequests: number; windowMs: number } | null;
+        ttlOverride?: number | null;
+        requiresApproval?: boolean;
+        delegatable?: boolean;
+        maxDelegationDepth?: number;
+        expiresAt?: string | null;
+      };
+
+      const input: UpdatePermissionInput = {};
+      if ('allowedScopes' in body) input.allowedScopes = body.allowedScopes;
+      if ('rateLimit' in body) input.rateLimit = body.rateLimit ?? undefined;
+      if ('ttlOverride' in body) input.ttlOverride = body.ttlOverride ?? undefined;
+      if ('requiresApproval' in body) input.requiresApproval = body.requiresApproval;
+      if ('delegatable' in body) input.delegatable = body.delegatable;
+      if ('maxDelegationDepth' in body) input.maxDelegationDepth = body.maxDelegationDepth;
+      if ('expiresAt' in body) input.expiresAt = parseOptionalExpiresAt(body.expiresAt);
+
+      const permission = await vault.updatePermission(id, input);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'update',
+        resource: { type: 'permission', id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: { changed: Object.keys(input) },
+      });
+
+      res.json({ permission });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to update permission');
+    }
+  });
+
+  /**
+   * DELETE /admin/permissions/:id — revoke a Permission record (admin-authenticated).
+   */
+  app.delete('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = routeParam(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Missing permission id' });
+        return;
+      }
+
+      await vault.revokePermission(id);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'revoke',
+        resource: { type: 'permission', id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to revoke permission');
+    }
+  });
+
+  /**
+   * GET /admin/audit — query audit events across ALL agents/users
+   * (admin-authenticated).
+   *
+   * These are new routes, not modifications to the existing agent-facing
+   * GET /api/v1/audit — that route continues to scope results to a single
+   * `userId` exactly as before. This admin route reads the same underlying
+   * vault instance (no new storage plumbing) but applies no userId
+   * scoping, so an operator can see the full cross-agent audit trail.
+   * Supports the same `service`/`limit` filters as the agent-facing route.
+   */
+  app.get('/admin/audit', adminAuditRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const service = typeof req.query.service === 'string' ? req.query.service : undefined;
+      const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+      const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        res.status(400).json({ error: 'Invalid limit: must be between 1 and 200' });
+        return;
+      }
+
+      let events;
+      try {
+        events = vault.queryAuditEvents({ limit });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('not supported')) {
+          res.status(501).json({ error: 'Audit query not supported by this vault backend' });
+          return;
+        }
+        throw err;
+      }
+
+      const entries = events
+        .filter((event) => {
+          if (!service) return true;
+          const [eventService] = event.resource.id.split('/');
+          return eventService === service;
+        })
+        .map((event) => {
+          const [eventService, eventUserId] = event.resource.id.split('/');
+          return {
+            id: event.id,
+            action: event.action,
+            resourceType: event.resource.type,
+            service: eventService || event.resource.type,
+            userId: eventUserId ?? null,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            metadata: buildAuditEntryMetadata(event),
+          };
+        });
+
+      res.json({ entries });
+    } catch (err) {
+      console.error('[/admin/audit] Error:', err);
+      res.status(500).json({ error: 'Failed to fetch audit log' });
+    }
+  });
+
+  /**
+   * GET /admin/agents — list registered agent identities with their status
+   * (admin-authenticated).
+   *
+   * This is the admin-authenticated equivalent of the existing
+   * agent-facing GET /api/v1/web-bot-auth/keys route — same TOFU identity
+   * registry, same response shape (mapAgentToWebBotAuthKey), just reachable
+   * without holding an agent Bearer token. The agent-facing route is
+   * unchanged.
+   */
+  app.get('/admin/agents', adminAgentsRateLimiter, requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const agents = await tofu.listAgents();
+      res.json({
+        keys: agents.map((agent) => mapAgentToWebBotAuthKey(agent)),
+      });
+    } catch (err) {
+      console.error('[/admin/agents] Error:', err);
+      res.status(500).json({ error: 'Failed to list agent identities' });
+    }
+  });
+
+  /**
+   * DELETE /admin/agents/:agentId — revoke the target agent identity
+   * (admin-authenticated).
+   *
+   * Mirrors POST /api/v1/agents/:agentId/revoke-all (vault-side, now
+   * ownership-checked for agent-initiated revocation) but via admin auth
+   * instead of requiring the agent to prove its own identity — an admin
+   * can revoke ANY agent, which is the whole point of this route existing.
+   * Writes a `revoke` audit event via writeAuditEventIfSupported, actor
+   * recorded as the admin principal, matching the existing agent-facing
+   * revoke route's action name — without this, an admin-initiated
+   * revocation would leave no audit trail and would not appear on a
+   * future observability unit's revoke-event stream.
+   */
+  app.delete('/admin/agents/:agentId', adminAgentsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const agentIdParam = req.params.agentId;
+      if (typeof agentIdParam !== 'string') {
+        res.status(400).json({ error: 'agentId must be a string' });
+        return;
+      }
+      const agentId = agentIdParam;
+      const agent = await vault.getAgent(agentId);
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+
+      await vault.revokeAgent(agentId);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'revoke',
+        resource: { type: 'agent', id: agent.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: {
+          agentDid: agent.did,
+        },
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'Agent storage not supported by this vault backend' });
+        return;
+      }
+      console.error('[/admin/agents/:agentId] Error:', err);
+      res.status(500).json({ error: 'Failed to revoke agent' });
     }
   });
 
@@ -2224,6 +2594,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     tokenRouteHandlers.push(guardMiddleware);
   }
 
+  // If you add guardMiddleware to a new agent-facing route here, also add its
+  // MCP tool name to CLOUD_SERVER_GUARDED_TOOLS in
+  // packages/mcp/src/guard-wiring.ts — that Set exists specifically to stop
+  // packages/mcp from double-wrapping a route already guarded here with a
+  // second, independently-configured CredGuard.
   const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
@@ -2294,6 +2669,29 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     } catch (err) {
       console.error('[/api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to retrieve token' });
+    }
+  });
+
+  /**
+   * GET /api/v1/providers — agent-facing provider discovery.
+   *
+   * Distinct from the admin-only GET /providers above: agent-Bearer auth
+   * instead of admin auth, and the response is stripped down to only
+   * non-secret fields (slug, defaultScopes) an agent can use to discover
+   * what's available before calling cred_delegate — never client
+   * id/secret or any other admin-only configuration.
+   */
+  app.get('/api/v1/providers', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (_req: Request, res: Response) => {
+    try {
+      const providers = config.providers.map((p) => ({
+        slug: p.slug,
+        defaultScopes: p.defaultScopes,
+      }));
+
+      res.json({ providers });
+    } catch (err) {
+      console.error('[/api/v1/providers] Error:', err);
+      res.status(500).json({ error: 'Failed to list providers' });
     }
   });
 
@@ -2931,10 +3329,76 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   });
 
   /**
+   * Shared by `GET /api/v1/audit` and `GET /api/v1/audit/stream` — decides
+   * whether an audit event is visible to a caller scoped to `userId`
+   * (optionally further narrowed by `service`). Agent-identity events
+   * (register/rotate/revoke) carry no `userId` in their resource id, so —
+   * matching the pre-existing behavior of `GET /api/v1/audit` — they are
+   * only visible to the `default` logical user and never alongside a
+   * `service` filter.
+   */
+  function isAuditEventVisibleToCaller(event: AuditEvent, userId: string, service: string | undefined): boolean {
+    if (event.resource.type === 'agent') {
+      return userId === 'default' && !service;
+    }
+    const [eventService, eventUserId] = event.resource.id.split('/');
+    if (eventUserId !== userId) return false;
+    if (service && eventService !== service) return false;
+    return true;
+  }
+
+  /** Shapes a raw `AuditEvent` into the response entry used by both audit routes above. */
+  /**
+   * The `metadata` sub-object is identical across every audit-entry mapper
+   * in this file (the agent-facing GET /api/v1/audit route, the admin GET
+   * /admin/audit route, and auditEventToEntry's two branches below) — factored
+   * out once so a future field addition doesn't need to be applied in 3+ places.
+   */
+  function buildAuditEntryMetadata(event: AuditEvent) {
+    return {
+      outcome: event.outcome,
+      scopesRequested: event.scopesRequested,
+      scopesGranted: event.scopesGranted,
+      correlationId: event.correlationId,
+      errorMessage: event.errorMessage,
+      ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+    };
+  }
+
+  function auditEventToEntry(event: AuditEvent, userId: string) {
+    if (event.resource.type === 'agent') {
+      return {
+        id: event.id,
+        action: event.action,
+        service: 'agent',
+        userId,
+        timestamp: event.timestamp.toISOString(),
+        metadata: buildAuditEntryMetadata(event),
+      };
+    }
+    const [eventService, eventUserId] = event.resource.id.split('/');
+    return {
+      id: event.id,
+      action: event.action,
+      service: eventService ?? '',
+      userId: eventUserId ?? 'default',
+      timestamp: event.timestamp.toISOString(),
+      metadata: buildAuditEntryMetadata(event),
+    };
+  }
+
+  /**
    * GET /api/v1/audit — query audit events when the vault backend supports audit.
    *
    * Requires Bearer auth. Events are filtered by logical `user_id` and optional
    * service when the backend supports audit queries.
+   *
+   * Accepts an optional `since` query parameter — an ISO-8601 timestamp cursor.
+   * When provided, only events with a timestamp strictly after `since` are
+   * returned (in place of the default "most recent `limit` events" behavior),
+   * letting a poller re-fetch just the events it hasn't seen instead of
+   * re-fetching and diffing the last N rows. Omitting `since` preserves
+   * today's behavior exactly.
    */
   app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
@@ -2948,9 +3412,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      const sinceRaw = typeof req.query.since === 'string' ? req.query.since : undefined;
+      let since: Date | undefined;
+      if (sinceRaw) {
+        const parsedSince = new Date(sinceRaw);
+        if (Number.isNaN(parsedSince.getTime())) {
+          res.status(400).json({ error: 'Invalid since: must be an ISO-8601 timestamp' });
+          return;
+        }
+        since = parsedSince;
+      }
+
       let events;
       try {
-        events = vault.queryAuditEvents({ limit });
+        events = vault.queryAuditEvents({ limit, ...(since ? { since } : {}) });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (message.includes('not supported')) {
@@ -2961,56 +3436,114 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const entries = events
-        .filter((event) => {
-          if (event.resource.type === 'agent') {
-            return userId === 'default' && !service;
-          }
-          const [eventService, eventUserId] = event.resource.id.split('/');
-          if (eventUserId !== userId) return false;
-          if (service && eventService !== service) return false;
-          return true;
-        })
-        .map((event) => {
-          if (event.resource.type === 'agent') {
-            return {
-              id: event.id,
-              action: event.action,
-              service: 'agent',
-              userId,
-              timestamp: event.timestamp.toISOString(),
-              metadata: {
-                outcome: event.outcome,
-                scopesRequested: event.scopesRequested,
-                scopesGranted: event.scopesGranted,
-                correlationId: event.correlationId,
-                errorMessage: event.errorMessage,
-                ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-              },
-            };
-          }
-          const [eventService, eventUserId] = event.resource.id.split('/');
-          return {
-            id: event.id,
-            action: event.action,
-            service: eventService ?? '',
-            userId: eventUserId ?? 'default',
-            timestamp: event.timestamp.toISOString(),
-            metadata: {
-              outcome: event.outcome,
-              scopesRequested: event.scopesRequested,
-              scopesGranted: event.scopesGranted,
-              correlationId: event.correlationId,
-              errorMessage: event.errorMessage,
-              ...(event.metadata ? { webBotAuth: event.metadata } : {}),
-            },
-          };
-        });
+        .filter((event) => isAuditEventVisibleToCaller(event, userId, service))
+        .map((event) => auditEventToEntry(event, userId));
 
       res.json({ entries });
     } catch (err) {
       console.error('[/api/v1/audit] Error:', err);
       res.status(500).json({ error: 'Failed to fetch audit log' });
     }
+  });
+
+  /**
+   * GET /api/v1/audit/stream — Server-Sent Events stream of the connecting
+   * caller's own `revoke`-action audit events, delivered as they happen.
+   *
+   * Deliberately minimal, per docs/plans/2026-08-31-003-feat-guard-mcp-agent-surface-plan.md
+   * (U9): scoped to `revoke` only — delegate/use/subdelegate events are not
+   * streamed by this route, and this is not a general pub/sub mechanism.
+   *
+   * Auth is the same header-based Bearer `requireAgentAuth`/`verifyWebBotAuth`
+   * used by `GET /api/v1/audit`, established once at connection time. This is
+   * not designed for browser `EventSource` clients (which cannot set an
+   * `Authorization` header) — a token-in-query-string workaround for browser
+   * compatibility is explicitly out of scope.
+   *
+   * No event-emitter/pub-sub hook exists anywhere in this codebase to attach
+   * to, so this is implemented as a short internal poll against
+   * `vault.queryAuditEvents` (every 1.5s) rather than a push from the audit
+   * write path — intentionally simple, not a production-grade event bus.
+   * Visibility uses the exact same `isAuditEventVisibleToCaller` scoping as
+   * `GET /api/v1/audit`, so a connecting caller only ever sees revoke events
+   * visible to its own logical `userId` (see that function's docs above).
+   *
+   * Operational note: SSE is new long-lived-connection surface for this
+   * codebase. Any reverse proxy fronting this service — not just the
+   * documented Caddy setup in packages/server/README.md — needs verified
+   * idle/read timeouts (and disabled response buffering) for this connection
+   * to survive; see the plan's System-Wide Impact section.
+   *
+   * Rate limiting: `auditRateLimiter` gates new *connection attempts* (a
+   * per-IP window, same as `GET /api/v1/audit`) rather than capping
+   * concurrent open streams — express-rate-limit counts at request start,
+   * so it does nothing once a stream is already open. A connection-count
+   * limit would be the more precise protection for a long-lived route, but
+   * is deliberately left out of this minimal unit; the connect-rate limit
+   * plus required auth is the accepted protection level for now.
+   */
+  app.get('/api/v1/audit/stream', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, (req: Request, res: Response) => {
+    const userId = requestUserId(req);
+
+    // Fail fast with the same 501 GET /api/v1/audit would give, rather than
+    // opening a stream that can never emit anything.
+    try {
+      vault.queryAuditEvents({ limit: 1 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'Audit query not supported by this vault backend' });
+        return;
+      }
+      console.error('[/api/v1/audit/stream] Error:', err);
+      res.status(500).json({ error: 'Failed to open audit stream' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    res.flushHeaders();
+
+    // Cursor starts just before connection time (1ms back) — this stream
+    // delivers revocations going forward, not a historical backlog (use
+    // GET /api/v1/audit for that). The 1ms backdate matters because the
+    // query below is a strict `timestamp > since` (see audit.ts) and Date
+    // has only millisecond resolution: without it, a revoke whose audit
+    // write lands in the same millisecond as this connection would never
+    // satisfy the comparison and would be silently dropped for the life of
+    // the stream, not just delayed.
+    let cursor = new Date(Date.now() - 1);
+
+    const poll = () => {
+      let events: AuditEvent[];
+      try {
+        events = vault.queryAuditEvents({ action: 'revoke', since: cursor });
+      } catch {
+        // Backend became unavailable mid-stream — skip this tick rather
+        // than crashing the poll loop; the client can reconnect.
+        return;
+      }
+      if (events.length === 0) return;
+
+      // queryAuditEvents orders newest-first; replay oldest-first so the
+      // cursor advances monotonically and events arrive in chronological order.
+      const chronological = [...events].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      for (const event of chronological) {
+        if (!isAuditEventVisibleToCaller(event, userId, undefined)) continue;
+        const entry = auditEventToEntry(event, userId);
+        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      }
+      cursor = chronological[chronological.length - 1]!.timestamp;
+    };
+
+    const interval = setInterval(poll, 1500);
+
+    req.on('close', () => {
+      clearInterval(interval);
+    });
   });
 
   /**

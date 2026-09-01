@@ -29,7 +29,7 @@ export interface AuditEvent {
   /** UTC timestamp with sub-second precision */
   timestamp: Date;
   actor: AuditActor;
-  action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'delete' | 'deny';
+  action: 'delegate' | 'access' | 'rotate' | 'revoke' | 'create' | 'update' | 'delete' | 'deny';
   resource: AuditResource;
   outcome: 'pending' | 'success' | 'denied' | 'error';
   delegationChain?: Array<{ delegatorId: string; delegateeId: string; scopes: string[] }>;
@@ -53,6 +53,15 @@ export interface AuditFilter {
   outcome?: AuditEvent['outcome'];
   after?: Date;
   before?: Date;
+  /**
+   * Cursor for incremental polling: return only events with a timestamp
+   * strictly after this value (`>`, not `>=` like `after`). Callers that
+   * re-poll with the timestamp of the last event they already saw as the
+   * next `since` will not see that event again. Distinct from `after`
+   * (inclusive range filtering) to give pollers an unambiguous, dedup-safe
+   * cursor semantic.
+   */
+  since?: Date;
   limit?: number;
 }
 
@@ -214,6 +223,10 @@ export class SQLiteAuditBackend implements AuditBackend {
     if (filter.after) {
       conditions.push('timestamp >= @after');
       params.after = filter.after.toISOString();
+    }
+    if (filter.since) {
+      conditions.push('timestamp > @since');
+      params.since = filter.since.toISOString();
     }
     if (filter.before) {
       conditions.push('timestamp <= @before');

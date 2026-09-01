@@ -6,6 +6,8 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
+import { summarizeGuardDecision } from '../guard-wiring.js';
+import { toolErrorResult } from '../tool-errors.js';
 
 export const STATUS_TOOL_NAME = 'cred_status';
 
@@ -45,12 +47,15 @@ export async function handleStatus(
       context.appClientId,
     );
 
+    const guard = summarizeGuardDecision(context);
+    const guardSuffix = guard ? `\n\nguard=${JSON.stringify(guard)}` : '';
+
     if (connections.length === 0) {
       return {
         content: [
           {
             type: 'text',
-            text: 'No connected services found for this user.',
+            text: `No connected services found for this user.${guardSuffix}`,
           },
         ],
       };
@@ -70,21 +75,11 @@ export async function handleStatus(
       content: [
         {
           type: 'text',
-          text: `Connected services:\n${formatted}`,
+          text: `Connected services:\n${formatted}${guardSuffix}`,
         },
       ],
     };
   } catch (error) {
-    // Handle errors — return error message, don't crash
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${message}`,
-        },
-      ],
-      isError: true,
-    };
+    return toolErrorResult(error);
   }
 }

@@ -6,6 +6,8 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
+import { summarizeGuardDecision } from '../guard-wiring.js';
+import { toolErrorResult } from '../tool-errors.js';
 
 export const REVOKE_TOOL_NAME = 'cred_revoke';
 
@@ -51,25 +53,17 @@ export async function handleRevoke(
       appClientId: context.appClientId,
     });
 
+    const guard = summarizeGuardDecision(context);
     return {
       content: [
         {
           type: 'text',
-          text: `Successfully revoked ${input.service} connection for user.`,
+          text: `Successfully revoked ${input.service} connection for user.`
+            + (guard ? ` guard=${JSON.stringify(guard)}` : ''),
         },
       ],
     };
   } catch (error) {
-    // Handle errors — return error message, don't crash
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${message}`,
-        },
-      ],
-      isError: true,
-    };
+    return toolErrorResult(error);
   }
 }

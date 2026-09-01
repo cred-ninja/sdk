@@ -38,7 +38,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@credninja/sdk": "^1.0.0"
+    "@credninja/sdk": "^1.0.0",
+    "@credninja/guard": "^1.0.0"
   },
   "peerDependencies": {
     "@credninja/oauth": "^1.0.0",

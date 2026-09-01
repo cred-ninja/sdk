@@ -16,7 +16,7 @@ export class UrlAllowlistPolicy implements CredPolicy {
   }
 
   evaluate(ctx: GuardContext): PolicyResult {
-    const { provider, targetUrl } = ctx;
+    const { provider, targetUrl, requestedScopes } = ctx;
 
     // SKIP if no targetUrl (this is a delegation, not a cred_use)
     if (!targetUrl) {
@@ -27,9 +27,13 @@ export class UrlAllowlistPolicy implements CredPolicy {
       };
     }
 
-    // SKIP if provider not in config
     const allowedPatterns = this.config.allowedUrls[provider];
-    if (!allowedPatterns || allowedPatterns.length === 0) {
+    const wildcardSuffixes = this.config.wildcardSubdomains?.[provider];
+    const hasPatterns = Boolean(allowedPatterns && allowedPatterns.length > 0);
+    const hasWildcards = Boolean(wildcardSuffixes && wildcardSuffixes.length > 0);
+
+    // SKIP if provider has neither fixed patterns nor wildcard suffixes configured
+    if (!hasPatterns && !hasWildcards) {
       return {
         decision: 'SKIP',
         policy: this.name,
@@ -37,18 +41,61 @@ export class UrlAllowlistPolicy implements CredPolicy {
       };
     }
 
-    // Check if targetUrl matches any pattern
-    for (const pattern of allowedPatterns) {
-      if (this.matchesPattern(targetUrl, pattern)) {
-        return {
-          decision: 'ALLOW',
-          policy: this.name,
-          reason: `URL matches allowed pattern: ${this.patternToString(pattern)}`,
-        };
+    let parsed: URL;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      return { decision: 'DENY', policy: this.name, reason: 'Target URL could not be parsed' };
+    }
+    if (parsed.protocol !== 'https:') {
+      return { decision: 'DENY', policy: this.name, reason: 'Target URL must use HTTPS' };
+    }
+    if (parsed.username || parsed.password) {
+      return { decision: 'DENY', policy: this.name, reason: 'Target URL must not contain userinfo' };
+    }
+    if (parsed.port !== '' && parsed.port !== '443') {
+      return { decision: 'DENY', policy: this.name, reason: 'Target URL must use the default HTTPS port' };
+    }
+
+    // Wildcard-subdomain match (e.g. Salesforce's per-tenant origin)
+    if (hasWildcards) {
+      const hostname = parsed.hostname.toLowerCase();
+      const looksLikeNumericSubdomain = /^(\d{1,3}\.){3}\d{1,3}\./.test(hostname);
+      if (!looksLikeNumericSubdomain) {
+        for (const suffix of wildcardSuffixes!) {
+          if (hostname.endsWith(suffix.toLowerCase())) {
+            return {
+              decision: 'ALLOW',
+              policy: this.name,
+              reason: `Hostname matches wildcard suffix: ${suffix}`,
+            };
+          }
+        }
       }
     }
 
-    // No pattern matched — DENY
+    // Fixed-pattern match, gated by an optional per-provider scope predicate
+    if (hasPatterns) {
+      for (const pattern of allowedPatterns!) {
+        if (this.matchesPattern(targetUrl, pattern)) {
+          const scopeGate = this.config.scopeGate?.[provider];
+          if (scopeGate && !scopeGate(requestedScopes, targetUrl)) {
+            return {
+              decision: 'DENY',
+              policy: this.name,
+              reason: `Target URL does not match an allowed scope for provider: ${provider}`,
+            };
+          }
+          return {
+            decision: 'ALLOW',
+            policy: this.name,
+            reason: `URL matches allowed pattern: ${this.patternToString(pattern)}`,
+          };
+        }
+      }
+    }
+
+    // No pattern or wildcard suffix matched — DENY
     return {
       decision: 'DENY',
       policy: this.name,

@@ -15,6 +15,7 @@ import type {
   AgentRecord,
   AgentRow,
   Permission,
+  UpdatePermissionInput,
   Rotation,
   RotationStrategy,
 } from './types.js';
@@ -360,6 +361,20 @@ export class CredVault {
   async revokePermission(permissionId: string): Promise<void> {
     await this.ensureInit();
     await this.getPermissionStore().revoke(permissionId);
+  }
+
+  /**
+   * Atomically update a subset of an existing permission's fields (scope
+   * ceiling, rate limit, TTL override, etc). Cannot move the permission to a
+   * different (agentId, connectionId) pair. Prospective-only: narrowing
+   * `allowedScopes` constrains future delegate()/subdelegate() calls but has
+   * no effect on a delegation handle already brokered through
+   * `POST /api/v1/use` — that route resolves scopes from an in-memory
+   * snapshot taken at delegation time and never re-reads the Permission row.
+   */
+  async updatePermission(id: string, input: UpdatePermissionInput): Promise<Permission> {
+    await this.ensureInit();
+    return this.getPermissionStore().update(id, input);
   }
 
   async checkPermissionRateLimit(
