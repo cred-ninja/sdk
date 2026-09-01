@@ -328,7 +328,8 @@ describe('@credninja/server', () => {
       const { app, tofu } = createServer(makeTestConfig());
       await tofu.init();
 
-      const first = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+      const keypair = generateKeyPairSync('ed25519');
+      const first = keypair.publicKey.export({ type: 'spki', format: 'der' });
       const second = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
 
       const createRes = await request(app)
@@ -354,9 +355,23 @@ describe('@credninja/server', () => {
       expect(listed).toBeDefined();
       expect(listed.metadata.label).toBe('native-web-bot-auth');
 
+      // Rotation is one of the two routes hardened by the ownership-check fix
+      // (docs/plans/2026-08-31-002-fix-agent-ownership-check-plan.md): it now
+      // requires a verified Web Bot Auth identity matching the target agent,
+      // regardless of the deployment's global webBotAuthMode — proven here by
+      // using the default config (mode left unset, i.e. 'off').
+      const signedHeaders = signWebBotAuthRequest({
+        url: `http://localhost:3456/api/v1/web-bot-auth/keys/${createRes.body.agent_id}/rotate`,
+        signatureAgent: createRes.body.signature_agent,
+        keyId: createRes.body.key_id,
+        privateKey: keypair.privateKey,
+      });
+
       const rotateRes = await request(app)
         .post(`/api/v1/web-bot-auth/keys/${createRes.body.agent_id}/rotate`)
+        .set('Host', 'localhost:3456')
         .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
         .send({
           public_key: Buffer.from(second.slice(-32)).toString('base64'),
           grace_period_hours: 2,
@@ -449,6 +464,215 @@ describe('@credninja/server', () => {
 
       expect(rotateRes.status).toBe(404);
       expect(rotateRes.body.error).toBe('Web Bot Auth key not found');
+    });
+  });
+
+  // Ownership-check hardening for revoke-all and rotate:
+  // docs/plans/2026-08-31-002-fix-agent-ownership-check-plan.md
+  describe('agent ownership checks (revoke-all, rotate)', () => {
+    async function registerWebBotAuthAgent(app: any) {
+      const keypair = generateKeyPairSync('ed25519');
+      const spki = keypair.publicKey.export({ type: 'spki', format: 'der' });
+      const createRes = await request(app)
+        .post('/api/v1/web-bot-auth/keys')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ public_key: Buffer.from(spki.slice(-32)).toString('base64') });
+      expect(createRes.status).toBe(201);
+      return { agentId: createRes.body.agent_id as string, keyId: createRes.body.key_id as string, signatureAgent: createRes.body.signature_agent as string, keypair };
+    }
+
+    it('denies rotate when the caller is a different verified agent', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const owner = await registerWebBotAuthAgent(app);
+      const other = await registerWebBotAuthAgent(app);
+
+      const signedHeaders = signWebBotAuthRequest({
+        url: `http://localhost:3456/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`,
+        signatureAgent: other.signatureAgent,
+        keyId: other.keyId,
+        privateKey: other.keypair.privateKey,
+      });
+
+      const newKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+      const rotateRes = await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`)
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(signedHeaders)
+        .send({ public_key: Buffer.from(newKey.slice(-32)).toString('base64') });
+
+      expect(rotateRes.status).toBe(403);
+
+      const stillListed = (await request(app).get('/api/v1/web-bot-auth/keys').set('Authorization', `Bearer ${TEST_TOKEN}`)).body.keys
+        .find((key: any) => key.agent_id === owner.agentId);
+      expect(stillListed.key_id).toBe(owner.keyId);
+    });
+
+    it('denies rotate for a static-bearer-only caller regardless of webBotAuthMode', async () => {
+      const { app, tofu } = createServer(makeTestConfig());
+      await tofu.init();
+
+      const owner = await registerWebBotAuthAgent(app);
+      const newKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      const rotateRes = await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ public_key: Buffer.from(newKey.slice(-32)).toString('base64') });
+
+      expect(rotateRes.status).toBe(403);
+    });
+
+    it('writes a denied-outcome audit event when rotate ownership check fails', async () => {
+      const { app, tofu, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await tofu.init();
+      await vault.init();
+
+      const owner = await registerWebBotAuthAgent(app);
+      const newKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ public_key: Buffer.from(newKey.slice(-32)).toString('base64') });
+
+      const events = vault.queryAuditEvents({ limit: 20 });
+      const denyEvent = events.find((event) => event.action === 'deny' && event.resource.id === owner.agentId);
+      expect(denyEvent).toBeDefined();
+      expect(denyEvent?.outcome).toBe('denied');
+    });
+
+    it('allows a custom agentRequestVerifier principalId matching the target TOFU agentId', async () => {
+      const { app, tofu } = createServer(makeTestConfig({
+        agentRequestVerifier: (req) => {
+          if (req.get('Authorization') !== `Bearer ${TEST_TOKEN}`) {
+            return { ok: false, status: 401, error: 'unauthorized' };
+          }
+          return { ok: true, principal: { type: 'test-verifier', principalId: req.get('X-Test-Acting-Agent-Id') ?? undefined } };
+        },
+      }));
+      await tofu.init();
+
+      const owner = await registerWebBotAuthAgent(app);
+      const newKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' });
+
+      const rotateRes = await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set('X-Test-Acting-Agent-Id', owner.agentId)
+        .send({ public_key: Buffer.from(newKey.slice(-32)).toString('base64') });
+
+      expect(rotateRes.status).toBe(200);
+    });
+
+    it('denies revoke-all when the caller is a different verified agent (vault fingerprint mismatch)', async () => {
+      const targetId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      const callerId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+
+      // A caller with its own verified identity (via a custom verifier
+      // resolving to the caller's own id) attempts to revoke a different agent.
+      const { app, vault } = createServer(makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        agentRequestVerifier: (req) => {
+          if (req.get('Authorization') !== `Bearer ${TEST_TOKEN}`) {
+            return { ok: false, status: 401, error: 'unauthorized' };
+          }
+          return { ok: true, principal: { type: 'test-verifier', principalId: callerId } };
+        },
+      }));
+      await vault.init();
+
+      const now = new Date().toISOString();
+      await vault.registerAgent({ id: targetId, fingerprint: `fp_${targetId}`, name: 'target', scopeCeiling: [], status: 'active', createdBy: 'test', createdAt: now, updatedAt: now });
+      await vault.registerAgent({ id: callerId, fingerprint: `fp_${callerId}`, name: 'caller', scopeCeiling: [], status: 'active', createdBy: 'test', createdAt: now, updatedAt: now });
+
+      const revokeRes = await request(app)
+        .post(`/api/v1/agents/${targetId}/revoke-all`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({});
+
+      expect(revokeRes.status).toBe(403);
+      await expect(vault.getAgent(targetId)).resolves.toMatchObject({ status: 'active' });
+    });
+
+    it('writes a denied-outcome audit event when revoke-all ownership check fails', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const now = new Date().toISOString();
+      const targetId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      await vault.registerAgent({ id: targetId, fingerprint: `fp_${targetId}`, name: 'target', scopeCeiling: [], status: 'active', createdBy: 'test', createdAt: now, updatedAt: now });
+
+      await request(app)
+        .post(`/api/v1/agents/${targetId}/revoke-all`)
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({});
+
+      const events = vault.queryAuditEvents({ limit: 20 });
+      const denyEvent = events.find((event) => event.action === 'deny' && event.resource.id === targetId);
+      expect(denyEvent).toBeDefined();
+      expect(denyEvent?.outcome).toBe('denied');
+    });
+
+    it('denies revoke-all after key rotation invalidates the vault fingerprint bridge (documented accepted trade-off)', async () => {
+      const { app, tofu, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await tofu.init();
+      await vault.init();
+
+      const owner = await registerWebBotAuthAgent(app);
+      const originalIdentity = (await tofu.listAgents()).find((agent) => agent.agentId === owner.agentId)!;
+
+      // Bridge the TOFU identity into a vault AgentRecord the way an operator's
+      // out-of-band provisioning process would, using TOFU's exact fingerprint.
+      const now = new Date().toISOString();
+      await vault.registerAgent({
+        id: owner.agentId,
+        fingerprint: originalIdentity.fingerprint,
+        name: 'bridged-agent',
+        scopeCeiling: [],
+        status: 'active',
+        createdBy: 'test',
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const newKeypair = generateKeyPairSync('ed25519');
+      const newKeySpki = newKeypair.publicKey.export({ type: 'spki', format: 'der' });
+      const rotateHeaders = signWebBotAuthRequest({
+        url: `http://localhost:3456/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`,
+        signatureAgent: owner.signatureAgent,
+        keyId: owner.keyId,
+        privateKey: owner.keypair.privateKey,
+      });
+      const rotateRes = await request(app)
+        .post(`/api/v1/web-bot-auth/keys/${owner.agentId}/rotate`)
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(rotateHeaders)
+        .send({ public_key: Buffer.from(newKeySpki.slice(-32)).toString('base64') });
+      expect(rotateRes.status).toBe(200);
+
+      // Attempt revoke-all signed with the NEW key's identity — the vault
+      // AgentRecord's fingerprint is still the pre-rotation snapshot, so this
+      // must be denied per Key Technical Decisions' accepted trade-off.
+      const revokeHeaders = signWebBotAuthRequest({
+        url: `http://localhost:3456/api/v1/agents/${owner.agentId}/revoke-all`,
+        signatureAgent: owner.signatureAgent,
+        keyId: rotateRes.body.key_id,
+        privateKey: newKeypair.privateKey,
+      });
+      const revokeRes = await request(app)
+        .post(`/api/v1/agents/${owner.agentId}/revoke-all`)
+        .set('Host', 'localhost:3456')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set(revokeHeaders)
+        .send({});
+
+      expect(revokeRes.status).toBe(403);
+      await expect(vault.getAgent(owner.agentId)).resolves.toMatchObject({ status: 'active' });
     });
   });
 
@@ -1136,9 +1360,26 @@ describe('@credninja/server', () => {
     });
 
     it('revokes stored DID agents and blocks future delegations for that agent', async () => {
+      // revoke-all is hardened by the ownership-check fix
+      // (docs/plans/2026-08-31-002-fix-agent-ownership-check-plan.md): it now
+      // requires a verified identity matching the target agent. This fixture's
+      // AgentRecord has no real Web Bot Auth key registered, so ownership is
+      // proven via a custom agentRequestVerifier whose principalId equals the
+      // target AgentRecord.id when the caller opts in via a test-only header —
+      // mirroring how a real custom verifier would resolve caller identity.
       const { app, vault } = createServer(makeTestConfig({
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,
+        agentRequestVerifier: (req) => {
+          if (req.get('Authorization') !== `Bearer ${TEST_TOKEN}`) {
+            return { ok: false, status: 401, error: 'Unauthorized. Provide a valid Bearer token.' };
+          }
+          const actingAsAgentId = req.get('X-Test-Acting-Agent-Id');
+          return {
+            ok: true,
+            principal: { type: 'test-verifier', principalId: actingAsAgentId ?? undefined },
+          };
+        },
       }));
       await vault.init();
 
@@ -1180,6 +1421,7 @@ describe('@credninja/server', () => {
       const revokeRes = await request(app)
         .post(`/api/v1/agents/${agentId}/revoke-all`)
         .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .set('X-Test-Acting-Agent-Id', agentId)
         .send({});
 
       expect(revokeRes.status).toBe(204);

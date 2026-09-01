@@ -618,6 +618,31 @@ export function createServer(config: ServerConfig) {
     next();
   }
 
+  /**
+   * Runs Web Bot Auth signature verification when Signature headers are present,
+   * independent of `config.webBotAuthMode`. Populates `req.webBotAuthIdentity` on
+   * success; no-ops (does not throw) when no signature headers are present at all.
+   */
+  async function attemptWebBotAuthIdentity(req: Request): Promise<void> {
+    const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
+    if (!hasHeaders) {
+      return;
+    }
+
+    const verifiedIdentity = await verifyIncomingWebBotAuthRequest(req);
+    (req as any).webBotAuthIdentity = verifiedIdentity;
+
+    if (req.body && typeof req.body === 'object') {
+      const body = req.body as Record<string, unknown>;
+      if (typeof body.web_bot_auth_key_id !== 'string') {
+        body.web_bot_auth_key_id = verifiedIdentity.keyId;
+      }
+      if (typeof body.signature_agent !== 'string') {
+        body.signature_agent = verifiedIdentity.signatureAgent;
+      }
+    }
+  }
+
   async function verifyWebBotAuth(req: Request, res: Response, next: NextFunction) {
     const mode = config.webBotAuthMode ?? 'off';
     if (mode === 'off') {
@@ -636,19 +661,7 @@ export function createServer(config: ServerConfig) {
     }
 
     try {
-      const verifiedIdentity = await verifyIncomingWebBotAuthRequest(req);
-      (req as any).webBotAuthIdentity = verifiedIdentity;
-
-      if (req.body && typeof req.body === 'object') {
-        const body = req.body as Record<string, unknown>;
-        if (typeof body.web_bot_auth_key_id !== 'string') {
-          body.web_bot_auth_key_id = verifiedIdentity.keyId;
-        }
-        if (typeof body.signature_agent !== 'string') {
-          body.signature_agent = verifiedIdentity.signatureAgent;
-        }
-      }
-
+      await attemptWebBotAuthIdentity(req);
       next();
     } catch (err) {
       res.status(401).json({
@@ -656,6 +669,78 @@ export function createServer(config: ServerConfig) {
         message: err instanceof Error ? err.message : 'Web Bot Auth verification failed',
       });
     }
+  }
+
+  /**
+   * Like `verifyWebBotAuth`, but ignores `config.webBotAuthMode` entirely — always
+   * attempts verification when signature headers are present. Used only on routes
+   * where ownership of a specific `:agentId` must be provable regardless of the
+   * deployment's global Web Bot Auth posture (`rotate`, `revoke-all`).
+   */
+  async function requireVerifiedIdentityRegardlessOfMode(req: Request, res: Response, next: NextFunction) {
+    try {
+      await attemptWebBotAuthIdentity(req);
+      next();
+    } catch (err) {
+      res.status(401).json({
+        error: 'invalid_web_bot_auth',
+        message: err instanceof Error ? err.message : 'Web Bot Auth verification failed',
+      });
+    }
+  }
+
+  type OwnershipCheckResult = { ok: true } | { ok: false; status: number; error: string };
+
+  /**
+   * Verifies the calling principal's verified identity matches `targetAgentId` in
+   * the given namespace. Takes only pre-loaded records — never reads storage itself,
+   * so there is no time-of-check/time-of-use gap between loading a record and
+   * checking it. See docs/plans/2026-08-31-002-fix-agent-ownership-check-plan.md.
+   */
+  function assertOwnsAgentId(req: Request, targetAgentId: string, namespace: 'tofu'): OwnershipCheckResult;
+  function assertOwnsAgentId(
+    req: Request,
+    targetAgentId: string,
+    namespace: 'vault',
+    vaultAgent: AgentRecord,
+  ): OwnershipCheckResult;
+  function assertOwnsAgentId(
+    req: Request,
+    targetAgentId: string,
+    namespace: 'tofu' | 'vault',
+    vaultAgent?: AgentRecord,
+  ): OwnershipCheckResult {
+    const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
+
+    if (namespace === 'tofu') {
+      const candidate = webBotAuthIdentity?.agentId;
+      if (candidate && candidate === targetAgentId) {
+        return { ok: true };
+      }
+    } else {
+      const candidate = webBotAuthIdentity?.fingerprint;
+      const recordFingerprint = vaultAgent?.fingerprint;
+      if (candidate && recordFingerprint && candidate === recordFingerprint) {
+        return { ok: true };
+      }
+    }
+
+    // Custom-verifier path: principalId is only trusted from an actual custom
+    // agentRequestVerifier, never from the shared static-bearer principal (which
+    // never populates principalId today, but this guards against that invariant
+    // silently changing later).
+    const agentPrincipal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    const principalId =
+      agentPrincipal && agentPrincipal.type !== 'static-bearer' ? agentPrincipal.principalId : undefined;
+    if (principalId && principalId === targetAgentId) {
+      return { ok: true };
+    }
+
+    return {
+      ok: false,
+      status: 403,
+      error: 'Forbidden. A verified identity matching this agent is required for this action.',
+    };
   }
 
   /**
@@ -2684,9 +2769,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
-  app.post('/api/v1/web-bot-auth/keys/:agentId/rotate', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  app.post('/api/v1/web-bot-auth/keys/:agentId/rotate', tokenRateLimiter, requireAgentAuth, requireVerifiedIdentityRegardlessOfMode, async (req: Request, res: Response) => {
     try {
       const { agentId } = req.params;
+      if (typeof agentId !== 'string') {
+        res.status(400).json({ error: 'agentId must be a string' });
+        return;
+      }
       const {
         public_key: publicKeyBase64,
         grace_period_hours: gracePeriodHours,
@@ -2703,6 +2792,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const existing = (await tofu.listAgents()).find((agent) => agent.agentId === agentId);
       if (!existing) {
         res.status(404).json({ error: 'Web Bot Auth key not found' });
+        return;
+      }
+
+      const ownership = assertOwnsAgentId(req, agentId, 'tofu');
+      if (!ownership.ok) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: {
+            type: 'agent',
+            id: (req as any).agentPrincipal?.principalId ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
+            fingerprint: (req as any).webBotAuthIdentity?.fingerprint,
+          },
+          action: 'deny',
+          resource: { type: 'agent', id: agentId },
+          outcome: 'denied',
+          errorMessage: ownership.error,
+          correlationId: crypto.randomUUID(),
+        });
+        res.status(ownership.status).json({ error: ownership.error });
         return;
       }
 
@@ -2754,7 +2863,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
-  app.post('/api/v1/agents/:agentId/revoke-all', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  app.post('/api/v1/agents/:agentId/revoke-all', revokeRateLimiter, requireAgentAuth, requireVerifiedIdentityRegardlessOfMode, async (req: Request, res: Response) => {
     try {
       const agentIdParam = req.params.agentId;
       if (typeof agentIdParam !== 'string') {
@@ -2765,6 +2874,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const agent = await vault.getAgent(agentId);
       if (!agent) {
         res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+
+      const ownership = assertOwnsAgentId(req, agentId, 'vault', agent);
+      if (!ownership.ok) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: {
+            type: 'agent',
+            id: (req as any).agentPrincipal?.principalId ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified',
+            fingerprint: (req as any).webBotAuthIdentity?.fingerprint,
+          },
+          action: 'deny',
+          resource: { type: 'agent', id: agentId },
+          outcome: 'denied',
+          errorMessage: ownership.error,
+          correlationId: crypto.randomUUID(),
+        });
+        res.status(ownership.status).json({ error: ownership.error });
         return;
       }
 
