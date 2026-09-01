@@ -30,7 +30,7 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy } from '@credninja/vault';
-import type { AgentRecord } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -1182,6 +1182,7 @@ export function createServer(config: ServerConfig) {
   const directoryRateLimiter = makeRateLimiter(60);  // /.well-known/… — crypto work per request
   const healthRateLimiter = makeRateLimiter(120);    // /health       — cheap but still DoS-able
   const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
+  const adminPermissionsRateLimiter = makeRateLimiter(30);  // /admin/permissions* — sqlite query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     try {
@@ -1499,6 +1500,212 @@ export function createServer(config: ServerConfig) {
     } catch (err) {
       console.error('[/providers] Error:', err);
       res.status(500).json({ error: 'Failed to list providers' });
+    }
+  });
+
+  const PERMISSION_STORAGE_NOT_SUPPORTED_MESSAGE =
+    'Permission storage not supported by this vault backend. This deployment must use vaultStorage: "sqlite".';
+
+  function mapPermissionErrorResponse(res: Response, err: unknown, fallbackMessage: string): void {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('not supported')) {
+      res.status(501).json({ error: PERMISSION_STORAGE_NOT_SUPPORTED_MESSAGE });
+      return;
+    }
+    if (message.includes('not found')) {
+      res.status(404).json({ error: 'Permission not found' });
+      return;
+    }
+    console.error(`[admin/permissions] Error:`, err);
+    res.status(500).json({ error: fallbackMessage });
+  }
+
+  /**
+   * POST /admin/permissions — create a Permission record (admin-authenticated).
+   *
+   * Permission records enforce an agent's scope ceiling, rate limit, TTL
+   * override, and delegation depth for a given connection — this is the
+   * only way to manage them without reaching into @credninja/vault
+   * directly. Sqlite-only: the file storage backend has no Permission
+   * support, so an operator on the file backend gets an explicit 501 (see
+   * mapPermissionErrorResponse) rather than a generic 500 on first use.
+   */
+  app.post('/admin/permissions', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as {
+        agentId?: unknown;
+        connectionId?: unknown;
+        allowedScopes?: unknown;
+        rateLimit?: { maxRequests: number; windowMs: number };
+        ttlOverride?: number;
+        requiresApproval?: boolean;
+        delegatable?: boolean;
+        maxDelegationDepth?: number;
+        expiresAt?: string;
+        createdBy?: unknown;
+      };
+
+      if (typeof body.agentId !== 'string' || !body.agentId) {
+        res.status(400).json({ error: 'agentId is required' });
+        return;
+      }
+      if (typeof body.connectionId !== 'string' || !body.connectionId) {
+        res.status(400).json({ error: 'connectionId is required' });
+        return;
+      }
+      if (!Array.isArray(body.allowedScopes) || !body.allowedScopes.every((s) => typeof s === 'string')) {
+        res.status(400).json({ error: 'allowedScopes must be an array of strings' });
+        return;
+      }
+
+      const permission = await vault.createPermission({
+        agentId: body.agentId,
+        connectionId: body.connectionId,
+        allowedScopes: body.allowedScopes,
+        rateLimit: body.rateLimit,
+        ttlOverride: body.ttlOverride,
+        requiresApproval: body.requiresApproval ?? false,
+        delegatable: body.delegatable ?? false,
+        maxDelegationDepth: body.maxDelegationDepth ?? 1,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        createdBy: typeof body.createdBy === 'string' && body.createdBy ? body.createdBy : 'admin',
+      });
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'create',
+        resource: { type: 'permission', id: permission.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: { agentId: permission.agentId, connectionId: permission.connectionId },
+      });
+
+      res.status(201).json({ permission });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to create permission');
+    }
+  });
+
+  /**
+   * GET /admin/permissions — list permissions for an agent, or fetch a
+   * single permission for an agent/connection pair (admin-authenticated).
+   *
+   * Mirrors CredVault.listPermissions(agentId) / getPermission(agentId,
+   * connectionId) exactly — query-param shaped rather than an `/:id` lookup,
+   * since neither underlying vault method supports fetching a permission by
+   * id alone.
+   */
+  app.get('/admin/permissions', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const agentId = queryStringValue(req.query.agent_id);
+      const connectionId = queryStringValue(req.query.connection_id);
+
+      if (!agentId) {
+        res.status(400).json({ error: 'agent_id query parameter is required' });
+        return;
+      }
+
+      if (connectionId) {
+        const permission = await vault.getPermission(agentId, connectionId);
+        if (!permission) {
+          res.status(404).json({ error: 'Permission not found' });
+          return;
+        }
+        res.json({ permission });
+        return;
+      }
+
+      const permissions = await vault.listPermissions(agentId);
+      res.json({ permissions });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to list permissions');
+    }
+  });
+
+  /**
+   * PATCH /admin/permissions/:id — update an existing Permission record
+   * (admin-authenticated).
+   *
+   * Prospective-only: narrowing allowedScopes here constrains future
+   * delegate()/subdelegate() calls, but does not affect a delegation handle
+   * already brokered through POST /api/v1/use — that route resolves scopes
+   * from an in-memory snapshot taken at issuance and never re-reads the
+   * Permission row.
+   */
+  app.patch('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = routeParam(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Missing permission id' });
+        return;
+      }
+
+      const body = (req.body ?? {}) as {
+        allowedScopes?: string[];
+        rateLimit?: { maxRequests: number; windowMs: number } | null;
+        ttlOverride?: number | null;
+        requiresApproval?: boolean;
+        delegatable?: boolean;
+        maxDelegationDepth?: number;
+        expiresAt?: string | null;
+      };
+
+      const input: UpdatePermissionInput = {};
+      if ('allowedScopes' in body) input.allowedScopes = body.allowedScopes;
+      if ('rateLimit' in body) input.rateLimit = body.rateLimit ?? undefined;
+      if ('ttlOverride' in body) input.ttlOverride = body.ttlOverride ?? undefined;
+      if ('requiresApproval' in body) input.requiresApproval = body.requiresApproval;
+      if ('delegatable' in body) input.delegatable = body.delegatable;
+      if ('maxDelegationDepth' in body) input.maxDelegationDepth = body.maxDelegationDepth;
+      if ('expiresAt' in body) input.expiresAt = body.expiresAt ? new Date(body.expiresAt) : undefined;
+
+      const permission = await vault.updatePermission(id, input);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'update',
+        resource: { type: 'permission', id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: { changed: Object.keys(input) },
+      });
+
+      res.json({ permission });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to update permission');
+    }
+  });
+
+  /**
+   * DELETE /admin/permissions/:id — revoke a Permission record (admin-authenticated).
+   */
+  app.delete('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = routeParam(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Missing permission id' });
+        return;
+      }
+
+      await vault.revokePermission(id);
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'revoke',
+        resource: { type: 'permission', id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to revoke permission');
     }
   });
 

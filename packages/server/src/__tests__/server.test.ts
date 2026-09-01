@@ -3098,6 +3098,277 @@ describe('@credninja/server', () => {
       expect(body).not.toContain('refreshToken');
     });
   });
+
+  describe('Admin Permission CRUD (/admin/permissions*)', () => {
+    it('requires admin auth on every route (rejects agent-Bearer-only callers)', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createNoAuth = await request(app).post('/admin/permissions').send({});
+      expect(createNoAuth.status).toBe(401);
+      const createAgentAuth = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ agentId: 'agt_1', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      expect(createAgentAuth.status).toBe(401);
+
+      const listNoAuth = await request(app).get('/admin/permissions?agent_id=agt_1');
+      expect(listNoAuth.status).toBe(401);
+      const listAgentAuth = await request(app)
+        .get('/admin/permissions?agent_id=agt_1')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(listAgentAuth.status).toBe(401);
+
+      const updateNoAuth = await request(app).patch('/admin/permissions/perm_x').send({});
+      expect(updateNoAuth.status).toBe(401);
+      const updateAgentAuth = await request(app)
+        .patch('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({});
+      expect(updateAgentAuth.status).toBe(401);
+
+      const revokeNoAuth = await request(app).delete('/admin/permissions/perm_x');
+      expect(revokeNoAuth.status).toBe(401);
+      const revokeAgentAuth = await request(app)
+        .delete('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(revokeAgentAuth.status).toBe(401);
+    });
+
+    it('is rate-limited like every other route in this file', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      let lastStatus = 200;
+      // adminPermissionsRateLimiter allows 30 requests/60s — the 31st trips it.
+      for (let i = 0; i < 31; i++) {
+        const res = await adminGet(app, '/admin/permissions?agent_id=agt_1');
+        lastStatus = res.status;
+      }
+      expect(lastStatus).toBe(429);
+    });
+
+    it('full CRUD round trip against the sqlite backend, preserving id and bumping updatedAt', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({
+          agentId: 'agt_crud',
+          connectionId: 'google',
+          allowedScopes: ['calendar.readonly'],
+          requiresApproval: false,
+          delegatable: true,
+          maxDelegationDepth: 1,
+        });
+
+      expect(createRes.status).toBe(201);
+      const permissionId = createRes.body.permission.id;
+      expect(permissionId).toMatch(/^perm_/);
+      expect(createRes.body.permission.updatedAt).toBe(createRes.body.permission.createdAt);
+
+      const getRes = await request(app)
+        .get(`/admin/permissions?agent_id=agt_crud&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.permission.id).toBe(permissionId);
+
+      const listRes = await request(app)
+        .get('/admin/permissions?agent_id=agt_crud')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.permissions).toHaveLength(1);
+      expect(listRes.body.permissions[0].id).toBe(permissionId);
+
+      const updateRes = await request(app)
+        .patch(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly', 'gmail.readonly'] });
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.permission.id).toBe(permissionId);
+      expect(updateRes.body.permission.agentId).toBe('agt_crud');
+      expect(updateRes.body.permission.connectionId).toBe('google');
+      expect(updateRes.body.permission.allowedScopes).toEqual(['calendar.readonly', 'gmail.readonly']);
+      expect(updateRes.body.permission.updatedAt).not.toBe(createRes.body.permission.updatedAt);
+
+      const revokeRes = await request(app)
+        .delete(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(revokeRes.status).toBe(204);
+
+      const afterRevoke = await request(app)
+        .get(`/admin/permissions?agent_id=agt_crud&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(afterRevoke.status).toBe(404);
+    });
+
+    it('PATCH on a nonexistent permission returns 404, not a silent create', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const res = await request(app)
+        .patch('/admin/permissions/perm_does_not_exist')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly'] });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('writes an audit event recording the admin actor on create/update/revoke, but not on reads', async () => {
+      const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ agentId: 'agt_audit', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      const permissionId = createRes.body.permission.id;
+
+      await request(app)
+        .get(`/admin/permissions?agent_id=agt_audit&connection_id=google`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+
+      await request(app)
+        .patch(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ ttlOverride: 3600 });
+
+      await request(app)
+        .delete(`/admin/permissions/${permissionId}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+
+      const events = vault.queryAuditEvents!({ resourceId: permissionId });
+      const actions = events.map((e) => e.action).sort();
+      expect(actions).toEqual(['create', 'revoke', 'update']);
+      for (const event of events) {
+        expect(event.actor).toMatchObject({ type: 'system', id: 'admin' });
+      }
+    });
+
+    it('returns a 501 naming the required backend when the vault uses the file storage backend', async () => {
+      // makeTestConfig() defaults to vaultStorage: 'file' — no Permission support.
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      const createRes = await request(app)
+        .post('/admin/permissions')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ agentId: 'agt_1', connectionId: 'google', allowedScopes: ['calendar.readonly'] });
+      expect(createRes.status).toBe(501);
+      expect(createRes.body.error).toMatch(/sqlite/);
+
+      const listRes = await request(app)
+        .get('/admin/permissions?agent_id=agt_1')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(listRes.status).toBe(501);
+      expect(listRes.body.error).toMatch(/sqlite/);
+
+      const updateRes = await request(app)
+        .patch('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: ['calendar.readonly'] });
+      expect(updateRes.status).toBe(501);
+      expect(updateRes.body.error).toMatch(/sqlite/);
+
+      const revokeRes = await request(app)
+        .delete('/admin/permissions/perm_x')
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+      expect(revokeRes.status).toBe(501);
+      expect(revokeRes.body.error).toMatch(/sqlite/);
+    });
+
+    it('narrowing allowedScopes via PATCH does not retroactively affect an already-brokered /api/v1/use handle (prospective-only)', async () => {
+      const config = makeTestConfig({
+        vaultStorage: 'sqlite',
+        vaultPath: TEST_SQLITE_VAULT_PATH,
+        tofuStorage: 'sqlite',
+        tofuPath: TEST_SQLITE_TOFU_PATH,
+      });
+      const { app, vault, tofu } = createServer(config);
+      await vault.init();
+      await tofu.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'default',
+        accessToken: 'ya29.prospective-only',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+      });
+
+      const keypair = generateTofuKeypair();
+      const registration = await tofu.registerAgent({
+        publicKey: keypair.publicKey,
+        initialScopes: ['calendar.readonly'],
+      });
+      await tofu.claimAgent({ fingerprint: registration.fingerprint, ownerUserId: 'user-prospective' });
+
+      const permission = await vault.createPermission({
+        agentId: `tofu:${registration.agentId}`,
+        connectionId: 'google',
+        allowedScopes: ['calendar.readonly'],
+        delegatable: true,
+        maxDelegationDepth: 1,
+        requiresApproval: false,
+        createdBy: 'admin',
+      });
+
+      const proof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date().toISOString(),
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+          tofu_fingerprint: registration.fingerprint,
+          tofu_payload: proof.payloadBase64,
+          tofu_signature: proof.signatureBase64,
+        });
+      expect(delegateRes.status).toBe(200);
+      const delegationId = delegateRes.body.delegation_id;
+      expect(delegationId).toMatch(/^del_/);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      // Narrow the permission to an empty scope set through the new admin
+      // route — if /api/v1/use re-checked the Permission row live, the
+      // second call below would now be denied.
+      const narrowRes = await request(app)
+        .patch(`/admin/permissions/${permission.id}`)
+        .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
+        .send({ allowedScopes: [] });
+      expect(narrowRes.status).toBe(200);
+      expect(narrowRes.body.permission.allowedScopes).toEqual([]);
+
+      const useRes = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          delegation_id: delegationId,
+          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          method: 'GET',
+        });
+
+      expect(useRes.status).toBe(200);
+      expect(useRes.body.body).toEqual({ items: [] });
+      fetchSpy.mockRestore();
+    });
+  });
 });
 
 function generateTofuKeypair(): { publicKey: Uint8Array; privateKeyDer: Buffer } {
