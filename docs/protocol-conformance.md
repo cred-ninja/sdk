@@ -4,8 +4,13 @@
 > This SDK is named as the protocol's reference implementation. This document maps
 > what the SDK actually implements to the protocol's capabilities and the six RFCs
 > it profiles, and tracks the gaps. It should be reconciled with the protocol
-> repo's formal conformance section as that stabilizes (the spec is a pre-submission
-> draft targeting IETF 126).
+> repo's formal conformance section as that stabilizes. The spec was submitted as
+> [`draft-sweeney-wimse-credential-delegation-00`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
+> (2026-07-27, individual I-D, not yet adopted). Its offline companion is
+> `draft-asor-wimse-agent-delegation-chain`, and the WIMSE WG has since adopted
+> `draft-ietf-wimse-aims` (AI agent identity best practices, formerly
+> draft-klrc-aiagent-auth), whose Section 10.3 claim conventions this document
+> now tracks.
 
 ## How to read this
 
@@ -92,3 +97,12 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
 - [x] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake. *(Done — `0.1.0` with explicit unsupported-version rejection.)*
 - [ ] Decide whether RAR (`authorization_details`) replaces or augments scope strings.
 - [ ] Add a revocation-propagation latency test to back the "<5s" claim.
+- [ ] Align the acting-agent identifier with adopted WG framing: `draft-ietf-wimse-aims-00`
+  Section 10.3 puts the acting agent in `client_id` and the delegating principal in
+  `sub` (per RFC 9068), where the I-D's -00 uses an RFC 8693 `act` claim for the
+  agent. The I-D's -01 is expected to move to `client_id` (keeping `act` for chain
+  history); receipts and audit records here should follow the same split.
+- [ ] Converge the `authorization_details` constraint vocabulary with
+  `draft-asor-wimse-agent-delegation-chain` (its `agent_delegation` type and
+  proposed constraint-types registry) so offline-minted chains and server-issued
+  receipts read the same. See `docs/design/delegation-constraints.md`.
