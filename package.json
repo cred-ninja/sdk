@@ -1,6 +1,6 @@
 {
   "name": "@cred-ninja/sdk",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "OAuth2 credential delegation for AI agents",
   "license": "Apache-2.0",
   "private": true,
@@ -29,7 +29,8 @@
     "lint": "eslint .",
     "release:hygiene": "node scripts/check-release-hygiene.mjs",
     "smoke:npm": "node scripts/smoke-npm-packages.mjs",
-    "smoke:python": "bash scripts/smoke-python-wheels.sh"
+    "smoke:python": "bash scripts/smoke-python-wheels.sh",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
     "eslint": "9.39.4",

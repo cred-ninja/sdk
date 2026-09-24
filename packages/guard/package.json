@@ -1,6 +1,6 @@
 {
   "name": "@credninja/guard",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Policy engine for credential delegation guardrails. Rate limiting, scope filtering, time windows, and more.",
   "license": "Apache-2.0",
   "author": "CredNinja",
@@ -36,5 +36,14 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cred-ninja/sdk.git",
+    "directory": "packages/guard"
+  },
+  "homepage": "https://cred.ninja",
+  "bugs": {
+    "url": "https://github.com/cred-ninja/sdk/issues"
   }
 }

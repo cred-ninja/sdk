@@ -248,7 +248,7 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   run('npm', ['install', '--no-audit', '--no-fund', tarballsByWorkspace['packages/create-cred-app']], {
     cwd: createDir,
   });
-  run('node', ['node_modules/create-cred-app/bin/create.mjs', 'generated'], {
+  run('node', ['node_modules/@credninja/create-app/bin/create.mjs', 'generated'], {
     cwd: createDir,
     env: { CREATE_CRED_APP_SKIP_INSTALL: '1' },
   });
