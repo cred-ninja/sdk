@@ -22,6 +22,7 @@
  * exercise the same linkage check.
  */
 import { scopeCoveredBy } from './delegation-chain.js';
+import { parseConstraints, constraintsSubsume } from './constraints.js';
 
 export interface DelegationChainHop {
   /** Subject of this hop (the delegate). */
@@ -32,6 +33,17 @@ export interface DelegationChainHop {
   chainDepth: number;
   /** Scopes held at this hop. Each must be covered by the parent's scopes. */
   scopes: string[];
+  /**
+   * Constraint ceilings carried by this hop's token, still untyped as parsed
+   * off the wire. Validated here with parseConstraints (fail closed:
+   * malformed constraints reject the hop before subsumption is evaluated,
+   * per draft-asor-wimse-agent-delegation-chain-01 section 4.2). Absent
+   * means the hop carries no ceilings — legal for a whole legacy chain, but
+   * a hop whose PARENT carries ceilings must restate them at least as
+   * tight, so a legacy child under a constrained parent fails 'not_narrower'
+   * (section 4.3: absent means unbounded).
+   */
+  constraints?: unknown;
   /** Unix seconds. Optional for legacy receipts. */
   iat?: number;
   exp?: number;
@@ -94,6 +106,7 @@ export function verifyDelegationChain(
 
   // Per-hop checks first, root to leaf, so a broken token is reported before
   // any relationship involving it.
+  const hopConstraints: import('./constraints.js').DelegationConstraint[][] = [];
   for (let i = 0; i < hops.length; i++) {
     const hop = hops[i];
     if (!hop || typeof hop.agentDid !== 'string' || hop.agentDid.trim() === ''
@@ -101,6 +114,11 @@ export function verifyDelegationChain(
       || !Array.isArray(hop.scopes) || !Number.isInteger(hop.chainDepth)) {
       return fail('malformed', i, `Hop ${i} is missing required fields`);
     }
+    const parsedConstraints = parseConstraints(hop.constraints);
+    if (!parsedConstraints.ok) {
+      return fail('malformed', i, `Hop ${i} constraints are malformed: ${parsedConstraints.message}`);
+    }
+    hopConstraints.push(parsedConstraints.constraints);
     if (hop.signatureValid !== true) {
       return fail('signature_invalid', i, `Hop ${i} signature did not verify`);
     }
@@ -145,6 +163,11 @@ export function verifyDelegationChain(
     const widened = child.scopes.filter((scope) => !scopeCoveredBy(parent.scopes, scope));
     if (widened.length > 0) {
       return fail('not_narrower', i, `Hop ${i} holds scopes its parent does not cover: ${widened.join(', ')}`);
+    }
+
+    const constraintCheck = constraintsSubsume(hopConstraints[i - 1], hopConstraints[i]);
+    if (!constraintCheck.ok) {
+      return fail('not_narrower', i, `Hop ${i} constraint '${constraintCheck.key}': ${constraintCheck.message}`);
     }
 
     if (typeof parent.exp === 'number' && typeof child.exp === 'number' && child.exp > parent.exp) {

@@ -14,6 +14,8 @@ export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
 export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope } from './delegation-chain.js';
 export { verifyDelegationChain } from './chain-verify.js';
+export { parseConstraints, constraintsSubsume } from './constraints.js';
+export type { DelegationConstraint, MaxConstraint, RankConstraint, ConstraintParseResult, ConstraintSubsumptionResult } from './constraints.js';
 export type { DelegationChainHop, ChainVerifyReason, ChainVerifyResult, VerifyDelegationChainOptions } from './chain-verify.js';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';

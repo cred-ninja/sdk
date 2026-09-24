@@ -1,6 +1,6 @@
 # Delegation constraints: where numeric ceilings live
 
-Status: open question for the draft-asor alignment call. No decision recorded here.
+Status: **decided Sep 2, 2026 — Option A** (constraints travel in receipts), implemented Sep 24, 2026: `packages/vault/src/constraints.ts` (parse + subsumption), `validateSubDelegation` (inherit-or-tighten with `constraint_escalation_denied`), `verifyDelegationChain` (per-hop fail-closed parse, pairwise subsumption), and the `/api/v1/delegate` / `/api/v1/subdelegate` routes (accept a `constraints` body field, mint the claim). Migration stance: a fully legacy chain (no ceilings anywhere) verifies; a legacy child under a constrained parent fails `not_narrower`, per the draft's absent-means-unbounded rule. Lifetime aggregates (`max_calls` measured across a delegation's lifetime) remain server-enforced; the in-receipt claim carries the ceiling, the Delegation Server does the debit. The options below are kept for the record.
 
 ## Current position
 

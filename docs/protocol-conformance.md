@@ -32,7 +32,7 @@ The protocol README advertises these capabilities. Against the SDK:
 | Multi-hop delegation with attenuation | **Implemented** | `packages/vault/src/delegation-chain.ts` (`validateSubDelegation`), server `/api/v1/subdelegate`. Attenuation is enforced end-to-end at chain depth ≥ 1: `/api/v1/subdelegate` always returns a brokered handle (never the raw provider token), regardless of the requested `token_format`, so scope attenuation can't be bypassed by exfiltrating a raw token. |
 | Credential wrapping (agents never handle raw secrets) | **Implemented** | Brokered `cred_use` keeps the token server-side: `packages/mcp/src/tools/use.ts`, server `/api/v1/use` |
 | Proof of possession | **Adjacent** | TOFU payload signing (`packages/tofu`, `cred.tofuDelegate`) + Web Bot Auth / HTTP Message Signatures (`packages/sdk/src/web-bot-auth.ts`). See RFC 9449 row. |
-| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Scope strings, not RFC 9396 `authorization_details`. |
+| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Receipts now also carry per-delegation `constraints` ceilings (asor-01 §4.2 shape: `{key, max}` / `{key, rank}`, fail-closed, monotonic down the chain — `packages/vault/src/constraints.ts`). Still scope strings + constraints, not RFC 9396 `authorization_details`. |
 | Fast revocation (<5s propagation) | **Partial** | Revoke endpoints exist (`/api/v1/agents/:agentId/revoke-all`, `DELETE /api/token/:provider`, `DELETE /api/v1/connections/:provider`). `/api/v1/subdelegate` checks the status of *every* ancestor agent in the delegation chain — not just the immediate parent — before minting a child receipt. There is no persisted table of delegations to walk for this, so the check instead walks a `lineage` claim (ancestor DIDs, root first) that each receipt carries and that is extended and re-signed by the trusted issuer at every hop; a requesting agent cannot forge or truncate it. This closes the "revoke a grandparent, an still-active parent keeps minting new descendants" gap, *as long as every receipt in that chain was minted after this claim was introduced* — receipts minted before it carry no lineage and degrade to a parent-only check for that hop, until they age out under `RECEIPT_TTL_SECONDS`. Propagation latency (how fast a revocation is checked, not full historical-chain migration) is not measured or asserted by tests. |
 | Cross-provider interoperability | **Implemented** | OAuth provider adapters in `packages/oauth/src/adapters` (Google, GitHub, Slack, Notion, Salesforce, Linear, HubSpot, …) |
 | Protocol-version handshake | **Implemented** | `packages/sdk/src/protocol.ts` (`CRED_PROTOCOL_VERSION`, `CRED_PROTOCOL_VERSION_HEADER`, supported-version set); SDK advertises via `Cred.headers()`, server selects/rejects via early middleware. See section below. |
@@ -97,11 +97,12 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
 - [x] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake. *(Done — `0.1.0` with explicit unsupported-version rejection.)*
 - [ ] Decide whether RAR (`authorization_details`) replaces or augments scope strings.
 - [ ] Add a revocation-propagation latency test to back the "<5s" claim.
-- [ ] Align the acting-agent identifier with adopted WG framing: `draft-ietf-wimse-aims-00`
-  Section 10.3 puts the acting agent in `client_id` and the delegating principal in
-  `sub` (per RFC 9068), where the I-D's -00 uses an RFC 8693 `act` claim for the
-  agent. The I-D's -01 is expected to move to `client_id` (keeping `act` for chain
-  history); receipts and audit records here should follow the same split.
+- [x] *(first step done)* Align the acting-agent identifier with adopted WG framing:
+  `draft-ietf-wimse-aims-00` Section 10.3 puts the acting agent in `client_id` and
+  the delegating principal in `sub` (per RFC 9068). Receipts now mint a `client_id`
+  claim naming the agent DID alongside `sub`. Remaining (breaking, next wire
+  version): move the delegating principal into `sub` and stop duplicating the agent
+  there; mirror the split in audit records.
 - [ ] Converge the `authorization_details` constraint vocabulary with
   `draft-asor-wimse-agent-delegation-chain` (its `agent_delegation` type and
   proposed constraint-types registry) so offline-minted chains and server-issued
