@@ -36,6 +36,12 @@ export interface ParsedReceipt {
   exp?: number;
   parentReceiptHash?: string;
   lineage: string[];
+  /**
+   * Raw `constraints` claim as carried by the receipt, if any. Left untyped
+   * here; verifyDelegationChain() validates it fail-closed and enforces
+   * subsumption down the chain.
+   */
+  constraints?: unknown;
 }
 
 export interface VerifyReceiptChainOptions {
@@ -99,6 +105,7 @@ export function parseReceiptPayload(payload: Record<string, unknown>): ParsedRec
     ...(typeof payload.exp === 'number' ? { exp: payload.exp } : {}),
     ...(typeof payload.parentReceiptHash === 'string' ? { parentReceiptHash: payload.parentReceiptHash } : {}),
     lineage: Array.isArray(payload.lineage) ? payload.lineage.filter((d: unknown): d is string => typeof d === 'string') : [],
+    ...('constraints' in payload ? { constraints: payload.constraints } : {}),
   };
 }
 
@@ -135,6 +142,7 @@ export function verifyReceiptChain(
       signatureValid: valid,
       selfHash: receiptHash(receipt),
       ...(p.parentReceiptHash !== undefined ? { parentHash: p.parentReceiptHash } : {}),
+      ...(p.constraints !== undefined ? { constraints: p.constraints } : {}),
     });
   }
 

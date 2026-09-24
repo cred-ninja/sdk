@@ -35,6 +35,7 @@ describe('validateSubDelegation', () => {
       parentDelegationId: 'del_parent',
       chainDepth: 1,
       grantedScopes: ['repo'],
+      grantedConstraints: [],
     });
   });
 

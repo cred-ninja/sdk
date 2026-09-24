@@ -1185,4 +1185,113 @@ describe('POST /api/v1/subdelegate', () => {
     const valid = cryptoVerify(null, sigInput, pubKey, Buffer.from(parts[2], 'base64url'));
     expect(valid).toBe(true);
   });
+
+  // ── Constraint ceilings (asor-01 sections 4.2/4.3) ──────────────────────
+
+  function constrainedParent(constraints: unknown, delegationId = 'del_constrained_parent') {
+    return createTestReceipt({
+      sub: 'did:key:z6MkParent',
+      service: 'google',
+      scopes: ['openid', 'email'],
+      userId: 'default',
+      appClientId: 'local',
+      delegationId,
+      chainDepth: 0,
+      ...(constraints !== undefined ? { constraints } : {}),
+    });
+  }
+
+  function subdelegateBody(extra: Record<string, unknown> = {}) {
+    return {
+      agent_did: 'did:key:z6MkChild',
+      service: 'google',
+      user_id: 'default',
+      appClientId: 'local',
+      scopes: ['openid'],
+      ...extra,
+    };
+  }
+
+  it('inherits parent constraints into the child receipt when none are requested', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({ parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }]) }));
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.constraints).toEqual([{ key: 'max_rows', max: 5000 }]);
+    expect(child.client_id).toBe('did:key:z6MkChild');
+  });
+
+  it('accepts tighter requested constraints and mints them', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }], 'del_cp_tighter'),
+        constraints: [{ key: 'max_rows', max: 100 }, { key: 'max_calls', max: 3 }],
+      }));
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.constraints).toEqual([{ key: 'max_rows', max: 100 }, { key: 'max_calls', max: 3 }]);
+  });
+
+  it('rejects loosened constraints with constraint_escalation_denied', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }], 'del_cp_loosen'),
+        constraints: [{ key: 'max_rows', max: 10000000 }],
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('constraint_escalation_denied');
+  });
+
+  it('rejects a requested list that drops a parent ceiling', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }], 'del_cp_drop'),
+        constraints: [],
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('constraint_escalation_denied');
+  });
+
+  it('rejects malformed requested constraints with 400 invalid_constraints', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent(undefined, 'del_cp_malformed_req'),
+        constraints: [{ key: 'max_rows', min: 1 }],
+      }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+  });
+
+  it('rejects a parent receipt carrying malformed constraints (fail closed)', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_rows' }], 'del_cp_malformed_parent'),
+      }));
+
+    expect(res.status).toBe(403);
+    expect(String(res.body.error)).toContain('constraints');
+  });
 });

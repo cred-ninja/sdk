@@ -29,8 +29,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy } from '@credninja/vault';
-import type { AgentRecord, UpdatePermissionInput, AuditEvent } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -1247,6 +1247,13 @@ export function createServer(config: ServerConfig) {
      */
     lineage?: string[];
     /**
+     * Constraint ceilings that travel with the receipt and narrow
+     * monotonically down the chain (asor-01 sections 4.2/4.3). Already
+     * validated by the caller (parseConstraints). Omitted or empty means
+     * the receipt carries no ceilings.
+     */
+    constraints?: DelegationConstraint[];
+    /**
      * Upper bound on this receipt's `exp`, in Unix seconds. Sub-delegation
      * passes the parent's expiry here so a child receipt can never outlive
      * the receipt it was derived from (monotonic expiry down the chain).
@@ -1263,6 +1270,12 @@ export function createServer(config: ServerConfig) {
     const payload = Buffer.from(JSON.stringify({
       iss: 'did:key:local-cred',
       sub: input.agentDid,
+      // Acting-agent identifier, per draft-ietf-wimse-aims-00 section 10.3
+      // (agent in `client_id`, principal in `sub`). `sub` here still names
+      // the agent for wire compatibility; moving the delegating principal
+      // into `sub` is a breaking change reserved for the next protocol
+      // version. See docs/protocol-conformance.md.
+      client_id: input.agentDid,
       iat: nowSeconds,
       exp,
       ...(aud ? { aud } : {}),
@@ -1276,6 +1289,7 @@ export function createServer(config: ServerConfig) {
       ...(input.parentDelegationId ? { parentDelegationId: input.parentDelegationId } : {}),
       ...(input.parentReceiptHash ? { parentReceiptHash: input.parentReceiptHash } : {}),
       ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
+      ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
     })).toString('base64url');
 
     const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
@@ -1294,6 +1308,8 @@ export function createServer(config: ServerConfig) {
     receiptClaims: string[];
     /** Ancestor DIDs above `sub`, oldest (root) first. See createReceipt(). */
     lineage: string[];
+    /** Validated ceilings carried by the receipt; empty on legacy receipts. */
+    constraints: DelegationConstraint[];
     /** Unix seconds. Absent only on legacy receipts minted before these claims existed. */
     iat?: number;
     exp?: number;
@@ -1316,6 +1332,14 @@ export function createServer(config: ServerConfig) {
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
     if (!payload.delegationId) {
       throw new Error('Receipt is missing delegationId');
+    }
+
+    // Constraint ceilings fail closed (asor-01 section 4.2): a receipt
+    // whose constraints claim does not parse is invalid outright, before
+    // any subsumption is evaluated. Absent parses to an empty list.
+    const parsedConstraints = parseConstraints(payload.constraints);
+    if (!parsedConstraints.ok) {
+      throw new Error(`Receipt constraints are malformed: ${parsedConstraints.message}`);
     }
 
     // Expiry enforcement. Receipts minted with an `exp` claim are rejected
@@ -1352,6 +1376,7 @@ export function createServer(config: ServerConfig) {
       lineage: Array.isArray(payload.lineage)
         ? payload.lineage.filter((did: unknown): did is string => typeof did === 'string' && did.trim().length > 0)
         : [],
+      constraints: parsedConstraints.constraints,
       ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
       ...(typeof payload.exp === 'number' ? { exp: payload.exp } : {}),
     };
@@ -2846,6 +2871,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id: requestedUserId,
         appClientId = 'local',
         scopes,
+        constraints: requestedConstraintsRaw,
         agent_did: agentDid,
         tofu_fingerprint: tofuFingerprint,
         tofu_payload: tofuPayload,
@@ -2855,6 +2881,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id?: string;
         appClientId?: string;
         scopes?: string[];
+        /**
+         * Optional ceilings the root receipt should carry, in the wire
+         * shape of asor-01 section 4.2: [{key, max}] or [{key, rank}].
+         * Every hop below must restate each at least as tight.
+         */
+        constraints?: unknown;
         agent_did?: string;
         tofu_fingerprint?: string;
         tofu_payload?: string;
@@ -2863,6 +2895,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       if (!service || typeof service !== 'string') {
         res.status(400).json({ error: 'service is required' });
+        return;
+      }
+
+      const rootConstraints = parseConstraints(requestedConstraintsRaw);
+      if (!rootConstraints.ok) {
+        res.status(400).json({ error: 'invalid_constraints', message: rootConstraints.message });
         return;
       }
 
@@ -2999,6 +3037,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             delegationId,
             chainDepth: 0,
             receiptClaims: extractTrustedReceiptClaims(req),
+            constraints: rootConstraints.constraints,
           })
         : undefined;
 
@@ -3592,6 +3631,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id: requestedUserId,
         appClientId = 'local',
         scopes: requestedScopes,
+        constraints: requestedConstraintsRaw,
         ancestor_receipts: ancestorReceipts,
       } = req.body as {
         parent_receipt?: string;
@@ -3600,6 +3640,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         user_id?: string;
         appClientId?: string;
         scopes?: string[];
+        /**
+         * Optional ceilings for the child receipt (asor-01 section 4.2
+         * shape). Absent inherits the parent's ceilings unchanged; present
+         * must restate every parent ceiling at least as tight, and may add
+         * new ones. Loosening is 'constraint_escalation_denied'.
+         */
+        constraints?: unknown;
         /**
          * Optional. Every receipt above parent_receipt, root first. When
          * present the whole chain is verified offline (signatures, linkage
@@ -3634,6 +3681,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           error: 'brokered_format_unsupported',
           message: `Sub-delegation requires a brokered handle for '${service}', which has no brokered-use path.`,
         });
+        return;
+      }
+
+      const childConstraints = parseConstraints(requestedConstraintsRaw);
+      if (!childConstraints.ok) {
+        res.status(400).json({ error: 'invalid_constraints', message: childConstraints.message });
         return;
       }
 
@@ -3815,12 +3868,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             appClientId: parent.appClientId,
             scopesGranted: parent.scopes,
             chainDepth: parent.chainDepth,
+            constraints: parent.constraints,
           },
           childAgentDid: agentDid,
           service,
           userId,
           appClientId,
           requestedScopes,
+          // `constraints` absent from the request body means inherit the
+          // parent's ceilings; an explicit list is checked for subsumption.
+          ...(requestedConstraintsRaw !== undefined
+            ? { requestedConstraints: childConstraints.constraints }
+            : {}),
           permission: {
             allowedScopes: permission.allowedScopes,
             delegatable: permission.delegatable,
@@ -3956,6 +4015,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         parentReceiptHash,
         receiptClaims: parent.receiptClaims,
         lineage: ancestorDids,
+        constraints: validation.grantedConstraints,
       });
 
       // ── Audit event ──────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import type {
   ValidateSubDelegationInput,
   ValidateSubDelegationResult,
 } from './types.js';
+import { constraintsSubsume } from './constraints.js';
 
 export class DelegationChainError extends Error {
   constructor(
@@ -15,7 +16,8 @@ export class DelegationChainError extends Error {
       | 'delegation_not_allowed'
       | 'depth_exceeded'
       | 'scope_escalation_denied'
-      | 'no_scopes_granted',
+      | 'no_scopes_granted'
+      | 'constraint_escalation_denied',
   ) {
     super(message);
     this.name = 'DelegationChainError';
@@ -129,9 +131,29 @@ export function validateSubDelegation(
     );
   }
 
+  // Constraint ceilings (asor-01 section 4.3): a child either inherits the
+  // parent's ceilings unchanged, or restates every one of them at least as
+  // tight (it may also add new ones). Anything looser is escalation.
+  const parentConstraints = parent.constraints ?? [];
+  const { requestedConstraints } = input;
+  let grantedConstraints;
+  if (requestedConstraints === undefined) {
+    grantedConstraints = parentConstraints;
+  } else {
+    const check = constraintsSubsume(parentConstraints, requestedConstraints);
+    if (!check.ok) {
+      throw new DelegationChainError(
+        `Requested constraints exceed parent delegation: ${check.message}`,
+        'constraint_escalation_denied',
+      );
+    }
+    grantedConstraints = requestedConstraints;
+  }
+
   return {
     parentDelegationId: parent.delegationId,
     chainDepth: nextDepth,
     grantedScopes,
+    grantedConstraints,
   };
 }
