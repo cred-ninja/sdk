@@ -411,7 +411,13 @@ export function createServer(config: ServerConfig) {
       return fallback;
     }
     if (parsed.origin !== 'https://cred.invalid' || !parsed.pathname.startsWith('/')) return fallback;
-    return `${parsed.pathname}${parsed.search}`;
+    const result = `${parsed.pathname}${parsed.search}`;
+    // Dot-segment normalization can collapse '/a/..//host' into '//host',
+    // which a browser reparses as protocol-relative. Reparse the rebuilt
+    // string the way the browser will and require it to stay same-origin.
+    if (result.startsWith('//')) return fallback;
+    if (new URL(result, 'https://cred.invalid').origin !== 'https://cred.invalid') return fallback;
+    return result;
   }
 
   function requestUserId(req: Request): string {
