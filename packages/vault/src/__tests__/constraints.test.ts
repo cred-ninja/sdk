@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseConstraints, constraintsSubsume, constraintTypeOf, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from '../constraints.js';
+import { parseConstraints, constraintsSubsume, constraintTypeOf, unresolvableRankLabels, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from '../constraints.js';
 import { validateSubDelegation, DelegationChainError } from '../delegation-chain.js';
 import { verifyDelegationChain, type DelegationChainHop } from '../chain-verify.js';
 
@@ -183,6 +183,31 @@ describe('asor-01 section 4.2 constraint types', () => {
     if (r.ok) {
       expect(r.constraints.map(constraintTypeOf)).toEqual(['max', 'min', 'one_of', 'not_one_of', 'prefix', 'rank', 'rank']);
     }
+  });
+
+  it('min is a signed floor: negative finite values parse, max and rank stay non-negative', () => {
+    expect(parseConstraints([{ key: 'balance', min: -1 }]).ok).toBe(true);
+    expect(parseConstraints([{ key: 'balance', min: -1e9 }]).ok).toBe(true);
+    expect(parseConstraints([{ key: 'x', min: Number.NEGATIVE_INFINITY }]).ok).toBe(false);
+    expect(parseConstraints([{ key: 'x', max: -1 }]).ok).toBe(false);
+    expect(parseConstraints([{ key: 'x', rank: -1 }]).ok).toBe(false);
+    expect(constraintsSubsume([{ key: 'balance', min: -10 }], [{ key: 'balance', min: -5 }]).ok).toBe(true);
+    expect(constraintsSubsume([{ key: 'balance', min: -10 }], [{ key: 'balance', min: -20 }]).ok).toBe(false);
+  });
+
+  it('unresolvableRankLabels names labels no ordering can compare', () => {
+    const list = parseConstraints([
+      { key: 'egress', rank: 'internal' },
+      { key: 'tier', rank: 'gold' },
+      { key: 'egress2', rank: 3 },
+      { key: 'max_rows', max: 5 },
+    ]);
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    expect(unresolvableRankLabels(list.constraints)).toEqual(['tier']);
+    expect(unresolvableRankLabels(list.constraints, { rankOrderings: { tier: ['bronze', 'silver', 'gold'] } })).toEqual([]);
+    expect(unresolvableRankLabels([{ key: 'egress', rank: 'vpn' }])).toEqual(['egress']);
+    expect(unresolvableRankLabels([{ key: 'constructor', rank: 'a' }])).toEqual(['constructor']);
   });
 
   it('rejects malformed values per type', () => {
