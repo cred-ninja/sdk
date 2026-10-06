@@ -32,7 +32,7 @@ The protocol README advertises these capabilities. Against the SDK:
 | Multi-hop delegation with attenuation | **Implemented** | `packages/vault/src/delegation-chain.ts` (`validateSubDelegation`), server `/api/v1/subdelegate`. Attenuation is enforced end-to-end at chain depth ≥ 1: `/api/v1/subdelegate` always returns a brokered handle (never the raw provider token), regardless of the requested `token_format`, so scope attenuation can't be bypassed by exfiltrating a raw token. |
 | Credential wrapping (agents never handle raw secrets) | **Implemented** | Brokered `cred_use` keeps the token server-side: `packages/mcp/src/tools/use.ts`, server `/api/v1/use` |
 | Proof of possession | **Adjacent** | TOFU payload signing (`packages/tofu`, `cred.tofuDelegate`) + Web Bot Auth / HTTP Message Signatures (`packages/sdk/src/web-bot-auth.ts`). See RFC 9449 row. |
-| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Receipts now also carry per-delegation `constraints` ceilings (asor-01 §4.2 shape: `{key, max}` / `{key, rank}`, fail-closed, monotonic down the chain — `packages/vault/src/constraints.ts`). Still scope strings + constraints, not RFC 9396 `authorization_details`. |
+| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Receipts now also carry per-delegation `constraints` ceilings covering all six asor-01 §4.2 types (`max`, `min`, `one_of`, `not_one_of`, `prefix`, `rank` with numeric or label values; fail-closed, monotonic down the chain per §4.3 — `packages/vault/src/constraints.ts`). Rank labels compare through a per-key ordering (`DEFAULT_RANK_ORDERINGS` seeds the draft's `egress` none < internal < any; callers add their own via `rankOrderings`), since the wire format does not carry the ordering. Still scope strings + constraints, not RFC 9396 `authorization_details`. |
 | Fast revocation (<5s propagation) | **Partial** | Revoke endpoints exist (`/api/v1/agents/:agentId/revoke-all`, `DELETE /api/token/:provider`, `DELETE /api/v1/connections/:provider`). `/api/v1/subdelegate` checks the status of *every* ancestor agent in the delegation chain — not just the immediate parent — before minting a child receipt. There is no persisted table of delegations to walk for this, so the check instead walks a `lineage` claim (ancestor DIDs, root first) that each receipt carries and that is extended and re-signed by the trusted issuer at every hop; a requesting agent cannot forge or truncate it. This closes the "revoke a grandparent, an still-active parent keeps minting new descendants" gap, *as long as every receipt in that chain was minted after this claim was introduced* — receipts minted before it carry no lineage and degrade to a parent-only check for that hop, until they age out under `RECEIPT_TTL_SECONDS`. Propagation latency (how fast a revocation is checked, not full historical-chain migration) is not measured or asserted by tests. |
 | Cross-provider interoperability | **Implemented** | OAuth provider adapters in `packages/oauth/src/adapters` (Google, GitHub, Slack, Notion, Salesforce, Linear, HubSpot, …) |
 | Protocol-version handshake | **Implemented** | `packages/sdk/src/protocol.ts` (`CRED_PROTOCOL_VERSION`, `CRED_PROTOCOL_VERSION_HEADER`, supported-version set); SDK advertises via `Cred.headers()`, server selects/rejects via early middleware. See section below. |
@@ -103,10 +103,19 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
   claim naming the agent DID alongside `sub`. Remaining (breaking, next wire
   version): move the delegating principal into `sub` and stop duplicating the agent
   there; mirror the split in audit records.
-- [ ] Converge the `authorization_details` constraint vocabulary with
-  `draft-asor-wimse-agent-delegation-chain` (its `agent_delegation` type and
-  proposed constraint-types registry) so offline-minted chains and server-issued
-  receipts read the same. See `docs/design/delegation-constraints.md`.
+- [x] *(vocabulary done)* Converge the constraint vocabulary with
+  `draft-asor-wimse-agent-delegation-chain-01` §4.2 / §10: all six registered
+  constraint types parse and subsume (Oct 6, 2026). The asor interop runner
+  now passes `constraints` through; `reject_exceeded_ceiling` moves from GAP
+  to PASS (18 of 20). See `docs/design/delegation-constraints.md`.
+- [ ] Remaining convergence: wrap scopes + constraints in an RFC 9396
+  `authorization_details` entry of type `agent_delegation` so offline-minted
+  chains and server-issued receipts read the same (next wire version).
+- [ ] Raise with Asor for -02: `rank` labels have no on-wire ordering. The
+  draft names one example ordering (`egress`: none < internal < any) and the
+  vectors depend on it. Either the registry entry for a key carries its
+  ordering, or the token does. Cred fails closed on any label without a
+  registered ordering.
 
 ## WIMSE composition tracking
 

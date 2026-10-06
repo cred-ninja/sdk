@@ -22,7 +22,7 @@
  * exercise the same linkage check.
  */
 import { scopeCoveredBy } from './delegation-chain.js';
-import { parseConstraints, constraintsSubsume } from './constraints.js';
+import { parseConstraints, constraintsSubsume, type RankOrderings } from './constraints.js';
 
 export interface DelegationChainHop {
   /** Subject of this hop (the delegate). */
@@ -86,6 +86,12 @@ export interface VerifyDelegationChainOptions {
    * Set false only for legacy chains whose receipts predate the commitment.
    */
   requireParentHash?: boolean;
+  /**
+   * Orderings for `rank` constraint labels, keyed by constraint key, lowest
+   * to highest. Merged over DEFAULT_RANK_ORDERINGS. A label with no
+   * registered ordering fails the hop closed ('not_narrower').
+   */
+  rankOrderings?: RankOrderings;
 }
 
 function fail(reason: ChainVerifyReason, hop: number, message: string): ChainVerifyResult {
@@ -165,7 +171,7 @@ export function verifyDelegationChain(
       return fail('not_narrower', i, `Hop ${i} holds scopes its parent does not cover: ${widened.join(', ')}`);
     }
 
-    const constraintCheck = constraintsSubsume(hopConstraints[i - 1], hopConstraints[i]);
+    const constraintCheck = constraintsSubsume(hopConstraints[i - 1], hopConstraints[i], { rankOrderings: options.rankOrderings });
     if (!constraintCheck.ok) {
       return fail('not_narrower', i, `Hop ${i} constraint '${constraintCheck.key}': ${constraintCheck.message}`);
     }
