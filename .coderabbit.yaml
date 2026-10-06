@@ -1,0 +1,12 @@
+# CodeRabbit configuration for cred-ninja/sdk.
+#
+# ESLint is run by CI (.github/workflows/ci.yml, job "Lint") against the
+# repo's flat config, which needs the workspace's devDependencies
+# (typescript-eslint, globals) installed. CodeRabbit's hosted ESLint runner
+# cannot install them and reports "Some tools did not complete" on every PR
+# that touches a .ts file. Disable that one tool here; the review itself and
+# the other tools stay on.
+reviews:
+  tools:
+    eslint:
+      enabled: false
