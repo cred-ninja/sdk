@@ -8,7 +8,7 @@
 > [`draft-sweeney-wimse-credential-delegation-00`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
 > (2026-07-27, individual I-D, not yet adopted). Its offline companion is
 > `draft-asor-wimse-agent-delegation-chain`, and the WIMSE WG has since adopted
-> `draft-ietf-wimse-aims` (AI agent identity best practices, formerly
+> `draft-ietf-wimse-aims` (AI Identity Management System, formerly
 > draft-klrc-aiagent-auth), whose Section 10.3 claim conventions this document
 > now tracks.
 
@@ -107,3 +107,16 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
   `draft-asor-wimse-agent-delegation-chain` (its `agent_delegation` type and
   proposed constraint-types registry) so offline-minted chains and server-issued
   receipts read the same. See `docs/design/delegation-constraints.md`.
+
+## WIMSE composition tracking
+
+- [ ] Track the AIMS example composing Sections 10.4.3, 10.5, 10.8, and
+  10.6: require re-verification at every hop, monotonic narrowing, preserved
+  delegated subject and accurate actor attribution, and reconstructable
+  evidence for Section 11. RFC 8693 Section 4.1's `act` is an attribution
+  carrier; it does not establish delegated authority.
+- [ ] Reconcile the Oct 1 `instance_bound` test-vector note. The original
+  Oct 1 sweep text was not recovered; this item is reconstructed from the
+  Oct 6 report's one-line summary and records only that a note about an
+  `instance_bound` vector was requested. No SDK code, vendored vector, or
+  design doc currently defines such a constraint.
