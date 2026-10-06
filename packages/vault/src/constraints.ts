@@ -124,8 +124,12 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
 function isBoundNumber(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  return isFiniteNumber(v) && v >= 0;
 }
 
 function isSetMember(v: unknown): v is ConstraintSetMember {
@@ -166,9 +170,12 @@ function parseSet(value: unknown): { ok: true; members: ConstraintSetMember[] } 
  * list (no ceilings), matching legacy receipts minted before this claim
  * existed.
  *
- * Numeric bounds (max, min, numeric rank) must be finite and non-negative.
- * Rank labels must be non-empty strings; whether a label is comparable is
- * decided at subsumption time against the registered ordering, not here.
+ * Numeric ceilings (max, numeric rank) must be finite and non-negative. A
+ * min is a signed floor and must be finite. Rank labels must be non-empty
+ * strings; whether a label is comparable is decided against the registered
+ * ordering at subsumption time (constraintsSubsume) or, for an issuer that
+ * wants to refuse to mint an uncomparable label, with
+ * unresolvableRankLabels.
  */
 export function parseConstraints(value: unknown): ConstraintParseResult {
   if (value === undefined) return { ok: true, constraints: [] };
@@ -203,12 +210,18 @@ export function parseConstraints(value: unknown): ConstraintParseResult {
     const raw = entry[type];
 
     switch (type) {
-      case 'max':
-      case 'min': {
+      case 'max': {
         if (!isBoundNumber(raw)) {
-          return { ok: false, message: `constraints[${i}] ('${key}') ${type} must be a finite non-negative number` };
+          return { ok: false, message: `constraints[${i}] ('${key}') max must be a finite non-negative number` };
         }
-        out.push(type === 'max' ? { key, max: raw } : { key, min: raw });
+        out.push({ key, max: raw });
+        break;
+      }
+      case 'min': {
+        if (!isFiniteNumber(raw)) {
+          return { ok: false, message: `constraints[${i}] ('${key}') min must be a finite number` };
+        }
+        out.push({ key, min: raw });
         break;
       }
       case 'one_of':
@@ -262,6 +275,31 @@ type RankResolution =
   | { ok: true; value: number }
   | { ok: false; message: string };
 
+function mergeOrderings(options: ConstraintSubsumptionOptions): RankOrderings {
+  return Object.assign(Object.create(null), DEFAULT_RANK_ORDERINGS, options.rankOrderings ?? {});
+}
+
+/**
+ * Keys of rank-label constraints in `constraints` that cannot be compared
+ * under the given orderings (no ordering registered for the key, or the label
+ * is not in it). Parsing admits such labels because the wire format does not
+ * carry the ordering; an issuer SHOULD refuse to mint them, otherwise every
+ * later hop that restates the key fails subsumption (asor-01 section 4.2
+ * fail-closed) and the chain is unusable. Numeric ranks never appear here.
+ */
+export function unresolvableRankLabels(
+  constraints: readonly DelegationConstraint[],
+  options: ConstraintSubsumptionOptions = {},
+): string[] {
+  const orderings = mergeOrderings(options);
+  const out: string[] = [];
+  for (const c of constraints) {
+    if (!('rank' in c) || typeof c.rank !== 'string') continue;
+    if (!resolveRank(c.key, c.rank, orderings).ok) out.push(c.key);
+  }
+  return out;
+}
+
 function resolveRank(key: string, rank: number | string, orderings: RankOrderings): RankResolution {
   if (typeof rank === 'number') return { ok: true, value: rank };
   // Own-property lookup only: constraint keys come off the wire, and a key
@@ -294,7 +332,7 @@ export function constraintsSubsume(
   child: readonly DelegationConstraint[],
   options: ConstraintSubsumptionOptions = {},
 ): ConstraintSubsumptionResult {
-  const orderings: RankOrderings = Object.assign(Object.create(null), DEFAULT_RANK_ORDERINGS, options.rankOrderings ?? {});
+  const orderings = mergeOrderings(options);
   const childByKey = new Map(child.map((c) => [c.key, c]));
   for (const p of parent) {
     const c = childByKey.get(p.key);

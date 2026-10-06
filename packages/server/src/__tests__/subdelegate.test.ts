@@ -1282,6 +1282,36 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.body.error).toBe('invalid_constraints');
   });
 
+  it('rejects a requested rank label with no registered ordering at issuance', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'egress', rank: 'any' }], 'del_cp_rank_label'),
+        constraints: [{ key: 'egress', rank: 'none' }, { key: 'tier', rank: 'gold' }],
+      }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+    expect(res.body.message).toContain('tier');
+  });
+
+  it('accepts a rank label the default ordering knows and mints it tighter', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'egress', rank: 'any' }], 'del_cp_rank_ok'),
+        constraints: [{ key: 'egress', rank: 'internal' }],
+      }));
+
+    expect(res.status).toBe(200);
+    const child = decodeReceiptPayload(res.body.receipt);
+    expect(child.constraints).toEqual([{ key: 'egress', rank: 'internal' }]);
+  });
+
   it('rejects a parent receipt carrying malformed constraints (fail closed)', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
     const res = await request(app)

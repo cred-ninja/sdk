@@ -14,7 +14,7 @@ export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
 export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope } from './delegation-chain.js';
 export { verifyDelegationChain } from './chain-verify.js';
-export { parseConstraints, constraintsSubsume, constraintTypeOf, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from './constraints.js';
+export { parseConstraints, constraintsSubsume, constraintTypeOf, unresolvableRankLabels, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from './constraints.js';
 export type {
   DelegationConstraint,
   DelegationConstraintType,
