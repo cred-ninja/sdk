@@ -1275,7 +1275,7 @@ describe('POST /api/v1/subdelegate', () => {
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
       .send(subdelegateBody({
         parent_receipt: constrainedParent(undefined, 'del_cp_malformed_req'),
-        constraints: [{ key: 'max_rows', min: 1 }],
+        constraints: [{ key: 'max_rows', regex: '^[0-9]+$' }],
       }));
 
     expect(res.status).toBe(400);
