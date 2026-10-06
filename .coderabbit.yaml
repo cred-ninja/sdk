@@ -10,3 +10,11 @@ reviews:
   tools:
     eslint:
       enabled: false
+  # The docstring-coverage pre-merge check counts test callbacks and inline
+  # arrows as "functions". On #39 the two real functions touched both carry
+  # JSDoc; the four undocumented "functions" were it()/it.each() bodies and a
+  # one-line find() predicate. Turn the check off; JSDoc on exported and
+  # security-relevant functions stays a review expectation, not a gate.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
