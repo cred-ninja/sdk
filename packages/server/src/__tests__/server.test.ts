@@ -3267,6 +3267,8 @@ describe('@credninja/server', () => {
       ['control character', '/connect\r\nSet-Cookie: x=y', '/connect'],
       ['fragment dropped', '/connect?user_id=u#frag', '/connect?user_id=u'],
       ['dot segments resolved in place', '/connect/../admin', '/admin'],
+      ['dot segments collapsing to protocol-relative', '/connect/..//evil.example/path', '/connect'],
+      ['dot segments collapsing to protocol-relative with query', '/a/b/../..//evil.example?x=1', '/connect'],
     ])('admin login redirect stays same-origin: %s', async (_name, next, expected) => {
       const config = makeTestConfig();
       const { app, vault } = createServer(config);
