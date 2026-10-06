@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = resolve(new URL('..', import.meta.url).pathname);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const rootPackage = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
 const expectedVersion = rootPackage.version;
 const failures = [];
@@ -43,14 +44,19 @@ const pythonPackagePaths = [
   'packages/integrations/semantic-kernel/pyproject.toml',
 ];
 
+// npm and PyPI releases can ship independently; keep each ecosystem coherent.
+const pythonVersion = readFileSync(join(repoRoot, pythonPackagePaths[0]), 'utf8')
+  .match(/^version = "([^"]+)"/m)?.[1];
+if (!pythonVersion) failures.push('packages/sdk-python/pyproject.toml: missing version');
+
 for (const pyprojectPath of pythonPackagePaths) {
   const source = readFileSync(join(repoRoot, pyprojectPath), 'utf8');
   const version = source.match(/^version = "([^"]+)"/m)?.[1];
-  if (version !== expectedVersion) {
-    failures.push(`${pyprojectPath}: expected version ${expectedVersion}, found ${version ?? 'missing'}`);
+  if (version !== pythonVersion) {
+    failures.push(`${pyprojectPath}: expected version ${pythonVersion}, found ${version ?? 'missing'}`);
   }
-  if (pyprojectPath !== 'packages/sdk-python/pyproject.toml' && !source.includes(`cred-auth>=${expectedVersion}`)) {
-    failures.push(`${pyprojectPath}: expected dependency cred-auth>=${expectedVersion}`);
+  if (pyprojectPath !== 'packages/sdk-python/pyproject.toml' && !source.includes(`cred-auth>=${pythonVersion}`)) {
+    failures.push(`${pyprojectPath}: expected dependency cred-auth>=${pythonVersion}`);
   }
 }
 
@@ -65,6 +71,7 @@ const stalePatterns = [
   [/CRED_SERVER_URL/, 'stale server URL env var'],
   [/https:\/\/api\.cred\.ninja/i, 'stale hosted API default'],
   [/"VAULT_PASSPHRASE": "your-passphrase"/, 'stale MCP local-mode vault env var'],
+  [/npx\s+create-cred-app\b/, 'unscoped scaffold command resolves to an unrelated npm package'],
 ];
 
 const textRoots = ['README.md', 'SECURITY-AUDITS.md', 'docs', 'examples', 'packages'];
@@ -80,8 +87,8 @@ function extensionOf(path) {
 function walk(path, visit) {
   const stats = statSync(path);
   if (stats.isDirectory()) {
-    const name = path.split('/').pop();
-    if (['node_modules', 'dist', '__pycache__', '.venv'].includes(name)) return;
+    const name = basename(path);
+    if (['node_modules', 'dist', '__pycache__', '.venv', '.git'].includes(name)) return;
     for (const entry of readdirSync(path)) walk(join(path, entry), visit);
     return;
   }

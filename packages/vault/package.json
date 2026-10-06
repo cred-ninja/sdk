@@ -1,6 +1,6 @@
 {
   "name": "@credninja/vault",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
   "license": "Apache-2.0",
   "author": "Cred",
@@ -34,7 +34,7 @@
     "better-sqlite3": "^12.6.2"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^1.0.0"
+    "@credninja/oauth": "^2.0.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {
@@ -49,5 +49,14 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cred-ninja/sdk.git",
+    "directory": "packages/vault"
+  },
+  "homepage": "https://cred.ninja",
+  "bugs": {
+    "url": "https://github.com/cred-ninja/sdk/issues"
   }
 }

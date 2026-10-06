@@ -8,6 +8,6 @@
     "dev": "cred-server"
   },
   "dependencies": {
-    "@credninja/server": "^1.0.0"
+    "@credninja/server": "^2.0.0"
   }
 }

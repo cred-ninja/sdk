@@ -1,6 +1,6 @@
 {
   "name": "@credninja/server",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Self-hosted credential delegation server for AI agents. Uses @credninja/oauth + @credninja/vault",
   "private": false,
   "type": "module",
@@ -39,11 +39,11 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@credninja/guard": "^1.0.0",
-    "@credninja/oauth": "^1.0.0",
-    "@credninja/protocol": "^1.0.0",
-    "@credninja/tofu": "^1.0.0",
-    "@credninja/vault": "^1.0.0",
+    "@credninja/guard": "^2.0.0",
+    "@credninja/oauth": "^2.0.0",
+    "@credninja/protocol": "^2.0.0",
+    "@credninja/tofu": "^2.0.0",
+    "@credninja/vault": "^2.0.0",
     "better-sqlite3": "^11.8.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2"
@@ -56,5 +56,14 @@
     "vitest": "^4.1.7",
     "supertest": "^7.0.0",
     "@types/supertest": "^6.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cred-ninja/sdk.git",
+    "directory": "packages/server"
+  },
+  "homepage": "https://cred.ninja",
+  "bugs": {
+    "url": "https://github.com/cred-ninja/sdk/issues"
   }
 }

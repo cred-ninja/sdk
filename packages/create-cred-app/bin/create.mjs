@@ -4,8 +4,8 @@
  * create-cred-app — Scaffold a self-hosted Cred server
  *
  * Usage:
- *   npx create-cred-app my-cred-server
- *   npx create-cred-app .              # scaffold in current directory
+ *   npx @credninja/create-app my-cred-server
+ *   npx @credninja/create-app .              # scaffold in current directory
  */
 
 import { mkdirSync, writeFileSync, copyFileSync, existsSync, readdirSync, statSync } from 'node:fs';
@@ -25,9 +25,9 @@ if (!name || name === '--help' || name === '-h') {
   \x1b[1mcreate-cred-app\x1b[0m — Scaffold a self-hosted Cred server
 
   \x1b[36mUsage:\x1b[0m
-    npx create-cred-app <directory>
-    npx create-cred-app my-server
-    npx create-cred-app .
+    npx @credninja/create-app <directory>
+    npx @credninja/create-app my-server
+    npx @credninja/create-app .
 
   \x1b[1mWhat you get:\x1b[0m
     • Express server powered by @credninja/server

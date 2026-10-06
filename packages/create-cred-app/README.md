@@ -1,11 +1,11 @@
-# create-cred-app
+# @credninja/create-app
 
 Scaffold a self-hosted [Cred](https://cred.ninja) server in seconds.
 
 ## Usage
 
 ```bash
-npx create-cred-app my-cred-server
+npx @credninja/create-app my-cred-server
 cd my-cred-server
 npm start
 ```
@@ -22,7 +22,7 @@ Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.e
 
 ## How It Works
 
-1. `create-cred-app` scaffolds a project with `@credninja/server` as a dependency
+1. `@credninja/create-app` scaffolds a project with `@credninja/server` as a dependency
 2. Generates a `.env` with a random vault passphrase and tokens
 3. Run `npm start` to launch the server with the built-in CLI
 4. Use the admin UI to connect OAuth providers

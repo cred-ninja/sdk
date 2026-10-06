@@ -17,5 +17,5 @@ This folder is the top-level documentation index for the open-source Cred repo.
 - [`@credninja/oauth`](../packages/oauth/README.md)
 - [`@credninja/vault`](../packages/vault/README.md)
 - [`@credninja/guard`](../packages/guard/README.md)
-- [`create-cred-app`](../packages/create-cred-app/README.md)
+- [`@credninja/create-app`](../packages/create-cred-app/README.md)
 - [`cred-auth` Python SDK](../packages/sdk-python/README.md)

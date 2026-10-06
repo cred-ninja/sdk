@@ -36,7 +36,7 @@ Cred is the missing layer: a credential delegation broker that handles OAuth tok
 ### 1. Fastest: Create an App
 
 ```bash
-npx create-cred-app my-cred-server
+npx @credninja/create-app my-cred-server
 cd my-cred-server
 npm start
 ```
@@ -132,7 +132,7 @@ When your MCP client needs your calendar, it requests a brokered handle from you
 | [`@credninja/server`](./packages/server) | Self-hosted credential server. Express, Docker, admin UI | `npm i @credninja/server` |
 | [`@credninja/guard`](./packages/guard) | Policy engine for delegation guardrails. Rate limits, scope filtering, time windows, URL allowlists | `npm i @credninja/guard` |
 | [`@credninja/mcp`](./packages/mcp) | MCP server for MCP-compatible runtimes | `npx @credninja/mcp` |
-| [`create-cred-app`](./packages/create-cred-app) | Scaffold a self-hosted Cred server in seconds | `npx create-cred-app` |
+| [`@credninja/create-app`](./packages/create-cred-app) | Scaffold a self-hosted Cred server in seconds | `npx @credninja/create-app` |
 | [`cred-auth`](./packages/sdk-python) | Python SDK | `pip install cred-auth` |
 
 ### Framework Integrations

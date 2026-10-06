@@ -1,7 +1,7 @@
 {
   "name": "@credninja/oauth",
-  "version": "1.0.0",
-  "description": "Zero-dependency OAuth2 client for AI agents. 5 provider adapters, PKCE, Express middleware",
+  "version": "2.0.0",
+  "description": "Zero-dependency OAuth2 client for AI agents. 7 provider adapters, PKCE, Express middleware",
   "license": "Apache-2.0",
   "author": "CredNinja",
   "engines": {
@@ -44,5 +44,14 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cred-ninja/sdk.git",
+    "directory": "packages/oauth"
+  },
+  "homepage": "https://cred.ninja",
+  "bugs": {
+    "url": "https://github.com/cred-ninja/sdk/issues"
   }
 }
