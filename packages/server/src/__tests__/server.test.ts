@@ -1219,6 +1219,8 @@ describe('@credninja/server', () => {
       ['cross-service API target', 'https://api.github.com/repos/cred-ninja/sdk'],
       ['encoded authority confusion', 'https://www.googleapis.com%2F@attacker.example/calendar/v3/calendars/primary/events'],
       ['unicode homoglyph host', 'https://www.google\u0430pis.com/calendar/v3/calendars/primary/events'],
+      ['path traversal above the allowlisted base', 'https://www.googleapis.com/calendar/../../admin/directory/v1/users'],
+      ['backslash authority escape', 'https://www.googleapis.com\\@attacker.example/calendar/v3/calendars/primary/events'],
     ])('blocks brokered server-side SSRF attempt: %s', async (_name, targetUrl) => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
@@ -1261,6 +1263,127 @@ describe('@credninja/server', () => {
         expect(useRes.status).toBe(400);
         expect(useRes.body.error).toMatch(/URL is not allowed/);
         expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('rebuilds the outbound URL from the allowlisted base and keeps the query', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+
+      await vault.store({
+        provider: 'google',
+        userId: 'rebuild-user',
+        accessToken: 'ya29.rebuild-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['calendar.readonly'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'rebuild-user',
+          appClientId: 'app_123',
+          scopes: ['calendar.readonly'],
+          token_format: 'handle',
+        });
+      expect(delegateRes.status).toBe(200);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      try {
+        const useRes = await request(app)
+          .post('/api/v1/use')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({
+            delegation_id: delegateRes.body.delegation_id,
+            url: 'https://WWW.GOOGLEAPIS.COM:443/calendar/v3/calendars/primary/events?maxResults=5#frag',
+            method: 'GET',
+          });
+
+        expect(useRes.status).toBe(200);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [calledUrl] = fetchSpy.mock.calls[0]!;
+        expect(calledUrl).toBe('https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=5');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      ['instance host', 'https://acme.my.salesforce.com/services/data/v60.0/query?q=SELECT+Id+FROM+Account', true],
+      ['lightning host', 'https://acme.lightning.force.com/services/data/v60.0/limits', true],
+      ['suffix confusion', 'https://acme.my.salesforce.com.attacker.example/services/data/v60.0/limits', false],
+      ['bare apex domain', 'https://salesforce.com/services/data/v60.0/limits', false],
+      ['dotted-IP label', 'https://10.0.0.1.my.salesforce.com/services/data/v60.0/limits', false],
+      ['underscore label', 'https://ac_me.my.salesforce.com/services/data/v60.0/limits', false],
+      ['http downgrade', 'http://acme.my.salesforce.com/services/data/v60.0/limits', false],
+    ])('salesforce brokered URL host rule: %s', async (_name, targetUrl, allowed) => {
+      const { app, vault } = createServer(makeTestConfig({
+        providers: [
+          {
+            slug: 'google',
+            clientId: 'test-google-client-id',
+            clientSecret: 'test-google-client-secret',
+            defaultScopes: ['openid', 'email', 'profile'],
+          },
+          {
+            slug: 'salesforce',
+            clientId: 'test-salesforce-client-id',
+            clientSecret: 'test-salesforce-client-secret',
+            defaultScopes: ['api'],
+          },
+        ],
+      }));
+      await vault.init();
+
+      await vault.store({
+        provider: 'salesforce',
+        userId: 'sf-user',
+        accessToken: '00D.sf-token',
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        scopes: ['api'],
+      });
+
+      const delegateRes = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'salesforce',
+          user_id: 'sf-user',
+          appClientId: 'app_123',
+          scopes: ['api'],
+          token_format: 'handle',
+        });
+      expect(delegateRes.status).toBe(200);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      try {
+        const useRes = await request(app)
+          .post('/api/v1/use')
+          .set('Authorization', `Bearer ${TEST_TOKEN}`)
+          .send({ delegation_id: delegateRes.body.delegation_id, url: targetUrl, method: 'GET' });
+
+        if (allowed) {
+          expect(useRes.status).toBe(200);
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+          const [calledUrl] = fetchSpy.mock.calls[0]!;
+          expect(String(calledUrl)).toBe(targetUrl);
+        } else {
+          expect(useRes.status).toBe(400);
+          expect(useRes.body.error).toMatch(/URL is not allowed/);
+          expect(fetchSpy).not.toHaveBeenCalled();
+        }
       } finally {
         fetchSpy.mockRestore();
       }
@@ -3135,6 +3258,27 @@ describe('@credninja/server', () => {
 
       expect(bootstrap.status).toBe(303);
       expect(bootstrap.headers.location).toBe('/connect');
+    });
+
+    it.each([
+      ['backslash protocol-relative', '/\\evil.example.com', '/connect'],
+      ['absolute URL', 'https://evil.example.com/', '/connect'],
+      ['scheme-relative via encoded slash', '/%2F%2Fevil.example.com', '/%2F%2Fevil.example.com'],
+      ['control character', '/connect\r\nSet-Cookie: x=y', '/connect'],
+      ['fragment dropped', '/connect?user_id=u#frag', '/connect?user_id=u'],
+      ['dot segments resolved in place', '/connect/../admin', '/admin'],
+    ])('admin login redirect stays same-origin: %s', async (_name, next, expected) => {
+      const config = makeTestConfig();
+      const { app, vault } = createServer(config);
+      await vault.init();
+
+      const bootstrap = await request(app)
+        .post('/admin/login')
+        .type('form')
+        .send({ admin_token: TEST_ADMIN_TOKEN, next });
+
+      expect(bootstrap.status).toBe(303);
+      expect(bootstrap.headers.location).toBe(expected);
     });
   });
 

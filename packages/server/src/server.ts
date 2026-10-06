@@ -393,11 +393,25 @@ export function createServer(config: ServerConfig) {
     return undefined;
   }
 
+  /**
+   * Accept only a same-origin, absolute-path redirect target. The result is
+   * rebuilt from the parsed path and query rather than echoed back, so a
+   * caller cannot smuggle a scheme, authority, backslash host trick, control
+   * character, or fragment into the Location header. Anything that does not
+   * resolve to the placeholder origin falls back.
+   */
   function safeRelativePath(rawPath: string | undefined, fallback = '/connect'): string {
-    if (!rawPath || !rawPath.startsWith('/') || rawPath.startsWith('//') || rawPath.includes('\\')) {
+    if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.length > 2048) return fallback;
+    if (!rawPath.startsWith('/') || rawPath.startsWith('//') || rawPath.startsWith('/\\')) return fallback;
+    if (/[\u0000-\u001f\u007f\\]/.test(rawPath)) return fallback;
+    let parsed: URL;
+    try {
+      parsed = new URL(rawPath, 'https://cred.invalid');
+    } catch {
       return fallback;
     }
-    return rawPath;
+    if (parsed.origin !== 'https://cred.invalid' || !parsed.pathname.startsWith('/')) return fallback;
+    return `${parsed.pathname}${parsed.search}`;
   }
 
   function requestUserId(req: Request): string {
@@ -459,33 +473,54 @@ export function createServer(config: ServerConfig) {
     ));
   }
 
-  function isAllowedBrokerUrl(service: string, url: string, scopes?: string[]): boolean {
+  const SALESFORCE_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.(?:salesforce\.com|force\.com)$/;
+
+  /**
+   * Resolve the upstream URL the broker will call for a delegated request.
+   *
+   * Returns null when the request is not allowed. When it is, the returned URL
+   * is rebuilt from a server-side base (the matched allowlist entry, or the
+   * validated Salesforce instance host) plus the caller's path and query, so the
+   * scheme and authority of the outbound request never come from caller input.
+   */
+  function resolveBrokerUrl(service: string, url: string, scopes?: string[]): URL | null {
     let parsed: URL;
     try {
       parsed = new URL(url);
     } catch {
-      return false;
+      return null;
     }
 
-    if (parsed.protocol !== 'https:') return false;
-    if (parsed.username || parsed.password) return false;
-    if (parsed.port !== '' && parsed.port !== '443') return false;
+    if (parsed.protocol !== 'https:') return null;
+    if (parsed.username || parsed.password) return null;
+    if (parsed.port !== '' && parsed.port !== '443') return null;
 
     const hostname = parsed.hostname.toLowerCase();
+    const pathAndQuery = `${parsed.pathname}${parsed.search}`;
+
     if (service === 'salesforce') {
-      const isPrivateIpSubdomain = /^(\d{1,3}\.){3}\d{1,3}\./.test(hostname);
-      if (isPrivateIpSubdomain) return false;
-      return hostname.endsWith('.salesforce.com') || hostname.endsWith('.force.com');
+      if (!SALESFORCE_HOST_PATTERN.test(hostname)) return null;
+      if (/^(\d{1,3}\.){3}\d{1,3}\./.test(hostname)) return null;
+      const instanceOrigin = `https://${hostname}`;
+      const resolved = new URL(pathAndQuery, instanceOrigin);
+      return resolved.origin === instanceOrigin ? resolved : null;
     }
 
     const allowed = SERVICE_ALLOWLIST[service];
-    if (!allowed) return false;
+    if (!allowed) return null;
     const normalizedUrl = `https://${hostname}${parsed.pathname}`;
-    if (!allowed.some((base) => normalizedUrl.startsWith(base))) return false;
-    if (service === 'google') {
-      return isAllowedGoogleScopeEndpoint(normalizedUrl, scopes);
-    }
-    return true;
+    const base = allowed.find((candidate) => normalizedUrl.startsWith(candidate));
+    if (!base) return null;
+    if (service === 'google' && !isAllowedGoogleScopeEndpoint(normalizedUrl, scopes)) return null;
+
+    // Rebuild from the constant base so the outbound authority is the
+    // allowlist's, not the caller's. The base always ends in '/' and the
+    // remainder is the caller's path below it plus the query string.
+    const remainder = normalizedUrl.slice(base.length);
+    const resolved = new URL(`${remainder}${parsed.search}`, base);
+    const baseOrigin = new URL(base).origin;
+    if (resolved.origin !== baseOrigin || !resolved.href.startsWith(base)) return null;
+    return resolved;
   }
 
   /**
@@ -2785,7 +2820,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       });
       if (!guardResult.allowed) return;
 
-      if (!isAllowedBrokerUrl(delegation.service, url, guardResult.effectiveScopes)) {
+      const upstreamUrl = resolveBrokerUrl(delegation.service, url, guardResult.effectiveScopes);
+      if (!upstreamUrl) {
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
       }
@@ -2799,7 +2835,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           )
         : {};
 
-      const upstream = await fetch(url, {
+      const upstream = await fetch(upstreamUrl.href, {
         method: normalizedMethod,
         redirect: 'manual',
         headers: {
