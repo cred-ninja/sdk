@@ -1,0 +1,20 @@
+# CodeRabbit configuration for cred-ninja/sdk.
+#
+# ESLint is run by CI (.github/workflows/ci.yml, job "Lint") against the
+# repo's flat config, which needs the workspace's devDependencies
+# (typescript-eslint, globals) installed. CodeRabbit's hosted ESLint runner
+# cannot install them and reports "Some tools did not complete" on every PR
+# that touches a .ts file. Disable that one tool here; the review itself and
+# the other tools stay on.
+reviews:
+  tools:
+    eslint:
+      enabled: false
+  # The docstring-coverage pre-merge check counts test callbacks and inline
+  # arrows as "functions". On #39 the two real functions touched both carry
+  # JSDoc; the four undocumented "functions" were it()/it.each() bodies and a
+  # one-line find() predicate. Turn the check off; JSDoc on exported and
+  # security-relevant functions stays a review expectation, not a gate.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
