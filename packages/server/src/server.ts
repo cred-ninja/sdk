@@ -474,16 +474,18 @@ export function createServer(config: ServerConfig) {
   }
 
   const SALESFORCE_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.(?:salesforce\.com|force\.com)$/;
+  const SAFE_PATH_AND_QUERY_PATTERN = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/;
 
   /**
    * Resolve the upstream URL the broker will call for a delegated request.
    *
-   * Returns null when the request is not allowed. When it is, the returned URL
-   * is rebuilt from a server-side base (the matched allowlist entry, or the
-   * validated Salesforce instance host) plus the caller's path and query, so the
-   * scheme and authority of the outbound request never come from caller input.
+   * Returns null when the request is not allowed. When it is, the returned
+   * string is assembled from a server-side origin (the matched allowlist entry,
+   * or a Salesforce instance host that passed the strict host grammar) plus the
+   * caller's already-normalized path and query, so the scheme and authority of
+   * the outbound request are never copied from caller input.
    */
-  function resolveBrokerUrl(service: string, url: string, scopes?: string[]): URL | null {
+  function resolveBrokerUrl(service: string, url: string, scopes?: string[]): string | null {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -496,14 +498,16 @@ export function createServer(config: ServerConfig) {
     if (parsed.port !== '' && parsed.port !== '443') return null;
 
     const hostname = parsed.hostname.toLowerCase();
+    // WHATWG parsing has already resolved dot segments and percent-encoded
+    // anything outside the path/query character set; reject anything else.
     const pathAndQuery = `${parsed.pathname}${parsed.search}`;
+    if (!SAFE_PATH_AND_QUERY_PATTERN.test(pathAndQuery)) return null;
+    if (pathAndQuery.startsWith('//')) return null;
 
     if (service === 'salesforce') {
       if (!SALESFORCE_HOST_PATTERN.test(hostname)) return null;
       if (/^(\d{1,3}\.){3}\d{1,3}\./.test(hostname)) return null;
-      const instanceOrigin = `https://${hostname}`;
-      const resolved = new URL(pathAndQuery, instanceOrigin);
-      return resolved.origin === instanceOrigin ? resolved : null;
+      return `https://${hostname}${pathAndQuery}`;
     }
 
     const allowed = SERVICE_ALLOWLIST[service];
@@ -513,14 +517,11 @@ export function createServer(config: ServerConfig) {
     if (!base) return null;
     if (service === 'google' && !isAllowedGoogleScopeEndpoint(normalizedUrl, scopes)) return null;
 
-    // Rebuild from the constant base so the outbound authority is the
-    // allowlist's, not the caller's. The base always ends in '/' and the
-    // remainder is the caller's path below it plus the query string.
-    const remainder = normalizedUrl.slice(base.length);
-    const resolved = new URL(`${remainder}${parsed.search}`, base);
-    const baseOrigin = new URL(base).origin;
-    if (resolved.origin !== baseOrigin || !resolved.href.startsWith(base)) return null;
-    return resolved;
+    // The base is a constant that ends in '/'; everything after it is the
+    // caller's path below that base plus the query string.
+    const remainder = `${parsed.pathname.slice(new URL(base).pathname.length)}${parsed.search}`;
+    if (remainder.startsWith('/')) return null;
+    return `${base}${remainder}`;
   }
 
   /**
@@ -2835,7 +2836,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           )
         : {};
 
-      const upstream = await fetch(upstreamUrl.href, {
+      const upstream = await fetch(upstreamUrl, {
         method: normalizedMethod,
         redirect: 'manual',
         headers: {
