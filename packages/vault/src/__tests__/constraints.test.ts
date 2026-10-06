@@ -265,6 +265,14 @@ describe('asor-01 section 4.3 subsumption per type', () => {
     expect(constraintsSubsume([{ key: 'egress', rank: 'any' }], [{ key: 'egress', rank: 'internal' }], { rankOrderings }).ok).toBe(false);
   });
 
+  it('rank labels: prototype-named keys fail closed instead of throwing', () => {
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      const r = constraintsSubsume([{ key, rank: 'a' }], [{ key, rank: 'a' }]);
+      expect(r.ok).toBe(false);
+    }
+    expect(constraintsSubsume([{ key: 'constructor', rank: 'a' }], [{ key: 'constructor', rank: 'a' }], { rankOrderings: { constructor: ['a'] } }).ok).toBe(true);
+  });
+
   it('rank: numeric and label ranks under one key never compare', () => {
     expect(constraintsSubsume([{ key: 'egress', rank: 2 }], [{ key: 'egress', rank: 'none' }]).ok).toBe(false);
     expect(constraintsSubsume([{ key: 'egress', rank: 'any' }], [{ key: 'egress', rank: 0 }]).ok).toBe(false);

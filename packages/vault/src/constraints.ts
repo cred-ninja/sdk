@@ -264,8 +264,11 @@ type RankResolution =
 
 function resolveRank(key: string, rank: number | string, orderings: RankOrderings): RankResolution {
   if (typeof rank === 'number') return { ok: true, value: rank };
-  const ordering = orderings[key];
-  if (!ordering) {
+  // Own-property lookup only: constraint keys come off the wire, and a key
+  // like 'constructor' or '__proto__' would otherwise resolve through
+  // Object.prototype to something that is not an ordering.
+  const ordering = Object.prototype.hasOwnProperty.call(orderings, key) ? orderings[key] : undefined;
+  if (!Array.isArray(ordering)) {
     return { ok: false, message: `No rank ordering is registered for '${key}'; label '${rank}' cannot be compared` };
   }
   const idx = ordering.indexOf(rank);
@@ -291,7 +294,7 @@ export function constraintsSubsume(
   child: readonly DelegationConstraint[],
   options: ConstraintSubsumptionOptions = {},
 ): ConstraintSubsumptionResult {
-  const orderings: RankOrderings = { ...DEFAULT_RANK_ORDERINGS, ...(options.rankOrderings ?? {}) };
+  const orderings: RankOrderings = Object.assign(Object.create(null), DEFAULT_RANK_ORDERINGS, options.rankOrderings ?? {});
   const childByKey = new Map(child.map((c) => [c.key, c]));
   for (const p of parent) {
     const c = childByKey.get(p.key);
