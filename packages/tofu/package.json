@@ -1,6 +1,6 @@
 {
   "name": "@credninja/tofu",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Trust-on-first-use agent identity primitives for Cred",
   "license": "Apache-2.0",
   "author": "Cred",
@@ -42,5 +42,14 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cred-ninja/sdk.git",
+    "directory": "packages/tofu"
+  },
+  "homepage": "https://cred.ninja",
+  "bugs": {
+    "url": "https://github.com/cred-ninja/sdk/issues"
   }
 }
