@@ -105,6 +105,11 @@ export interface ValidateSubDelegationInput {
    * or validation throws 'constraint_escalation_denied'.
    */
   requestedConstraints?: import('./constraints.js').DelegationConstraint[];
+  /**
+   * Orderings for `rank` constraint labels (see constraints.ts). Merged over
+   * DEFAULT_RANK_ORDERINGS.
+   */
+  rankOrderings?: import('./constraints.js').RankOrderings;
   permission: DelegationValidationPermission;
 }
 
