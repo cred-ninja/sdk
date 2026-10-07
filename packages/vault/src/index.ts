@@ -67,3 +67,5 @@ export type {
   RotationState,
   RotationFailureAction,
 } from './types.js';
+export { parseStrictJson, StrictJsonError } from './strict-json.js';
+export type { StrictJsonErrorCode } from './strict-json.js';

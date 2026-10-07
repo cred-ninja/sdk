@@ -15,7 +15,7 @@
  * Cred's convention is a wire change and belongs in an ADR, not here.
  */
 import { createHash, verify, type KeyObject } from 'node:crypto';
-import { verifyDelegationChain } from '@credninja/vault';
+import { verifyDelegationChain, parseStrictJson } from '@credninja/vault';
 import type { ChainVerifyReason, ChainVerifyResult, DelegationChainHop } from '@credninja/vault';
 
 export type ReceiptChainReason = ChainVerifyReason | 'context_mismatch';
@@ -69,7 +69,9 @@ function decodeReceipt(receipt: string, publicKey: KeyObject): { valid: boolean;
   }
   let payload: Record<string, unknown> | null = null;
   try {
-    const parsedJson: unknown = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    // Strict JSON: duplicate members and unsafe integers make the receipt
+    // undecodable rather than silently resolved (see vault strict-json).
+    const parsedJson: unknown = parseStrictJson(Buffer.from(payloadB64, 'base64url').toString('utf8'));
     if (typeof parsedJson === 'object' && parsedJson !== null && !Array.isArray(parsedJson)) {
       payload = parsedJson as Record<string, unknown>;
     }
