@@ -142,7 +142,7 @@ describe('validateSubDelegation', () => {
 // Wildcard scope subsumption. Semantics follow the wire subsumption relation
 // in draft-asor-wimse-agent-delegation-chain section 4.2 rule 1. Malformed
 // scopes match only themselves and fail closed on any expansion.
-import { isValidScope, scopeCovers, scopeCoveredBy } from '../delegation-chain.js';
+import { isValidScope, scopeCovers, scopeCoveredBy, classifyScope } from '../delegation-chain.js';
 
 describe('scopeCovers', () => {
   const cases: Array<[granted: string, requested: string, covered: boolean]> = [
@@ -171,6 +171,18 @@ describe('scopeCovers', () => {
     ['read:*', 'read:other', false],
     ['read:other', 'read:*', false],
     ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.readonly', true],
+    // opaque class: wildcard never covers, opaque matches only itself
+    ['drive.*', 'drive.Read', false],
+    ['drive.*', 'drive.readonly', true],
+    ['payment.*', 'payment.release', true],
+    ['repo.*', 'repo:status', false],
+    ['auth.*', 'https://www.googleapis.com/auth/drive.readonly', false],
+    ['crm.*', 'crm.1read', false],
+    ['crm.*', 'crm.read-only', true],
+    ['crm.*', 'crm.read_only', true],
+    ['openid', 'openid', true],
+    ['User.Read', 'User.Read', true],
+    ['User.Read', 'user.read', false],
   ];
 
   for (const [granted, requested, covered] of cases) {
@@ -179,6 +191,29 @@ describe('scopeCovers', () => {
     });
   }
 
+  it('classifyScope follows literal, wildcard, opaque precedence', () => {
+    expect(classifyScope('crm.read')).toBe('literal');
+    expect(classifyScope('crm.contacts.read')).toBe('literal');
+    expect(classifyScope('payment.release')).toBe('literal');
+    expect(classifyScope('crm.*')).toBe('wildcard');
+    expect(classifyScope('crm.contacts.*')).toBe('wildcard');
+    expect(classifyScope('openid')).toBe('opaque');
+    expect(classifyScope('User.Read')).toBe('opaque');
+    expect(classifyScope('repo:status')).toBe('opaque');
+    expect(classifyScope('https://www.googleapis.com/auth/drive.readonly')).toBe('opaque');
+    expect(classifyScope('crm.1read')).toBe('opaque');
+    expect(classifyScope('*')).toBe('malformed');
+    expect(classifyScope('crm*')).toBe('malformed');
+    expect(classifyScope('read:*')).toBe('malformed');
+    expect(classifyScope('crm.*.read')).toBe('malformed');
+    expect(classifyScope('crm read')).toBe('malformed');
+    expect(classifyScope('crm"read')).toBe('malformed');
+    expect(classifyScope('crm\\read')).toBe('malformed');
+    expect(classifyScope('crm\u00e9')).toBe('malformed');
+    expect(classifyScope('')).toBe('malformed');
+    expect(classifyScope(undefined)).toBe('malformed');
+  });
+
   it('isValidScope accepts exact scopes and trailing ".*" only', () => {
     expect(isValidScope('crm.read')).toBe(true);
     expect(isValidScope('crm.*')).toBe(true);
@@ -186,6 +221,8 @@ describe('scopeCovers', () => {
     expect(isValidScope('.*')).toBe(false);
     expect(isValidScope('crm*')).toBe(false);
     expect(isValidScope('crm.*.write')).toBe(false);
+    expect(isValidScope('repo:status')).toBe(true);
+    expect(isValidScope('openid')).toBe(true);
     expect(isValidScope('')).toBe(false);
     expect(isValidScope(undefined)).toBe(false);
   });
