@@ -29,7 +29,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, parseStrictJson, StrictJsonError } from '@credninja/vault';
 import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
@@ -1371,7 +1371,22 @@ export function createServer(config: ServerConfig) {
       throw new Error('Invalid receipt signature');
     }
 
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    // Strict JSON: a duplicate member or an integer outside the binary64
+    // exact range makes the receipt invalid, never last-value-wins or
+    // silently rounded (RFC 7493 Section 2.2 and 2.3; RFC 8785).
+    // The field reads below were written against an untyped JSON.parse
+    // result and validate each claim they use; keep that contract.
+    let payload: Record<string, any>;
+    try {
+      const parsedPayload = parseStrictJson(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+      if (typeof parsedPayload !== 'object' || parsedPayload === null || Array.isArray(parsedPayload)) {
+        throw new Error('Receipt payload is not a JSON object');
+      }
+      payload = parsedPayload as Record<string, any>;
+    } catch (err) {
+      if (err instanceof StrictJsonError) throw new Error(`Receipt payload is malformed (${err.code}): ${err.message}`);
+      throw err;
+    }
     if (!payload.delegationId) {
       throw new Error('Receipt is missing delegationId');
     }
