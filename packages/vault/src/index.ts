@@ -12,7 +12,8 @@ export { RotationEngine } from './rotation.js';
 export type { RotationResult as RotationEngineResult, RefreshAdapter as RotationRefreshAdapter } from './rotation.js';
 export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
-export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope } from './delegation-chain.js';
+export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope, classifyScope } from './delegation-chain.js';
+export type { ScopeClass } from './delegation-chain.js';
 export { verifyDelegationChain } from './chain-verify.js';
 export { parseConstraints, constraintsSubsume, constraintTypeOf, unresolvableRankLabels, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from './constraints.js';
 export type {
