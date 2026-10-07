@@ -103,11 +103,17 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
   claim naming the agent DID alongside `sub`. Remaining (breaking, next wire
   version): move the delegating principal into `sub` and stop duplicating the agent
   there; mirror the split in audit records.
+- [x] Strict JSON for receipt payloads (Oct 7, 2026): `parseStrictJson` in
+  `packages/vault/src/strict-json.ts` rejects duplicate member names and
+  integers outside the binary64 exact range (RFC 7493 2.2/2.3, RFC 8785);
+  `/api/v1/subdelegate` receipt decoding and `receipt-chain.ts` use it. The
+  asor runner decodes the same way, closing `reject_duplicate_member` and
+  `reject_unsafe_integer`: 20 of 20.
 - [x] *(vocabulary done)* Converge the constraint vocabulary with
   `draft-asor-wimse-agent-delegation-chain-01` §4.2 / §10: all six registered
   constraint types parse and subsume (Oct 6, 2026). The asor interop runner
   now passes `constraints` through; `reject_exceeded_ceiling` moves from GAP
-  to PASS (18 of 20). See `docs/design/delegation-constraints.md`.
+  to PASS (18 of 20, then 20 of 20 with strict JSON below). See `docs/design/delegation-constraints.md`.
 - [ ] Remaining convergence: wrap scopes + constraints in an RFC 9396
   `authorization_details` entry of type `agent_delegation` so offline-minted
   chains and server-issued receipts read the same (next wire version).
