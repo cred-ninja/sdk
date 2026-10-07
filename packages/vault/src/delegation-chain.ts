@@ -24,37 +24,67 @@ export class DelegationChainError extends Error {
   }
 }
 
-const WILDCARD_SUFFIX = '.*';
+/**
+ * Scope classes, following the scope grammar proposed for
+ * draft-asor-wimse-agent-delegation-chain-02 (list thread, Oct 2026) and
+ * the -01 Section 4.1 productions it keeps intact:
+ *
+ *   scope          = literal-scope / wildcard-scope / opaque-scope
+ *   segment        = lower *(lower / digit / "_" / "-")
+ *   literal-scope  = segment "." segment *("." segment)        ; -01 4.1
+ *   wildcard-scope = segment *("." segment) ".*"               ; -01 4.1
+ *   opaque-scope   = 1*( %x21 / %x23-29 / %x2B-5B / %x5D-7E )  ; RFC 6749 scope-token minus "*"
+ *
+ * The alternatives overlap, so classification is by precedence: literal,
+ * then wildcard, then opaque; anything else (a "*" anywhere but as the
+ * trailing ".*" segment, whitespace, control or non-ASCII bytes) is
+ * malformed. Classification is a function of the string alone: a provider
+ * scope that happens to be lowercase and dotted is a literal and gets
+ * wildcard coverage; one with uppercase, a colon, a slash, or a single
+ * segment is opaque and matches only itself.
+ */
+export type ScopeClass = 'literal' | 'wildcard' | 'opaque' | 'malformed';
+
+const SEGMENT = '[a-z][a-z0-9_-]*';
+const LITERAL_SCOPE = new RegExp(`^${SEGMENT}(?:\\.${SEGMENT})+$`);
+const WILDCARD_SCOPE = new RegExp(`^${SEGMENT}(?:\\.${SEGMENT})*\\.\\*$`);
+const OPAQUE_SCOPE = /^[\x21\x23-\x29\x2B-\x5B\x5D-\x7E]+$/;
+
+export function classifyScope(scope: unknown): ScopeClass {
+  if (typeof scope !== 'string' || scope.length === 0) return 'malformed';
+  if (LITERAL_SCOPE.test(scope)) return 'literal';
+  if (WILDCARD_SCOPE.test(scope)) return 'wildcard';
+  if (OPAQUE_SCOPE.test(scope)) return 'opaque';
+  return 'malformed';
+}
 
 /**
- * A scope is a non-empty string with at most one wildcard, and that wildcard
- * must be a trailing ".*" segment ("crm.*"). A bare "*", a mid-string star
- * ("cr*m"), or a star without a dot ("crm*") is malformed. A malformed scope
- * matches only itself (exact literal equality, preserving pre-wildcard
- * behavior for legacy scopes), and never covers or is covered by anything
- * else, so it can be carried through a chain unchanged but never expanded.
+ * A scope is valid when it is a literal, a wildcard, or an opaque
+ * provider-native string. A bare "*", a mid-string star ("cr*m"), or a star
+ * without a dot ("crm*") is malformed. A malformed scope matches only itself
+ * (exact equality, preserving pre-wildcard behavior for legacy receipts) and
+ * never covers, and is never covered by, anything else.
  */
 export function isValidScope(scope: unknown): scope is string {
-  if (typeof scope !== 'string' || scope.trim().length === 0) return false;
-  const star = scope.indexOf('*');
-  if (star === -1) return true;
-  return scope.endsWith(WILDCARD_SUFFIX)
-    && star === scope.length - 1
-    && scope.length > WILDCARD_SUFFIX.length;
+  return classifyScope(scope) !== 'malformed';
 }
 
 /**
  * Does `granted` cover `requested`?
  *
- * Rules (these match the wire subsumption relation in
- * draft-asor-wimse-agent-delegation-chain section 4.2, rule 1):
- * - exact match covers;
- * - a trailing-wildcard scope "p.*" covers any scope that begins with "p."
- *   and has at least one character after it, at any depth ("crm.*" covers
- *   "crm.read" and "crm.contacts.read"), including a longer wildcard
- *   ("crm.*" covers "crm.contacts.*");
+ * Rules (the wire subsumption relation in
+ * draft-asor-wimse-agent-delegation-chain-01 section 4.1, plus the opaque
+ * class proposed for -02):
+ * - exact match covers, whatever the class;
+ * - a wildcard "p.*" covers any LITERAL that begins with "p." at any depth
+ *   ("crm.*" covers "crm.read" and "crm.contacts.read"), and any longer
+ *   wildcard under the same prefix ("crm.*" covers "crm.contacts.*");
  * - "crm.*" does not cover "crm", "crm.", "crmx.read", or "crm.*" spelled
  *   with a different prefix;
+ * - a wildcard never covers an opaque scope, and an opaque scope never
+ *   covers anything but a byte-identical opaque scope: "drive.*" does not
+ *   cover "drive.Read" (uppercase makes it opaque), "repo:status" matches
+ *   only "repo:status";
  * - a malformed scope matches only itself: exact equality covers ("read:*"
  *   covers "read:*"), but a malformed scope never covers, and is never
  *   covered by, anything else.
@@ -62,8 +92,9 @@ export function isValidScope(scope: unknown): scope is string {
 export function scopeCovers(granted: string, requested: string): boolean {
   if (typeof granted !== 'string' || granted.trim().length === 0) return false;
   if (granted === requested) return true;
-  if (!isValidScope(granted) || !isValidScope(requested)) return false;
-  if (!granted.endsWith(WILDCARD_SUFFIX)) return false;
+  if (classifyScope(granted) !== 'wildcard') return false;
+  const requestedClass = classifyScope(requested);
+  if (requestedClass !== 'literal' && requestedClass !== 'wildcard') return false;
   const prefix = granted.slice(0, -1); // keep the dot: "crm."
   return requested.length > prefix.length && requested.startsWith(prefix);
 }
