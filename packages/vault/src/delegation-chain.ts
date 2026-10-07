@@ -140,7 +140,7 @@ export function validateSubDelegation(
   if (requestedConstraints === undefined) {
     grantedConstraints = parentConstraints;
   } else {
-    const check = constraintsSubsume(parentConstraints, requestedConstraints);
+    const check = constraintsSubsume(parentConstraints, requestedConstraints, { rankOrderings: input.rankOrderings });
     if (!check.ok) {
       throw new DelegationChainError(
         `Requested constraints exceed parent delegation: ${check.message}`,

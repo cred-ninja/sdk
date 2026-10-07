@@ -29,7 +29,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels } from '@credninja/vault';
 import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
@@ -2946,6 +2946,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_constraints', message: rootConstraints.message });
         return;
       }
+      // A rank label with no registered ordering would parse, be minted, and
+      // then fail every later hop's subsumption check. Refuse at issuance.
+      const unresolvableRoot = unresolvableRankLabels(rootConstraints.constraints);
+      if (unresolvableRoot.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', message: `No rank ordering is registered for: ${unresolvableRoot.join(', ')}` });
+        return;
+      }
 
       const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
       const requestedScopes = normalizeRequestedScopes(scopes);
@@ -3730,6 +3737,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const childConstraints = parseConstraints(requestedConstraintsRaw);
       if (!childConstraints.ok) {
         res.status(400).json({ error: 'invalid_constraints', message: childConstraints.message });
+        return;
+      }
+      const unresolvableChild = unresolvableRankLabels(childConstraints.constraints);
+      if (unresolvableChild.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', message: `No rank ordering is registered for: ${unresolvableChild.join(', ')}` });
         return;
       }
 
