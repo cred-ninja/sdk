@@ -62,9 +62,12 @@ class Parser {
   }
 
   private value(depth: number): unknown {
-    if (depth > MAX_DEPTH) this.fail('syntax', 'nesting too deep');
     if (this.i >= this.text.length) this.fail('syntax', 'unexpected end of input');
     const c = this.text[this.i];
+    // A container opening at depth MAX_DEPTH would be the (MAX_DEPTH+1)th
+    // nested container; an empty one never recurses, so check here rather
+    // than on entry to the child.
+    if (depth >= MAX_DEPTH && (c === '{' || c === '[')) this.fail('syntax', 'nesting too deep');
     switch (c) {
       case '{': return this.object(depth);
       case '[': return this.array(depth);
