@@ -60,9 +60,14 @@ describe('parseStrictJson', () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
-  it('bounds nesting depth', () => {
+  it('bounds nesting at 256 containers, empty or not', () => {
+    expect(codeOf('['.repeat(256) + ']'.repeat(256))).toBeNull();
+    expect(codeOf('['.repeat(256) + '1' + ']'.repeat(256))).toBeNull();
+    expect(codeOf('['.repeat(257) + ']'.repeat(257))).toBe('syntax');
+    expect(codeOf('['.repeat(257) + '1' + ']'.repeat(257))).toBe('syntax');
+    expect(codeOf('{"a":'.repeat(256) + '1' + '}'.repeat(256))).toBeNull();
+    expect(codeOf('{"a":'.repeat(257) + '1' + '}'.repeat(257))).toBe('syntax');
     expect(codeOf('['.repeat(300) + ']'.repeat(300))).toBe('syntax');
-    expect(codeOf('['.repeat(100) + ']'.repeat(100))).toBeNull();
   });
 
   it('reports the offset of the failure', () => {
