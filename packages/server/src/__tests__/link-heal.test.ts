@@ -744,7 +744,8 @@ describe('startup heal: the permission intersect runs in every branch', () => {
 
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const commit = vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
-    const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    // Both attempts of the needs_reauth write fail.
+    const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY')).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     const settle = vi.spyOn(SqliteLinkStore.prototype, 'settleActivation').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     expect((await activate(hx.app, client, pending.connection_id, pending.code)).status).not.toBe(200);
     commit.mockRestore();
@@ -786,5 +787,122 @@ describe('startup heal: the permission intersect runs in every branch', () => {
     const widening = await finishFlow(hx, uri, BOTH);
     expect((await activate(hx.app, client, widening.connection_id, widening.code)).status).toBe(200);
     expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+  });
+});
+
+describe('startup heal: the intersect uses the activation\'s previous scopes', () => {
+  const BOTH = ['calendar.readonly', 'gmail.send'];
+  const CAL = ['calendar.readonly'];
+
+  type Ctx = NonNullable<Harness['server']['link']>['context'];
+  const branches: Array<[string, CrashPoint, (ctx: Ctx, conn: string, tid: string, staged: { refresh_token?: string }) => Promise<void>]> = [
+    ['reverted', 'before-move', async () => undefined],
+    ['settled_reauth', 'before-move', async (ctx, conn, tid) => {
+      await ctx.secrets.deleteStaged(tid as never);
+      await ctx.secrets.delete(conn as never);
+    }],
+    ['stale', 'before-move', async (ctx, conn) => {
+      await ctx.store.setConnectionStatus({ connection_id: conn, status: 'needs_reauth', reason: 'reauth_required', now: new Date(Date.now() + 5).toISOString() });
+    }],
+    ['cleaned', 'after-vault-write', async () => undefined],
+    ['settled', 'after-move', async () => undefined],
+    ['reapplied', 'after-vault-write', async (ctx, conn) => {
+      const stored = (await ctx.secrets.get(conn as never))!;
+      await ctx.secrets.put(conn as never, { ...stored, access_token: 'rotated-access-token' });
+    }],
+  ];
+
+  for (const [outcome, point, prepare] of branches) {
+    it(`${outcome}: a widening update clips to grant ∩ grant_scopes_at_confirm`, async () => {
+      const hx = await harness();
+      const client = await registerClient(hx.app);
+      const conn = await connectAndActivate(hx.app, client, { confirmScopes: CAL });
+      const pending = await updateFlow(hx, client, conn, BOTH);
+      const { tid, staged } = await crashActivationWithTokens(hx, client, pending, point);
+      await prepare(hx.server.link!.context, conn, tid, staged);
+      const spy = vi.spyOn(PermissionStore.prototype, 'intersectForConnection');
+      const { report } = await restartAndHeal(hx);
+      expect(report.outcomes).toEqual([{ tid, outcome }]);
+      expect(spy.mock.calls.map(([id, scopes]) => [id, [...scopes]])).toContainEqual([conn, CAL]);
+    });
+  }
+
+  it('a transaction that created its connection has no recorded previous scopes: the plain current grant', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const pending = await newConnection(hx, client);
+    const tid = await crashActivation(hx, client, pending, 'after-move');
+    const spy = vi.spyOn(PermissionStore.prototype, 'intersectForConnection');
+    const { report } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'settled' }]);
+    expect(spy.mock.calls.map(([id, scopes]) => [id, [...scopes]])).toContainEqual([pending.connection_id, BOTH]);
+  });
+
+  it('reviewer: a permission that missed a narrowing intersect does not regain the scope when the heal finishes the widening', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const ctx0 = hx.server.link!.context;
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+
+    // Miss 1: the narrowing intersect fails.
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const hook = vi.spyOn(ctx0.hooks, 'onGrantUpdated').mockRejectedValueOnce(new Error('permission store down'));
+    const narrowed = await request(hx.app).post(`/link/v1/connections/${conn}/narrow`).set('Authorization', client.auth)
+      .send({ subject: 'user-a', scopes: CAL });
+    expect(narrowed.status).toBe(500);
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+    hook.mockRestore();
+
+    // A widening for another agent; its intersect does not take effect.
+    const uri = await par(hx.app, client, { intent: 'update', connection_id: conn, scopes: { google: BOTH }, required_scopes: {}, agent_id: 'other-agent' });
+    const widening = await finishFlow(hx, uri, BOTH, BOTH);
+    vi.spyOn(ctx0.hooks, 'onGrantUpdated').mockRejectedValueOnce(new Error('process died here'));
+    expect((await activate(hx.app, client, widening.connection_id, widening.code)).status).toBe(401);
+    expect(await ctx0.store.listUnsettledActivations()).toHaveLength(1);
+    vi.restoreAllMocks();
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes.map((o) => o.outcome)).toEqual(['settled']);
+    expect((await ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+  });
+});
+
+describe('startup heal: reapplied keeps the newer access token', () => {
+  it('the stored token refreshed after the staged one is kept, with the staged refresh token and expires_at now', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const pending = await updateFlow(hx, client, conn);
+    const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
+    const later = new Date(Date.parse(staged.expires_at!) + 60_000).toISOString();
+    await hx.server.link!.context.secrets.put(conn as never, { ...staged, access_token: 'rotated-access-token', expires_at: later });
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+    const stored = (await ctx.secrets.get(conn as never))!;
+    expect(stored.access_token).toBe('rotated-access-token');
+    expect(stored.refresh_token).toBe(staged.refresh_token);
+    expect(Date.parse(stored.expires_at!)).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('a staged token newer than the stored one wins, and so does staged when either has no expiry', async () => {
+    for (const storedExpiry of ['earlier', 'none'] as const) {
+      const hx = await harness();
+      const client = await registerClient(hx.app);
+      const conn = await connectAndActivate(hx.app, client);
+      const pending = await updateFlow(hx, client, conn);
+      const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
+      const { expires_at: _drop, ...noExpiry } = staged;
+      await hx.server.link!.context.secrets.put(conn as never, storedExpiry === 'none'
+        ? { ...noExpiry, access_token: 'older-access-token' }
+        : { ...staged, access_token: 'older-access-token', expires_at: new Date(Date.parse(staged.expires_at!) - 60_000).toISOString() });
+      const { report, ctx } = await restartAndHeal(hx);
+      expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+      expect({ storedExpiry, token: (await ctx.secrets.get(conn as never))!.access_token }).toEqual({ storedExpiry, token: staged.access_token });
+      h?.close();
+      h = null;
+    }
   });
 });

@@ -450,7 +450,7 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
   type ActivationStep =
     | { kind: 'refused'; storeEnded: boolean }
     | { kind: 'tokens_failed'; connection: Connection; createsConnection: boolean; markedReauth: boolean; intersected: boolean }
-    | { kind: 'hook_failed' }
+    | { kind: 'hook_failed'; connection: Connection; grant: ClientGrant; previous: string[] | null }
     | { kind: 'ok'; connection: Connection; grant: ClientGrant; previous: string[] | null };
   const intersect = async (previous: string[] | null, fallback: ClientGrant): Promise<boolean> => {
     if (previous === null) return true;
@@ -491,12 +491,22 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     if (!moved) {
       // The database says active but the tokens did not move: never leave an
       // active connection without (or with the wrong) tokens.
-      const marked = await ctx.store.setConnectionStatus({
+      const markReauth = () => ctx.store.setConnectionStatus({
         connection_id: activated.connection.id,
         status: 'needs_reauth',
         reason: 'reauth_required',
         now: nowIso(),
       }).catch(() => null);
+      // One retry before giving up on the status write.
+      const marked = (await markReauth()) ?? (await markReauth());
+      if (marked) {
+        ctx.quarantine.delete(activated.connection.id);
+      } else {
+        // Still reads as active on its old tokens: hand out nothing for it in
+        // this process (no refresh either, which could rewrite the row), so
+        // the next start can revert it. Added before the lock is released.
+        ctx.quarantine.add(activated.connection.id);
+      }
       const intersected = await intersect(activated.previous_grant_scopes, activated.grant);
       return {
         kind: 'tokens_failed',
@@ -506,7 +516,11 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
         intersected,
       };
     }
-    if (!(await intersect(activated.previous_grant_scopes, activated.grant))) return { kind: 'hook_failed' };
+    // The tokens moved: whatever quarantined this connection is resolved.
+    ctx.quarantine.delete(activated.connection.id);
+    if (!(await intersect(activated.previous_grant_scopes, activated.grant))) {
+      return { kind: 'hook_failed', connection: activated.connection, grant: activated.grant, previous: activated.previous_grant_scopes };
+    }
     // The move and the intersect finished: mark it settled so the startup
     // heal leaves it alone. If this write is lost, the heal finds the tokens
     // moved, runs the intersect again and settles it.
@@ -558,15 +572,11 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     sendOpaqueFailure(req, res);
     return;
   }
-  if (step.kind === 'hook_failed') {
-    // Same answer as any hook failure; the heal re-runs the intersect.
-    sendOpaqueFailure(req, res);
-    return;
-  }
   const { connection, grant, previous } = step;
 
-  // The pending record already made this fail closed: a failure of the
-  // success record is logged and does not abort the activation.
+  // The grant change is committed (also when the intersect failed), so the
+  // success record is written. The pending record already made this fail
+  // closed: a failure here is logged and does not change the response.
   try {
     writeGrantAudit(ctx, {
       action: 'update',
@@ -579,6 +589,11 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     });
   } catch (error) {
     console.error('[link] activation success audit failed', { tid: tx.tid, kind: error instanceof Error ? error.name : 'unknown' });
+  }
+  if (step.kind === 'hook_failed') {
+    // Same answer as any hook failure; the heal re-runs the intersect.
+    sendOpaqueFailure(req, res);
+    return;
   }
   try {
     await ctx.hooks.onActivate({
@@ -631,6 +646,7 @@ export async function handleRevokeConnection(ctx: LinkContext, req: Request, res
       const before = await ctx.store.getGrantForConnection(connection.id);
       const tokens = await ctx.secrets.get(connection.id).catch(() => null);
       const updated = await ctx.store.setConnectionStatus({ connection_id: connection.id, status: 'revoked', now: nowIso() });
+      if (updated) ctx.quarantine.delete(connection.id);
       let revoked = false;
       if (tokens) {
         revoked = await revokeAtProviderIfSafe(ctx, tokens, {
@@ -681,6 +697,13 @@ export async function handleRefreshConnection(ctx: LinkContext, req: Request, re
     const result = await ctx.tokens.load(connection, { force: true });
     if (!result.ok && result.kind === 'unavailable') {
       sendLinkError(req, res, 503, 'temporarily_unavailable');
+      return;
+    }
+    if (ctx.quarantine.has(connection.id)) {
+      // The row still says active, but this process will not use or refresh
+      // the connection, and the next start reverts it: report that.
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ connection_id: connection.id, status: 'needs_reauth', status_reason: 'reauth_required' });
       return;
     }
   }

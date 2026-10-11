@@ -159,10 +159,15 @@ under the connection's token lock: the database commit, the token move, the
 permission intersect for an existing grant (every agent Permission clipped to
 the new grant and the previous one), and only then marks the activation
 settled. If the token move fails, the connection is set to `needs_reauth`,
-never left active without tokens; if that write fails too, the staged tokens
-are kept and the activation stays unsettled for the startup heal. If the
-intersect fails, the client gets the opaque failure and the activation stays
-unsettled; the startup heal runs the intersect again.
+never left active without tokens. If that write fails twice, the staged
+tokens are kept, the activation stays unsettled for the startup heal, and
+the connection is quarantined in memory: until a later activation of it
+succeeds or it is revoked, this process hands out no token for it and does
+not refresh it (calls are refused with `reauth_required`), so nothing
+rewrites the connection before the next start reverts it. If the intersect
+fails, the client gets the opaque failure (the grant audit record is still
+written) and the activation stays unsettled; the startup heal runs the
+intersect again.
 
 **Startup heal.** Every activation that is not settled (the process died
 between the database commit and the settle, or a step failed) is resolved
@@ -171,7 +176,10 @@ routes and the Link branches of `/api/v1/delegate` and `/api/v1/use` wait for
 it; other routes do not). Before Link opens, only local work happens: for
 every transaction whose connection still exists, the permission intersect
 with the connection's current grant runs first (whatever its status; it
-never widens), and then:
+never widens). It stands in for the activation's own call, so it clips to
+the grant's scopes from just before that activation when the transaction
+recorded them (an update, reauth or reconnect), and to the current grant
+otherwise. Then:
 
 - no staged tokens left: settled. An active connection with no stored
   tokens at all becomes `needs_reauth`.
@@ -186,8 +194,9 @@ never widens), and then:
   the move finished and a refresh rotated the tokens since; settled.
 - a refresh token was staged and the stored one equals it: moved then
   refreshed, or never moved and the provider answered the re-consent with the
-  same refresh token, which cannot be told apart. The staged tokens are
-  written onto the connection marked expired, so the next use refreshes with
+  same refresh token, which cannot be told apart. The staged refresh token is
+  written onto the connection marked expired (keeping whichever access token
+  expires later), so the next use refreshes with
   that refresh token (the same credential either way) and gets tokens for
   the current consent; a refresh that fails with `invalid_grant` moves the
   connection to `needs_reauth` as usual. Settled; the connection stays
@@ -223,6 +232,16 @@ Known limits of the heal:
 - A leftover staged copy whose background deletion failed after its
   transaction was settled is never swept; it is an orphan that no connection
   reads again.
+- The heal's intersect with the pre-activation scopes strips a Permission
+  the app set for a newly added scope between a failed-hook response and the
+  restart (fails closed).
+- Two missed intersects in a row (a store failure during a narrowing, then a
+  store failure, not a crash, during the next widening) leave the stale
+  Permission usable until the next start.
+- `setAgentPermission` racing a widening activation can have its new scope
+  stripped (fails closed).
+- The in-memory quarantine dies with the process; the next start reverts
+  the connection as long as nothing rewrote its row.
 
 **Reconnecting an account.** When a connect flow lands on a provider account
 this client and subject already have connected, the confirmation screen shows

@@ -38,8 +38,14 @@
  * In every branch where the connection exists, the permission intersect
  * with its current grant (whatever its status) runs first, under the lock,
  * because the grant change was committed whatever happened to the tokens.
- * It never widens, so it is safe on a connection touched since. If it
- * fails, nothing else happens and the transaction stays unsettled.
+ * It stands in for the activation's own call, so its previous_scopes are
+ * the transaction's grant_scopes_at_confirm (the grant's scopes just before
+ * the commit, as commitActivation verified) when the transaction has them,
+ * else the grant's own scopes (a transaction that created its connection,
+ * or a version 1 row). It never widens. If it fails, nothing else happens
+ * and the transaction stays unsettled. Known cost, failing closed: a
+ * Permission the app set for a newly added scope between a failed-hook
+ * response and the restart is stripped of that scope.
  *
  * Per transaction:
  *   connection gone                 settle; delete any staged copy in
@@ -61,10 +67,13 @@
  *   a refresh token was staged and  moved then refreshed, or never moved and
  *   the stored one equals it        the provider re-issued the same refresh
  *                                   token on re-consent: indistinguishable.
- *                                   Write the staged set onto the connection
- *                                   with expires_at now (secrets.put), so the
- *                                   next use refreshes with that refresh
- *                                   token, the same credential in both
+ *                                   Write the staged refresh token onto the
+ *                                   connection with expires_at now
+ *                                   (secrets.put; the access token kept is
+ *                                   the one of the two with the later
+ *                                   expiry), so the next use refreshes with
+ *                                   that refresh token, the same credential
+ *                                   in both
  *                                   cases, and gets tokens for the current
  *                                   consent; a refresh that fails with
  *                                   invalid_grant moves the connection to
@@ -98,6 +107,11 @@
  *     before the heal decided (which needs an earlier start whose phase 1
  *     failed for that transaction, or a version 1 leftover), the stored
  *     tokens match no rule above either.
+ * Also: two missed intersects in a row (a store failure during a
+ * narrowing, then a store failure, not a crash, during the next widening)
+ * leave the stale Permission usable until the next start; and
+ * setAgentPermission racing a widening activation can have its new scope
+ * stripped (fails closed).
  */
 
 import type { Connection, LinkTokenSet, LinkTransaction } from '@credninja/protocol';
@@ -174,18 +188,31 @@ async function markReauth(ctx: LinkContext, connection: Connection, tx: LinkTran
 }
 
 /**
- * The permission intersect activation runs after its database commit,
- * re-applied with the connection's current grant (whatever its status;
- * previous_scopes = grant.scopes, the plain re-apply). Idempotent and never
- * widens, so it is safe on a connection touched since. Local only: no
- * network call. onActivate is not re-run: it overwrites the requesting
- * agent's permission, which could undo a later change by the app; a
- * missing agent permission fails closed instead.
+ * The permission intersect the activation runs after its database commit,
+ * re-run with the connection's current grant (whatever its status). It
+ * stands in for the activation's own call, so previous_scopes is that
+ * call's previous scopes when the transaction carries them:
+ * grant_scopes_at_confirm, which commitActivation verified equal to the
+ * grant's scopes before its commit. A transaction that created its
+ * connection, or a version 1 row, has none; then previous_scopes =
+ * grant.scopes, the plain re-apply. Never widens. Local only: no network
+ * call. onActivate is not re-run: it overwrites the requesting agent's
+ * permission, which could undo a later change by the app; a missing agent
+ * permission fails closed instead.
  */
-async function reconcile(ctx: LinkContext, connectionId: string): Promise<void> {
+async function reconcile(ctx: LinkContext, connectionId: string, tx: LinkTransaction): Promise<void> {
   const grant = await ctx.store.getGrantForConnection(connectionId);
   if (!grant) return;
-  await ctx.hooks.onGrantUpdated({ grant, previous_scopes: grant.scopes, reason: 'activate' });
+  const previous = Array.isArray(tx.grant_scopes_at_confirm) ? tx.grant_scopes_at_confirm : grant.scopes;
+  await ctx.hooks.onGrantUpdated({ grant, previous_scopes: previous, reason: 'activate' });
+}
+
+/** The access token with the later expiry (staged when either has none). */
+function laterAccessToken(stored: LinkTokenSet, staged: LinkTokenSet): string {
+  const storedMs = stored.expires_at ? Date.parse(stored.expires_at) : NaN;
+  const stagedMs = staged.expires_at ? Date.parse(staged.expires_at) : NaN;
+  if (Number.isNaN(storedMs) || Number.isNaN(stagedMs)) return staged.access_token;
+  return storedMs > stagedMs ? stored.access_token : staged.access_token;
 }
 
 /** Phase 2 for a settled transaction: delete the leftover staged copy (best effort). */
@@ -250,7 +277,7 @@ async function phaseOne(ctx: LinkContext, tx: LinkTransaction): Promise<PhaseOne
     // the permission intersect runs first in every branch (it never widens,
     // so it is safe on a connection touched since). If it fails, nothing
     // else happens and the transaction stays unsettled for the next start.
-    await reconcile(ctx, connection.id);
+    await reconcile(ctx, connection.id, tx);
 
     if (!staged) {
       const stored = await ctx.secrets.get(connection.id);
@@ -280,10 +307,12 @@ async function phaseOne(ctx: LinkContext, tx: LinkTransaction): Promise<PhaseOne
     if (stored && staged.refresh_token !== undefined && stored.refresh_token === staged.refresh_token) {
       // Moved then refreshed, or never moved and the provider answered the
       // re-consent with the same refresh token string: the two cannot be
-      // told apart. Write the staged set with expires_at now, so the next
-      // use refreshes with that refresh token (the same credential in both
-      // cases) and gets tokens for the current consent.
-      await ctx.secrets.put(connection.id, { ...staged, expires_at: nowIso() });
+      // told apart. Write the staged refresh token with expires_at now, so
+      // the next use refreshes with it (the same credential in both cases)
+      // and gets tokens for the current consent. The access token kept is
+      // the one with the later expiry, so a revocation before that refresh
+      // targets the newest token.
+      await ctx.secrets.put(connection.id, { ...staged, access_token: laterAccessToken(stored, staged), expires_at: nowIso() });
       await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() });
       return { outcome: 'reapplied', followUp: deleteOrphan(tx) };
     }
