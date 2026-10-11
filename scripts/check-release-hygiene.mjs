@@ -13,6 +13,8 @@ const npmPackagePaths = [
   'packages/create-cred-app/package.json',
   'packages/guard/package.json',
   'packages/integrations/vercel-ai/package.json',
+  'packages/link/package.json',
+  'packages/link-react/package.json',
   'packages/mcp/package.json',
   'packages/oauth/package.json',
   'packages/protocol/package.json',

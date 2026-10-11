@@ -64,6 +64,21 @@ export interface StorageBackend {
    * (does not silently create) when `id` doesn't exist.
    */
   updatePermission?(id: string, updates: PermissionRowUpdate): PermissionRow | Promise<PermissionRow>;
+  /**
+   * All permission rows on one connection, any agent (Cred Link). Returns
+   * an empty list when there are none; never throws for a missing row.
+   */
+  listPermissionsForConnection?(connectionId: string): PermissionRow[] | Promise<PermissionRow[]>;
+  /**
+   * Cred Link narrowing: set every permission row on `connectionId` to
+   * allowed_scopes ∩ `scopes`, comparing in canonical scope form
+   * (`intersectScopes` from @credninja/protocol), atomically in one
+   * transaction. Rows whose scope set changes are rewritten in canonical
+   * form with updated_at bumped; the others are left untouched. Returns the
+   * rows that changed, as stored after the write. Can only narrow, never
+   * widen. A row whose allowed_scopes cannot be parsed is narrowed to [].
+   */
+  intersectPermissionsForConnection?(connectionId: string, scopes: readonly string[]): PermissionRow[] | Promise<PermissionRow[]>;
   checkPermissionRateLimit?(
     permissionId: string,
     maxRequests: number,

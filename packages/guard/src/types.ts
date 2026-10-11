@@ -34,6 +34,43 @@ export interface GuardContext {
   signatureAgent?: string;
   /** Optional claims carried by a delegation receipt chain */
   receiptClaims?: string[];
+  /**
+   * Set only when the call names a Cred Link connection. Absent for every
+   * other call, and Link policies (clientGrantPolicy) SKIP when it is absent.
+   * Must be built by the server from verified request state: `agentId` is
+   * the authenticated principal's id, never a request body field.
+   */
+  link?: GuardLinkContext;
+}
+
+/**
+ * Cred Link call context (spec 4 call-time check, spec 6). Mirrors the
+ * fields of @credninja/protocol's LinkAccessCheckInput that the request
+ * itself carries; provider and requested scopes come from GuardContext.
+ */
+export interface GuardLinkContext {
+  /**
+   * The Link connection the call names (`conn_...`). This names a resource,
+   * not an identity, so it may come from the call; an unknown or malformed
+   * id is denied with `permission_required`.
+   */
+  connectionId: string;
+  /**
+   * The calling agent's verified principal id, in the same id space as
+   * Permission.agentId. null when the request carries no verified agent
+   * identity (always denied for Link calls). Never taken from body fields.
+   */
+  agentId: string | null;
+  /**
+   * Which route is being checked. Required, with no default: a 'use' path
+   * that omitted it would otherwise skip the grant id check. Anything other
+   * than 'delegate' or 'use' is denied.
+   */
+  operation: 'delegate' | 'use';
+  /** use only: the grant id carried by the brokered handle minted at delegate time. */
+  grantId?: string;
+  /** use only: informational, see LinkHooks.checkLinkAccess. */
+  grantVersion?: number;
 }
 
 /** Result of a single policy evaluation */
@@ -47,6 +84,12 @@ export interface PolicyResult {
   narrowedScopes?: string[];
   /** Duration of this policy evaluation in ms */
   durationMs?: number;
+  /**
+   * Optional typed machine code (for example a Cred Link code such as
+   * `permission_required` or `grant_revoked`). Set on DENY by policies that
+   * have one, so callers never need to parse `reason`.
+   */
+  code?: string;
 }
 
 /** A single policy — the core extension point */
@@ -91,8 +134,14 @@ export interface GuardAuditEvent {
     name: string;
     decision: 'ALLOW' | 'DENY' | 'SKIP';
     reason?: string;
+    /** The policy's typed code, when it set one. */
+    code?: string;
     durationMs: number;
   }>;
+  /** The denying policy's typed code, when it set one. */
+  code?: string;
+  /** Present when the call named a Cred Link connection. */
+  link?: GuardLinkContext;
   requestedScopes: string[];
   effectiveScopes: string[];
   targetUrl?: string;

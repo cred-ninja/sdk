@@ -31,6 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@credninja/protocol": "^2.0.0",
     "better-sqlite3": "^12.6.2"
   },
   "peerDependencies": {

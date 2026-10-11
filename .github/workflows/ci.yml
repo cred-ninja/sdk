@@ -80,6 +80,12 @@ jobs:
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
 
+      - name: Build @credninja/link
+        run: npm run build --workspace=packages/link
+
+      - name: Build @credninja/link-react
+        run: npm run build --workspace=packages/link-react
+
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth
 
@@ -94,6 +100,15 @@ jobs:
 
       - name: Build @credninja/sdk
         run: npm run build --workspace=packages/sdk
+
+      - name: Test @credninja/protocol
+        run: npm test --workspace=packages/protocol
+
+      - name: Test @credninja/link
+        run: npm test --workspace=packages/link
+
+      - name: Test @credninja/link-react
+        run: npm test --workspace=packages/link-react
 
       - name: Test @credninja/oauth
         run: npm test --workspace=packages/oauth
@@ -133,6 +148,12 @@ jobs:
 
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
+
+      - name: Build @credninja/link
+        run: npm run build --workspace=packages/link
+
+      - name: Build @credninja/link-react
+        run: npm run build --workspace=packages/link-react
 
       - name: Build @credninja/oauth
         run: npm run build --workspace=packages/oauth

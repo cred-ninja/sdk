@@ -538,7 +538,9 @@ describe('POST /api/v1/subdelegate', () => {
       .send({
         parent_receipt: 'irrelevant.receipt.value',
         agent_did: 'did:key:z6MkChild',
-        service: 'linear',
+        // Linear and HubSpot now have brokered-use paths (SERVICE_ALLOWLIST);
+        // Stripe still has none.
+        service: 'stripe',
       });
 
     expect(res.status).toBe(400);

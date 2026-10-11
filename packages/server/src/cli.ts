@@ -29,7 +29,7 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-import { loadConfig } from './config.js';
+import { loadConfig, resolveLinkStorePath } from './config.js';
 import { createServer } from './server.js';
 
 async function main() {
@@ -43,6 +43,7 @@ async function main() {
   for (const dataDir of new Set([
     path.dirname(path.resolve(config.vaultPath)),
     path.dirname(path.resolve(config.tofuPath)),
+    ...(config.linkEnabled ? [path.dirname(path.resolve(resolveLinkStorePath(config)))] : []),
   ])) {
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -82,6 +83,14 @@ async function main() {
     console.log(`  POST /api/v1/use                   — broker upstream API call (Bearer auth)`);
     console.log(`  DELETE /api/v1/connections/:provider — revoke connection (Bearer auth)`);
     console.log(`  DELETE /api/token/:provider        — revoke token (Bearer auth)`);
+    if (config.linkEnabled) {
+      const linkBase = config.linkBaseUrl ?? config.redirectBaseUri;
+      console.log(`  POST /link/v1/par                  - Cred Link pushed request (Link client auth)`);
+      console.log(`  GET  /link/v1/authorize            - Cred Link hosted flow`);
+      console.log(`  *    /link/v1/connections/...      - Cred Link connection API (Link client auth)`);
+      console.log(`  *    /admin/link/clients...        - Cred Link client registration (admin auth)`);
+      console.log(`  Register ${linkBase}/link/v1/callback/<provider> as a redirect URI at each provider.`);
+    }
     console.log('');
     if (config.host === '127.0.0.1' || config.host === 'localhost') {
       console.log('⚠️  Listening on localhost only. For remote access, set HOST=0.0.0.0');

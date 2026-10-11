@@ -57,7 +57,10 @@ rate-limit headroom.
 From `packages/server/src/server.ts`, current as of this plan's U9. Auth
 column: `None` (no auth), `Admin` (`requireAdminAuth`, admin token/session),
 `Bearer` (`requireAgentAuth`, agent Bearer token), `Bearer+VI` (Bearer plus
-`requireVerifiedIdentityRegardlessOfMode`, i.e. Web Bot Auth-verified).
+`requireVerifiedIdentityRegardlessOfMode`, i.e. Web Bot Auth-verified). `Link client` = Cred
+Link client authentication (`client_secret_basic` or `private_key_jwt`; every
+failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
+`/admin/link/*` routes exist only when `LINK_ENABLED` is set.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -92,6 +95,23 @@ column: `None` (no auth), `Admin` (`requireAdminAuth`, admin token/session),
 | POST | `/api/v1/agents/:agentId/revoke-all` | Bearer+VI | Revoke a stored agent record |
 | GET | `/api/v1/audit` | Bearer | Read audit events (`since` cursor param supported) |
 | GET | `/api/v1/audit/stream` | Bearer | SSE stream of `revoke` audit events for the connecting agent/user |
+| POST | `/admin/link/clients` | Admin | Register a Cred Link client (secret returned once) |
+| GET | `/admin/link/clients` | Admin | List Cred Link clients |
+| POST | `/admin/link/clients/:client_id/disable` | Admin | Disable a Cred Link client |
+| POST | `/admin/link/clients/:client_id/enable` | Admin | Re-enable a Cred Link client |
+| POST | `/link/v1/par` | Link client | Pushed request for a hosted connect, update or reauth flow; returns the widget `request_uri` |
+| GET | `/link/v1/authorize` | None (request_uri) | Hosted flow entry: renders the provider picker |
+| POST | `/link/v1/picker` | None (envelope + binding cookie) | Picker submission; redirects to the provider |
+| GET | `/link/v1/callback/:provider` | None (provider state envelope) | Provider callback; renders the scope confirmation |
+| POST | `/link/v1/confirm` | None (envelope + binding cookie) | Confirm, back or cancel; delivers the result |
+| GET | `/link/v1/connections` | Link client | List a subject's Link connections (`?subject=`) |
+| GET | `/link/v1/connections/:id` | Link client | Connection status, provider, subject and grant |
+| DELETE | `/link/v1/connections/:id` | Link client | Revoke at the provider, delete secrets, revoke the grant |
+| POST | `/link/v1/connections/:id/activate` | Link client | Activate with the one-time code and the session subject |
+| POST | `/link/v1/connections/:id/refresh` | Link client | Force a token refresh; returns status only |
+| POST | `/link/v1/connections/:id/reauth` | Link client | Reauth pushed request for this connection |
+| POST | `/link/v1/connections/:id/permissions` | Link client | Grant an agent scopes within the grant |
+| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker` only for Google when whole API families were removed, else `record`: family level, not read versus write) |
 
 `GET /api/v1/audit` and `GET /admin/audit` are separate routes: the former
 is scoped to the requesting agent's own `userId`; the latter is

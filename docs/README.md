@@ -8,6 +8,7 @@ This folder is the top-level documentation index for the open-source Cred repo.
 - [Cloudflare submission checklist](./cloudflare-submission-checklist.md)
 - [TOFU proof of possession](./tofu-proof-of-possession.md)
 - [Delegation constraint ceilings design note](./design/delegation-constraints.md)
+- [Cred Link design and Phase 1 status](./design/cred-link.md)
 
 ## Package Docs
 

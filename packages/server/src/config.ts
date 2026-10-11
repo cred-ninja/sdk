@@ -5,6 +5,7 @@
  * Call loadConfig() after dotenv (or process.env is populated).
  */
 
+import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
@@ -71,6 +72,49 @@ export interface ServerConfig {
   webBotAuthNonceStore?: 'memory' | 'sqlite';
   webBotAuthNoncePath?: string;
   webBotAuthAllowedOrigins?: string[];
+
+  // Cred Link (Phase 1, self-hosted). Off unless linkEnabled is true.
+  // Requires vaultStorage 'sqlite' (Link permissions live in the vault).
+  linkEnabled?: boolean;
+  // Link SQLite file. Defaults to link.sqlite next to the vault file.
+  linkStorePath?: string;
+  // Public base URL of the Link pages and the provider callback
+  // (<base>/link/v1/callback/<provider>). Defaults to redirectBaseUri.
+  linkBaseUrl?: string;
+  // Lifetime of Link brokered handles in seconds. Default 300, capped at 900.
+  linkHandleTtlSeconds?: number;
+}
+
+/** The Link store path the server uses for a config (explicit, else next to the vault). */
+export function resolveLinkStorePath(config: Pick<ServerConfig, 'linkStorePath' | 'vaultPath'>): string {
+  if (config.linkStorePath) return config.linkStorePath;
+  return path.join(path.dirname(config.vaultPath), 'link.sqlite');
+}
+
+/** Fail fast on a Link configuration the server cannot run (decision 1). */
+export function assertLinkConfig(config: ServerConfig): void {
+  if (!config.linkEnabled) return;
+  if (config.vaultStorage !== 'sqlite') {
+    throw new Error('LINK_ENABLED requires VAULT_STORAGE=sqlite: Link stores agent permissions in the vault, and the file backend has no permission storage.');
+  }
+  const base = config.linkBaseUrl ?? config.redirectBaseUri;
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new Error('LINK_BASE_URL must be an absolute http(s) URL');
+  }
+  // An origin only: the hosted pages and the provider callback live at
+  // fixed paths (/link/v1/...), and CSP form-action and cookie scoping
+  // assume the service owns the whole origin.
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.search || url.hash || url.username || url.password
+    || (url.pathname !== '/' && url.pathname !== '') || /[?#]/.test(base)) {
+    throw new Error('LINK_BASE_URL (or REDIRECT_BASE_URI when Link uses it) must be an http(s) origin without path, query, fragment or credentials');
+  }
+  if (config.linkHandleTtlSeconds !== undefined
+    && (!Number.isInteger(config.linkHandleTtlSeconds) || config.linkHandleTtlSeconds <= 0)) {
+    throw new Error('LINK_HANDLE_TTL_SECONDS must be a positive integer');
+  }
 }
 
 const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
@@ -157,6 +201,13 @@ export function loadConfig(): ServerConfig {
     }
   }
 
+  const linkEnabledRaw = (process.env.LINK_ENABLED ?? '').trim().toLowerCase();
+  const linkEnabled = linkEnabledRaw === 'true' || linkEnabledRaw === '1';
+  const linkStorePath = process.env.LINK_STORE_PATH || undefined;
+  const linkBaseUrl = process.env.LINK_BASE_URL || undefined;
+  const linkHandleTtlRaw = process.env.LINK_HANDLE_TTL_SECONDS;
+  const linkHandleTtlSeconds = linkHandleTtlRaw !== undefined ? parseInt(linkHandleTtlRaw, 10) : undefined;
+
   return {
     port,
     host,
@@ -175,5 +226,9 @@ export function loadConfig(): ServerConfig {
     webBotAuthNonceStore,
     webBotAuthNoncePath,
     webBotAuthAllowedOrigins,
+    linkEnabled,
+    ...(linkStorePath ? { linkStorePath } : {}),
+    ...(linkBaseUrl ? { linkBaseUrl } : {}),
+    ...(linkHandleTtlSeconds !== undefined ? { linkHandleTtlSeconds } : {}),
   };
 }
