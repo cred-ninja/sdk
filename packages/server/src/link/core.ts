@@ -29,7 +29,7 @@ import type {
 import type { SqliteLinkStore } from '@credninja/vault';
 import type { LinkClientAuthenticator } from './client-auth.js';
 import type { LinkProviderRuntime } from './providers.js';
-import type { ConnectionLocks, LinkTokenLoader } from './tokens.js';
+import type { ConnectionLocks, ConnectionQuarantine, LinkTokenLoader } from './tokens.js';
 import { alwaysRequiredScopes } from './scopes.js';
 import { newId, newSecret, nowIso, sha256Hex } from './util.js';
 
@@ -43,6 +43,8 @@ export interface LinkContext {
   tokens: LinkTokenLoader;
   /** Per-connection lock shared by every path that writes or deletes a connection's tokens. */
   locks: ConnectionLocks;
+  /** Connections whose failed activation could not record needs_reauth (see ConnectionQuarantine). */
+  quarantine: ConnectionQuarantine;
   clientAuth: LinkClientAuthenticator;
   vault: CredVault;
   /** Public Link base URL, no trailing slash. */
