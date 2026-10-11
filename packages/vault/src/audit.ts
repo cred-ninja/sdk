@@ -19,7 +19,8 @@ export interface AuditActor {
 }
 
 export interface AuditResource {
-  type: 'connection' | 'token' | 'agent' | 'permission' | 'rotation';
+  /** 'grant' is a Cred Link client grant (protocol LINK_AUDIT_RESOURCE_TYPE_GRANT). */
+  type: 'connection' | 'token' | 'agent' | 'permission' | 'rotation' | 'grant';
   id: string;
 }
 

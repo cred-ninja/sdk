@@ -23,6 +23,10 @@
 // Core client
 export { OAuthClient } from './client.js';
 
+// Typed token endpoint errors and the raw token response (additive)
+export { OAuthTokenError, isOAuthTokenError, getRawTokenResponse } from './errors.js';
+export type { OAuthTokenOperation } from './errors.js';
+
 // PKCE helpers
 export { generatePKCE, generateVerifier, computeChallenge } from './pkce.js';
 

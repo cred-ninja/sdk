@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { CredGuard } from '../guard.js';
-import type { GuardContext, GuardDecision } from '../types.js';
+import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
 
 /** Options for express middleware */
@@ -29,6 +29,16 @@ export interface ExpressMiddlewareOptions {
    * Default: same as requested (assume pre-validated).
    */
   extractConsentedScopes?: (req: Request) => string[];
+
+  /**
+   * Supply the Cred Link context for calls that name a Link connection,
+   * from verified request state only: `agentId` must be the authenticated
+   * principal's id (for example what the server's agent auth middleware
+   * verified), never a request body field. Return undefined for calls that
+   * name no Link connection. Default: no Link context (Link policies SKIP).
+   * A throw here fails closed with a 500, like any other guard error.
+   */
+  resolveLinkContext?: (req: Request) => GuardLinkContext | undefined | Promise<GuardLinkContext | undefined>;
 
   /**
    * Called when guard allows the request.
@@ -57,6 +67,7 @@ export function createExpressMiddleware(
     extractConsentedScopes = defaultExtractConsentedScopes,
     onAllow = defaultOnAllow,
     onDeny = defaultOnDeny,
+    resolveLinkContext,
   } = options;
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -81,6 +92,7 @@ export function createExpressMiddleware(
       const consentedScopes = extractConsentedScopes(req) || requestedScopes;
 
       const principal = (req as any).agentPrincipal;
+      const link = resolveLinkContext ? await resolveLinkContext(req) : undefined;
       const ctx: GuardContext = {
         provider,
         agentTokenHash,
@@ -99,6 +111,7 @@ export function createExpressMiddleware(
           : (typeof req.body?.key_id === 'string' ? req.body.key_id : undefined),
         signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
         receiptClaims: resolveReceiptClaims(req.body, principal),
+        ...(link ? { link } : {}),
       };
 
       // Evaluate policies
@@ -166,10 +179,12 @@ function defaultOnAllow(
 }
 
 function defaultOnDeny(req: Request, res: Response, decision: GuardDecision): void {
+  const code = decision.deniedBy?.code;
   res.status(403).json({
     error: 'Request denied by policy',
     policy: decision.deniedBy?.policy,
     reason: decision.deniedBy?.reason,
+    ...(typeof code === 'string' ? { code } : {}),
     requestId: (req as any).id,
   });
 }

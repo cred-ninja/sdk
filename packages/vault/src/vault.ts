@@ -22,6 +22,9 @@ import type {
 import type { AuditEvent, AuditFilter } from './audit.js';
 import { RotationEngine } from './rotation.js';
 import { PermissionStore, type CreatePermissionInput } from './permissions.js';
+import { isReservedLinkVaultUserId, ReservedVaultUserIdError } from './link/vault-ids.js';
+import { LINK_VAULT_ACCESS, type LinkVaultAccess } from './link/vault-access.js';
+import type { LinkPermissionPort } from '@credninja/protocol';
 
 /**
  * CredVault — local-first encrypted token vault.
@@ -32,7 +35,26 @@ import { PermissionStore, type CreatePermissionInput } from './permissions.js';
  * Storage backends:
  *   - 'sqlite': uses better-sqlite3 for production use
  *   - 'file':   encrypted JSON file, zero additional deps (ideal for CLI tools)
+ *
+ * User ids starting with `link:` or `link-staged:` are reserved for Cred
+ * Link. Every public method that takes a userId (store, get, getStored,
+ * delete, list, getRotationByConnection) throws ReservedVaultUserIdError
+ * for them; only this package's VaultLinkSecretStore holds the capability
+ * to reach those entries.
  */
+/**
+ * Every CredVault the constructor has built. Lets package-internal code tell
+ * a genuine instance from a Proxy or look-alike (a Proxy around a real vault
+ * still passes instanceof, but it is a different object and is not in here).
+ * Not exported from the package entry point.
+ */
+const genuineVaults = new WeakSet<object>();
+
+/** True only for objects built by the CredVault constructor (subclasses included), never a Proxy. */
+export function isGenuineCredVault(value: unknown): value is CredVault {
+  return typeof value === 'object' && value !== null && value instanceof CredVault && genuineVaults.has(value);
+}
+
 export class CredVault {
   private readonly backend: StorageBackend;
   // Passphrase held only in this field — never serialized or logged
@@ -44,6 +66,7 @@ export class CredVault {
   private permissionStore: PermissionStore | null = null;
 
   constructor(options: VaultOptions) {
+    genuineVaults.add(this);
     this.passphrase = options.passphrase;
     // Salt stored adjacent to the vault data file
     this.saltPath = options.path + '.salt';
@@ -110,7 +133,23 @@ export class CredVault {
    * Access tokens and refresh tokens are AES-256-GCM encrypted before storage.
    * Neither the passphrase nor any plaintext token is ever written to disk.
    */
-  async store(input: StoreInput): Promise<void> {
+  async store(input: StoreInput, access?: LinkVaultAccess): Promise<void> {
+    this.assertUserIdAllowed('store', input.userId, access);
+    await this.writeEntry(input);
+  }
+
+  /**
+   * Refuses reserved Cred Link user ids (`link:`, `link-staged:`) unless the
+   * caller holds the package-internal Link capability. Every public method
+   * that takes a userId calls this first.
+   */
+  private assertUserIdAllowed(method: string, userId: string, access: LinkVaultAccess | undefined): void {
+    if (isReservedLinkVaultUserId(userId) && access !== LINK_VAULT_ACCESS) {
+      throw new ReservedVaultUserIdError(method);
+    }
+  }
+
+  private async writeEntry(input: StoreInput): Promise<void> {
     const key = await this.ensureReady();
     const now = new Date().toISOString();
 
@@ -146,7 +185,8 @@ export class CredVault {
    *
    * Returns null if no entry is found for this provider + userId combination.
    */
-  async get(input: GetInput): Promise<VaultEntry | null> {
+  async get(input: GetInput, access?: LinkVaultAccess): Promise<VaultEntry | null> {
+    this.assertUserIdAllowed('get', input.userId, access);
     await this.ensureInit();
     let row = await this.backend.get(input.provider, input.userId);
     if (!row && input.adapter && input.clientId && input.clientSecret && this.backend.getForRefresh) {
@@ -192,7 +232,7 @@ export class CredVault {
         const newScopes = refreshed.scopes ?? scopes;
 
         // Persist refreshed tokens (encrypted)
-        await this.store({
+        await this.writeEntry({
           provider: input.provider,
           userId: input.userId,
           accessToken: refreshed.accessToken,
@@ -235,10 +275,56 @@ export class CredVault {
   }
 
   /**
+   * Retrieve the stored, decrypted entry for a provider + user exactly as
+   * it is at rest: expired entries are returned too, and no refresh is ever
+   * attempted. Returns null when no entry exists.
+   *
+   * Use this when the caller manages refresh itself (Cred Link's token
+   * holder) or needs an expired entry's refresh token, for example to revoke
+   * it at the provider. get() keeps its existing behavior.
+   *
+   * Reads through the backend's getForRefresh() (both built-in backends have
+   * it). A custom backend without getForRefresh() falls back to get(), which
+   * may hide expired rows.
+   */
+  async getStored(input: Pick<GetInput, 'provider' | 'userId'>, access?: LinkVaultAccess): Promise<VaultEntry | null> {
+    this.assertUserIdAllowed('getStored', input.userId, access);
+    await this.ensureInit();
+    const row = this.backend.getForRefresh
+      ? await this.backend.getForRefresh(input.provider, input.userId)
+      : await this.backend.get(input.provider, input.userId);
+    if (!row) return null;
+    const key = this.ensureKey();
+
+    let refreshToken: string | undefined;
+    if (row.refreshTokenEnc && row.refreshTokenIv && row.refreshTokenTag) {
+      refreshToken = this.decryptField(
+        { encrypted: row.refreshTokenEnc, iv: row.refreshTokenIv, tag: row.refreshTokenTag },
+        key
+      );
+    }
+
+    return {
+      provider: row.provider,
+      userId: row.userId,
+      accessToken: this.decryptField(
+        { encrypted: row.accessTokenEnc, iv: row.accessTokenIv, tag: row.accessTokenTag },
+        key
+      ),
+      refreshToken,
+      expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
+      scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+    };
+  }
+
+  /**
    * Delete credentials for a provider + user.
    * Idempotent — safe to call even if no entry exists.
    */
-  async delete(input: DeleteInput): Promise<void> {
+  async delete(input: DeleteInput, access?: LinkVaultAccess): Promise<void> {
+    this.assertUserIdAllowed('delete', input.userId, access);
     await this.ensureInit();
     await this.backend.delete(input.provider, input.userId);
   }
@@ -247,7 +333,8 @@ export class CredVault {
    * List all connections for a userId across all providers.
    * Returns fully decrypted entries.
    */
-  async list(input: ListInput): Promise<VaultEntry[]> {
+  async list(input: ListInput, access?: LinkVaultAccess): Promise<VaultEntry[]> {
+    this.assertUserIdAllowed('list', input.userId, access);
     await this.ensureInit();
     const rows = await this.backend.list(input.userId);
     const key = this.ensureKey();
@@ -387,6 +474,68 @@ export class CredVault {
     return this.getPermissionStore().checkRateLimit(permissionId, maxRequests, windowMs, now);
   }
 
+  /** Cred Link: all permissions on one connection, any agent. */
+  async listPermissionsForConnection(connectionId: string): Promise<Permission[]> {
+    await this.ensureInit();
+    return this.getPermissionStore().listForConnection(connectionId);
+  }
+
+  /**
+   * Cred Link: atomically set every permission on the connection to
+   * allowedScopes ∩ scopes (canonical comparison). Returns the permissions
+   * that changed. Never widens.
+   */
+  async intersectPermissionsForConnection(connectionId: string, scopes: readonly string[]): Promise<Permission[]> {
+    await this.ensureInit();
+    return this.getPermissionStore().intersectForConnection(connectionId, scopes);
+  }
+
+  /**
+   * The vault's permission storage as Cred Link's `LinkPermissionPort`
+   * (from @credninja/protocol), for `createLinkHooks` in @credninja/guard.
+   * Every call ensures the vault is initialized first.
+   *
+   * Throws synchronously when the storage backend has no permission
+   * support (the file backend), so a server that enables Link on such a
+   * vault fails at startup instead of denying every Link call at runtime.
+   */
+  getLinkPermissionPort(): LinkPermissionPort {
+    const store = this.getPermissionStore();
+    if (!store.supportsLinkPermissions()) {
+      throw new Error('Link permission storage not supported by this backend');
+    }
+    return {
+      get: async (agentId, connectionId) => {
+        await this.ensureInit();
+        return store.get(agentId, connectionId);
+      },
+      list: async (agentId) => {
+        await this.ensureInit();
+        return store.list(agentId);
+      },
+      create: async (input) => {
+        await this.ensureInit();
+        return store.create(input);
+      },
+      update: async (id, input) => {
+        await this.ensureInit();
+        return store.update(id, input);
+      },
+      revoke: async (permissionId) => {
+        await this.ensureInit();
+        await store.revoke(permissionId);
+      },
+      listForConnection: async (connectionId) => {
+        await this.ensureInit();
+        return store.listForConnection(connectionId);
+      },
+      intersectForConnection: async (connectionId, scopes) => {
+        await this.ensureInit();
+        return store.intersectForConnection(connectionId, scopes);
+      },
+    };
+  }
+
   // ── Audit event methods ──────────────────────────────────────────────────
 
   /**
@@ -446,7 +595,8 @@ export class CredVault {
   /**
    * Get current rotation state for a connection by provider + userId.
    */
-  async getRotationByConnection(provider: string, userId: string): Promise<Rotation | null> {
+  async getRotationByConnection(provider: string, userId: string, access?: LinkVaultAccess): Promise<Rotation | null> {
+    this.assertUserIdAllowed('getRotationByConnection', userId, access);
     await this.ensureInit();
     if (!this.backend.getRotationByConnectionId) return null;
     const connectionId = `${provider}_${userId}`;

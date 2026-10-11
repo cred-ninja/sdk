@@ -6,13 +6,15 @@
 
 import { createHash } from 'node:crypto';
 import { CredGuard } from '../guard.js';
-import type { GuardContext, GuardDecision } from '../types.js';
+import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
 
 /** MCP tool result structure */
 export interface CallToolResult {
   content: Array<{ type: string; text?: string; [key: string]: unknown }>;
   isError?: boolean;
+  /** Machine-readable result (MCP structuredContent). The default deny sets it when the denying policy has a code. */
+  structuredContent?: Record<string, unknown>;
 }
 
 /** MCP context passed to tool handlers */
@@ -38,6 +40,17 @@ export interface CredToolInput {
 
 /** Options for MCP tool wrapper */
 export interface McpWrapperOptions {
+  /**
+   * Supply the Cred Link context for calls that name a Link connection.
+   * Build it from the MCP server's verified context only (`agentId` is the
+   * authenticated principal), never from tool input. Default: none, so Link
+   * policies SKIP.
+   */
+  resolveLinkContext?: (
+    input: CredToolInput,
+    ctx: McpToolContext,
+  ) => GuardLinkContext | undefined | Promise<GuardLinkContext | undefined>;
+
   /**
    * Called when guard allows the request.
    * Default: calls the wrapped handler.
@@ -69,7 +82,7 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
   handler: (input: TInput, ctx: McpToolContext) => Promise<CallToolResult>,
   options: McpWrapperOptions = {}
 ): (input: TInput, ctx: McpToolContext) => Promise<CallToolResult> {
-  const { onDeny = defaultOnDeny } = options;
+  const { onDeny = defaultOnDeny, resolveLinkContext } = options;
 
   return async (input: TInput, ctx: McpToolContext): Promise<CallToolResult> => {
     try {
@@ -82,6 +95,8 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
           isError: true,
         };
       }
+
+      const link = resolveLinkContext ? await resolveLinkContext(input, ctx) : undefined;
 
       // Build guard context
       const guardCtx: GuardContext = {
@@ -100,6 +115,7 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
         webBotAuthKeyId: getStringMetadata(input.metadata, 'webBotAuthKeyId'),
         signatureAgent: getStringMetadata(input.metadata, 'signatureAgent'),
         receiptClaims: getStringArrayMetadata(input.metadata, 'receiptClaims'),
+        ...(link ? { link } : {}),
       };
 
       // Evaluate policies
@@ -138,13 +154,31 @@ function defaultOnDeny(
   decision: GuardDecision,
   _guardCtx: GuardContext
 ): CallToolResult {
+  const code = decision.deniedBy?.code;
+  if (typeof code !== 'string') {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Request denied by policy: ${decision.deniedBy?.policy}. Reason: ${decision.deniedBy?.reason}`,
+        },
+      ],
+      isError: true,
+    };
+  }
   return {
     content: [
       {
         type: 'text',
-        text: `Request denied by policy: ${decision.deniedBy?.policy}. Reason: ${decision.deniedBy?.reason}`,
+        text: `Request denied by policy: ${decision.deniedBy?.policy}. Reason: ${decision.deniedBy?.reason}. Code: ${code}`,
       },
     ],
+    structuredContent: {
+      error: 'policy_denied',
+      code,
+      policy: decision.deniedBy?.policy,
+      reason: decision.deniedBy?.reason,
+    },
     isError: true,
   };
 }

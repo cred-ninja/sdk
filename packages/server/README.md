@@ -67,6 +67,23 @@ npm run dev
 | POST | `/api/v1/agents/:agentId/revoke-all` | Bearer + verified identity | Revoke a stored agent record — see [Security](#security) |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
+| POST | `/admin/link/clients` | Admin | Register a Cred Link client, see [Cred Link](#cred-link-phase-1) |
+| GET | `/admin/link/clients` | Admin | List Cred Link clients |
+| POST | `/admin/link/clients/:client_id/disable` | Admin | Disable a Cred Link client (its connections stop working) |
+| POST | `/admin/link/clients/:client_id/enable` | Admin | Re-enable a Cred Link client |
+| POST | `/link/v1/par` | Link client | Pushed request (connect, update, reauth); returns the widget `request_uri` |
+| GET | `/link/v1/authorize` | None (request_uri) | Hosted flow entry, renders the provider picker |
+| POST | `/link/v1/picker` | None (envelope + cookie) | Picker submission, redirects to the provider |
+| GET | `/link/v1/callback/:provider` | None (provider state) | Provider callback, renders the scope confirmation |
+| POST | `/link/v1/confirm` | None (envelope + cookie) | Confirm, back or cancel; delivers the result |
+| GET | `/link/v1/connections?subject=` | Link client | List a subject's connections |
+| GET | `/link/v1/connections/:id` | Link client | Connection status, provider, subject, grant |
+| DELETE | `/link/v1/connections/:id` | Link client | Revoke the grant and delete secrets; revoke at the provider when safe (`provider_revoked`) |
+| POST | `/link/v1/connections/:id/activate` | Link client | `{ code, subject }`: pending to active (or commit a staged update) |
+| POST | `/link/v1/connections/:id/refresh` | Link client | Force a refresh, status only |
+| POST | `/link/v1/connections/:id/reauth` | Link client | `{ subject }`: reauth pushed request |
+| POST | `/link/v1/connections/:id/permissions` | Link client | `{ agent_id, scopes }`: grant an agent scopes within the grant |
+| POST | `/link/v1/connections/:id/narrow` | Link client | `{ subject, scopes }`: narrow the grant to a subset, no provider round trip |
 
 > **Sub-delegation is broker-only.** Scope attenuation on a raw provider access token can't be
 > enforced once it has left the server, so every response from `/api/v1/subdelegate`
@@ -83,6 +100,234 @@ npm run dev
 > lineage and degrade to a parent-only check for that hop until they age out under
 > `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
 > `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
+
+## Cred Link (Phase 1)
+
+Cred Link is the hosted account-connection flow behind `@credninja/link` and
+`@credninja/link-react`. With `LINK_ENABLED=true` this server serves the
+`/link/v1/*` routes itself (self-hosted, SQLite). Raw provider credentials
+never reach the developer's code: the developer receives a `connection_id`,
+and agents receive brokered handles.
+
+**Setup**
+
+1. Set `LINK_ENABLED=true` and `VAULT_STORAGE=sqlite`. Optionally set
+   `LINK_STORE_PATH` and `LINK_BASE_URL`.
+2. At every provider you offer through Link, register
+   `<LINK_BASE_URL>/link/v1/callback/<provider>` as an OAuth redirect URI
+   (for example `https://cred.example.com/link/v1/callback/google`). Link uses
+   the same `<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` as the admin connect UI.
+3. Register each developer app as a Link client (admin auth):
+
+   ```bash
+   curl -X POST https://cred.example.com/admin/link/clients \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+     -d '{"name":"Acme","redirect_uris":["https://app.example.com/cred/return"],"origins":["https://app.example.com"]}'
+   ```
+
+   The response carries `client_secret` once (only its SHA-256 is stored).
+   `name` is required: it is the app name the consent pages show (unless the
+   registered `theme.appName` overrides it), and the logo comes only from the
+   registered `theme.logoUrl`; the browser can change only cosmetic theme
+   fields. RSA client keys must be at least 2048 bits.
+   For `private_key_jwt`, send `"token_endpoint_auth_method":"private_key_jwt"`
+   and `"jwks":{"keys":[...]}` (public RSA, EC or Ed25519 keys). Redirect URIs
+   and origins must be https (plain http only on loopback); redirect URIs may
+   not carry a fragment or any Link result parameter (`cred_link`, `code`,
+   `state`, ...). `"allow_raw_tokens": true` is the operator's per-client
+   escape hatch for raw provider tokens (see below).
+
+**Client authentication.** `client_secret_basic` (`Authorization: Basic`,
+RFC 6749 2.3.1) or `private_key_jwt` (RFC 7523): the assertion travels as
+`Authorization: Bearer <jwt>` on every route, or as `client_assertion_type` +
+`client_assertion` body fields on routes with a body. `iss` = `sub` =
+client_id, `aud` = `REDIRECT_BASE_URI` (or `LINK_BASE_URL`), `exp - iat` at
+most 300 seconds, `jti` single use. Every client authentication failure, and
+every lookup of an unknown or foreign connection, answers exactly
+`401 {"error":"access_denied"}` with a `Cred-Request-Id` header.
+
+**Flow.** The backend pushes `POST /link/v1/par` and hands the returned
+`request_uri` to the widget; the user picks a provider and permissions,
+consents at the provider, confirms what the provider actually granted (and
+may narrow it), and the widget reports `connection_id` and a one-time `code`.
+The connection stays `pending` until the backend calls
+`POST /link/v1/connections/:id/activate` with that code and the `subject` of
+its own current session; any mismatch revokes it. Transactions expire after
+10 minutes; anything unactivated is cleaned up by a background sweep (and
+revoked at the provider under the revocation rule below). Activation commits
+the database first and moves the tokens second; if the token move fails the
+connection is set to `needs_reauth`, never left active without tokens.
+
+**Startup heal.** If the process dies between the database commit and the
+token move, the next start resolves every such activation before Link serves
+any request (the `/link/v1/*` routes and the Link branches of
+`/api/v1/delegate` and `/api/v1/use` wait for it; other routes do not). Only
+state changes happen before Link opens: a finished move is marked settled, an
+unfinished one leaves the connection `needs_reauth` (`reauth_required`) and
+keeps its old tokens for an update or reauth. Provider revocation of the
+discarded staged tokens (under the revocation rule below, bounded by the
+provider call timeout) and their deletion run afterwards in the background;
+the transaction stays unsettled until that is done, so a restart finds it
+again. A transaction is acted on only if its connection is still exactly as
+that activation left it (still active, and not written since: its
+`updated_at` equals the activation time). If anything happened to the
+connection afterwards (a later reauth, update or narrowing, the failure
+handling of the activation itself, or the heal's own earlier pass), the
+transaction is stale: its staged copy is deleted locally, nothing is revoked
+at the provider and the connection is left alone. A consequence: if the
+process dies after the heal marked a connection `needs_reauth` but before
+the background revocation ran, the next start only deletes the staged tokens
+locally. An activation whose token move finished is settled before Link
+opens even when its leftover staged copy is still there, also when a refresh
+has rotated the tokens since (the connection was created by that activation,
+or still holds the refresh token it staged); only removing the leftover copy
+runs afterwards. Known limit, which fails closed: an update or reauth on a
+provider that rotates refresh tokens, a crash inside the token move, and a
+refresh before the next start leave tokens the heal cannot attribute, so
+that connection ends `needs_reauth` although its tokens work, and the user
+reconnects. A transaction that cannot be resolved is logged and retried on the
+next start; startup never fails because of it. The first start after
+upgrading from a version 1 Link database re-checks every earlier activation
+once (that version did not record whether the token move finished); healthy
+ones are only marked settled, and no provider is called before Link opens. If the crash also skipped the
+seeding of the pushed `agent_id`'s Permission, that agent is refused until the
+app adds it with `POST /link/v1/connections/:id/permissions`.
+
+**Reconnecting an account.** When a connect flow lands on a provider account
+this client and subject already have connected, the confirmation screen shows
+what the app can do today and what it keeps, gains and loses on confirm.
+Confirming replaces the grant with exactly the confirmed permissions; anything
+unchecked or not offered in this flow is removed. The form carries which grant
+and which scopes the page was rendered against (or that it showed none); if
+the account's grant is different when the user confirms (another flow went
+live, or its scopes changed), the page is shown again with the current
+picture instead of committing. What the page showed is recorded with the
+confirmation, and activation compares it with the grant's scopes at that
+moment: an update, reauth or reconnect whose grant scopes changed after the
+screen (a narrowing, a provider scope reduction, or another activation) is
+refused, the client gets the opaque failure, the staged tokens are discarded
+under the revocation rule, and the newer grant stands. A status change alone
+does not refuse it: a reauth confirmed while the old token was still
+working activates normally after that token died and the connection went to
+`needs_reauth`.
+
+**Narrowing without a round trip.** `POST /link/v1/connections/:id/narrow`
+with `{ "subject", "scopes" }` replaces the grant with a subset of itself
+(canonical scope names, non-empty, keeping every scope the provider always
+grants). It answers `{ connection, changed, removed_scopes, enforcement }`;
+repeating it with the same scopes answers `changed: false` and changes
+nothing (it re-runs the Permission intersect). A grant that changed
+underneath the request answers `503 temporarily_unavailable`; retry it.
+
+What narrowing enforces, exactly. Narrowing never contacts the provider and
+never changes the stored token, which keeps every scope the provider
+granted.
+
+- Always: the grant and every agent Permission shrink, and agents can no
+  longer request or be issued the removed scopes (`/api/v1/delegate` refuses
+  them, and new handles never carry them). Raw tokens are no longer issued
+  for the connection (see below).
+- Google: the broker tells Google API families apart (Gmail, Calendar,
+  Drive, Sheets, Docs, Admin, Contacts), not single scopes, and not read
+  versus write. Any remaining scope of a family unlocks every URL of that
+  family. When every removed scope belongs to a family that no remaining
+  scope unlocks, the response says `enforcement: "broker"` and a brokered
+  call into that family is refused before it reaches Google, also through a
+  handle issued before the narrowing. When a removed scope shares a family
+  with a remaining one, the response says `enforcement: "record"` and the
+  call still reaches Google: gmail.readonly and gmail.send, calendar.readonly
+  and calendar.events, drive.file and drive, spreadsheets.readonly and
+  spreadsheets, documents.readonly and documents, contacts.readonly and
+  contacts are not separated. Narrowing `[gmail.readonly, gmail.send]` to
+  `[gmail.readonly]` therefore still lets a handle send mail.
+- GitHub, Slack, Notion, Linear, HubSpot and Salesforce (always
+  `enforcement: "record"`): the broker cannot tell which scope a URL needs,
+  so a still-valid handle can reach any allowlisted URL of the provider,
+  including ones that need a removed scope, because the provider token is
+  unchanged.
+
+To really remove access at the provider, run an update or reauth flow that
+asks the provider for fewer scopes, or delete the connection.
+
+**Popup fallback.** In popup mode the result page posts the result to the
+opener at the registered origin and waits up to 2 seconds for the widget's
+`cred.link.ack`. Without an opener, or without an ack, it falls back to
+redirect delivery: it navigates to the registered `redirect_uri` with the
+usual result parameters plus `cred_link_via=popup` and `cred_link_flow` (the
+SHA-256 hex of the flow's `request_uri`, which binds the result to the widget
+that started the flow); read them with `parseLinkRedirectResult`,
+`parseLinkRedirectVia` and `parseLinkRedirectFlowId` from
+`@credninja/protocol`. The embedded mode's top-level window behaves the same
+way, with the iframe as its opener. One case delivers twice: an opener page
+that is blocked (busy, or throttled in the background) for longer than the
+ack timeout still receives the postMessage after the popup already fell back
+to the redirect. The activation code is single use, so one of the two
+activation attempts fails; the app should treat that failure as harmless when
+the connection is already active.
+
+A provider whose consent page cut the opener is remembered in the browser
+(`localStorage`, 30 days), and the next popup for it hands the flow to the
+top window in redirect delivery. The memory is written only by a window that
+demonstrably started the flow with an opener and lost it: the picker reports
+whether the window had an opener when the user submitted, the server records
+that in a short-lived, HttpOnly cookie bound to the transaction, and the
+result page writes the memory only when that cookie matches. A popup-mode
+link opened directly in a tab never writes it, and neither does the top
+window that completes a handoff (so an entry expires after 30 days). Only
+the popup picker page allows `connect-src 'self'` (for that handoff); every
+other Link page sends `connect-src 'none'`. Link pages send no
+Cross-Origin-Opener-Policy.
+
+**Agents and enforcement.** Link is deny-by-default per agent: an agent can
+use a connection only through a Permission, seeded on activation from the
+pushed `agent_id` or added with `POST /link/v1/connections/:id/permissions`.
+`POST /api/v1/delegate` with `connection_id` runs the Link check before any
+vault access whether or not a Guard is configured, returns a brokered handle
+by default (300 seconds, see `LINK_HANDLE_TTL_SECONDS`), and
+`POST /api/v1/use` re-runs the check on every call, so a
+revoked or `needs_reauth` connection is refused at once with a typed code
+(`grant_revoked`, `reauth_required`, `permission_required`,
+`insufficient_scope`, ...); for a narrowed one see "What narrowing enforces"
+above. Raw tokens are issued only when the client has `allow_raw_tokens`, the
+provider's tokens expire and refresh (never Slack, Notion or GitHub OAuth App
+tokens), and the delegated scopes cover every scope the provider granted for
+the connection (a raw provider token carries all of them; a narrower grant,
+Permission or request gets a handle only). The check counts only scopes in
+Link's catalog, so a raw token can still carry provider scopes no grant can
+express (for example the app-level scopes HubSpot requires). Each raw
+issuance has its own audit event.
+
+The agent id for Link checks comes from verified request state only: a custom
+`agentRequestVerifier`'s `principalId`; otherwise a signature-verified TOFU
+proof or Web Bot Auth key of a local TOFU agent (`tofu:<agentId>`); otherwise
+the fixed id `server-agent`. A single-agent deployment that uses the shared
+`AGENT_TOKEN` passes `"agent_id": "server-agent"` in PAR.
+
+**Provider notes.** Slack connects as a bot install (bot token, account
+`<team id>/<bot user id>`). Notion has no OAuth scopes: its `content`
+permission is enforced by Cred. Salesforce pins every brokered call to the
+instance host captured at connect time. Brokered calls can never reach
+provider revocation endpoints (Linear is limited to its GraphQL endpoint,
+HubSpot to its data API paths, Slack `auth.revoke` and `apps.uninstall` are
+refused).
+
+**Provider revocation.** Every Link client on this server shares the
+server's provider OAuth app, and at Google, Salesforce and Slack one
+revocation ends the whole authorization for that account. Link therefore
+revokes at the provider (after cancel, back, failure, expiry, a superseded
+activation, or `DELETE /link/v1/connections/:id`) only when no other
+non-revoked Link connection on this server, for any client or subject, uses
+the same provider account and no other open flow holds staged tokens for it;
+otherwise it deletes only its local tokens, and `DELETE` answers
+`"provider_revoked": false`. **Limitation:** connections made through the
+legacy admin `/connect` UI carry no provider account id, so Link cannot see
+them; revoking a Link connection can still end a legacy connection on the
+same account. Do not mix legacy and Link connections for one account if
+that matters.
+
+**Reserved user ids.** Link tokens live in the vault under the user ids
+`link:<connection_id>` and `link-staged:<tid>`. Every legacy route that takes
+a `user_id` rejects those ids with `400 invalid_user_id`.
 
 ## Configuration
 
@@ -111,6 +356,10 @@ All configuration via environment variables (or `.env` file):
 | `SLACK_CLIENT_ID` | No | Slack OAuth client ID |
 | `SLACK_CLIENT_SECRET` | No | Slack OAuth client secret |
 | ... | No | Same pattern for NOTION, SALESFORCE, LINEAR, HUBSPOT |
+| `LINK_ENABLED` | No | `true` to enable Cred Link. Requires `VAULT_STORAGE=sqlite`; startup fails otherwise |
+| `LINK_STORE_PATH` | No | Link SQLite file (default: `link.sqlite` next to `VAULT_PATH`) |
+| `LINK_BASE_URL` | No | Public origin of the Link pages and provider callback, no path (default: `REDIRECT_BASE_URI`) |
+| `LINK_HANDLE_TTL_SECONDS` | No | Lifetime of Link brokered handles (default `300`, capped at `900`) |
 
 `ADMIN_TOKEN` and `AGENT_TOKEN` are required when you use `loadConfig()` from environment variables. For embedded/programmatic agent auth, you can instead provide a custom `agentRequestVerifier` function in `createServer(config)` and omit the static agent token entirely. Admin routes still require `adminToken`.
 

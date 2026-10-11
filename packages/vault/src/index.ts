@@ -69,3 +69,26 @@ export type {
 } from './types.js';
 export { parseStrictJson, StrictJsonError } from './strict-json.js';
 export type { StrictJsonErrorCode } from './strict-json.js';
+
+// Cred Link Phase 1 storage (LinkStore on SQLite, LinkSecretStore over CredVault).
+export {
+  SqliteLinkStore,
+  LinkStoreError,
+  VaultLinkSecretStore,
+  createLinkStorage,
+  LINK_VAULT_USER_ID_PREFIX,
+  LINK_STAGED_VAULT_USER_ID_PREFIX,
+  linkVaultUserId,
+  linkStagedVaultUserId,
+  isReservedLinkVaultUserId,
+  ReservedVaultUserIdError,
+  LINK_SCHEMA_VERSION,
+} from './link/index.js';
+export type {
+  SqliteLinkStoreOptions,
+  LinkStoreErrorCode,
+  VaultLinkSecretStoreOptions,
+  LinkSecretStoreLookup,
+  CreateLinkStorageOptions,
+  LinkStorage,
+} from './link/index.js';

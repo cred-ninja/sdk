@@ -29,12 +29,16 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, parseStrictJson, StrictJsonError } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError } from '@credninja/vault';
 import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
+import { assertLinkConfig, resolveLinkStorePath } from './config.js';
+import { createLinkService } from './link/index.js';
+import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
+import type { LinkHandleBinding, LinkService } from './link/index.js';
 import { createExpressMiddleware, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
@@ -45,6 +49,8 @@ import {
   CRED_PROTOCOL_VERSION_MINIMUM,
   CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
   isCredProtocolVersionSupported,
+  isConnectionId,
+  isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
 
@@ -66,6 +72,12 @@ interface BrokeredDelegation {
   scopes: string[];
   expiresAt: number;
   createdAt: number;
+  /**
+   * Set for handles minted for a Cred Link connection. Such handles hold no
+   * provider token (accessToken is ''): /api/v1/use re-runs the Link check
+   * and loads the current token at call time.
+   */
+  link?: LinkHandleBinding;
 }
 
 interface WebBotAuthDirectoryResponse {
@@ -141,42 +153,31 @@ const SERVICE_ALLOWLIST: Record<string, string[]> = {
   slack: ['https://slack.com/api/'],
   notion: ['https://api.notion.com/'],
   salesforce: [],
+  // Linear: only the GraphQL endpoint (an exact match, see
+  // SERVICE_EXACT_ENDPOINTS); never /oauth/revoke.
+  linear: [],
+  // HubSpot: data API prefixes only, never /oauth/.
+  hubspot: [
+    'https://api.hubapi.com/crm/',
+    'https://api.hubapi.com/cms/',
+    'https://api.hubapi.com/content/',
+    'https://api.hubapi.com/automation/',
+  ],
 };
 
-const GOOGLE_SCOPE_ENDPOINTS: Array<{ scopes: string[]; bases: string[] }> = [
-  {
-    scopes: ['calendar', 'calendar.readonly', 'calendar.events'],
-    bases: ['https://www.googleapis.com/calendar/', 'https://calendar.googleapis.com/'],
-  },
-  {
-    scopes: ['gmail.readonly', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
-    bases: ['https://gmail.googleapis.com/', 'https://www.googleapis.com/gmail/'],
-  },
-  {
-    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata.readonly'],
-    bases: ['https://www.googleapis.com/drive/', 'https://www.googleapis.com/upload/drive/', 'https://drive.googleapis.com/'],
-  },
-  {
-    scopes: ['spreadsheets', 'spreadsheets.readonly'],
-    bases: ['https://sheets.googleapis.com/'],
-  },
-  {
-    scopes: ['documents', 'documents.readonly'],
-    bases: ['https://docs.googleapis.com/'],
-  },
-  {
-    scopes: ['admin', 'admin.directory.user.readonly', 'admin.directory.group.readonly'],
-    bases: ['https://admin.googleapis.com/'],
-  },
-  {
-    scopes: ['openid', 'email', 'profile', 'userinfo.email', 'userinfo.profile'],
-    bases: ['https://www.googleapis.com/oauth2/', 'https://openidconnect.googleapis.com/'],
-  },
-  {
-    scopes: ['contacts', 'contacts.readonly'],
-    bases: ['https://people.googleapis.com/'],
-  },
-];
+/** Exact endpoint URLs (no trailing path) a service may call, besides its prefixes. */
+const SERVICE_EXACT_ENDPOINTS: Record<string, string[]> = {
+  linear: ['https://api.linear.app/graphql'],
+};
+
+/**
+ * Endpoints never brokered even though their prefix is allowed: they
+ * revoke or uninstall the shared authorization, which would break every
+ * connection of that account (compared lowercase, path prefix).
+ */
+const BROKER_BLOCKED_ENDPOINTS: Record<string, string[]> = {
+  slack: ['https://slack.com/api/auth.revoke', 'https://slack.com/api/apps.uninstall'],
+};
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'authorization',
@@ -239,6 +240,7 @@ export function createServer(config: ServerConfig) {
   if (!config.agentToken && !config.agentRequestVerifier) {
     throw new Error('Either agentToken or agentRequestVerifier is required');
   }
+  assertLinkConfig(config);
 
   const app = express();
   app.use(express.json());
@@ -284,6 +286,24 @@ export function createServer(config: ServerConfig) {
     store: config.webBotAuthNonceStore ?? 'memory',
     path: config.webBotAuthNoncePath,
   });
+
+  // Cred Link (Phase 1): off unless config.linkEnabled. Routes are mounted
+  // here; delegate and use call into it below.
+  const linkService: LinkService | null = config.linkEnabled
+    ? createLinkService({
+        vault,
+        tofu,
+        providers: config.providers,
+        baseUrl: config.linkBaseUrl ?? config.redirectBaseUri,
+        redirectBaseUri: config.redirectBaseUri,
+        storePath: resolveLinkStorePath(config),
+        customVerifier: Boolean(config.agentRequestVerifier),
+        storeHandle: (input) => storeBrokeredDelegation({ ...input, accessToken: '' }),
+        ...(config.linkHandleTtlSeconds !== undefined ? { handleTtlSeconds: config.linkHandleTtlSeconds } : {}),
+        makeRateLimiter: (max) => makeRateLimiter(max),
+      })
+    : null;
+  if (linkService) linkService.mount(app, requireAdminAuth);
 
   // Hash bearer/admin tokens once at startup for constant-time comparison
   const adminTokenHash = crypto.createHash('sha256').update(config.adminToken).digest('hex');
@@ -427,6 +447,33 @@ export function createServer(config: ServerConfig) {
     return userId || 'default';
   }
 
+  /**
+   * Cred Link keeps its tokens in the vault under reserved user ids
+   * (`link:<connection_id>`, `link-staged:<tid>`). No legacy entry point may
+   * reach those rows with a caller-supplied user id, since that would bypass
+   * the Link access check. Applied whether or not Link is enabled (tokens
+   * may outlive a configuration change). Sends 400 and returns true when the
+   * id is reserved.
+   */
+  function rejectReservedUserId(res: Response, userId: string): boolean {
+    if (!isReservedLinkVaultUserId(userId)) return false;
+    res.status(400).json({ error: 'invalid_user_id', message: 'This user_id is reserved' });
+    return true;
+  }
+
+  /**
+   * The vault itself refuses reserved Link user ids (ReservedVaultUserIdError).
+   * Routes reject them before any vault call; if one still reaches the vault,
+   * it is a 400, never a 500.
+   */
+  function sendReservedUserIdError(res: Response, err: unknown): boolean {
+    const reserved = err instanceof ReservedVaultUserIdError
+      || (typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'ReservedVaultUserIdError');
+    if (!reserved || res.headersSent) return false;
+    res.status(400).json({ error: 'invalid_user_id', message: 'This user_id is reserved' });
+    return true;
+  }
+
   function buildConsentUrl(input: {
     service: string;
     userId: string;
@@ -448,36 +495,9 @@ export function createServer(config: ServerConfig) {
     return req.body?.token_format === 'handle' ? 'handle' : 'raw';
   }
 
-  function scopeMatches(grantedScope: string, requiredScope: string): boolean {
-    const normalized = grantedScope.toLowerCase().replace(/\/$/, '');
-    const required = requiredScope.toLowerCase();
-    return scopeEquivalent(grantedScope, requiredScope) ||
-      normalized.endsWith(`/${required}`) ||
-      normalized.endsWith(`auth/${required}`) ||
-      normalized.includes(`//${required}`);
-  }
-
-  function canonicalScope(scope: string): string {
-    const trimmed = scope.trim().replace(/\/$/, '');
-    const normalized = trimmed.toLowerCase();
-    const googleAuthPrefix = 'https://www.googleapis.com/auth/';
-    if (normalized.startsWith(googleAuthPrefix)) {
-      return normalized.slice(googleAuthPrefix.length);
-    }
-    return trimmed;
-  }
-
-  function scopeEquivalent(left: string, right: string): boolean {
-    return canonicalScope(left) === canonicalScope(right);
-  }
-
-  function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[]): boolean {
-    if (!scopes || scopes.length === 0) return false;
-    return GOOGLE_SCOPE_ENDPOINTS.some(({ scopes: requiredScopes, bases }) => (
-      bases.some((base) => normalizedUrl.startsWith(base)) &&
-      requiredScopes.some((requiredScope) => scopes.some((scope) => scopeMatches(scope, requiredScope)))
-    ));
-  }
+  // The Google family table and the scope matching live in google-scopes.ts,
+  // shared with Link's narrow response so the two cannot drift.
+  const scopeEquivalent = brokerScopeEquivalent;
 
   const SALESFORCE_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.(?:salesforce\.com|force\.com)$/;
   const SAFE_PATH_AND_QUERY_PATTERN = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/;
@@ -510,6 +530,21 @@ export function createServer(config: ServerConfig) {
     if (!SAFE_PATH_AND_QUERY_PATTERN.test(pathAndQuery)) return null;
     if (pathAndQuery.startsWith('//')) return null;
 
+    // Percent-encoding must not be able to hide a segment from the rules
+    // below, here or at the provider: refuse an encoded dot, slash,
+    // backslash or percent (double encoding) anywhere in the path, any case.
+    if (/%(2e|2f|5c|25)/i.test(parsed.pathname)) return null;
+    // Then match on the decoded path: no dot segments, no empty segments
+    // (double slash), no backslash, no control characters.
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(parsed.pathname);
+    } catch {
+      return null;
+    }
+    if (decodedPath.includes('\\') || decodedPath.includes('//') || /[\u0000-\u001f\u007f]/.test(decodedPath)) return null;
+    if (decodedPath.split('/').some((segment) => segment === '.' || segment === '..')) return null;
+
     if (service === 'salesforce') {
       if (!SALESFORCE_HOST_PATTERN.test(hostname)) return null;
       if (/^(\d{1,3}\.){3}\d{1,3}\./.test(hostname)) return null;
@@ -518,10 +553,21 @@ export function createServer(config: ServerConfig) {
 
     const allowed = SERVICE_ALLOWLIST[service];
     if (!allowed) return null;
-    const normalizedUrl = `https://${hostname}${parsed.pathname}`;
-    const base = allowed.find((candidate) => normalizedUrl.startsWith(candidate));
+    const decodedUrl = `https://${hostname}${decodedPath}`;
+    if ((BROKER_BLOCKED_ENDPOINTS[service] ?? []).some((blocked) => decodedUrl.toLowerCase().startsWith(blocked))) return null;
+    // Matched constants must also be spelled literally in the encoded path,
+    // so the outbound URL (constant plus the caller's remainder) means
+    // exactly what was matched.
+    const exact = (SERVICE_EXACT_ENDPOINTS[service] ?? []).find((endpoint) => (
+      decodedUrl === endpoint && parsed.pathname === new URL(endpoint).pathname
+    ));
+    // Built from the constant endpoint plus the already-validated query.
+    if (exact) return `${exact}${parsed.search}`;
+    const base = allowed.find((candidate) => (
+      decodedUrl.startsWith(candidate) && parsed.pathname.startsWith(new URL(candidate).pathname)
+    ));
     if (!base) return null;
-    if (service === 'google' && !isAllowedGoogleScopeEndpoint(normalizedUrl, scopes)) return null;
+    if (service === 'google' && !isAllowedGoogleScopeEndpoint(decodedUrl, scopes)) return null;
 
     // The base is a constant that ends in '/'; everything after it is the
     // caller's path below that base plus the query string.
@@ -1572,6 +1618,7 @@ export function createServer(config: ServerConfig) {
   app.get('/providers', providersRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const entries = await vault.list({ userId });
       const connected = new Set(entries.map((e) => e.provider));
 
@@ -1582,6 +1629,7 @@ export function createServer(config: ServerConfig) {
 
       res.json({ providers });
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/providers] Error:', err);
       res.status(500).json({ error: 'Failed to list providers' });
     }
@@ -1606,6 +1654,21 @@ export function createServer(config: ServerConfig) {
       throw new Error(`expiresAt is not a valid date: ${value}`);
     }
     return parsed;
+  }
+
+  /**
+   * With Link enabled, a Permission on a Link connection (conn_ id) may only
+   * hold scopes within that connection's grant (spec 3). Sends 400 and
+   * returns false otherwise. Legacy connection ids (provider slugs) pass.
+   */
+  async function linkPermissionScopesAllowed(res: Response, connectionId: string, scopes: string[]): Promise<boolean> {
+    if (!linkService || !isConnectionId(connectionId)) return true;
+    const grant = await linkService.context.store.getGrantForConnection(connectionId);
+    if (!grant || !isScopeSubset(scopes, grant.scopes)) {
+      res.status(400).json({ error: 'invalid_scope', message: 'allowedScopes must be within the Link connection grant' });
+      return false;
+    }
+    return true;
   }
 
   function mapPermissionErrorResponse(res: Response, err: unknown, fallbackMessage: string): void {
@@ -1663,6 +1726,8 @@ export function createServer(config: ServerConfig) {
         res.status(400).json({ error: 'allowedScopes must be an array of strings' });
         return;
       }
+
+      if (!(await linkPermissionScopesAllowed(res, body.connectionId, body.allowedScopes))) return;
 
       const permission = await vault.createPermission({
         agentId: body.agentId,
@@ -1757,6 +1822,17 @@ export function createServer(config: ServerConfig) {
         maxDelegationDepth?: number;
         expiresAt?: string | null;
       };
+
+      if ('allowedScopes' in body && linkService) {
+        if (!Array.isArray(body.allowedScopes) || !body.allowedScopes.every((s) => typeof s === 'string')) {
+          res.status(400).json({ error: 'allowedScopes must be an array of strings' });
+          return;
+        }
+        // No read-by-id exists: an empty update returns the row (it only
+        // bumps updatedAt) so its connectionId can be checked first.
+        const current = await vault.updatePermission(id, {});
+        if (!(await linkPermissionScopesAllowed(res, current.connectionId, body.allowedScopes))) return;
+      }
 
       const input: UpdatePermissionInput = {};
       if ('allowedScopes' in body) input.allowedScopes = body.allowedScopes;
@@ -1962,6 +2038,7 @@ export function createServer(config: ServerConfig) {
   app.get('/connect', connectUiRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const safeUserId = escapeHtml(userId);
       const encodedUserId = encodeURIComponent(userId);
       const entries = await vault.list({ userId });
@@ -2208,6 +2285,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 </body>
 </html>`);
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/connect] Error:', err);
       res.status(500).json({ error: 'Failed to render admin UI' });
     }
@@ -2229,9 +2307,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       await revokeStoredProvider(slug, userId);
       res.status(204).send();
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/connect/:provider DELETE] Error:', err);
       res.status(500).json({ error: 'Failed to revoke provider connection' });
     }
@@ -2251,6 +2331,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const providerConfig = getProviderConfig(slug);
       if (!providerConfig) {
         res.status(404).json({ error: `Provider '${slug}' not configured. Available: ${config.providers.map((p) => p.slug).join(', ')}` });
@@ -2282,6 +2363,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       res.redirect(url);
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/connect] Error:', err);
       res.status(500).json({ error: 'Failed to start OAuth flow' });
     }
@@ -2303,8 +2385,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const { code, state, error: oauthError } = req.query as Record<string, string>;
 
       if (oauthError) {
-        const safeOauthError = escapeHtml(oauthError);
-        res.status(400).send(`<h2>OAuth Error</h2><p>${safeOauthError}</p><p><a href="/providers">Back</a></p>`);
+        // Never render provider error text: generic message plus a request id.
+        const requestId = crypto.randomUUID();
+        console.warn('[/callback] Provider returned an OAuth error', { provider: slug, requestId });
+        res.status(400).send(`<h2>OAuth Error</h2><p>The provider did not complete the connection.</p><p>Request ID: ${requestId}</p><p><a href="/providers">Back</a></p>`);
         return;
       }
 
@@ -2320,6 +2404,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       pendingOAuth.delete(state);
+      if (rejectReservedUserId(res, pending.userId)) return;
 
       const providerConfig = getProviderConfig(slug);
       if (!providerConfig) {
@@ -2365,11 +2450,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         </html>
       `);
     } catch (err) {
-      console.error('[/callback] Error:', err);
-      const safeMessage = err instanceof Error
-        ? escapeHtml(err.message)
-        : 'Unknown error';
-      res.status(500).send(`<h2>Connection Failed</h2><p>${safeMessage}</p><p><a href="/providers">Try again</a></p>`);
+      // Log the detail server-side; never render exception messages.
+      const requestId = crypto.randomUUID();
+      if (sendReservedUserIdError(res, err)) return;
+      console.error('[/callback] Error:', { requestId, err });
+      res.status(500).send(`<h2>Connection Failed</h2><p>The connection could not be completed.</p><p>Request ID: ${requestId}</p><p><a href="/providers">Try again</a></p>`);
     }
   });
 
@@ -2382,16 +2467,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   const guardMiddleware = config.guard
     ? createExpressMiddleware(config.guard, {
+        // Link context from verified state only (set by the Link precheck).
+        resolveLinkContext: (req) => linkService?.resolveGuardLinkContext(req),
         onDeny: (_req, res, decision) => {
           // Log guard denials for audit
           console.warn('[guard] DENIED', {
             policy: decision.deniedBy?.policy,
             reason: decision.deniedBy?.reason,
           });
+          const code = decision.deniedBy?.code;
           res.status(403).json({
             error: 'Request denied by guard policy',
             policy: decision.deniedBy?.policy,
             reason: decision.deniedBy?.reason,
+            ...(typeof code === 'string' ? { code } : {}),
           });
         },
       })
@@ -2408,6 +2497,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   };
 
   async function getVaultEntry(service: string, userId: string): Promise<VaultEntryResult> {
+    if (isReservedLinkVaultUserId(userId)) {
+      return { status: 400, body: { error: 'invalid_user_id', message: 'This user_id is reserved' } } as const;
+    }
     const providerConfig = getProviderConfig(service);
     if (!providerConfig) {
       return {
@@ -2471,6 +2563,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     | { status: number; body: Record<string, unknown> };
 
   async function revokeStoredProvider(slug: string, userId: string): Promise<void> {
+    if (isReservedLinkVaultUserId(userId)) throw new ReservedVaultUserIdError('delete');
     await vault.delete({ provider: slug, userId });
 
     writeAuditEventIfSupported({
@@ -2491,6 +2584,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     userId: string;
     scopes: string[];
     expiresIn: number;
+    link?: LinkHandleBinding;
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -2500,6 +2594,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       scopes: input.scopes,
       expiresAt,
       createdAt: Date.now(),
+      ...(input.link ? { link: input.link } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -2592,10 +2687,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       url: string;
       method: string;
       delegation: BrokeredDelegation;
+      /** Link handles: the scopes checkLinkAccess allowed for this call. */
+      scopes?: string[];
     },
   ): Promise<{ allowed: true; effectiveScopes: string[]; decision?: GuardDecision } | { allowed: false }> {
+    const callScopes = input.scopes ?? input.delegation.scopes;
     if (!config.guard) {
-      return { allowed: true, effectiveScopes: input.delegation.scopes };
+      return { allowed: true, effectiveScopes: callScopes };
     }
 
     try {
@@ -2604,8 +2702,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const ctx: GuardContext = {
         provider: input.delegation.service,
         agentTokenHash: (req as any).agentTokenHash ?? hashAgentPrincipal(principal ?? { type: 'unknown' }),
-        requestedScopes: input.delegation.scopes,
-        consentedScopes: input.delegation.scopes,
+        requestedScopes: callScopes,
+        consentedScopes: callScopes,
         timestamp: new Date().toISOString(),
         targetUrl: input.url,
         targetMethod: input.method,
@@ -2618,6 +2716,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         identitySource: webBotAuthIdentity ? 'web-bot-auth' : 'agent-token',
         webBotAuthKeyId: webBotAuthIdentity?.keyId,
         signatureAgent: webBotAuthIdentity?.signatureAgent,
+        ...(input.delegation.link
+          ? {
+              link: {
+                connectionId: input.delegation.link.connectionId,
+                agentId: input.delegation.link.agentId,
+                operation: 'use' as const,
+                grantId: input.delegation.link.grantId,
+                grantVersion: input.delegation.link.grantVersion,
+              },
+            }
+          : {}),
       };
 
       const decision = await config.guard.evaluate(ctx);
@@ -2625,10 +2734,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       (req as any).guardContext = ctx;
 
       if (!decision.allowed) {
+        const code = decision.deniedBy?.code;
         res.status(403).json({
           error: 'Request denied by guard policy',
           policy: decision.deniedBy?.policy,
           reason: decision.deniedBy?.reason,
+          ...(typeof code === 'string' ? { code } : {}),
         });
         return { allowed: false };
       }
@@ -2681,12 +2792,37 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   // packages/mcp/src/guard-wiring.ts — that Set exists specifically to stop
   // packages/mcp from double-wrapping a route already guarded here with a
   // second, independently-configured CredGuard.
-  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
+  /**
+   * A call naming connection_id is a Cred Link call. With Link disabled the
+   * server cannot check it, so it is refused before any vault access instead
+   * of falling back to the legacy `default` user. Sub-delegation of a Link
+   * connection is refused in Phase 1 either way.
+   */
+  const refuseUncheckableLinkCall = (always: boolean): express.RequestHandler => (req, res, next) => {
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : null;
+    if (body && body.connection_id !== undefined && (always || !linkService)) {
+      res.status(400).json({
+        error: 'invalid_request',
+        message: always
+          ? 'Sub-delegation of a Link connection is not supported'
+          : 'connection_id names a Cred Link connection, and Cred Link is not enabled on this server',
+      });
+      return;
+    }
+    next();
+  };
+
+  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false)];
+  if (linkService) {
+    // Runs checkLinkAccess for calls naming connection_id, before Guard and
+    // before any vault access, whether or not a Guard is configured.
+    delegateRouteHandlers.push(linkService.delegatePrecheck);
+  }
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
   }
 
-  const subdelegateRouteHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
+  const subdelegateRouteHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(true)];
   if (guardMiddleware) {
     subdelegateRouteHandlers.push(attachParentReceiptClaimsForGuard, assignProviderFromBody, guardMiddleware);
   }
@@ -2699,6 +2835,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const vaultEntry = await getVaultEntry(slug, userId);
       if ('status' in vaultEntry) {
         res.status(vaultEntry.status).json(vaultEntry.body);
@@ -2749,6 +2886,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         }),
       });
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to retrieve token' });
     }
@@ -2780,6 +2918,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.get('/api/v1/connections', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const entries = await vault.list({ userId });
       res.json({
         connections: entries.map((entry) => ({
@@ -2790,6 +2929,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         })),
       });
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/api/v1/connections] Error:', err);
       res.status(500).json({ error: 'Failed to list connections' });
     }
@@ -2834,18 +2974,41 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
+      // Link handles: re-run the Link check (revoked, narrowed or
+      // needs_reauth connections are refused at once) before anything else.
+      let linkAccess: Awaited<ReturnType<LinkService['authorizeUse']>> = null;
+      if (delegation.link) {
+        if (!linkService) {
+          res.status(404).json({ error: 'Delegation handle not found or expired' });
+          return;
+        }
+        linkAccess = await linkService.authorizeUse(req, res, {
+          service: delegation.service,
+          scopes: delegation.scopes,
+          link: delegation.link,
+        });
+        if (!linkAccess) return;
+      }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
         delegationId,
         url,
         method: normalizedMethod,
         delegation,
+        ...(linkAccess ? { scopes: linkAccess.effective_scopes } : {}),
       });
       if (!guardResult.allowed) return;
 
       const upstreamUrl = resolveBrokerUrl(delegation.service, url, guardResult.effectiveScopes);
-      if (!upstreamUrl) {
+      if (!upstreamUrl || (linkAccess && !linkService!.upstreamAllowed(linkAccess.connection, upstreamUrl))) {
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
+      }
+
+      let upstreamToken = delegation.accessToken;
+      if (linkAccess && delegation.link) {
+        const loaded = await linkService!.loadUseToken(req, res, linkAccess, delegation.link.agentId);
+        if (loaded === null) return;
+        upstreamToken = loaded;
       }
 
       const hasBody = body !== undefined;
@@ -2861,7 +3024,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         method: normalizedMethod,
         redirect: 'manual',
         headers: {
-          Authorization: `Bearer ${delegation.accessToken}`,
+          Authorization: `Bearer ${upstreamToken}`,
           Accept: 'application/json',
           'User-Agent': 'Cred-Server/1.0',
           ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
@@ -2884,7 +3047,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'agent', id: 'server-agent' },
+        actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
         action: 'access',
         resource: { type: 'connection', id: `${delegation.service}/${delegation.userId}` },
         outcome: upstream.ok ? 'success' : 'error',
@@ -2924,6 +3087,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const correlationId = crypto.randomUUID();
 
     try {
+      if (linkService && await linkService.handleDelegate(req, res)) return;
+
       const {
         service,
         user_id: requestedUserId,
@@ -2970,6 +3135,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
+      if (rejectReservedUserId(res, userId)) return;
       const requestedScopes = normalizeRequestedScopes(scopes);
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
@@ -3143,6 +3309,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         receipt,
       }));
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[/api/v1/delegate] Error:', err);
       res.status(500).json({ error: 'Delegation failed' });
     }
@@ -3507,6 +3674,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;
       const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
       const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
@@ -3588,6 +3756,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   app.get('/api/v1/audit/stream', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, (req: Request, res: Response) => {
     const userId = requestUserId(req);
+    if (rejectReservedUserId(res, userId)) return;
 
     // Fail fast with the same 501 GET /api/v1/audit would give, rather than
     // opening a stream that can never emit anything.
@@ -3722,6 +3891,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ancestor_receipts?: string[];
       };
       const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
+      // Sub-delegation of a Cred Link connection is refused in Phase 1, and
+      // no caller-supplied user id may reach the reserved Link vault rows.
+      if (req.body?.connection_id !== undefined) {
+        res.status(400).json({ error: 'invalid_request', message: 'Sub-delegation of a Link connection is not supported' });
+        return;
+      }
+      if (rejectReservedUserId(res, userId)) return;
       // Sub-delegation always returns a brokered handle — see route doc
       // comment above. `requestedTokenFormat` is only used to detect (and
       // flag) a caller asking for the raw provider token.
@@ -3791,6 +3967,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: 'User does not match parent receipt' });
         return;
       }
+      if (rejectReservedUserId(res, parent.userId)) return;
       if (parent.appClientId !== appClientId) {
         res.status(403).json({ error: 'App does not match parent receipt' });
         return;
@@ -4144,6 +4321,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ...(requestedTokenFormat !== 'handle' ? { requested_token_format: requestedTokenFormat } : {}),
       });
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[POST /api/v1/subdelegate] Error:', err);
       res.status(500).json({ error: 'Sub-delegation failed' });
     }
@@ -4162,10 +4340,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
       }
-      await revokeStoredProvider(slug, requestUserId(req));
+      const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
+      await revokeStoredProvider(slug, userId);
 
       res.status(204).send();
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[DELETE /api/token/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to revoke token' });
     }
@@ -4174,6 +4355,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.delete('/api/v1/connections/:provider', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const userId = requestUserId(req);
+      if (rejectReservedUserId(res, userId)) return;
       const slug = routeParam(req.params.provider);
       if (!slug) {
         res.status(400).json({ error: 'Missing provider parameter' });
@@ -4182,10 +4364,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       await revokeStoredProvider(slug, userId);
       res.status(204).send();
     } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
       console.error('[DELETE /api/v1/connections/:provider] Error:', { provider: req.params.provider, err });
       res.status(500).json({ error: 'Failed to revoke connection' });
     }
   });
 
-  return { app, vault, tofu };
+  return { app, vault, tofu, link: linkService };
 }

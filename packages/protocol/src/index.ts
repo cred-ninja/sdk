@@ -23,3 +23,6 @@ export const CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR = 'protocol_version_unsuppo
 export function isCredProtocolVersionSupported(version: string): boolean {
   return (CRED_PROTOCOL_SUPPORTED_VERSIONS as readonly string[]).includes(version);
 }
+
+// Cred Link Phase 1 contracts (types, constants, pure helpers).
+export * from './link.js';
