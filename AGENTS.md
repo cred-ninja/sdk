@@ -62,6 +62,14 @@ Link client authentication (`client_secret_basic` or `private_key_jwt`; every
 failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
 `/admin/link/*` routes exist only when `LINK_ENABLED` is set.
 
+User ids on the legacy routes: every route that acts on stored provider
+tokens resolves its user id through one resolver (`requestUserId` in
+server.ts). Without `user_id` it refuses with `400 user_id_required` unless
+`SINGLE_USER_MODE=true`, which acts on the shared user `default`. A custom
+`agentRequestVerifier` principal with `userId` binds agent requests to that
+user (`403 user_id_mismatch` for another). Never add a route that falls
+back to `default` on its own.
+
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/.well-known/http-message-signatures-directory` | None | Web Bot Auth key directory |
@@ -77,7 +85,8 @@ failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
-| GET | `/connect/:provider` | Admin | Start OAuth flow (browser) |
+| GET | `/connect/:provider` | Admin | Start OAuth flow (browser) from a single-use connect request (`?request=<id>`); query `user_id`/`scopes` only with the Bearer admin token |
+| POST | `/connect/:provider/start` | Admin | JSON `{ user_id, scopes }`: mint a single-use connect request, answers `{ url }` |
 | DELETE | `/connect/:provider` | Admin | Disconnect a provider connection |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |

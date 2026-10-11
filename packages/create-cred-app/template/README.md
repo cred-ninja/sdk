@@ -17,6 +17,7 @@ Edit `.env` to configure:
 - **VAULT_PASSPHRASE** — Encryption key for stored tokens (auto-generated, don't lose it)
 - **ADMIN_TOKEN** — Token for provider-management browser routes
 - **AGENT_TOKEN** — Token your AI agents use to request credentials
+- **SINGLE_USER_MODE**: `true` (generated): requests without `user_id` act on the shared user `default`. Set `false` when several users share the server; every request must then name `user_id`
 - **Provider credentials** — OAuth client ID/secret for each provider
 
 ## Endpoints
@@ -25,7 +26,8 @@ Edit `.env` to configure:
 |----------|------|-------------|
 | `GET /admin/login` | None | Admin login form |
 | `GET /connect` | Admin | Admin UI for managing providers |
-| `GET /connect/:provider` | Admin | Start OAuth flow |
+| `GET /connect/:provider` | Admin | Start OAuth flow (from a connect request link) |
+| `POST /connect/:provider/start` | Admin | Mint a connect request for `{ user_id, scopes }` |
 | `POST /api/v1/delegate` | Bearer | Get a brokered handle or short-lived access token |
 | `POST /api/v1/use` | Bearer | Broker an upstream API call with a delegation handle |
 | `GET /api/v1/connections` | Bearer | List stored provider connections |

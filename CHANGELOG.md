@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Breaking: explicit user ids on the legacy routes (`@credninja/server`)
+
+These change behavior for callers that relied on the silent fallback to the
+shared `default` user. Migration, one line: set `SINGLE_USER_MODE=true` on
+the server, or send `user_id` on every call.
+
+- New setting `SINGLE_USER_MODE` (`singleUserMode` in `createServer`),
+  default `false`. A legacy request without `user_id` (blank counts as
+  missing) is now refused with `400 {"error":"user_id_required"}` instead
+  of acting on `default`. With `SINGLE_USER_MODE=true` it acts on `default`
+  as before. Naming `user_id`, `default` included, works in both modes. This
+  covers `/providers`, `/connect`, `DELETE /connect/:provider`,
+  `/api/token/:provider`, `/api/v1/delegate`, `/api/v1/subdelegate`,
+  `/api/v1/connections`, `/api/v1/audit` and `/api/v1/audit/stream`.
+  `.env.example` and `create-cred-app` set `SINGLE_USER_MODE=true`.
+- A custom `agentRequestVerifier` may return a principal with `userId`.
+  Agent requests from it act on that user when they name none, and are
+  refused with `403 {"error":"user_id_mismatch"}` when they name another.
+- `consent_url` from `POST /api/v1/delegate` is now
+  `/connect/<provider>?request=<id>`, a single-use connect request (10
+  minutes) bound to the user id and scopes of that call. It no longer
+  carries `user_id`, `scopes` or `app_client_id`; do not parse it.
+- `GET /connect/<provider>?user_id=...&scopes=...` no longer starts OAuth
+  under the admin session cookie: it redirects to `/connect?user_id=...`,
+  where the operator starts the flow (the page uses the new
+  `POST /connect/<provider>/start`, JSON `{ user_id, scopes }`, which
+  answers `{ url }`). The same URL with the admin Bearer token still starts
+  the flow directly.
+- Links built client-side by `getConsentUrl()` (`@credninja/sdk`) and
+  `get_consent_url()` (Python SDK) keep the old shape. Opened in a browser
+  session they now land on the connect page for that user id, and the scopes
+  in the link are not applied; prefer the `consent_url` the server returns.
+
 ### Cred Link, Phase 1 (off by default, behind `LINK_ENABLED`)
 
 A drop-in account-connection widget and the server flow behind it. See the

@@ -100,6 +100,11 @@ ADMIN_TOKEN=${adminToken}
 # Agent token (agents use this to request credentials)
 AGENT_TOKEN=${agentToken}
 
+# One user's accounts: requests without user_id act on the shared user
+# "default". Set to false when several users share this server; every
+# request must then name user_id.
+SINGLE_USER_MODE=true
+
 # ─── Provider OAuth Credentials ───────────────────────────
 # Uncomment and fill in the providers you want to use.
 # Get credentials from each provider's developer console.
