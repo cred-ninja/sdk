@@ -9,7 +9,7 @@ import request from 'supertest';
 import crypto, { generateKeyPairSync } from 'node:crypto';
 import util from 'node:util';
 import { LINK_OPAQUE_FAILURE_BODY } from '@credninja/protocol';
-import { ReservedVaultUserIdError } from '@credninja/vault';
+import { ReservedVaultUserIdError, SqliteLinkStore, VaultLinkSecretStore } from '@credninja/vault';
 import { createServer } from '../server.js';
 import { googleRemovalIsBrokerEnforced } from '../google-scopes.js';
 import {
@@ -1408,3 +1408,98 @@ describe('final review: a failed token move still intersects the Permissions', (
   });
 });
 
+
+// ── Review of main: activation ordering (formerly zz-review-main) ───────────
+
+describe('review of main: activation settles only after the intersect, and never on a failed needs_reauth write', () => {
+  const BOTH = ['calendar.readonly', 'gmail.send'];
+  const CAL = ['calendar.readonly'];
+
+  async function updateTo(hx: Harness, client: { client_id: string; auth: string }, conn: string, confirmScopes: string[], agentId?: string) {
+    const uri = await par(hx.app, client as never, {
+      intent: 'update', connection_id: conn, scopes: { google: BOTH }, required_scopes: {},
+      ...(agentId !== undefined ? { agent_id: agentId } : { agent_id: undefined }),
+    });
+    const b = new Browser();
+    const page = await callback(hx.app, b, await toProvider(hx.app, b, uri, { scopes: BOTH }), 'google', 'auth-code-x');
+    const r = resultOf(await confirm(hx.app, b, page.text, confirmScopes));
+    if (r.outcome !== 'success') throw new Error('update failed');
+    return r;
+  }
+
+  it('a failed token move whose needs_reauth write also fails keeps the staged copy and leaves the transaction for the heal, which reverts it', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client, { confirmScopes: CAL });
+    const ctx = hx.server.link!.context;
+    const oldTokens = (await ctx.secrets.get(conn as never))!;
+    const pending = await updateTo(hx, client, conn, BOTH);
+
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
+    vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    const res = await activate(hx.app, client, pending.connection_id, pending.code);
+    expect(res.status).toBe(401);
+    expect(res.text).toBe(JSON.stringify(LINK_OPAQUE_FAILURE_BODY));
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(BOTH);
+    // Nothing was revoked or deleted: the heal needs the staged copy.
+    const [left] = await ctx.store.listUnsettledActivations();
+    expect(left).toBeDefined();
+    expect(await ctx.secrets.getStaged(left.tid as never)).not.toBeNull();
+    expect(hx.fake.revocations).toEqual([]);
+    vi.restoreAllMocks();
+
+    const next = await hx.restart();
+    expect((await next.link!.ready).outcomes).toEqual([{ tid: left.tid, outcome: 'reverted' }]);
+    await next.link!.healed;
+    const after = next.link!.context;
+    expect(await after.store.getConnection(conn)).toMatchObject({ status: 'needs_reauth', status_reason: 'reauth_required' });
+    expect((await after.secrets.get(conn as never))!.access_token).toBe(oldTokens.access_token);
+  });
+
+  it('a failed onGrantUpdated leaves the activation unsettled; the next start intersects and settles, and a later widening for another agent does not hand the old agent the removed scope', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const ctx0 = hx.server.link!.context;
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+
+    const narrowing = await updateTo(hx, client, conn, CAL);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(ctx0.hooks, 'onGrantUpdated').mockRejectedValueOnce(new Error('permission store down'));
+    const res = await activate(hx.app, client, narrowing.connection_id, narrowing.code);
+    expect(res.status).toBe(401);
+    expect(res.text).toBe(JSON.stringify(LINK_OPAQUE_FAILURE_BODY));
+    expect((await ctx0.store.getGrantForConnection(conn))!.scopes).toEqual(CAL);
+    const [left] = await ctx0.store.listUnsettledActivations();
+    expect(left).toBeDefined();
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+
+    const next = await hx.restart();
+    expect((await next.link!.ready).outcomes).toEqual([{ tid: left.tid, outcome: 'settled' }]);
+    expect((await next.link!.context.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+    expect(await next.link!.context.store.listUnsettledActivations()).toEqual([]);
+
+    const widening = await updateTo(hx, client, conn, BOTH, 'other-agent');
+    expect((await activate(hx.app, client, widening.connection_id, widening.code)).status).toBe(200);
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+    expect((await next.link!.context.permissions.get('other-agent', conn))!.allowedScopes).toEqual(BOTH);
+  });
+
+  it('every activation of an existing grant runs onGrantUpdated with the true previous scopes, also when they did not change', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const spy = vi.spyOn(hx.server.link!.context.hooks, 'onGrantUpdated');
+    const same = await updateTo(hx, client, conn, BOTH);
+    expect((await activate(hx.app, client, same.connection_id, same.code)).status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ previous_scopes: BOTH, reason: 'activate' });
+    expect(spy.mock.calls[0][0].grant.scopes).toEqual(BOTH);
+    const narrower = await updateTo(hx, client, conn, CAL);
+    expect((await activate(hx.app, client, narrower.connection_id, narrower.code)).status).toBe(200);
+    expect(spy.mock.calls[1][0]).toMatchObject({ previous_scopes: BOTH });
+    expect(spy.mock.calls[1][0].grant.scopes).toEqual(CAL);
+    expect(await hx.server.link!.context.store.listUnsettledActivations()).toEqual([]);
+  });
+});

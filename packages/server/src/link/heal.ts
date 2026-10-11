@@ -35,50 +35,69 @@
  * copy is deleted locally, never revoked at the provider (the same account
  * may now hold newer, live tokens), and it is settled.
  *
- * Per transaction (not stale):
+ * In every branch where the connection exists, the permission intersect
+ * with its current grant (whatever its status) runs first, under the lock,
+ * because the grant change was committed whatever happened to the tokens.
+ * It never widens, so it is safe on a connection touched since. If it
+ * fails, nothing else happens and the transaction stays unsettled.
+ *
+ * Per transaction:
+ *   connection gone                 settle; delete any staged copy in
+ *                                   phase 2 (best effort)
  *   no staged tokens left           the move finished: settle; an active
  *                                   connection with no stored tokens at all
- *                                   becomes needs_reauth
+ *                                   becomes needs_reauth (settled_reauth)
  *   staged equal to stored tokens   the move finished except the cleanup:
  *                                   settle now, delete the staged copy in
- *                                   phase 2 (best effort)
- *   stored tokens that can only     the move finished and a refresh rotated
- *   have come from this             the tokens since (a refresh writes only
- *   transaction                     the secret, never the connection row):
+ *                                   phase 2 (best effort) (cleaned)
+ *   stale (rule above)              phase 2: delete the staged copy, never
+ *                                   revoke, settle
+ *   created the connection, and     the move finished and a refresh rotated
+ *   the connection holds tokens     the tokens since (no other tokens were
+ *                                   ever stored there; a refresh writes only
+ *                                   the secret, never the connection row):
  *                                   settle now, delete the staged copy in
- *                                   phase 2. That is: the transaction created
- *                                   the connection and the connection holds
- *                                   tokens at all, or a refresh token was
- *                                   staged and the stored refresh token
- *                                   equals it
+ *                                   phase 2 (cleaned)
+ *   a refresh token was staged and  moved then refreshed, or never moved and
+ *   the stored one equals it        the provider re-issued the same refresh
+ *                                   token on re-consent: indistinguishable.
+ *                                   Write the staged set onto the connection
+ *                                   with expires_at now (secrets.put), so the
+ *                                   next use refreshes with that refresh
+ *                                   token, the same credential in both
+ *                                   cases, and gets tokens for the current
+ *                                   consent; a refresh that fails with
+ *                                   invalid_grant moves the connection to
+ *                                   needs_reauth as usual. Settle now,
+ *                                   delete the staged copy in phase 2; the
+ *                                   connection stays active (reapplied)
  *   otherwise                       the move never happened: needs_reauth
  *                                   (reason reauth_required) and an audit
  *                                   record now; then, in phase 2, provider
  *                                   revocation rule on the staged tokens,
- *                                   delete them, settle
- * A connection left active that is still untouched since this activation
- * also gets the permission intersect with its current grant re-run, since
- * activation's hooks may not have run. A connection written since then had
- * its hooks run by whatever wrote it (or by this activation before it), so
- * it is left alone.
+ *                                   delete them, settle (reverted)
  *
  * After an upgrade from a version 1 Link database the store returns every
  * activation that build recorded (it cannot tell a crash from a healthy
  * one), so the first start re-checks all of them once. Phase 1 stays local
- * (store and vault reads, at most a status change, a permission intersect
- * for an untouched connection, and the settle); provider calls only ever
- * happen in phase 2, and only for an activation whose move never happened.
+ * (store and vault reads and writes, at most a status change, the
+ * permission intersect, and the settle); provider calls only ever happen in
+ * phase 2, and only for an activation whose move never happened.
  * A connection's stored tokens are never deleted here, and the staged
  * tokens are never revoked at the provider while the connection holds
  * tokens (phase 2 excludes the connection from the account check only when
  * it holds none). A transaction that cannot be healed is logged and left
  * unsettled for the next start.
  *
- * Known limit (fails closed): an update or reauth on a provider that
- * rotates refresh tokens, a crash inside the token move, and a refresh
- * before the next start leave stored tokens that match neither rule above;
- * the connection then ends needs_reauth although its tokens work, and the
- * user reconnects.
+ * Known limits (both fail closed: a working connection ends needs_reauth
+ * and the user reconnects):
+ *   - an update or reauth on a provider that rotates refresh tokens, a
+ *     crash inside the token move, and a refresh before the next start
+ *     leave stored tokens that match no rule above;
+ *   - when no refresh token was staged and the access token was refreshed
+ *     before the heal decided (which needs an earlier start whose phase 1
+ *     failed for that transaction, or a version 1 leftover), the stored
+ *     tokens match no rule above either.
  */
 
 import type { Connection, LinkTokenSet, LinkTransaction } from '@credninja/protocol';
@@ -87,7 +106,7 @@ import { revokeAtProviderIfSafe, writeGrantAuditBestEffort } from './core.js';
 import { nowIso } from './util.js';
 
 /** Outcome of phase 1 for one transaction (for logs and tests). */
-export type LinkHealOutcome = 'settled' | 'settled_reauth' | 'cleaned' | 'reverted' | 'stale' | 'failed';
+export type LinkHealOutcome = 'settled' | 'settled_reauth' | 'cleaned' | 'reapplied' | 'reverted' | 'stale' | 'failed';
 
 /** Outcome of phase 2 for one transaction. */
 export type LinkHealFollowUpOutcome = 'revoked' | 'not_revoked' | 'skipped_stale' | 'deleted' | 'failed';
@@ -124,17 +143,6 @@ function sameTokens(stored: LinkTokenSet, staged: LinkTokenSet): boolean {
     && (staged.refresh_token === undefined || stored.refresh_token === staged.refresh_token);
 }
 
-/**
- * Stored tokens that differ from the staged ones but can only have come
- * from this transaction's move (then rotated by a refresh): it created the
- * connection, so no other tokens were ever stored there, or a refresh token
- * was staged and the stored one is still it.
- */
-function movedHere(tx: LinkTransaction, stored: LinkTokenSet, staged: LinkTokenSet): boolean {
-  if (tx.creates_connection === true) return true;
-  return staged.refresh_token !== undefined && stored.refresh_token === staged.refresh_token;
-}
-
 /** True when the connection is exactly as this activation left it (module comment). */
 function untouchedSinceActivation(connection: Connection, tx: LinkTransaction): boolean {
   return connection.status === 'active'
@@ -166,17 +174,17 @@ async function markReauth(ctx: LinkContext, connection: Connection, tx: LinkTran
 }
 
 /**
- * A connection the heal leaves active may have missed activation's
- * post-commit hooks. Re-run only the permission intersect with the current
- * grant (idempotent, never widens). onActivate is not re-run: it overwrites
- * the requesting agent's permission, which could undo a later change by
- * the app; a missing agent permission fails closed instead.
+ * The permission intersect activation runs after its database commit,
+ * re-applied with the connection's current grant (whatever its status;
+ * previous_scopes = grant.scopes, the plain re-apply). Idempotent and never
+ * widens, so it is safe on a connection touched since. Local only: no
+ * network call. onActivate is not re-run: it overwrites the requesting
+ * agent's permission, which could undo a later change by the app; a
+ * missing agent permission fails closed instead.
  */
-async function reconcileActive(ctx: LinkContext, connectionId: string): Promise<void> {
-  const connection = await ctx.store.getConnection(connectionId);
-  if (!connection || connection.status !== 'active') return;
+async function reconcile(ctx: LinkContext, connectionId: string): Promise<void> {
   const grant = await ctx.store.getGrantForConnection(connectionId);
-  if (!grant || grant.status !== 'active') return;
+  if (!grant) return;
   await ctx.hooks.onGrantUpdated({ grant, previous_scopes: grant.scopes, reason: 'activate' });
 }
 
@@ -238,17 +246,21 @@ async function phaseOne(ctx: LinkContext, tx: LinkTransaction): Promise<PhaseOne
       return staged ? { outcome: 'cleaned', followUp: deleteOrphan(tx) } : { outcome: 'cleaned' };
     }
 
+    // The grant change was committed whatever happened to the tokens, so
+    // the permission intersect runs first in every branch (it never widens,
+    // so it is safe on a connection touched since). If it fails, nothing
+    // else happens and the transaction stays unsettled for the next start.
+    await reconcile(ctx, connection.id);
+
     if (!staged) {
       const stored = await ctx.secrets.get(connection.id);
       const reauth = !stored ? (await markReauth(ctx, connection, tx)) !== null : false;
-      if (!reauth && untouchedSinceActivation(connection, tx)) await reconcileActive(ctx, connection.id);
       await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() });
       return { outcome: reauth ? 'settled_reauth' : 'settled' };
     }
 
     const stored = await ctx.secrets.get(connection.id);
     if (stored && sameTokens(stored, staged)) {
-      if (untouchedSinceActivation(connection, tx)) await reconcileActive(ctx, connection.id);
       await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() });
       return { outcome: 'cleaned', followUp: deleteOrphan(tx) };
     }
@@ -258,11 +270,22 @@ async function phaseOne(ctx: LinkContext, tx: LinkTransaction): Promise<PhaseOne
       return { outcome: 'stale', followUp: deleteAndSettle(tx, 'skipped_stale') };
     }
 
-    if (stored && movedHere(tx, stored, staged)) {
-      // The move finished and a refresh rotated the tokens since.
-      await reconcileActive(ctx, connection.id);
+    if (stored && tx.creates_connection === true) {
+      // The transaction created the connection, so no other tokens were ever
+      // stored there: the move finished and a refresh rotated them since.
       await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() });
       return { outcome: 'cleaned', followUp: deleteOrphan(tx) };
+    }
+
+    if (stored && staged.refresh_token !== undefined && stored.refresh_token === staged.refresh_token) {
+      // Moved then refreshed, or never moved and the provider answered the
+      // re-consent with the same refresh token string: the two cannot be
+      // told apart. Write the staged set with expires_at now, so the next
+      // use refreshes with that refresh token (the same credential in both
+      // cases) and gets tokens for the current consent.
+      await ctx.secrets.put(connection.id, { ...staged, expires_at: nowIso() });
+      await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() });
+      return { outcome: 'reapplied', followUp: deleteOrphan(tx) };
     }
 
     // The move never happened: never half-active.

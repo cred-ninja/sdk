@@ -212,6 +212,37 @@ describe('Link hooks over the real vault permission store', () => {
     expect(await access('agt_race', ['gmail.send'])).toMatchObject({ ok: false, code: 'insufficient_scope' });
   });
 
+  it('a missed narrowing intersect is not undone by a later widening (previous_scopes bound)', async () => {
+    const CAL = 'calendar.readonly';
+    const SEND = 'gmail.send';
+    current.grant = grant([CAL, SEND], 1);
+    const activate = (agent_id: string, g: ClientGrant, tid: `ltx_${string}`) => hooks.onActivate({
+      intent: 'update', connection: current.connection, grant: g, agent_id, tid, actor: `link:${CLIENT}`,
+    });
+    await activate('agt_a', current.grant, 'ltx_v1');
+    expect((await port.get('agt_a', CONN))?.allowedScopes).toEqual([CAL, SEND]);
+
+    // A narrowing commits grant [calendar]; its onGrantUpdated call is missed.
+    current.grant = grant([CAL], 2);
+
+    // A later update for another agent widens the grant back.
+    const widened = grant([CAL, SEND], 3);
+    current.grant = widened;
+    await hooks.onGrantUpdated({ grant: widened, previous_scopes: [`${G}calendar.readonly`], reason: 'activate' });
+    await activate('agt_b', widened, 'ltx_v3');
+
+    expect((await port.get('agt_a', CONN))?.allowedScopes).toEqual([CAL]);
+    expect((await port.get('agt_b', CONN))?.allowedScopes).toEqual([CAL, SEND]);
+    expect(await access('agt_a', [SEND])).toMatchObject({ ok: false, code: 'permission_required' });
+    expect((await access('agt_b', [SEND])).ok).toBe(true);
+    await expectPermissionsWithinGrant();
+
+    // A repair that re-applies the current grant changes nothing further.
+    await hooks.onGrantUpdated({ grant: widened, previous_scopes: widened.scopes, reason: 'activate' });
+    expect((await port.get('agt_a', CONN))?.allowedScopes).toEqual([CAL]);
+    expect((await port.get('agt_b', CONN))?.allowedScopes).toEqual([CAL, SEND]);
+  });
+
   it('a file-backed vault refuses to hand out a Link permission port', () => {
     const fileVault = new CredVault({ passphrase: 'p', storage: 'file', path: join(dir, 'vault.json') });
     expect(() => fileVault.getLinkPermissionPort()).toThrow(/not supported/);
