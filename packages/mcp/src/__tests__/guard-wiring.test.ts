@@ -7,7 +7,7 @@ import { CredGuard, rateLimitPolicy, maxTtlPolicy } from '@credninja/guard';
 import type { CredPolicy } from '@credninja/guard';
 import { createCredMcpServer } from '../server.js';
 import type { CredMcpLocalConfig } from '../config.js';
-import { shouldWrapWithGuard, wireGuardedTool } from '../guard-wiring.js';
+import { mcpOnDeny, shouldWrapWithGuard, wireGuardedTool } from '../guard-wiring.js';
 
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-guard-vault.json');
 
@@ -238,5 +238,34 @@ describe('shouldWrapWithGuard (U1 scoping rules)', () => {
     expect(shouldWrapWithGuard('cred_audit_log', 'local')).toBe(false);
     expect(shouldWrapWithGuard('cred_whoami', 'cloud')).toBe(false);
     expect(shouldWrapWithGuard('cred_whoami', 'local')).toBe(false);
+  });
+});
+
+describe('mcpOnDeny', () => {
+  it('carries the denying policy code (Cred Link typed codes)', () => {
+    const result = mcpOnDeny({ provider: 'google' } as any, {}, {
+      allowed: false,
+      results: [],
+      effectiveScopes: [],
+      evaluationMs: 0,
+      deniedBy: { decision: 'DENY', policy: 'client-grant', reason: 'Link access denied: grant_revoked', code: 'grant_revoked' },
+    } as any);
+    expect(JSON.parse(String(result.content[0].text))).toEqual({
+      error: 'policy_denied',
+      policy: 'client-grant',
+      reason: 'Link access denied: grant_revoked',
+      code: 'grant_revoked',
+    });
+  });
+
+  it('omits code when the policy set none', () => {
+    const result = mcpOnDeny({ provider: 'google' } as any, {}, {
+      allowed: false,
+      results: [],
+      effectiveScopes: [],
+      evaluationMs: 0,
+      deniedBy: { decision: 'DENY', policy: 'deny-all', reason: 'no' },
+    } as any);
+    expect(JSON.parse(String(result.content[0].text))).not.toHaveProperty('code');
   });
 });

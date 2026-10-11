@@ -14,6 +14,13 @@ import type {
   RefreshTokenParams,
   RevokeTokenParams,
 } from '../types.js';
+import {
+  OAuthTokenError,
+  attachRawTokenResponse,
+  isErrorTokenBody,
+  oauthErrorCode,
+  readErrorBody,
+} from '../errors.js';
 
 export type { ServiceAdapter };
 
@@ -70,11 +77,16 @@ export abstract class BaseServiceAdapter implements ServiceAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Token exchange failed: ${response.status} ${response.statusText}`);
+      const errorBody = await readErrorBody(response);
+      throw new OAuthTokenError(`Token exchange failed: ${response.status} ${response.statusText}`, {
+        status: response.status,
+        error: oauthErrorCode(errorBody),
+        operation: 'exchange',
+      });
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeTokenResponse(data);
+    return this.finishTokenResponse(data, response.status);
   }
 
   async refreshAccessToken(params: RefreshTokenParams): Promise<RefreshResponse> {
@@ -97,11 +109,16 @@ export abstract class BaseServiceAdapter implements ServiceAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Token refresh failed: ${response.status} ${response.statusText}`);
+      const errorBody = await readErrorBody(response);
+      throw new OAuthTokenError(`Token refresh failed: ${response.status} ${response.statusText}`, {
+        status: response.status,
+        error: oauthErrorCode(errorBody),
+        operation: 'refresh',
+      });
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeRefreshResponse(data);
+    return this.finishRefreshResponse(data, response.status);
   }
 
   async revokeToken(params: RevokeTokenParams): Promise<void> {
@@ -123,6 +140,34 @@ export abstract class BaseServiceAdapter implements ServiceAdapter {
     if (!response.ok) {
       throw new Error(`Token revocation failed: ${response.status} ${response.statusText}`);
     }
+  }
+
+  /**
+   * Shared tail of a successful code exchange: reject a 2xx body that is
+   * really an OAuth error (GitHub and Slack answer errors with 200), then
+   * normalize and remember the raw body (see getRawTokenResponse).
+   */
+  protected finishTokenResponse(data: Record<string, unknown>, status: number): TokenResponse {
+    if (data && typeof data === 'object' && isErrorTokenBody(data)) {
+      throw new OAuthTokenError(`Token exchange failed: ${status} ${String(oauthErrorCode(data))}`, {
+        status,
+        error: oauthErrorCode(data),
+        operation: 'exchange',
+      });
+    }
+    return attachRawTokenResponse(this.normalizeTokenResponse(data), data);
+  }
+
+  /** Shared tail of a successful refresh; see finishTokenResponse (getRawTokenResponse works on the result too). */
+  protected finishRefreshResponse(data: Record<string, unknown>, status: number): RefreshResponse {
+    if (data && typeof data === 'object' && isErrorTokenBody(data)) {
+      throw new OAuthTokenError(`Token refresh failed: ${status} ${String(oauthErrorCode(data))}`, {
+        status,
+        error: oauthErrorCode(data),
+        operation: 'refresh',
+      });
+    }
+    return attachRawTokenResponse(this.normalizeRefreshResponse(data), data);
   }
 
   /** Normalize provider response to standard TokenResponse shape */

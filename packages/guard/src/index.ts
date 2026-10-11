@@ -47,6 +47,7 @@ export type {
   MaxTtlPolicyConfig,
   WebBotAuthPolicyConfig,
   ReceiptClaimsPolicyConfig,
+  GuardLinkContext,
 } from './types.js';
 
 // Policies
@@ -65,6 +66,15 @@ export {
   receiptClaimsPolicy,
 } from './policies/index.js';
 export type { MaxTtlPolicyResult, RateLimitPolicyResult } from './policies/index.js';
+
+// Cred Link policy
+export { createLinkHooks, LINK_CHECK_ERROR_CODE, clientGrantPolicy, CLIENT_GRANT_POLICY_NAME } from './link/index.js';
+export type {
+  LinkHooksDeps,
+  LinkHooksOptions,
+  ClientGrantPolicyConfig,
+  ClientGrantPolicyResult,
+} from './link/index.js';
 
 // Audit
 export { buildAuditEvent, formatAuditLog } from './audit.js';

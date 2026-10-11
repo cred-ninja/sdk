@@ -17,6 +17,7 @@ import type {
   RefreshTokenParams,
   RevokeTokenParams,
 } from '../types.js';
+import { OAuthTokenError, oauthErrorCode, readErrorBody } from '../errors.js';
 
 export class GitHubAdapter extends BaseServiceAdapter {
   readonly slug = 'github';
@@ -44,11 +45,16 @@ export class GitHubAdapter extends BaseServiceAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`GitHub token exchange failed: ${response.status} ${response.statusText}`);
+      const errorBody = await readErrorBody(response);
+      throw new OAuthTokenError(`GitHub token exchange failed: ${response.status} ${response.statusText}`, {
+        status: response.status,
+        error: oauthErrorCode(errorBody),
+        operation: 'exchange',
+      });
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeTokenResponse(data);
+    return this.finishTokenResponse(data, response.status);
   }
 
   async refreshAccessToken(params: RefreshTokenParams): Promise<RefreshResponse> {
@@ -67,11 +73,16 @@ export class GitHubAdapter extends BaseServiceAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`GitHub token refresh failed: ${response.status} ${response.statusText}`);
+      const errorBody = await readErrorBody(response);
+      throw new OAuthTokenError(`GitHub token refresh failed: ${response.status} ${response.statusText}`, {
+        status: response.status,
+        error: oauthErrorCode(errorBody),
+        operation: 'refresh',
+      });
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeRefreshResponse(data);
+    return this.finishRefreshResponse(data, response.status);
   }
 
   async revokeToken(params: RevokeTokenParams): Promise<void> {

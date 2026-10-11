@@ -27,7 +27,8 @@
     "build": "npm run build:cjs && npm run build:esm && node ../../scripts/write-package-types.cjs",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "build:esm": "tsc -p tsconfig.esm.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

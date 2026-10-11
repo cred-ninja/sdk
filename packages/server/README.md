@@ -67,6 +67,22 @@ npm run dev
 | POST | `/api/v1/agents/:agentId/revoke-all` | Bearer + verified identity | Revoke a stored agent record — see [Security](#security) |
 | GET | `/api/token/:provider` | Bearer | Compatibility delegation route |
 | DELETE | `/api/token/:provider` | Bearer | Revoke stored credentials |
+| POST | `/admin/link/clients` | Admin | Register a Cred Link client, see [Cred Link](#cred-link-phase-1) |
+| GET | `/admin/link/clients` | Admin | List Cred Link clients |
+| POST | `/admin/link/clients/:client_id/disable` | Admin | Disable a Cred Link client (its connections stop working) |
+| POST | `/admin/link/clients/:client_id/enable` | Admin | Re-enable a Cred Link client |
+| POST | `/link/v1/par` | Link client | Pushed request (connect, update, reauth); returns the widget `request_uri` |
+| GET | `/link/v1/authorize` | None (request_uri) | Hosted flow entry, renders the provider picker |
+| POST | `/link/v1/picker` | None (envelope + cookie) | Picker submission, redirects to the provider |
+| GET | `/link/v1/callback/:provider` | None (provider state) | Provider callback, renders the scope confirmation |
+| POST | `/link/v1/confirm` | None (envelope + cookie) | Confirm, back or cancel; delivers the result |
+| GET | `/link/v1/connections?subject=` | Link client | List a subject's connections |
+| GET | `/link/v1/connections/:id` | Link client | Connection status, provider, subject, grant |
+| DELETE | `/link/v1/connections/:id` | Link client | Revoke the grant and delete secrets; revoke at the provider when safe (`provider_revoked`) |
+| POST | `/link/v1/connections/:id/activate` | Link client | `{ code, subject }`: pending to active (or commit a staged update) |
+| POST | `/link/v1/connections/:id/refresh` | Link client | Force a refresh, status only |
+| POST | `/link/v1/connections/:id/reauth` | Link client | `{ subject }`: reauth pushed request |
+| POST | `/link/v1/connections/:id/permissions` | Link client | `{ agent_id, scopes }`: grant an agent scopes within the grant |
 
 > **Sub-delegation is broker-only.** Scope attenuation on a raw provider access token can't be
 > enforced once it has left the server, so every response from `/api/v1/subdelegate`
@@ -83,6 +99,108 @@ npm run dev
 > lineage and degrade to a parent-only check for that hop until they age out under
 > `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
 > `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
+
+## Cred Link (Phase 1)
+
+Cred Link is the hosted account-connection flow behind `@credninja/link` and
+`@credninja/link-react`. With `LINK_ENABLED=true` this server serves the
+`/link/v1/*` routes itself (self-hosted, SQLite). Raw provider credentials
+never reach the developer's code: the developer receives a `connection_id`,
+and agents receive brokered handles.
+
+**Setup**
+
+1. Set `LINK_ENABLED=true` and `VAULT_STORAGE=sqlite`. Optionally set
+   `LINK_STORE_PATH` and `LINK_BASE_URL`.
+2. At every provider you offer through Link, register
+   `<LINK_BASE_URL>/link/v1/callback/<provider>` as an OAuth redirect URI
+   (for example `https://cred.example.com/link/v1/callback/google`). Link uses
+   the same `<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` as the admin connect UI.
+3. Register each developer app as a Link client (admin auth):
+
+   ```bash
+   curl -X POST https://cred.example.com/admin/link/clients \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+     -d '{"name":"Acme","redirect_uris":["https://app.example.com/cred/return"],"origins":["https://app.example.com"]}'
+   ```
+
+   The response carries `client_secret` once (only its SHA-256 is stored).
+   `name` is required: it is the app name the consent pages show (unless the
+   registered `theme.appName` overrides it), and the logo comes only from the
+   registered `theme.logoUrl`; the browser can change only cosmetic theme
+   fields. RSA client keys must be at least 2048 bits.
+   For `private_key_jwt`, send `"token_endpoint_auth_method":"private_key_jwt"`
+   and `"jwks":{"keys":[...]}` (public RSA, EC or Ed25519 keys). Redirect URIs
+   and origins must be https (plain http only on loopback); redirect URIs may
+   not carry a fragment or any Link result parameter (`cred_link`, `code`,
+   `state`, ...). `"allow_raw_tokens": true` is the operator's per-client
+   escape hatch for raw provider tokens (see below).
+
+**Client authentication.** `client_secret_basic` (`Authorization: Basic`,
+RFC 6749 2.3.1) or `private_key_jwt` (RFC 7523): the assertion travels as
+`Authorization: Bearer <jwt>` on every route, or as `client_assertion_type` +
+`client_assertion` body fields on routes with a body. `iss` = `sub` =
+client_id, `aud` = `REDIRECT_BASE_URI` (or `LINK_BASE_URL`), `exp - iat` at
+most 300 seconds, `jti` single use. Every client authentication failure, and
+every lookup of an unknown or foreign connection, answers exactly
+`401 {"error":"access_denied"}` with a `Cred-Request-Id` header.
+
+**Flow.** The backend pushes `POST /link/v1/par` and hands the returned
+`request_uri` to the widget; the user picks a provider and permissions,
+consents at the provider, confirms what the provider actually granted (and
+may narrow it), and the widget reports `connection_id` and a one-time `code`.
+The connection stays `pending` until the backend calls
+`POST /link/v1/connections/:id/activate` with that code and the `subject` of
+its own current session; any mismatch revokes it. Transactions expire after
+10 minutes; anything unactivated is cleaned up by a background sweep (and
+revoked at the provider under the revocation rule below). Activation commits
+the database first and moves the tokens second; if the token move fails the
+connection is set to `needs_reauth`, never left active without tokens.
+
+**Agents and enforcement.** Link is deny-by-default per agent: an agent can
+use a connection only through a Permission, seeded on activation from the
+pushed `agent_id` or added with `POST /link/v1/connections/:id/permissions`.
+`POST /api/v1/delegate` with `connection_id` runs the Link check before any
+vault access whether or not a Guard is configured, returns a brokered handle
+by default (300 seconds, see `LINK_HANDLE_TTL_SECONDS`), and
+`POST /api/v1/use` re-runs the check on every call, so a
+revoked, narrowed or `needs_reauth` connection is refused at once with a typed
+code (`grant_revoked`, `reauth_required`, `permission_required`,
+`insufficient_scope`, ...). Raw tokens are issued only when the client has
+`allow_raw_tokens` and the provider's tokens expire and refresh (never Slack,
+Notion or GitHub OAuth App tokens), each with its own audit event.
+
+The agent id for Link checks comes from verified request state only: a custom
+`agentRequestVerifier`'s `principalId`; otherwise a signature-verified TOFU
+proof or Web Bot Auth key of a local TOFU agent (`tofu:<agentId>`); otherwise
+the fixed id `server-agent`. A single-agent deployment that uses the shared
+`AGENT_TOKEN` passes `"agent_id": "server-agent"` in PAR.
+
+**Provider notes.** Slack connects as a bot install (bot token, account
+`<team id>/<bot user id>`). Notion has no OAuth scopes: its `content`
+permission is enforced by Cred. Salesforce pins every brokered call to the
+instance host captured at connect time. Brokered calls can never reach
+provider revocation endpoints (Linear is limited to its GraphQL endpoint,
+HubSpot to its data API paths, Slack `auth.revoke` and `apps.uninstall` are
+refused).
+
+**Provider revocation.** Every Link client on this server shares the
+server's provider OAuth app, and at Google, Salesforce and Slack one
+revocation ends the whole authorization for that account. Link therefore
+revokes at the provider (after cancel, back, failure, expiry, a superseded
+activation, or `DELETE /link/v1/connections/:id`) only when no other
+non-revoked Link connection on this server, for any client or subject, uses
+the same provider account and no other open flow holds staged tokens for it;
+otherwise it deletes only its local tokens, and `DELETE` answers
+`"provider_revoked": false`. **Limitation:** connections made through the
+legacy admin `/connect` UI carry no provider account id, so Link cannot see
+them; revoking a Link connection can still end a legacy connection on the
+same account. Do not mix legacy and Link connections for one account if
+that matters.
+
+**Reserved user ids.** Link tokens live in the vault under the user ids
+`link:<connection_id>` and `link-staged:<tid>`. Every legacy route that takes
+a `user_id` rejects those ids with `400 invalid_user_id`.
 
 ## Configuration
 
@@ -111,6 +229,10 @@ All configuration via environment variables (or `.env` file):
 | `SLACK_CLIENT_ID` | No | Slack OAuth client ID |
 | `SLACK_CLIENT_SECRET` | No | Slack OAuth client secret |
 | ... | No | Same pattern for NOTION, SALESFORCE, LINEAR, HUBSPOT |
+| `LINK_ENABLED` | No | `true` to enable Cred Link. Requires `VAULT_STORAGE=sqlite`; startup fails otherwise |
+| `LINK_STORE_PATH` | No | Link SQLite file (default: `link.sqlite` next to `VAULT_PATH`) |
+| `LINK_BASE_URL` | No | Public origin of the Link pages and provider callback, no path (default: `REDIRECT_BASE_URI`) |
+| `LINK_HANDLE_TTL_SECONDS` | No | Lifetime of Link brokered handles (default `300`, capped at `900`) |
 
 `ADMIN_TOKEN` and `AGENT_TOKEN` are required when you use `loadConfig()` from environment variables. For embedded/programmatic agent auth, you can instead provide a custom `agentRequestVerifier` function in `createServer(config)` and omit the static agent token entirely. Admin routes still require `adminToken`.
 

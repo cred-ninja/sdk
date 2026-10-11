@@ -137,6 +137,7 @@ export function mcpOnDeny(
           error: 'policy_denied',
           policy: decision.deniedBy?.policy,
           reason: decision.deniedBy?.reason,
+          code: decision.deniedBy?.code,
         }),
       },
     ],
