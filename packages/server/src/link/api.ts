@@ -498,7 +498,8 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
         now: nowIso(),
       }).catch(() => null);
       // One retry before giving up on the status write.
-      const marked = (await markReauth()) ?? (await markReauth());
+      let marked = await markReauth();
+      if (!marked) marked = await markReauth();
       if (marked) {
         ctx.quarantine.delete(activated.connection.id);
       } else {
