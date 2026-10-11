@@ -64,6 +64,42 @@ export class PermissionStore {
     await storage.revokePermission(permissionId);
   }
 
+  /** Cred Link: all permissions on one connection, any agent. */
+  async listForConnection(connectionId: string): Promise<Permission[]> {
+    if (!this.backend.listPermissionsForConnection) {
+      throw new Error('Permission storage not supported by this backend');
+    }
+    const rows = await this.backend.listPermissionsForConnection(connectionId);
+    return rows.map((row) => this.rowToPermission(row));
+  }
+
+  /**
+   * Cred Link: set every permission on the connection to
+   * allowedScopes ∩ scopes (canonical comparison), atomically. Returns the
+   * permissions whose scope set changed. Never widens.
+   */
+  async intersectForConnection(connectionId: string, scopes: readonly string[]): Promise<Permission[]> {
+    if (!this.backend.intersectPermissionsForConnection) {
+      throw new Error('Permission storage not supported by this backend');
+    }
+    const rows = await this.backend.intersectPermissionsForConnection(connectionId, [...scopes]);
+    return rows.map((row) => this.rowToPermission(row));
+  }
+
+  /** Whether the backend implements everything Cred Link's permission port needs. */
+  supportsLinkPermissions(): boolean {
+    return Boolean(
+      this.backend.storePermission
+      && this.backend.getPermission
+      && this.backend.listPermissions
+      && this.backend.revokePermission
+      && this.backend.checkPermissionRateLimit
+      && this.backend.updatePermission
+      && this.backend.listPermissionsForConnection
+      && this.backend.intersectPermissionsForConnection,
+    );
+  }
+
   async checkRateLimit(
     permissionId: string,
     maxRequests: number,

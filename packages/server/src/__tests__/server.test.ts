@@ -3017,16 +3017,20 @@ describe('@credninja/server', () => {
       expect(missingState.body.error).toBe('Missing code or state parameter');
     });
 
-    it('escapes OAuth callback error messages before rendering HTML', async () => {
+    it('never renders OAuth callback error text into HTML', async () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
       const res = await request(app)
         .get('/connect/google/callback?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E');
 
+      // Provider error text is neither echoed raw nor escaped: a generic
+      // message and a request id only (Cred Link spec 5 gap fix).
       expect(res.status).toBe(400);
-      expect(res.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
       expect(res.text).not.toContain('<script>alert(1)</script>');
+      expect(res.text).not.toContain('&lt;script&gt;');
+      expect(res.text).not.toContain('alert(1)');
+      expect(res.text).toMatch(/Request ID: [0-9a-f-]{36}/);
     });
 
     it('rejects OAuth callbacks with invalid or provider-mismatched state', async () => {
@@ -3070,6 +3074,9 @@ describe('@credninja/server', () => {
 
         expect(callbackRes.status).toBe(500);
         expect(callbackRes.text).toContain('Connection Failed');
+        // The exception message (it names the provider status) is never rendered.
+        expect(callbackRes.text).not.toContain('Token exchange failed');
+        expect(callbackRes.text).not.toContain('invalid_grant');
         const entry = await vault.get({ provider: 'google', userId: 'exchange-fail-user' });
         expect(entry).toBeNull();
       } finally {

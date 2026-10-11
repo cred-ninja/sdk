@@ -2,8 +2,30 @@ import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 import Database from 'better-sqlite3';
+import { canonicalScopeSet, intersectScopes, scopeSetsEqual } from '@credninja/protocol';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
+
+/** Column list for vault_permissions reads used by the Cred Link methods. */
+const PERMISSION_COLUMNS = `
+  id, agent_id, connection_id, allowed_scopes,
+  rate_limit_max, rate_limit_window_ms, ttl_override,
+  requires_approval, delegatable, max_delegation_depth,
+  expires_at, created_at, created_by, updated_at
+`;
+
+/** Parse a stored allowed_scopes JSON array. null when it is not an array of strings. */
+function parsePermissionScopes(raw: string): string[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((s) => typeof s === 'string')) {
+      return parsed as string[];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 
 /**
@@ -570,6 +592,59 @@ export class SQLiteBackend implements StorageBackend {
     });
 
     revoke(permissionId);
+  }
+
+  listPermissionsForConnection(connectionId: string): PermissionRow[] {
+    const db = this.ensureDb();
+
+    return db.prepare(`
+      SELECT ${PERMISSION_COLUMNS}
+      FROM vault_permissions
+      WHERE connection_id = ?
+      ORDER BY created_at DESC, id ASC
+    `).all(connectionId) as PermissionRow[];
+  }
+
+  /**
+   * Cred Link narrowing. One BEGIN IMMEDIATE transaction: read every row on
+   * the connection, compute allowed_scopes ∩ scopes in canonical form, and
+   * rewrite only the rows whose scope set changed (canonical JSON, updated_at
+   * bumped). IMMEDIATE takes the write lock before the read so another
+   * connection to the same database file cannot interleave a write between
+   * the read and the update. Returns the changed rows as stored.
+   */
+  intersectPermissionsForConnection(connectionId: string, scopes: readonly string[]): PermissionRow[] {
+    const db = this.ensureDb();
+    const bound = canonicalScopeSet(scopes);
+
+    const run = db.transaction((connId: string): PermissionRow[] => {
+      const rows = db.prepare(`
+        SELECT ${PERMISSION_COLUMNS}
+        FROM vault_permissions
+        WHERE connection_id = ?
+        ORDER BY created_at DESC, id ASC
+      `).all(connId) as PermissionRow[];
+
+      const now = new Date().toISOString();
+      const update = db.prepare(`
+        UPDATE vault_permissions
+        SET allowed_scopes = @allowedScopes, updated_at = @updatedAt
+        WHERE id = @id
+      `);
+
+      const changed: PermissionRow[] = [];
+      for (const row of rows) {
+        const current = parsePermissionScopes(row.allowed_scopes);
+        const next = current === null ? [] : intersectScopes(current, bound);
+        if (current !== null && scopeSetsEqual(current, next)) continue;
+        const allowedScopes = JSON.stringify(next);
+        update.run({ id: row.id, allowedScopes, updatedAt: now });
+        changed.push({ ...row, allowed_scopes: allowedScopes, updated_at: now });
+      }
+      return changed;
+    });
+
+    return run.immediate(connectionId);
   }
 
   checkPermissionRateLimit(

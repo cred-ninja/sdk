@@ -17,6 +17,7 @@ import type {
   RefreshTokenParams,
   RevokeTokenParams,
 } from '../types.js';
+import { OAuthTokenError, oauthErrorCode, readErrorBody } from '../errors.js';
 
 export class NotionAdapter extends BaseServiceAdapter {
   readonly slug = 'notion';
@@ -47,11 +48,16 @@ export class NotionAdapter extends BaseServiceAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Notion token exchange failed: ${response.status} ${response.statusText}`);
+      const errorBody = await readErrorBody(response);
+      throw new OAuthTokenError(`Notion token exchange failed: ${response.status} ${response.statusText}`, {
+        status: response.status,
+        error: oauthErrorCode(errorBody),
+        operation: 'exchange',
+      });
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeTokenResponse(data);
+    return this.finishTokenResponse(data, response.status);
   }
 
   protected normalizeTokenResponse(data: Record<string, unknown>): TokenResponse {

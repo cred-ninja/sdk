@@ -12,6 +12,14 @@ import type { StoredRow } from '../types.js';
  *
  * Atomic writes: data is written to a temp file and renamed, preventing
  * corrupt state if the process dies mid-write.
+ *
+ * Permissions are deliberately not supported: this backend implements none
+ * of the optional permission methods, including the Cred Link ones
+ * (`listPermissionsForConnection`, `intersectPermissionsForConnection`).
+ * PermissionStore throws "Permission storage not supported by this backend"
+ * and `CredVault.getLinkPermissionPort()` throws the same way, so Cred Link
+ * (which is deny-by-default per agent and needs Permission rows) cannot be
+ * enabled on a file vault. Use the SQLite backend for Link.
  */
 export class FileBackend implements StorageBackend {
   private readonly filePath: string;

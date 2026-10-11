@@ -28,7 +28,11 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@credninja/protocol": "^2.0.0"
+  },
   "devDependencies": {
+    "@credninja/vault": "^2.0.0",
     "@types/express": "^5.0.5",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",

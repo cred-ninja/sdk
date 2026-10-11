@@ -13,6 +13,8 @@ const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
   'packages/protocol',
+  'packages/link',
+  'packages/link-react',
   'packages/oauth',
   'packages/tofu',
   'packages/vault',
