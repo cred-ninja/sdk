@@ -11,6 +11,7 @@ import util from 'node:util';
 import { LINK_OPAQUE_FAILURE_BODY } from '@credninja/protocol';
 import { ReservedVaultUserIdError } from '@credninja/vault';
 import { createServer } from '../server.js';
+import { googleRemovalIsBrokerEnforced } from '../google-scopes.js';
 import {
   ADMIN_TOKEN,
   AGENT_TOKEN,
@@ -999,3 +1000,411 @@ describe('the success audit record does not abort activation (v2 item 5)', () =>
     expect((await delegate(hx.app, { connection_id: result.connection_id })).status).toBe(200);
   });
 });
+
+// ── Polish-round review (formerly zz-review-polish) ──────────────────────────
+
+describe('polish review: narrowing', () => {
+  function narrow(hx: Harness, client: { auth: string }, id: string, body: Record<string, unknown>) {
+    return request(hx.app).post(`/link/v1/connections/${id}/narrow`).set('Authorization', client.auth).send(body);
+  }
+
+  it('scopes that canonicalize to nothing never narrow the grant to empty', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    for (const scopes of [['/'], ['/', 'calendar.readonly'], [' / ']]) {
+      const res = await narrow(hx, client, conn, { subject: 'user-a', scopes });
+      expect({ scopes, status: res.status, error: res.body.error }).toEqual({ scopes, status: 400, error: 'invalid_scope' });
+    }
+    expect((await hx.server.link!.context.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly', 'gmail.send']);
+  });
+
+  it('Slack (enforcement record): records shrink, but a brokered call still reaches upstream', async () => {
+    // Known Phase 1 limit, documented in the README and in
+    // NarrowConnectionResponse.enforcement: narrowing never changes the
+    // provider token, and the broker cannot tell which Slack scope a URL
+    // needs, so a still-valid handle can reach any allowlisted Slack URL.
+    // To really remove access, run an update or reauth for fewer scopes, or
+    // delete the connection.
+    const hx = await harness();
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['slack'], scopes: { slack: ['chat:write', 'channels:read'] }, required_scopes: {} }), { provider: 'slack', scopes: ['chat:write', 'channels:read'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'slack')).text, ['chat:write', 'channels:read']));
+    if (r.outcome !== 'success') throw new Error('slack flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    const oldHandle = (await delegate(app, { connection_id: r.connection_id })).body.delegation_id;
+
+    const n = await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['channels:read'] });
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['chat:write']);
+    expect(n.body.enforcement).toBe('record');
+
+    // The records: an agent can no longer request or be issued the scope.
+    const named = await delegate(app, { connection_id: r.connection_id, scopes: ['chat:write'] });
+    expect(named.status).toBe(403);
+    const fresh = await delegate(app, { connection_id: r.connection_id });
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.scopes).toEqual(['channels:read']);
+
+    // The limit: the brokered call still reaches Slack through either handle.
+    const post = (id: string) => use(app, { delegation_id: id, url: 'https://slack.com/api/chat.postMessage', method: 'POST', body: { channel: 'C1', text: 'hi' } });
+    expect((await post(oldHandle)).status).toBe(200);
+    expect((await post(fresh.body.delegation_id)).status).toBe(200);
+    expect(hx.fake.upstream.filter((u) => u.url === 'https://slack.com/api/chat.postMessage')).toHaveLength(2);
+  });
+
+  it('Google (enforcement broker): a call to a removed scope\'s endpoint is refused before upstream', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const oldHandle = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, { subject: 'user-a', scopes: ['calendar.readonly'] });
+    expect(n.status).toBe(200);
+    expect(n.body.enforcement).toBe('broker');
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+    const send = await use(hx.app, { delegation_id: oldHandle, url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', method: 'POST', body: {} });
+    expect(send.status).not.toBe(200);
+    expect(hx.fake.upstream.map((u) => u.url)).not.toContain('https://gmail.googleapis.com/gmail/v1/users/me/messages/send');
+    expect((await use(hx.app, { delegation_id: oldHandle, url: CALENDAR_URL, method: 'GET' })).status).toBe(200);
+  });
+
+  it('raw tokens only when the delegated scopes cover everything the provider granted', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app, { allow_raw_tokens: true });
+    const conn = await connectAndActivate(hx.app, client);
+    expect((await delegate(hx.app, { connection_id: conn, token_format: 'raw' })).status).toBe(200);
+    // A request for fewer scopes than the token carries: handle only.
+    const partial = await delegate(hx.app, { connection_id: conn, token_format: 'raw', scopes: ['calendar.readonly'] });
+    expect(partial.status).toBe(400);
+    expect(partial.body.access_token).toBeUndefined();
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['calendar.readonly'] })).status).toBe(200);
+    // A narrowed grant: never raw again.
+    expect((await narrow(hx, client, conn, { subject: 'user-a', scopes: ['calendar.readonly'] })).status).toBe(200);
+    const narrowed = await delegate(hx.app, { connection_id: conn, token_format: 'raw' });
+    expect(narrowed.status).toBe(400);
+    expect(narrowed.body.access_token).toBeUndefined();
+    expect((await delegate(hx.app, { connection_id: conn })).status).toBe(200);
+  });
+
+  it('an update confirmed before a narrow and activated after it is refused; the narrow stays in force', async () => {
+    const hx = await harness();
+    const { app, server } = hx;
+    const client = await registerClient(app);
+    const conn = await connectAndActivate(app, client);
+    const ctx = server.link!.context;
+    const oldTokens = await ctx.secrets.get(conn as never);
+    const b = new Browser();
+    const uri = await par(app, client, { intent: 'update', connection_id: conn, scopes: { google: ['calendar.readonly', 'gmail.send'] }, required_scopes: {} });
+    const pu = await toProvider(app, b, uri);
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'google', 'auth-code-2')).text, ['calendar.readonly', 'gmail.send']));
+    if (r.outcome !== 'success') throw new Error('update flow failed');
+    const [open] = await ctx.store.listOpenAccountTransactions({ provider: 'google', provider_account_id: 'google-sub-alice' }).then(
+      (txs) => txs.filter((t) => t.connection_id === conn),
+    );
+    expect(open).toBeDefined();
+    expect(await ctx.secrets.getStaged(open.tid as never)).not.toBeNull();
+
+    expect((await narrow(hx, client, conn, { subject: 'user-a', scopes: ['calendar.readonly'] })).status).toBe(200);
+    const revocationsBefore = hx.fake.revocations.length;
+    const act = await activate(app, client, conn, r.code);
+    expect(act.status).toBe(401);
+    expect(act.text).toBe(JSON.stringify(LINK_OPAQUE_FAILURE_BODY));
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly']);
+    expect(await ctx.store.getConnection(conn)).toMatchObject({ status: 'active' });
+    expect(await ctx.secrets.get(conn as never)).toEqual(oldTokens);
+    // The staged tokens are cleaned up; the live connection blocks revocation.
+    expect(await ctx.secrets.getStaged(open.tid as never)).toBeNull();
+    expect(hx.fake.revocations.length).toBe(revocationsBefore);
+    expect((await ctx.store.getTransaction(open.tid))!.outcome).toBe('failed');
+  });
+});
+
+describe('polish review: startup heal and stale transactions', () => {
+  it('a later successful reauth is not undone by the heal of an earlier unsettled activation', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const first = await connectFlow(hx.app, client);
+    const ctx = hx.server.link!.context;
+    const secrets = ctx.secrets;
+    const origCommit = secrets.commitStaged.bind(secrets);
+    const origDelete = secrets.deleteStaged.bind(secrets);
+    // The token move fails and the staged copy cannot be deleted (a disk error).
+    secrets.commitStaged = async () => { throw new Error('disk'); };
+    secrets.deleteStaged = async () => { throw new Error('disk'); };
+    try {
+      expect((await activate(hx.app, client, first.connection_id, first.code)).status).toBe(401);
+    } finally {
+      secrets.commitStaged = origCommit;
+      secrets.deleteStaged = origDelete;
+    }
+    expect((await ctx.store.getConnection(first.connection_id))!.status).toBe('needs_reauth');
+    const [stale] = await ctx.store.listUnsettledActivations();
+    expect(stale).toBeDefined();
+
+    // The app reconnects the account; it works.
+    const re = await request(hx.app).post(`/link/v1/connections/${first.connection_id}/reauth`).set('Authorization', client.auth).send({ subject: 'user-a', agent_id: 'server-agent' });
+    const b = new Browser();
+    const pu = await toProvider(hx.app, b, re.body.request_uri);
+    const rr = resultOf(await confirm(hx.app, b, (await callback(hx.app, b, pu, 'google', 'auth-code-2')).text, ['calendar.readonly', 'gmail.send']));
+    if (rr.outcome !== 'success') throw new Error('reauth failed');
+    expect((await activate(hx.app, client, first.connection_id, rr.code)).body.status).toBe('active');
+    const liveTokens = await ctx.secrets.get(first.connection_id as never);
+    const revocationsBefore = hx.fake.revocations.length;
+
+    // Restart: the stale transaction is cleaned up locally and settled only.
+    const next = await hx.restart();
+    expect((await next.link!.ready).outcomes).toEqual([{ tid: stale.tid, outcome: 'stale' }]);
+    expect((await next.link!.healed).follow_ups).toEqual([{ tid: stale.tid, outcome: 'skipped_stale' }]);
+    const after = next.link!.context;
+    expect(await after.store.getConnection(first.connection_id)).toMatchObject({ status: 'active' });
+    expect(await after.secrets.get(first.connection_id as never)).toEqual(liveTokens);
+    expect(await after.secrets.getStaged(stale.tid as never)).toBeNull();
+    expect(await after.store.listUnsettledActivations()).toEqual([]);
+    expect(hx.fake.revocations.length).toBe(revocationsBefore);
+    expect((await delegate(hx.app, { connection_id: first.connection_id })).status).toBe(200);
+  });
+});
+
+// ── Second review pass (formerly zz-review-polish2) ─────────────────────────
+
+describe('second review: Google narrowing is enforced per API family only', () => {
+  const GMAIL_SEND_WWW = 'https://www.googleapis.com/gmail/v1/users/me/messages/send';
+
+  async function googleConnection(hx: Harness, scopes: string[]) {
+    hx.fake.googleScope = ['openid', 'https://www.googleapis.com/auth/userinfo.email', ...scopes.map((s) => `https://www.googleapis.com/auth/${s}`)].join(' ');
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client, {
+      parOverrides: { scopes: { google: scopes }, required_scopes: {} },
+      scopes,
+      confirmScopes: scopes,
+    });
+    return { client, conn };
+  }
+
+  function narrow(hx: Harness, client: { auth: string }, id: string, scopes: string[]) {
+    return request(hx.app).post(`/link/v1/connections/${id}/narrow`).set('Authorization', client.auth).send({ subject: 'user-a', scopes });
+  }
+
+  it('a same-family narrow answers record, and the call still reaches Google (known limit)', async () => {
+    // Known Phase 1 limit: the broker tells Google API families apart, not
+    // scopes inside a family, so gmail.readonly still unlocks gmail send.
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['gmail.readonly', 'gmail.send']);
+    const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, ['gmail.readonly']);
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['gmail.send']);
+    expect(n.body.enforcement).toBe('record');
+    const fresh = (await delegate(hx.app, { connection_id: conn })).body;
+    expect(fresh.scopes).toEqual(['gmail.readonly']);
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+    for (const id of [old, fresh.delegation_id]) {
+      expect((await use(hx.app, { delegation_id: id, url: GMAIL_SEND_WWW, method: 'POST', body: { raw: 'x' } })).status).toBe(200);
+    }
+    expect(hx.fake.upstream.filter((u) => u.url === GMAIL_SEND_WWW)).toHaveLength(2);
+    // Repeating the narrow (idempotent) gives the same honest answer.
+    const again = await narrow(hx, client, conn, ['gmail.readonly']);
+    expect(again.body).toMatchObject({ changed: false, enforcement: 'record' });
+  });
+
+  it('a whole-family narrow answers broker, and the call is refused before Google', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly', 'gmail.send']);
+    const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, ['calendar.readonly']);
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['gmail.readonly', 'gmail.send']);
+    expect(n.body.enforcement).toBe('broker');
+    const send = await use(hx.app, { delegation_id: old, url: GMAIL_SEND_WWW, method: 'POST', body: { raw: 'x' } });
+    expect(send.status).not.toBe(200);
+    expect(hx.fake.upstream.map((u) => u.url)).not.toContain(GMAIL_SEND_WWW);
+    expect((await use(hx.app, { delegation_id: old, url: CALENDAR_URL, method: 'GET' })).status).toBe(200);
+    const again = await narrow(hx, client, conn, ['calendar.readonly']);
+    expect(again.body).toMatchObject({ changed: false, enforcement: 'broker' });
+  });
+
+  it('a mixed removal (one whole family plus one same-family scope) answers record', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly', 'gmail.send']);
+    const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, ['gmail.readonly']);
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['calendar.readonly', 'gmail.send']);
+    expect(n.body.enforcement).toBe('record');
+    // The calendar family is closed; gmail send is not.
+    expect((await use(hx.app, { delegation_id: old, url: CALENDAR_URL, method: 'GET' })).status).not.toBe(200);
+    expect((await use(hx.app, { delegation_id: old, url: GMAIL_SEND_WWW, method: 'POST', body: { raw: 'x' } })).status).toBe(200);
+  });
+
+  it('the family rule matches the broker table: no family means record', () => {
+    expect(googleRemovalIsBrokerEnforced(['gmail.send'], ['calendar.readonly'])).toBe(true);
+    expect(googleRemovalIsBrokerEnforced(['gmail.send'], ['gmail.readonly'])).toBe(false);
+    expect(googleRemovalIsBrokerEnforced(['https://www.googleapis.com/auth/gmail.send'], ['https://www.googleapis.com/auth/gmail.readonly'])).toBe(false);
+    expect(googleRemovalIsBrokerEnforced(['drive.file'], ['drive'])).toBe(false);
+    expect(googleRemovalIsBrokerEnforced(['tasks'], ['calendar.readonly'])).toBe(false);
+    expect(googleRemovalIsBrokerEnforced(['calendar.events', 'calendar.readonly'], ['contacts.readonly'])).toBe(true);
+  });
+});
+
+describe('second review: activation compares grant scopes, not versions', () => {
+  it('a reauth confirmed while active still activates after the old token died (a status change alone does not refuse)', async () => {
+    const hx = await harness();
+    const { app, server } = hx;
+    const ctx = server.link!.context;
+    const client = await registerClient(app);
+    const conn = await connectAndActivate(app, client);
+    const re = await request(app).post(`/link/v1/connections/${conn}/reauth`).set('Authorization', client.auth).send({ subject: 'user-a', agent_id: 'server-agent' });
+    expect(re.status).toBe(201);
+    const b = new Browser();
+    const pu = await toProvider(app, b, re.body.request_uri);
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'google', 'auth-code-2')).text, ['calendar.readonly', 'gmail.send']));
+    if (r.outcome !== 'success') throw new Error('reauth flow failed');
+    const [open] = (await ctx.store.listOpenAccountTransactions({ provider: 'google', provider_account_id: 'google-sub-alice' }))
+      .filter((t) => t.connection_id === conn);
+    const staged = await ctx.secrets.getStaged(open.tid as never);
+    expect(staged).not.toBeNull();
+
+    // Meanwhile an agent call refreshes the old token and the provider says
+    // invalid_grant (the usual reason a user reconnects).
+    const tokens = await ctx.secrets.get(conn as never);
+    await ctx.secrets.put(conn as never, { ...tokens!, expires_at: new Date(Date.now() - 1000).toISOString() });
+    hx.fake.refreshMode = 'invalid_grant';
+    const d = await delegate(app, { connection_id: conn });
+    expect(d.body.error).toBe('grant_revoked');
+    expect((await ctx.store.getConnection(conn))!.status).toBe('needs_reauth');
+
+    // This reauth is exactly what repairs the dead token.
+    const act = await activate(app, client, conn, r.code);
+    expect(act.status).toBe(200);
+    expect(act.body.status).toBe('active');
+    expect(await ctx.store.getConnection(conn)).toMatchObject({ status: 'active' });
+    expect((await ctx.secrets.get(conn as never))!.access_token).toBe(staged!.access_token);
+    hx.fake.refreshMode = 'ok';
+    expect((await delegate(app, { connection_id: conn })).status).toBe(200);
+  });
+
+  it('a narrow that lands between the confirm screen check and the confirm commit is caught at activation (connect onto a live connection)', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const store = hx.server.link!.context.store;
+    const b = new Browser();
+    const uri = await par(hx.app, client, { scopes: { google: ['calendar.readonly', 'gmail.send'] }, required_scopes: {} });
+    const page = await callback(hx.app, b, await toProvider(hx.app, b, uri));
+    expect(page.text).toContain('id="cred-link-reconnect"');
+
+    // The narrow commits after handleConfirm compared the basis, just before
+    // commitConfirm records what the screen showed.
+    const original = store.commitConfirm.bind(store);
+    let shown: unknown;
+    store.commitConfirm = async (input) => {
+      shown = input.shown_grant_scopes;
+      const grant = await store.getGrantForConnection(conn);
+      await store.narrowGrant({ grant_id: grant!.id, scopes: ['calendar.readonly'], expected_version: grant!.version, now: new Date().toISOString() });
+      return original(input);
+    };
+    let result;
+    try {
+      result = resultOf(await confirm(hx.app, b, page.text, ['calendar.readonly', 'gmail.send']));
+    } finally {
+      store.commitConfirm = original;
+    }
+    expect(shown).toEqual(['calendar.readonly', 'gmail.send']);
+    if (result.outcome !== 'success') throw new Error('confirm failed');
+    const act = await activate(hx.app, client, conn, result.code);
+    expect(act.status).toBe(401);
+    expect(act.text).toBe(JSON.stringify(LINK_OPAQUE_FAILURE_BODY));
+    expect((await store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly']);
+  });
+
+  it('the same race on an update is caught too', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const store = hx.server.link!.context.store;
+    const b = new Browser();
+    const uri = await par(hx.app, client, { intent: 'update', connection_id: conn, scopes: { google: ['calendar.readonly', 'gmail.send'] }, required_scopes: {} });
+    const page = await callback(hx.app, b, await toProvider(hx.app, b, uri), 'google', 'auth-code-2');
+    const original = store.commitConfirm.bind(store);
+    let shown: unknown;
+    store.commitConfirm = async (input) => {
+      shown = input.shown_grant_scopes;
+      const grant = await store.getGrantForConnection(conn);
+      await store.narrowGrant({ grant_id: grant!.id, scopes: ['calendar.readonly'], expected_version: grant!.version, now: new Date().toISOString() });
+      return original(input);
+    };
+    let result;
+    try {
+      result = resultOf(await confirm(hx.app, b, page.text, ['calendar.readonly', 'gmail.send']));
+    } finally {
+      store.commitConfirm = original;
+    }
+    expect(shown).toEqual(['calendar.readonly', 'gmail.send']);
+    if (result.outcome !== 'success') throw new Error('confirm failed');
+    expect((await activate(hx.app, client, conn, result.code)).status).toBe(401);
+    expect((await store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly']);
+  });
+
+  it('a first connect passes null: the screen showed a new connection', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const store = hx.server.link!.context.store;
+    const original = store.commitConfirm.bind(store);
+    let shown: unknown = 'unset';
+    store.commitConfirm = async (input) => {
+      shown = input.shown_grant_scopes;
+      return original(input);
+    };
+    try {
+      await connectAndActivate(hx.app, client);
+    } finally {
+      store.commitConfirm = original;
+    }
+    expect(shown).toBeNull();
+  });
+});
+
+describe('final review: a failed token move still intersects the Permissions', () => {
+  it('narrowing update, token move fails, a later update re-adds the scope: the agent\'s Permission does not get it back', async () => {
+    const hx = await harness();
+    const { app } = hx;
+    const client = await registerClient(app);
+    const conn = await connectAndActivate(app, client);
+    const ctx = hx.server.link!.context;
+    const perm = await request(app).post(`/link/v1/connections/${conn}/permissions`).set('Authorization', client.auth)
+      .send({ agent_id: 'agent-2', scopes: ['calendar.readonly', 'gmail.send'] });
+    expect(perm.status).toBe(200);
+
+    // A narrowing update whose token move fails after the database commit.
+    const updateTo = async (scopes: string[], code: string) => {
+      const b = new Browser();
+      const uri = await par(app, client, { intent: 'update', connection_id: conn, scopes: { google: ['calendar.readonly', 'gmail.send'] }, required_scopes: {} });
+      const page = await callback(app, b, await toProvider(app, b, uri, { scopes: ['calendar.readonly', 'gmail.send'] }), 'google', code);
+      const r = resultOf(await confirm(app, b, page.text, scopes));
+      if (r.outcome !== 'success') throw new Error('update failed');
+      return r;
+    };
+    const narrowing = await updateTo(['calendar.readonly'], 'auth-code-2');
+    const secrets = ctx.secrets;
+    const origCommit = secrets.commitStaged.bind(secrets);
+    secrets.commitStaged = async () => { throw new Error('disk'); };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await activate(app, client, conn, narrowing.code)).status).toBe(401);
+    } finally {
+      secrets.commitStaged = origCommit;
+    }
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly']);
+    expect((await ctx.permissions.get('agent-2', conn))!.allowedScopes).toEqual(['calendar.readonly']);
+
+    // A later update re-adds gmail.send to the grant; agent-2 was never
+    // granted it again by the backend.
+    const widening = await updateTo(['calendar.readonly', 'gmail.send'], 'auth-code-3');
+    expect((await activate(app, client, conn, widening.code)).status).toBe(200);
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly', 'gmail.send']);
+    expect((await ctx.permissions.get('agent-2', conn))!.allowedScopes).toEqual(['calendar.readonly']);
+  });
+});
+

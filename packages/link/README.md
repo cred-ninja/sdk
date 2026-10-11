@@ -125,6 +125,31 @@ Opens the hosted flow in a centered popup and listens for the result. If the use
 - Call `open()` directly inside a user gesture. If the browser still blocks the popup, `open()` throws `CredLinkError` with code `popup_blocked` and leaves nothing running; the user can click again. The widget does not silently fall back to redirect mode, because that would navigate your page away without your return page being ready.
 - Your page must keep its opener relationship with the popup: do not serve it with `Cross-Origin-Opener-Policy: same-origin`. `same-origin-allow-popups` or no COOP header both work.
 
+### Popup fallback
+
+Popup mode needs the popup to keep its link to your page (`window.opener`) for the whole flow. Some providers' consent pages cut that link (a strict `Cross-Origin-Opener-Policy`). When that happens, Link falls back to redirect delivery on its own; popup stays the default.
+
+What happens:
+
+1. The hosted result page posts the result to your page as usual, and the widget acknowledges it at once. If the link to your page is gone, or no acknowledgement arrives within 2 seconds, the popup navigates itself to your registered `redirect_uri` with the result, `cred_link_via=popup` and `cred_link_flow`, a flow id that is the SHA-256 of the widget's token.
+2. On that page, `Cred.handleRedirect()` offers the result, over a `BroadcastChannel` on your origin, to the widget for that flow if it is still waiting on another page. Only a widget whose own token hashes to that flow id claims it. That widget validates the result, sends a receipt, and gets it through its normal `onSuccess`, `onError` or `onExit`. Once the receipt arrives, the return page calls your `onRelayed` callback instead of its result callbacks and asks the browser to close the window. If nobody claims within 700 ms, or no receipt arrives within about 1 s of the delivery (a short extra grace lets a receipt already queued behind a busy page still count), `handleRedirect()` delivers the result to its own callbacks, exactly as in redirect mode, and the window stays open. A return URL with the marker but no valid flow id is always handled on the return page.
+3. The browser remembers that this provider cut the popup off. Next time, when the user picks that provider, the popup closes and your page continues in redirect mode: the top window navigates to Link, and the result comes back to your `redirect_uri` page.
+
+What you need to do:
+
+- **The page at your registered `redirect_uri` must call `Cred.handleRedirect()`**, the same requirement as redirect mode. Without it the fallback delivers nothing.
+- **The relay only works when the `redirect_uri` page and the page hosting the widget are on the same origin.** Otherwise the return page handles the result itself, and the widget page eventually reports an exit.
+- **Show something when the result went elsewhere.** Pass `onRelayed` to `handleRedirect()`. It runs when the result was handed to the waiting page; then this page's `onSuccess`, `onError` and `onExit` do not run. The browser may refuse `window.close()` (a window the user opened, or a popup whose browsing context was swapped), so use `onRelayed` to show "Connected. You can close this window."
+- **Trigger activation from the callbacks, not from `handleRedirect()`'s return value.** The return value is the parsed result either way, but in the fallback case another page may be the one that delivers it and activates. Activating from both would make one attempt fail.
+- **What the relay does and does not protect.** The relay is bound to the flow: a crafted return URL (from any site) cannot reach a waiting widget unless it carries that widget's flow id, which is derived from a token that never leaves the user's browser, and two tabs running different flows cannot take each other's results. But the relay channel trusts every script on your page's origin. Such a script can see the flow id in an offer and claim the result, so it can read a relayed result, or answer with its own receipt and keep the result from being delivered (the return window then closes and the waiting widget reports an exit only when the transaction expires). Same-origin script can already do worse, so this sits inside the same trust boundary. Backend activation remains the real check: `POST /link/v1/connections/:id/activate` with `{code, subject}`, the subject taken from your session, after checking the echoed `state`.
+- **After a handoff the top window navigates away**, just like redirect mode. Persist any in-progress state (form input, the page to come back to) the same way you would for redirect mode.
+
+Trade-off: if the popup reads as closed within 3 seconds of the user choosing a provider, the widget treats it as a lost link, not a cancel. It stays waiting for a relayed result and does not call `onExit` until the transaction can no longer complete (10 minutes). So if the user really closes the popup in that window, `onExit` is delayed. Call `close()` to end the attempt sooner; calling `open()` again also ends it (with `onExit`) and starts a new popup. A popup closed at any other time reports `onExit` right away, as before.
+
+In the relay case `handleRedirect()` still returns the parsed result and cleans the URL synchronously, but its callbacks (or `onRelayed`) run asynchronously, after the relay decision. Pass `relay: false` to always handle the result on the return page. If `BroadcastChannel` or Web Crypto is missing, the result is handled on the return page. The return page never calls `window.close()` after handling a result itself.
+
+Residual double delivery: if the page that opened the popup has its main thread blocked for seconds, the popup can give up waiting for the acknowledgement and fall back to the redirect while the original result message is still queued for that page. Both pages can then deliver the same result. The code is single use, so one of the two activation calls fails with the opaque `401`; treat that as "already connected" if the connection shows up as active.
+
 ### `redirect`
 
 `open()` navigates the top window to the hosted flow. At the end, Cred redirects to your registered `redirect_uri` with the result in the query string. On that page:
@@ -139,7 +164,7 @@ Cred.handleRedirect({
 });
 ```
 
-`handleRedirect()` parses the result with the contracts helper (only the Link parameters are handed to it, so an unrelated malformed parameter such as `x=%E0%A4` cannot break parsing), removes the Link parameters (`cred_link`, `connection_id`, `code`, `grant_id`, `provider`, `scope`, `state`, `error`, `request_id`, `step`) from the address bar with `history.replaceState`, keeps your other parameters and the fragment, then calls the matching callback once. It returns the result, or `null` if the page was not reached from Link. If the Link parameters themselves are malformed, nothing is delivered and the URL is left untouched, so a result is never cleaned away without being delivered.
+`handleRedirect()` parses the result with the contracts helper (only the Link parameters are handed to it, so an unrelated malformed parameter such as `x=%E0%A4` cannot break parsing), removes the Link parameters (`cred_link`, `cred_link_via`, `connection_id`, `code`, `grant_id`, `provider`, `scope`, `state`, `error`, `request_id`, `step`) from the address bar with `history.replaceState`, keeps your other parameters and the fragment, then calls the matching callback once. It returns the result, or `null` if the page was not reached from Link. If the Link parameters themselves are malformed, nothing is delivered and the URL is left untouched, so a result is never cleaned away without being delivered.
 
 This assumes your registered `redirect_uri` has no query parameter of its own named like a Link result parameter; Cred's client registration rejects such redirect URIs, because a repeated parameter makes the result unparseable.
 
@@ -187,7 +212,7 @@ interface CredLink {
   destroy(): void; // tear down silently; the handle can no longer be opened
 }
 
-Cred.handleRedirect(options?: { onSuccess?; onError?; onExit?; url?: string }): LinkResult | null
+Cred.handleRedirect(options?: { onSuccess?; onError?; onExit?; onRelayed?(): void; url?: string; relay?: boolean }): LinkResult | null
 parseRedirectResult(input: string | { search: string }): LinkResult | null
 buildAuthorizeUrl(options: Pick<CredLinkOptions, 'token' | 'mode' | 'baseUrl' | 'providers' | 'scopes' | 'theme'>): string
 ```

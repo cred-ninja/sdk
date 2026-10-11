@@ -537,3 +537,81 @@ describe('redirect-mode results', () => {
     for (const q of bad) expect(parseLinkRedirectResult(q)).toBeNull();
   });
 });
+
+describe('polish: narrow path, ack handshake, handoff, redirect via', () => {
+  it('exposes the narrow path', () => {
+    expect(protocol.fillLinkPath(protocol.LINK_PATHS.narrow, { id: 'conn_abc' })).toBe('/link/v1/connections/conn_abc/narrow');
+  });
+
+  it('builds and recognizes the ack message only', () => {
+    expect(protocol.linkAckMessage()).toEqual({ type: 'cred.link.ack', v: 1 });
+    expect(protocol.isLinkAckMessage(protocol.linkAckMessage())).toBe(true);
+    expect(protocol.isLinkAckMessage({ type: 'cred.link.ack', v: 2 })).toBe(false);
+    expect(protocol.isLinkAckMessage({ type: 'cred.link.result', v: 1 })).toBe(false);
+    expect(protocol.isLinkAckMessage(null)).toBe(false);
+    // The widget never accepts an ack as a page message.
+    expect(protocol.parseLinkMessage(protocol.linkAckMessage())).toBeNull();
+  });
+
+  it('accepts a redirect handoff only on the provider step with a provider', () => {
+    expect(protocol.parseLinkMessage({ type: 'cred.link.step', v: 1, step: 'provider', provider: 'google', handoff: 'redirect' }))
+      .toEqual({ type: 'cred.link.step', v: 1, step: 'provider', provider: 'google', handoff: 'redirect' });
+    expect(protocol.parseLinkMessage({ type: 'cred.link.step', v: 1, step: 'provider', handoff: 'redirect' })).toBeNull();
+    expect(protocol.parseLinkMessage({ type: 'cred.link.step', v: 1, step: 'picker', provider: 'google', handoff: 'redirect' })).toBeNull();
+    expect(protocol.parseLinkMessage({ type: 'cred.link.step', v: 1, step: 'provider', provider: 'google', handoff: 'popup' })).toBeNull();
+  });
+
+  it('marks and reads a popup fallback without changing the parsed result', () => {
+    const result = {
+      outcome: 'exit' as const,
+      step: 'confirm' as const,
+      state: 's1',
+    };
+    const plain = protocol.appendLinkRedirectResult('https://app.example.com/return', result);
+    const via = protocol.appendLinkRedirectResult('https://app.example.com/return', result, { via: 'popup' });
+    expect(plain).not.toContain('cred_link_via');
+    expect(via.endsWith('&cred_link_via=popup')).toBe(true);
+    const q = via.slice(via.indexOf('?'));
+    expect(protocol.parseLinkRedirectResult(q)).toEqual(protocol.parseLinkRedirectResult(plain.slice(plain.indexOf('?'))));
+    expect(protocol.parseLinkRedirectVia(q)).toBe('popup');
+    expect(protocol.parseLinkRedirectVia(plain.slice(plain.indexOf('?')))).toBeNull();
+    // Malformed or repeated markers fail closed.
+    expect(protocol.parseLinkRedirectVia(q + '&cred_link_via=popup')).toBeNull();
+    expect(protocol.parseLinkRedirectResult(q.replace('cred_link_via=popup', 'cred_link_via=other'))).toBeNull();
+    expect(protocol.parseLinkRedirectResult(q + '&cred_link_via=popup')).toBeNull();
+  });
+});
+
+describe('polish: relay flow id and narrow enforcement', () => {
+  const flow = 'a'.repeat(64);
+  const result = { outcome: 'exit' as const, step: 'confirm' as const };
+
+  it('appends a flow id only with the via marker and reads it back', () => {
+    const url = protocol.appendLinkRedirectResult('https://app.example.com/r', result, { via: 'popup', flow_id: flow });
+    const q = url.slice(url.indexOf('?'));
+    expect(url.endsWith(`&cred_link_via=popup&cred_link_flow=${flow}`)).toBe(true);
+    expect(protocol.parseLinkRedirectFlowId(q)).toBe(flow);
+    expect(protocol.parseLinkRedirectVia(q)).toBe('popup');
+    expect(protocol.parseLinkRedirectResult(q)).toEqual(result);
+    expect(() => protocol.appendLinkRedirectResult('https://app.example.com/r', result, { flow_id: flow })).toThrow(TypeError);
+    expect(() => protocol.appendLinkRedirectResult('https://app.example.com/r', result, { via: 'popup', flow_id: 'ABC' })).toThrow(TypeError);
+  });
+
+  it('fails closed on a stray, malformed or repeated flow id', () => {
+    const base = 'cred_link=exit&step=confirm';
+    expect(protocol.parseLinkRedirectFlowId(`${base}&cred_link_flow=${flow}`)).toBeNull();
+    expect(protocol.parseLinkRedirectResult(`${base}&cred_link_flow=${flow}`)).toBeNull();
+    expect(protocol.parseLinkRedirectResult(`${base}&cred_link_via=popup&cred_link_flow=${flow.toUpperCase()}`)).toBeNull();
+    expect(protocol.parseLinkRedirectResult(`${base}&cred_link_via=popup&cred_link_flow=${flow}&cred_link_flow=${flow}`)).toBeNull();
+    expect(protocol.parseLinkRedirectFlowId(`${base}&cred_link_via=popup`)).toBeNull();
+    expect(protocol.parseLinkRedirectResult(`${base}&cred_link_via=popup`)).toEqual(result);
+  });
+
+  it('reports broker enforcement for Google only', () => {
+    expect(protocol.linkNarrowEnforcementFor('google')).toBe('broker');
+    for (const p of protocol.LINK_PROVIDERS) {
+      if (p !== 'google') expect(protocol.linkNarrowEnforcementFor(p)).toBe('record');
+    }
+  });
+});
+

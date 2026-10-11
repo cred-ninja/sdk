@@ -45,7 +45,7 @@ describe('SqliteLinkStore', () => {
 
       const raw = new Database(path);
       expect(raw.pragma('user_version', { simple: true })).toBe(LINK_SCHEMA_VERSION);
-      expect(LINK_SCHEMA_VERSION).toBe(1);
+      expect(LINK_SCHEMA_VERSION).toBe(2);
       raw.close();
     });
 
@@ -1177,6 +1177,122 @@ describe('SqliteLinkStore', () => {
       await store.sweepExpiredTransactions({ now: at(200), limit: 10 });
       expect((await store.listOpenAccountTransactions({ provider: 'google', provider_account_id: 'google-sub-1' })).map((t) => t.tid).sort())
         .toEqual([confirmed.tid, atConfirm.tid].sort());
+    });
+  });
+
+  describe('settled activations', () => {
+    /** Connect and activate with a chosen activation time. */
+    async function activateAt(overrides: Parameters<typeof newTx>[0], accountId: string, activateSec: number) {
+      const input = newTx(overrides);
+      await driveToConfirm(store, input, { accountId });
+      const c = await confirm(store, input.tid, { accountId });
+      const connection_id = c.transaction.connection_id as string;
+      const claim = await store.claimActivation({
+        client_id: input.client_id, connection_id, activation_code_hash: h(`code-${input.tid}`), subject: input.subject, now: at(activateSec - 1),
+      });
+      if (!claim.ok) throw new Error(claim.reason);
+      await store.commitActivation({ tid: input.tid, now: at(activateSec) });
+      return { tid: input.tid, connection_id };
+    }
+
+    it('commitActivation leaves tokens_settled_at unset, for a new connection and for a staged update', async () => {
+      const created = await connectActive(store);
+      expect(await store.getTransaction(created.tid)).not.toHaveProperty('tokens_settled_at');
+
+      const update = newTx({ intent: 'update', providers: ['google'], connection_id: created.connection_id });
+      await driveToConfirm(store, update);
+      await confirm(store, update.tid);
+      await store.claimActivation({
+        client_id: 'acme', connection_id: created.connection_id, activation_code_hash: h(`code-${update.tid}`), subject: 'user-123', now: at(40),
+      });
+      await store.commitActivation({ tid: update.tid, now: at(41) });
+      const tx = await store.getTransaction(update.tid);
+      expect(tx).toMatchObject({ outcome: 'activated', activated_at: at(41) });
+      expect(tx).not.toHaveProperty('tokens_settled_at');
+    });
+
+    it('settleActivation sets the marker once and is idempotent', async () => {
+      const { tid } = await connectActive(store);
+      expect(await store.settleActivation({ tid, now: at(30) })).toBe(true);
+      const first = await store.getTransaction(tid);
+      expect(first).toMatchObject({ tokens_settled_at: at(30), updated_at: at(30) });
+      expect(await store.settleActivation({ tid, now: at(99) })).toBe(true);
+      expect(await store.getTransaction(tid)).toEqual(first);
+    });
+
+    it('settleActivation is false for unknown, pending, failed, expired and cancelled transactions, and changes nothing', async () => {
+      expect(await store.settleActivation({ tid: 'ltx_unknown' as TransactionId, now: at(1) })).toBe(false);
+
+      const open = newTx();
+      await driveToConfirm(store, open);
+      await confirm(store, open.tid);
+      const failed = newTx();
+      await store.createTransaction(failed);
+      await store.endTransaction({ tid: failed.tid, outcome: 'failed', error: 'provider_error', now: at(5) });
+      const cancelled = newTx();
+      await store.createTransaction(cancelled);
+      await store.endTransaction({ tid: cancelled.tid, outcome: 'cancelled', now: at(5) });
+      const expired = newTx({ expires_at: at(50) });
+      await store.createTransaction(expired);
+      await store.sweepExpiredTransactions({ now: at(60), limit: 10 });
+      const claimedNotCommitted = newTx();
+      await driveToConfirm(store, claimedNotCommitted);
+      const c = await confirm(store, claimedNotCommitted.tid);
+      await store.claimActivation({
+        client_id: 'acme', connection_id: c.transaction.connection_id as string, activation_code_hash: h(`code-${claimedNotCommitted.tid}`), subject: 'user-123', now: at(20),
+      });
+
+      for (const tid of [open.tid, failed.tid, cancelled.tid, expired.tid, claimedNotCommitted.tid]) {
+        const before = await store.getTransaction(tid);
+        expect(await store.settleActivation({ tid, now: at(70) })).toBe(false);
+        expect(await store.getTransaction(tid)).toEqual(before);
+      }
+      expect(await store.listUnsettledActivations()).toEqual([]);
+    });
+
+    it('listUnsettledActivations returns activated, unsettled rows oldest first across clients; settled ones drop out', async () => {
+      const b = await activateAt({ client_id: 'beta', subject: 'user-2' }, 'acct-b', 200);
+      const a = await activateAt({ client_id: 'acme', subject: 'user-1' }, 'acct-a', 100);
+      const c = await activateAt({ client_id: 'gamma', subject: 'user-3' }, 'acct-c', 300);
+      // Noise: an open transaction and a cancelled one.
+      const open = newTx({ client_id: 'delta' });
+      await driveToConfirm(store, open, { accountId: 'acct-d' });
+      const cancelled = newTx();
+      await store.createTransaction(cancelled);
+      await store.endTransaction({ tid: cancelled.tid, outcome: 'cancelled', now: at(5) });
+
+      const list = await store.listUnsettledActivations();
+      expect(list.map((t) => t.tid)).toEqual([a.tid, b.tid, c.tid]);
+      expect(list.map((t) => t.client_id)).toEqual(['acme', 'beta', 'gamma']);
+      expect(list.every((t) => t.outcome === 'activated' && t.tokens_settled_at === undefined)).toBe(true);
+
+      await store.settleActivation({ tid: b.tid, now: at(400) });
+      expect((await store.listUnsettledActivations()).map((t) => t.tid)).toEqual([a.tid, c.tid]);
+      await store.settleActivation({ tid: a.tid, now: at(401) });
+      await store.settleActivation({ tid: c.tid, now: at(402) });
+      expect(await store.listUnsettledActivations()).toEqual([]);
+    });
+
+    it('the sweep, endTransaction and other reads are unaffected', async () => {
+      const unsettled = await connectActive(store);
+      const settled = await connectActive(store, { client_id: 'beta' });
+      await store.settleActivation({ tid: settled.tid, now: at(30) });
+      const live = newTx({ expires_at: at(5000) });
+      await driveToConfirm(store, live, { accountId: 'acct-live' });
+      const lapsed = newTx({ expires_at: at(100) });
+      await store.createTransaction(lapsed);
+
+      const swept = await store.sweepExpiredTransactions({ now: at(1000), limit: 10 });
+      expect(swept.map((t) => t.tid)).toEqual([lapsed.tid]);
+      expect(swept[0]).not.toHaveProperty('tokens_settled_at');
+      expect(await store.endTransaction({ tid: unsettled.tid, outcome: 'cancelled', now: at(1001) })).toBeNull();
+      expect(await store.endTransaction({ tid: settled.tid, outcome: 'cancelled', now: at(1001) })).toBeNull();
+      expect(await store.getTransaction(settled.tid)).toMatchObject({ outcome: 'activated', tokens_settled_at: at(30) });
+      expect(await store.getConnection(unsettled.connection_id)).toMatchObject({ status: 'active' });
+      expect((await store.listOpenAccountTransactions({ provider: 'google', provider_account_id: 'acct-live' })).map((t) => t.tid))
+        .toEqual([live.tid]);
+      expect(await store.listOpenAccountTransactions({ provider: 'google', provider_account_id: 'google-sub-1' })).toEqual([]);
+      expect((await store.listUnsettledActivations()).map((t) => t.tid)).toEqual([unsettled.tid]);
     });
   });
 

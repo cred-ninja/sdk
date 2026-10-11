@@ -152,6 +152,8 @@ describe('popup mode', () => {
     cbs.handle.open();
     post(popup, { type: 'cred.link.step', v: 1, step: 'picker' });
     post(popup, { type: 'cred.link.step', v: 1, step: 'provider', provider: 'google' });
+    // Close outside the opener-loss window: a real close, reported after the usual grace.
+    vi.advanceTimersByTime(3500);
     popup.closed = true;
     vi.advanceTimersByTime(500);
     expect(cbs.onExit).not.toHaveBeenCalled();

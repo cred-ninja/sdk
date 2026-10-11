@@ -21,6 +21,29 @@ Link sections of the `@credninja/server` and `@credninja/link` READMEs.
 - `@credninja/oauth`: `OAuthTokenError` with the parsed OAuth error code, and
   access to the raw token response for provider identity.
 
+Polish round:
+
+- Narrowing: `POST /link/v1/connections/:id/narrow` shrinks a grant without
+  a provider round trip and intersects every permission on the connection.
+  The response field `enforcement` says whether brokered calls are
+  restricted too (`broker`, only when whole Google API families were
+  removed) or only the records changed (`record`).
+- Reconnect diff: connecting an account that is already connected shows the
+  current grant next to the new one on the confirmation screen. Activation
+  fails closed if the grant's scopes changed after the user confirmed.
+- Popup fallback: when the popup loses its opener after the provider hop,
+  the result is delivered by redirect and relayed to the waiting widget, and
+  the provider is remembered as redirect-only in that browser for 30 days.
+  `Cred.handleRedirect()` gains `relay` and `onRelayed`.
+- Crash heal: a startup sweep resolves every activation that committed but
+  never settled its token move; such a connection ends in `needs_reauth`.
+- The Link SQLite schema is version 2, with a migration from version 1.
+- Raw provider tokens (`allow_raw_tokens`) are refused when the delegation is
+  narrower than what the provider granted.
+- `@credninja/server`: the Google scope-to-endpoint table moved from
+  `server.ts` to `google-scopes.ts` unchanged, so the broker and the narrow
+  response share it.
+
 ### Behavior changes that apply even with Link disabled
 
 - User ids starting with `link:` or `link-staged:` are reserved. Every route

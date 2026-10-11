@@ -48,12 +48,16 @@ export interface LinkPageSecurity {
   frameAncestor: string | null;
   /** Origins (besides 'self') a form on this page may end up at; null when the page has no form. */
   formActions: string[] | null;
+  /** connect-src 'self' instead of 'none': only the popup-mode picker (redirect-only handoff fetch). */
+  connectSelf?: boolean;
 }
 
 /** Client-side configuration of the page script. */
 export interface LinkPageScriptConfig {
   context: LinkPageContext;
-  /** targetOrigin for every message this page sends itself. */
+  /** The transaction's widget mode. */
+  mode: LinkWidgetMode;
+  /** targetOrigin for every message this page sends itself; also the only origin an ack is accepted from. */
   target: string;
   /** iframe only: the registered origin used when relaying to window.parent. */
   parent_origin?: string;
@@ -62,6 +66,22 @@ export interface LinkPageScriptConfig {
   step?: LinkExitStep;
   provider?: LinkProviderSlug;
   result?: ReturnType<typeof linkResultMessage>;
+  /**
+   * Result pages of popup and embedded flows (top-level window): the
+   * registered redirect_uri with the result and cred_link_via=popup, used
+   * when the opener is gone or no ack arrives in ack_timeout_ms.
+   */
+  fallback_url?: string;
+  /** The provider remembered as redirect-only on a real opener loss. */
+  memory_provider?: LinkProviderSlug;
+  ack_timeout_ms: number;
+  /** localStorage key and entry lifetime of the redirect-only memory. */
+  storage_key: string;
+  redirect_only_ttl_ms: number;
+  /** Popup-mode picker: hand remembered providers off to redirect mode. */
+  handoff?: boolean;
+  /** Confirm page of a reconnect: scopes held today and labels, for the live diff. */
+  reconnect?: { today: string[]; labels: Record<string, string> };
 }
 
 const PROVIDER_NAMES: Record<LinkProviderSlug, string> = {
@@ -81,7 +101,22 @@ export function providerDisplayName(provider: LinkProviderSlug): string {
 /**
  * The page script. Static text: it reads its configuration from the JSON
  * data block and posts only to the configured targetOrigin.
+ *
+ * Popup fallback (spec 9 Q12): a result page of a popup or embedded flow
+ * posts the result to its opener and waits for cred.link.ack (from the
+ * target origin and from window.opener only). On ack it closes; on timeout
+ * it falls back to redirect delivery (location.replace to fallback_url).
+ * With no opener at all it falls back at once and remembers the provider
+ * as redirect-only in this origin's localStorage (never on a timeout). The
+ * popup-mode picker hands a remembered provider off to redirect mode: it
+ * records the choice with fetch, posts a step with handoff 'redirect' and
+ * waits to be closed; any failure submits the form normally.
  */
+/** Picker form field the page script fills: '1' (had an opener), '0', or 'handoff'. */
+export const LINK_PICKER_OPENER_FIELD = 'opener';
+/** Confirm form field carrying what the reconnect diff was computed against. */
+export const LINK_RECONNECT_BASIS_FIELD = 'reconnect_basis';
+
 export const LINK_PAGE_SCRIPT = `(function () {
   var el = document.getElementById('cred-link-config');
   if (!el) return;
@@ -93,18 +128,54 @@ export const LINK_PAGE_SCRIPT = `(function () {
     if (!t || t === window) return false;
     try { t.postMessage(msg, c.target); return true; } catch (e) { return false; }
   }
-  function step(name, provider) {
+  function step(name, provider, handoff) {
     var m = { type: 'cred.link.step', v: 1, step: name };
     if (provider) m.provider = provider;
-    send(m);
+    if (handoff) m.handoff = handoff;
+    return send(m);
+  }
+  function readMemory() {
+    try {
+      var raw = window.localStorage.getItem(c.storage_key);
+      var m = raw ? JSON.parse(raw) : {};
+      return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+    } catch (e) { return null; }
+  }
+  function remember(provider) {
+    if (!provider || !c.storage_key) return;
+    try {
+      var m = readMemory() || {};
+      m[provider] = Date.now();
+      window.localStorage.setItem(c.storage_key, JSON.stringify(m));
+    } catch (e) {}
+  }
+  function isRedirectOnly(provider) {
+    var m = readMemory();
+    if (!m) return false;
+    var at = m[provider];
+    if (typeof at !== 'number' || !isFinite(at)) return false;
+    var age = Date.now() - at;
+    return age >= 0 && age < c.redirect_only_ttl_ms;
+  }
+  function showDone() {
+    var note = document.getElementById('cred-link-done');
+    if (note) note.hidden = false;
   }
   if (c.step) step(c.step, c.provider);
   if (c.context === 'iframe') {
+    var resultSource = null;
     window.addEventListener('message', function (ev) {
-      if (ev.origin !== c.self_origin || ev.source === window.parent) return;
       var d = ev.data;
       if (!d || typeof d !== 'object' || d.v !== 1) return;
+      if (ev.source === window.parent) {
+        if (ev.origin === c.parent_origin && d.type === 'cred.link.ack' && resultSource) {
+          try { resultSource.postMessage({ type: 'cred.link.ack', v: 1 }, c.self_origin); } catch (e) {}
+        }
+        return;
+      }
+      if (ev.origin !== c.self_origin) return;
       if (d.type !== 'cred.link.result' && d.type !== 'cred.link.step') return;
+      if (d.type === 'cred.link.result') resultSource = ev.source;
       try { window.parent.postMessage(d, c.parent_origin); } catch (e) {}
     });
     var last = -1;
@@ -118,15 +189,107 @@ export const LINK_PAGE_SCRIPT = `(function () {
   var forms = document.querySelectorAll('form[data-cred-provider]');
   for (var i = 0; i < forms.length; i++) {
     forms[i].addEventListener('submit', function (ev) {
-      var p = ev.currentTarget.getAttribute('data-cred-provider');
-      if (p) step('provider', p);
+      var form = ev.currentTarget;
+      var p = form.getAttribute('data-cred-provider');
+      if (!p) return;
+      var openerField = form.querySelector('input[name="opener"]');
+      if (openerField) openerField.value = window.opener ? '1' : '0';
+      if (c.handoff && window.opener && typeof window.fetch === 'function' && isRedirectOnly(p)) {
+        ev.preventDefault();
+        var submitNormally = function () {
+          var a = document.createElement('input');
+          a.type = 'hidden'; a.name = 'action'; a.value = 'continue';
+          form.appendChild(a);
+          step('provider', p);
+          form.submit();
+        };
+        var body;
+        try {
+          body = new URLSearchParams(new FormData(form));
+          body.set('action', 'continue');
+          body.set('opener', 'handoff');
+        } catch (e) { submitNormally(); return; }
+        window.fetch(form.action, { method: 'POST', body: body, credentials: 'include', redirect: 'manual' }).then(function (r) {
+          if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) { step('provider', p, 'redirect'); }
+          else { submitNormally(); }
+        }, submitNormally);
+        return;
+      }
+      step('provider', p);
     });
   }
+  if (c.reconnect) {
+    var confirmForm = document.getElementById('cred-link-confirm');
+    var fill = function (id, list) {
+      var ul = document.getElementById(id);
+      if (!ul) return;
+      while (ul.firstChild) ul.removeChild(ul.firstChild);
+      if (list.length === 0) {
+        var none = document.createElement('li');
+        none.className = 'muted';
+        none.textContent = 'Nothing';
+        ul.appendChild(none);
+        return;
+      }
+      for (var k = 0; k < list.length; k++) {
+        var li = document.createElement('li');
+        li.setAttribute('data-scope', list[k]);
+        li.textContent = c.reconnect.labels[list[k]] || list[k];
+        ul.appendChild(li);
+      }
+    };
+    var update = function () {
+      var selected = {};
+      var inputs = confirmForm ? confirmForm.querySelectorAll('input[name="scope"]') : [];
+      for (var k = 0; k < inputs.length; k++) {
+        if (inputs[k].type === 'hidden' || inputs[k].checked) selected[inputs[k].value] = true;
+      }
+      var today = {};
+      var kept = [], added = [], removed = [];
+      for (var t = 0; t < c.reconnect.today.length; t++) {
+        var s = c.reconnect.today[t];
+        today[s] = true;
+        if (selected[s]) kept.push(s); else removed.push(s);
+      }
+      var keys = Object.keys(selected).sort();
+      for (var a = 0; a < keys.length; a++) if (!today[keys[a]]) added.push(keys[a]);
+      fill('cred-reconnect-kept', kept);
+      fill('cred-reconnect-added', added);
+      fill('cred-reconnect-removed', removed);
+    };
+    if (confirmForm) confirmForm.addEventListener('change', update);
+    update();
+  }
   if (c.result) {
-    var delivered = send(c.result);
-    if (delivered && c.context !== 'iframe') { setTimeout(function () { window.close(); }, 100); }
-    var note = document.getElementById('cred-link-done');
-    if (note) note.hidden = false;
+    if (c.context === 'iframe' || !c.fallback_url) {
+      var delivered = send(c.result);
+      if (delivered && c.context !== 'iframe') { setTimeout(function () { window.close(); }, 100); }
+      showDone();
+      return;
+    }
+    if (!window.opener) {
+      remember(c.memory_provider);
+      window.location.replace(c.fallback_url);
+      return;
+    }
+    var settled = false;
+    var timer = null;
+    window.addEventListener('message', function (ev) {
+      if (settled) return;
+      if (ev.origin !== c.target || ev.source !== window.opener) return;
+      var d = ev.data;
+      if (!d || typeof d !== 'object' || d.type !== 'cred.link.ack' || d.v !== 1) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      showDone();
+      window.close();
+    });
+    send(c.result);
+    timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      window.location.replace(c.fallback_url);
+    }, c.ack_timeout_ms);
   }
 })();`;
 
@@ -162,6 +325,10 @@ button{font:inherit;border-radius:var(--radius);padding:9px 14px;border:1px soli
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 code{font-size:12px}
+.reconnect{border-color:var(--accent)}
+.reconnect h2{font-size:16px}
+.reconnect h3{font-size:14px;margin:10px 0 4px}
+.reconnect ul{margin:0;padding-left:20px}
 </style>`;
 }
 
@@ -183,7 +350,7 @@ function cspHeader(nonce: string, security: LinkPageSecurity): string {
     `form-action ${formAction}`,
     "base-uri 'none'",
     `frame-ancestors ${frame}`,
-    "connect-src 'none'",
+    security.connectSelf === true ? "connect-src 'self'" : "connect-src 'none'",
   ].join('; ');
 }
 
@@ -304,6 +471,7 @@ ${input.providers.map((p) => `<form class="card" method="post" action="${escapeH
 <h2>${escapeHtml(providerDisplayName(p.provider))}</h2>
 <input type="hidden" name="${fieldE}" value="${e}">
 <input type="hidden" name="${fieldProvider}" value="${escapeHtml(p.provider)}">
+<input type="hidden" name="${LINK_PICKER_OPENER_FIELD}" value="0">
 ${p.entries.length === 0 ? '<p class="muted">No permissions requested.</p>' : p.entries.map((item) => scopeRow(p.provider, item)).join('\n')}
 <div class="actions"><button class="primary" type="submit" name="${fieldAction}" value="continue">Continue with ${escapeHtml(providerDisplayName(p.provider))}</button></div>
 </form>`).join('\n')}
@@ -314,14 +482,61 @@ ${p.entries.length === 0 ? '<p class="muted">No permissions requested.</p>' : p.
   });
 }
 
+/** A scope with the label shown to the user. */
+export interface LabeledScope {
+  scope: string;
+  label: string;
+}
+
+/**
+ * The reconnect diff (a connect that lands on an account this client and
+ * subject already have connected): what the app can do today, and what it
+ * keeps, gains and loses on confirm with the initial toggles.
+ */
+export interface ReconnectView {
+  today: LabeledScope[];
+  kept: LabeledScope[];
+  added: LabeledScope[];
+  removed: LabeledScope[];
+}
+
 export interface ConfirmPageInput {
   envelope: string;
   provider: LinkProviderSlug;
   theme: LinkTheme;
   accountLabel?: string;
   entries: Array<{ entry: ScopeCatalogEntry; checked: boolean; locked: boolean }>;
+  reconnect?: ReconnectView;
+  /** What the reconnect diff was computed against ('<grant id>:<version>' or 'none'), echoed by the form. */
+  reconnectBasis: string;
+  /** Shown above the form when the page is re-rendered because the account changed. */
+  notice?: string;
   security: LinkPageSecurity;
   script: LinkPageScriptConfig;
+}
+
+function scopeList(id: string | null, items: LabeledScope[]): string {
+  const attr = id ? ` id="${escapeHtml(id)}"` : '';
+  const body = items.length === 0
+    ? '<li class="muted">Nothing</li>'
+    : items.map((i) => `<li data-scope="${escapeHtml(i.scope)}">${escapeHtml(i.label)}</li>`).join('');
+  return `<ul${attr}>${body}</ul>`;
+}
+
+function reconnectBlock(view: ReconnectView, appName: string, providerName: string): string {
+  return `<section class="card reconnect" id="cred-link-reconnect" role="note">
+<h2>This ${escapeHtml(providerName)} account is already connected</h2>
+<p><strong>Confirming replaces the access ${escapeHtml(appName)} has today.</strong> Anything left unchecked or not listed below will be removed.</p>
+<h3>Today ${escapeHtml(appName)} can</h3>
+${scopeList('cred-reconnect-today', view.today)}
+<h3>After you confirm</h3>
+<p class="muted">Keeps</p>
+${scopeList('cred-reconnect-kept', view.kept)}
+<p class="muted">Adds</p>
+${scopeList('cred-reconnect-added', view.added)}
+<p class="muted">Removes</p>
+${scopeList('cred-reconnect-removed', view.removed)}
+</section>`;
 }
 
 /** The scope confirmation screen: what the provider granted, narrowable. */
@@ -336,8 +551,11 @@ export function sendConfirmPage(req: Request, res: Response, input: ConfirmPageI
     script: input.script,
     body: () => `${headerHtml(input.theme)}<h1>Confirm permissions</h1>
 <p class="muted">${escapeHtml(name)} granted the permissions below${input.accountLabel ? ` for <strong>${escapeHtml(input.accountLabel)}</strong>` : ''}. ${escapeHtml(appName)} gets only what you leave checked.</p>
-<form class="card" method="post" action="${escapeHtml(LINK_PATHS.confirm)}">
+${input.notice ? `<p class="card" role="alert">${escapeHtml(input.notice)}</p>` : ''}
+${input.reconnect ? reconnectBlock(input.reconnect, appName, name) : ''}
+<form class="card" id="cred-link-confirm" method="post" action="${escapeHtml(LINK_PATHS.confirm)}">
 <input type="hidden" name="${escapeHtml(LINK_FORM_FIELDS.envelope)}" value="${escapeHtml(input.envelope)}">
+<input type="hidden" name="${LINK_RECONNECT_BASIS_FIELD}" value="${escapeHtml(input.reconnectBasis)}">
 ${input.entries.length === 0 ? '<p class="muted">No permissions were granted.</p>' : input.entries.map((item) => scopeRow(input.provider, item)).join('\n')}
 <div class="actions">
 <button class="primary" type="submit" name="${fieldAction}" value="confirm">Confirm</button>

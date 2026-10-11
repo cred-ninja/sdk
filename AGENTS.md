@@ -111,6 +111,7 @@ failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
 | POST | `/link/v1/connections/:id/refresh` | Link client | Force a token refresh; returns status only |
 | POST | `/link/v1/connections/:id/reauth` | Link client | Reauth pushed request for this connection |
 | POST | `/link/v1/connections/:id/permissions` | Link client | Grant an agent scopes within the grant |
+| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker` only for Google when whole API families were removed, else `record`: family level, not read versus write) |
 
 `GET /api/v1/audit` and `GET /admin/audit` are separate routes: the former
 is scoped to the requesting agent's own `userId`; the latter is

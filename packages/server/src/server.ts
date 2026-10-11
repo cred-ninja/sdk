@@ -37,6 +37,7 @@ import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
 import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
+import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
 import { createExpressMiddleware, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
@@ -177,41 +178,6 @@ const SERVICE_EXACT_ENDPOINTS: Record<string, string[]> = {
 const BROKER_BLOCKED_ENDPOINTS: Record<string, string[]> = {
   slack: ['https://slack.com/api/auth.revoke', 'https://slack.com/api/apps.uninstall'],
 };
-
-const GOOGLE_SCOPE_ENDPOINTS: Array<{ scopes: string[]; bases: string[] }> = [
-  {
-    scopes: ['calendar', 'calendar.readonly', 'calendar.events'],
-    bases: ['https://www.googleapis.com/calendar/', 'https://calendar.googleapis.com/'],
-  },
-  {
-    scopes: ['gmail.readonly', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
-    bases: ['https://gmail.googleapis.com/', 'https://www.googleapis.com/gmail/'],
-  },
-  {
-    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata.readonly'],
-    bases: ['https://www.googleapis.com/drive/', 'https://www.googleapis.com/upload/drive/', 'https://drive.googleapis.com/'],
-  },
-  {
-    scopes: ['spreadsheets', 'spreadsheets.readonly'],
-    bases: ['https://sheets.googleapis.com/'],
-  },
-  {
-    scopes: ['documents', 'documents.readonly'],
-    bases: ['https://docs.googleapis.com/'],
-  },
-  {
-    scopes: ['admin', 'admin.directory.user.readonly', 'admin.directory.group.readonly'],
-    bases: ['https://admin.googleapis.com/'],
-  },
-  {
-    scopes: ['openid', 'email', 'profile', 'userinfo.email', 'userinfo.profile'],
-    bases: ['https://www.googleapis.com/oauth2/', 'https://openidconnect.googleapis.com/'],
-  },
-  {
-    scopes: ['contacts', 'contacts.readonly'],
-    bases: ['https://people.googleapis.com/'],
-  },
-];
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'authorization',
@@ -529,36 +495,9 @@ export function createServer(config: ServerConfig) {
     return req.body?.token_format === 'handle' ? 'handle' : 'raw';
   }
 
-  function scopeMatches(grantedScope: string, requiredScope: string): boolean {
-    const normalized = grantedScope.toLowerCase().replace(/\/$/, '');
-    const required = requiredScope.toLowerCase();
-    return scopeEquivalent(grantedScope, requiredScope) ||
-      normalized.endsWith(`/${required}`) ||
-      normalized.endsWith(`auth/${required}`) ||
-      normalized.includes(`//${required}`);
-  }
-
-  function canonicalScope(scope: string): string {
-    const trimmed = scope.trim().replace(/\/$/, '');
-    const normalized = trimmed.toLowerCase();
-    const googleAuthPrefix = 'https://www.googleapis.com/auth/';
-    if (normalized.startsWith(googleAuthPrefix)) {
-      return normalized.slice(googleAuthPrefix.length);
-    }
-    return trimmed;
-  }
-
-  function scopeEquivalent(left: string, right: string): boolean {
-    return canonicalScope(left) === canonicalScope(right);
-  }
-
-  function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[]): boolean {
-    if (!scopes || scopes.length === 0) return false;
-    return GOOGLE_SCOPE_ENDPOINTS.some(({ scopes: requiredScopes, bases }) => (
-      bases.some((base) => normalizedUrl.startsWith(base)) &&
-      requiredScopes.some((requiredScope) => scopes.some((scope) => scopeMatches(scope, requiredScope)))
-    ));
-  }
+  // The Google family table and the scope matching live in google-scopes.ts,
+  // shared with Link's narrow response so the two cannot drift.
+  const scopeEquivalent = brokerScopeEquivalent;
 
   const SALESFORCE_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.(?:salesforce\.com|force\.com)$/;
   const SAFE_PATH_AND_QUERY_PATTERN = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/;

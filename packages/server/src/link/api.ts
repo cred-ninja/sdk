@@ -18,8 +18,15 @@ import {
   LINK_OPAQUE_FAILURE_STATUS,
   LINK_PROVIDERS,
   LINK_REDIRECT_PARAMS,
+  LINK_MACHINE_CODE_FOR_CONNECTION_STATUS,
+  LINK_MACHINE_CODE_FOR_GRANT_STATUS,
+  LINK_MACHINE_ERROR_STATUS,
   LINK_TRANSACTION_TTL_SECONDS,
+  canonicalScope,
   canonicalScopeSet,
+  findScopeCatalogEntry,
+  linkNarrowEnforcementFor,
+  scopeDifference,
   isConnectionId,
   isLinkActivationCode,
   isLinkClientId,
@@ -38,10 +45,12 @@ import type {
   LinkClient,
   LinkConnectionView,
   LinkIntent,
+  LinkNarrowEnforcement,
   LinkPermission,
   LinkPermissionView,
   LinkProviderSlug,
   LinkScopeMap,
+  NarrowConnectionResponse,
   ParResponse,
   RevokeConnectionResponse,
 } from '@credninja/protocol';
@@ -50,6 +59,7 @@ import type { LinkContext } from './core.js';
 import { cleanupEndedTransaction, mintTransaction, revokeAtProviderIfSafe, writeGrantAudit } from './core.js';
 import { validateClientJwks } from './client-auth.js';
 import { validateRequestedScopes } from './scopes.js';
+import { googleRemovalIsBrokerEnforced } from '../google-scopes.js';
 import {
   boundedString,
   hasControlCharacter,
@@ -432,15 +442,19 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
   // needs the same lock runs after it is released.
   type ActivationStep =
     | { kind: 'refused'; storeEnded: boolean }
-    | { kind: 'tokens_failed'; connection: Connection; createsConnection: boolean }
+    | { kind: 'tokens_failed'; connection: Connection; grant: ClientGrant; previous: string[] | null; createsConnection: boolean }
     | { kind: 'ok'; connection: Connection; grant: ClientGrant; previous: string[] | null };
   const step = await ctx.locks.run(connectionId, async (): Promise<ActivationStep> => {
     let activated;
     try {
       activated = await ctx.store.commitActivation({ tid: tx.tid, now: nowIso() });
     } catch (error) {
+      // Refusals the store already ended the transaction for. grant_changed:
+      // the grant's scopes differ from what the confirmation screen showed
+      // (a narrow, a provider scope reduction or another activation since);
+      // a status change alone never refuses.
       const storeEnded = error instanceof LinkStoreError
-        && (error.code === 'activation_superseded' || error.code === 'connection_unavailable');
+        && (error.code === 'activation_superseded' || error.code === 'connection_unavailable' || error.code === 'grant_changed');
       if (!storeEnded) {
         console.error('[link] activation commit failed', { tid: tx.tid, kind: error instanceof Error ? error.name : 'unknown' });
       }
@@ -461,8 +475,17 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
         reason: 'reauth_required',
         now: nowIso(),
       }).catch(() => null);
-      return { kind: 'tokens_failed', connection: activated.connection, createsConnection: tx.creates_connection === true };
+      return {
+        kind: 'tokens_failed',
+        connection: activated.connection,
+        grant: activated.grant,
+        previous: activated.previous_grant_scopes,
+        createsConnection: tx.creates_connection === true,
+      };
     }
+    // The move finished: mark it settled so the startup heal leaves it alone.
+    // If this write is lost, the heal finds the tokens moved and settles it.
+    await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() }).catch(() => false);
     return { kind: 'ok', connection: activated.connection, grant: activated.grant, previous: activated.previous_grant_scopes };
   });
 
@@ -480,6 +503,14 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     return;
   }
   if (step.kind === 'tokens_failed') {
+    // The database commit stands (the grant may have been narrowed), so the
+    // Permissions must not stay wider than it: run the intersect with the
+    // committed grant. Best effort; it never changes the response.
+    try {
+      await ctx.hooks.onGrantUpdated({ grant: step.grant, previous_scopes: step.previous ?? step.grant.scopes, reason: 'activate' });
+    } catch (error) {
+      console.error('[link] permission intersect after a failed token move failed', { tid: tx.tid, kind: error instanceof Error ? error.name : 'unknown' });
+    }
     // Discard the staged tokens under the revocation rule. A connection this
     // transaction created holds no tokens, so it does not block revocation;
     // a live connection (update, reauth) does, since revoking the new token
@@ -493,7 +524,10 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
         exclude_tid: tx.tid,
       });
     }
-    await ctx.secrets.deleteStaged(tx.tid).catch(() => undefined);
+    const deleted = await ctx.secrets.deleteStaged(tx.tid).then(() => true, () => false);
+    // Resolved in process (the connection is needs_reauth); a staged copy
+    // that could not be deleted is left for the startup heal.
+    if (deleted) await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() }).catch(() => false);
     sendOpaqueFailure(req, res);
     return;
   }
@@ -662,6 +696,187 @@ export async function handleReauthConnection(ctx: LinkContext, req: Request, res
     console.error('[link] reauth failed', { kind: error instanceof Error ? error.name : 'unknown' });
     sendLinkError(req, res, 500, 'server_error');
   }
+}
+
+/**
+ * POST /link/v1/connections/:id/narrow { subject, scopes } (spec 6).
+ *
+ * Shrinks the grant to exactly `scopes` with no provider round trip and no
+ * token change. Ownership as update and reauth: (client, subject), else the
+ * opaque failure. Rejected requests change nothing. Idempotent and self-
+ * healing: scopes equal to the current grant answer changed: false without
+ * touching the grant, its version or the audit log, but still intersect
+ * every Permission, so a narrow whose intersect step failed is repaired by
+ * repeating it.
+ */
+export async function handleNarrowConnection(ctx: LinkContext, req: Request, res: Response): Promise<void> {
+  const client = clientOf(req);
+  const body = isPlainObject(req.body) ? req.body : {};
+  const id = req.params.id;
+  const subject = boundedString(body.subject, MAX_SUBJECT_LENGTH);
+  if (typeof id !== 'string' || !isConnectionId(id) || !subject) {
+    sendOpaqueFailure(req, res);
+    return;
+  }
+  const connection = await ctx.store.getSubjectConnection({ client_id: client.client_id, subject, connection_id: id });
+  if (!connection) {
+    sendOpaqueFailure(req, res);
+    return;
+  }
+  const scopes = body.scopes;
+  // Every entry is checked in canonical form: an entry such as "/" is not
+  // blank but canonicalizes to nothing, and must not shrink the grant.
+  if (!Array.isArray(scopes) || scopes.length === 0 || scopes.length > 64
+    || !scopes.every((s) => typeof s === 'string' && s.length <= 256 && canonicalScope(s) !== '')) {
+    sendLinkError(req, res, 400, 'invalid_scope', { message: 'scopes must be a non-empty list of scope strings; delete the connection to remove all access' });
+    return;
+  }
+  if (connection.status !== 'active') {
+    const code = connection.status_reason ?? LINK_MACHINE_CODE_FOR_CONNECTION_STATUS[connection.status] ?? 'grant_revoked';
+    sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS[code], code);
+    return;
+  }
+  const grant = await ctx.store.getGrantForConnection(connection.id);
+  if (!grant || grant.status !== 'active') {
+    const code = grant ? (LINK_MACHINE_CODE_FOR_GRANT_STATUS[grant.status] ?? 'grant_revoked') : 'grant_revoked';
+    sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS[code], code);
+    return;
+  }
+  const wanted = canonicalScopeSet(scopes as string[]);
+  if (wanted.length === 0) {
+    sendLinkError(req, res, 400, 'invalid_scope', { message: 'scopes must be a non-empty list of scope strings; delete the connection to remove all access' });
+    return;
+  }
+  if (!isScopeSubset(wanted, grant.scopes)) {
+    sendLinkError(req, res, 400, 'invalid_scope', { message: 'scopes must be a subset of the current grant' });
+    return;
+  }
+  const locked = grant.scopes.filter((s) => findScopeCatalogEntry(connection.provider, s)?.flags.includes('always_required'));
+  if (!isScopeSubset(locked, wanted)) {
+    sendLinkError(req, res, 400, 'invalid_scope', { message: 'scopes must keep every always-required scope' });
+    return;
+  }
+  const actor = `link:${client.client_id}`;
+  const correlationId = requestId(req, res);
+  const changed = !scopeSetsEqual(wanted, grant.scopes);
+
+  type NarrowStep =
+    | { kind: 'audit_failed' }
+    | { kind: 'moved' }
+    | { kind: 'hook_failed' }
+    | { kind: 'ok'; grant: ClientGrant; removed: string[] };
+  const step = await ctx.locks.run(connection.id, async (): Promise<NarrowStep> => {
+    if (!changed) {
+      // Repair path: no write, no version change, no audit; intersect only,
+      // with the grant as it stands now (re-read under the lock). If the
+      // connection or grant moved since the checks above, the caller
+      // retries and the checks run again.
+      const currentConnection = await ctx.store.getConnection(connection.id);
+      const current = await ctx.store.getGrantForConnection(connection.id);
+      if (!currentConnection || currentConnection.status !== 'active' || !current || current.status !== 'active'
+        || current.id !== grant.id || !scopeSetsEqual(current.scopes, wanted)) {
+        return { kind: 'moved' };
+      }
+      try {
+        await ctx.hooks.onGrantUpdated({ grant: current, previous_scopes: current.scopes, reason: 'narrow' });
+      } catch {
+        return { kind: 'hook_failed' };
+      }
+      return { kind: 'ok', grant: current, removed: [] };
+    }
+    try {
+      writeOperationAudit(ctx, {
+        action: 'update',
+        outcome: 'pending',
+        resource: { type: 'grant', id: grant.id },
+        actor,
+        correlationId,
+        metadata: { reason: 'narrow', connection_id: connection.id, before_scopes: grant.scopes, after_scopes: wanted, version: grant.version },
+      });
+    } catch {
+      return { kind: 'audit_failed' };
+    }
+    const narrowed = await ctx.store.narrowGrant({ grant_id: grant.id, scopes: wanted, expected_version: grant.version, now: nowIso() });
+    if (!narrowed) return { kind: 'moved' };
+    let hookFailed = false;
+    try {
+      await ctx.hooks.onGrantUpdated({ grant: narrowed.grant, previous_scopes: narrowed.previous_scopes, reason: 'narrow' });
+    } catch {
+      hookFailed = true;
+    }
+    // The grant changed either way, so the success record is written; its
+    // failure is logged and does not abort (the pending record exists).
+    try {
+      writeGrantAudit(ctx, {
+        action: 'update',
+        grant: narrowed.grant,
+        provider: connection.provider,
+        before_scopes: narrowed.previous_scopes,
+        before_status: 'active',
+        reason: 'narrow',
+        actor,
+      });
+    } catch (error) {
+      console.error('[link] narrow success audit failed', { grant_id: grant.id, kind: error instanceof Error ? error.name : 'unknown' });
+    }
+    if (hookFailed) return { kind: 'hook_failed' };
+    return { kind: 'ok', grant: narrowed.grant, removed: scopeDifference(narrowed.previous_scopes, narrowed.grant.scopes) };
+  });
+
+  switch (step.kind) {
+    case 'audit_failed':
+      sendLinkError(req, res, 500, 'server_error');
+      return;
+    case 'moved':
+      // The grant changed underneath this request: nothing else was written.
+      sendLinkError(req, res, 503, 'temporarily_unavailable', { message: 'the grant changed; retry' });
+      return;
+    case 'hook_failed':
+      // The grant is narrowed (or unchanged); repeating the same request
+      // repairs the permission intersect.
+      sendLinkError(req, res, 500, 'server_error', { message: 'retry the same request to finish' });
+      return;
+    case 'ok': {
+      const current = (await ctx.store.getConnection(connection.id)) ?? connection;
+      const response: NarrowConnectionResponse = {
+        connection: connectionView(current, step.grant),
+        changed,
+        removed_scopes: step.removed,
+        // Narrowing never changes the provider token: say what enforces it.
+        enforcement: narrowEnforcement(current, step.grant, changed ? step.removed : null),
+      };
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(response);
+    }
+  }
+}
+
+/**
+ * What stops an agent from exercising the scopes a narrow removed. The
+ * provider's upper bound comes from linkNarrowEnforcementFor; within it,
+ * the broker only tells Google API families apart (google-scopes.ts, the
+ * same table and matcher the broker uses). So 'broker' only when every
+ * removed scope belongs to a family that no remaining scope unlocks; a
+ * removed scope that shares a family with a remaining one (gmail.send
+ * removed, gmail.readonly kept) or belongs to no family answers 'record'.
+ *
+ * An unchanged (idempotent) narrow removed nothing in this call, so it is
+ * judged on what the provider token carries beyond the grant: the
+ * non-hidden catalog scopes the provider granted that the grant lacks.
+ * That matches the original narrow's answer when the grant was cut from
+ * the token, and it never claims more than the broker enforces.
+ */
+function narrowEnforcement(connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
+  if (linkNarrowEnforcementFor(connection.provider) !== 'broker') return 'record';
+  if (connection.provider !== 'google') return 'record';
+  const beyond = removed ?? scopeDifference(
+    canonicalScopeSet(connection.provider_scopes).filter((s) => {
+      const entry = findScopeCatalogEntry(connection.provider, s);
+      return entry !== null && entry.enforced_by === 'provider' && !entry.flags.includes('hidden');
+    }),
+    grant.scopes,
+  );
+  return googleRemovalIsBrokerEnforced(beyond, grant.scopes) ? 'broker' : 'record';
 }
 
 /** POST /link/v1/connections/:id/permissions (decision 14). */

@@ -26,10 +26,13 @@ import type {
 
 /**
  * Schema version stored in PRAGMA user_version of the Link database file.
- * Version 1 is the first shipped layout (LINK_SCHEMA_SQL below). A later
- * layout bumps this number and adds a step to SqliteLinkStore.migrate().
+ *   1: the Phase 1 layout.
+ *   2: link_transactions gains tokens_settled_at, grant_scopes_at_confirm_json
+ *      and the unsettled-activation index (see SqliteLinkStore.migrate()).
+ * LINK_SCHEMA_SQL is always the current layout; a new file is created
+ * directly at LINK_SCHEMA_VERSION.
  */
-export const LINK_SCHEMA_VERSION = 1;
+export const LINK_SCHEMA_VERSION = 2;
 
 /**
  * Link storage schema (SQLite). Its own database file, separate from the
@@ -143,8 +146,10 @@ export const LINK_SCHEMA_SQL = `
     confirmed_at                   TEXT,
     confirmed_scopes_json          TEXT,
     activation_code_hash           TEXT,
+    grant_scopes_at_confirm_json   TEXT,
     activation_claimed_at          TEXT,
     activated_at                   TEXT,
+    tokens_settled_at              TEXT,
     created_at                     TEXT NOT NULL,
     updated_at                     TEXT NOT NULL,
     expires_at                     TEXT NOT NULL,
@@ -161,6 +166,8 @@ export const LINK_SCHEMA_SQL = `
     ON link_transactions(expires_at) WHERE consumed_at IS NULL;
   CREATE INDEX IF NOT EXISTS idx_link_transactions_open_account
     ON link_transactions(provider, provider_account_id) WHERE consumed_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_link_transactions_unsettled
+    ON link_transactions(activated_at, tid) WHERE outcome = 'activated' AND tokens_settled_at IS NULL;
 `;
 
 // ── Row shapes (exactly the columns above) ──────────────────────────────────
@@ -257,8 +264,10 @@ export interface TransactionRow {
   confirmed_at: string | null;
   confirmed_scopes_json: string | null;
   activation_code_hash: string | null;
+  grant_scopes_at_confirm_json: string | null;
   activation_claimed_at: string | null;
   activated_at: string | null;
+  tokens_settled_at: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string;
@@ -400,8 +409,12 @@ export function rowToTransaction(row: TransactionRow): LinkTransaction {
   setOpt(t, 'confirmed_at', row.confirmed_at);
   if (row.confirmed_scopes_json !== null) t.confirmed_scopes = json<string[]>(row.confirmed_scopes_json);
   setOpt(t, 'activation_code_hash', row.activation_code_hash);
+  if (row.grant_scopes_at_confirm_json !== null) {
+    t.grant_scopes_at_confirm = json<string[]>(row.grant_scopes_at_confirm_json);
+  }
   setOpt(t, 'activation_claimed_at', row.activation_claimed_at);
   setOpt(t, 'activated_at', row.activated_at);
+  setOpt(t, 'tokens_settled_at', row.tokens_settled_at);
   setOpt(t, 'consumed_at', row.consumed_at);
   setOpt(t, 'outcome', row.outcome as LinkTransactionOutcome | null);
   setOpt(t, 'error', row.error as LinkErrorCode | null);

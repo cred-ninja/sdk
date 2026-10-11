@@ -25,7 +25,11 @@ import {
   LINK_DEFAULT_WIDGET_MODE,
   LINK_FORM_FIELDS,
   LINK_ID_PREFIXES,
+  LINK_POPUP_ACK_TIMEOUT_MS,
   LINK_PROVIDERS,
+  LINK_REDIRECT_ONLY_STORAGE_KEY,
+  LINK_REDIRECT_ONLY_TTL_DAYS,
+  LINK_REDIRECT_VIA_POPUP,
   LINK_TX_COOKIE_NAME,
   appendLinkRedirectResult,
   canonicalScopeSet,
@@ -59,13 +63,15 @@ import { LinkStoreError } from '@credninja/vault';
 import type { LinkContext } from './core.js';
 import { cleanupEndedTransaction, revokeAtProviderIfSafe, writeGrantAudit } from './core.js';
 import {
+  LINK_PICKER_OPENER_FIELD,
+  LINK_RECONNECT_BASIS_FIELD,
   sendConfirmPage,
   sendLocalErrorPage,
   sendPickerPage,
   sendResultPage,
   setNoStoreHeaders,
 } from './pages.js';
-import type { LinkPageContext, LinkPageScriptConfig, PickerProviderView } from './pages.js';
+import type { LabeledScope, LinkPageContext, LinkPageScriptConfig, PickerProviderView, ReconnectView } from './pages.js';
 import { LinkProviderError } from './providers.js';
 import { grantableScopes, providerRequestScopes } from './scopes.js';
 import {
@@ -110,6 +116,40 @@ function setBindingCookie(res: Response, value: string, tx: LinkTransaction): vo
   res.append('Set-Cookie', `${LINK_TX_COOKIE_NAME}=${value}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Lax`);
 }
 
+/**
+ * Redirect-only memory guard (popup fallback). The page script may write
+ * the browser's redirect-only memory for a provider only when the window
+ * demonstrably started this flow with an opener and then lost it. The
+ * picker form reports whether the window had an opener when the user
+ * submitted (LINK_PICKER_OPENER_FIELD, set by the page script; the handoff
+ * fetch reports 'handoff'); the picker response then sets this short-lived,
+ * HttpOnly cookie bound to the transaction, and the result page enables the
+ * memory write only when the cookie matches the transaction. In embedded
+ * mode the top-level picker submission always comes from the window the
+ * iframe opened with an opener. A popup-mode URL opened directly in a tab,
+ * and the top window that completes a handoff, never get the cookie.
+ */
+export const LINK_OPENER_COOKIE_NAME = '__Host-cred_link_op';
+
+function openerMark(tx: LinkTransaction): string {
+  return sha256Hex(`cred-link-opener:${tx.tid}`);
+}
+
+function setOpenerCookie(res: Response, tx: LinkTransaction): void {
+  const maxAge = Math.max(1, Math.floor((Date.parse(tx.expires_at) - Date.now()) / 1000));
+  res.append('Set-Cookie', `${LINK_OPENER_COOKIE_NAME}=${openerMark(tx)}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Lax`);
+}
+
+function clearOpenerCookie(req: Request, res: Response): void {
+  if (!parseCookieHeader(req.headers.cookie).has(LINK_OPENER_COOKIE_NAME)) return;
+  res.append('Set-Cookie', `${LINK_OPENER_COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`);
+}
+
+function startedWithOpener(req: Request, tx: LinkTransaction): boolean {
+  return parseCookieHeader(req.headers.cookie).get(LINK_OPENER_COOKIE_NAME) === openerMark(tx);
+}
+
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function envelopeFor(tx: LinkTransaction, handle: string): string {
@@ -153,8 +193,12 @@ function scriptConfig(ctx: LinkContext, tx: LinkTransaction, context: LinkPageCo
   const embedded = modeOf(tx) === 'embedded';
   const config: LinkPageScriptConfig = {
     context,
+    mode: modeOf(tx),
     target: context === 'top' && embedded ? ctx.selfOrigin : tx.origin,
     self_origin: ctx.selfOrigin,
+    ack_timeout_ms: LINK_POPUP_ACK_TIMEOUT_MS,
+    storage_key: LINK_REDIRECT_ONLY_STORAGE_KEY,
+    redirect_only_ttl_ms: LINK_REDIRECT_ONLY_TTL_DAYS * 24 * 60 * 60 * 1000,
   };
   if (context === 'iframe') config.parent_origin = tx.origin;
   if (step) config.step = step;
@@ -191,10 +235,25 @@ function deliverResult(ctx: LinkContext, req: Request, res: Response, hop: Pick<
     res.redirect(303, appendLinkRedirectResult(tx.redirect_uri, result));
     return;
   }
+  const script: Omit<LinkPageScriptConfig, 'result'> = scriptConfig(ctx, tx, context);
+  if (context === 'top') {
+    // Popup fallback: the result page (a popup, or the top-level window the
+    // embedded picker opened) falls back to redirect delivery to the
+    // registered redirect_uri, marked cred_link_via=popup and bound to this
+    // flow (cred_link_flow = request_uri_hash) for the widget's relay.
+    script.fallback_url = appendLinkRedirectResult(tx.redirect_uri, result, {
+      via: LINK_REDIRECT_VIA_POPUP,
+      flow_id: tx.request_uri_hash,
+    });
+    // Redirect-only memory only for a window that started with an opener.
+    const provider = result.outcome === 'error' ? tx.provider : result.provider ?? tx.provider;
+    if (provider && startedWithOpener(req, tx)) script.memory_provider = provider;
+  }
+  clearOpenerCookie(req, res);
   sendResultPage(req, res, {
     result,
     theme: themeFor(client, tx),
-    script: scriptConfig(ctx, tx, context),
+    script,
     frameAncestor: context === 'iframe' ? tx.origin : null,
   });
 }
@@ -265,6 +324,7 @@ function pickerView(tx: LinkTransaction): PickerProviderView[] {
 function sendPicker(ctx: LinkContext, req: Request, res: Response, hop: HopState): void {
   const { tx, client, context } = hop;
   const embeddedIframe = modeOf(tx) === 'embedded' && context === 'iframe';
+  const handoff = modeOf(tx) === 'popup' && context === 'top';
   const formActions = formActionOrigins(ctx, tx, tx.providers);
   sendPickerPage(req, res, {
     envelope: envelopeFor(tx, hop.handle),
@@ -272,13 +332,76 @@ function sendPicker(ctx: LinkContext, req: Request, res: Response, hop: HopState
     context,
     theme: themeFor(client, tx),
     providers: pickerView(tx),
-    security: { frameAncestor: embeddedIframe ? tx.origin : null, formActions },
-    script: scriptConfig(ctx, tx, context, 'picker'),
+    // The popup picker may record a redirect-only handoff with fetch: only
+    // this page gets connect-src 'self'.
+    security: { frameAncestor: embeddedIframe ? tx.origin : null, formActions, ...(handoff ? { connectSelf: true } : {}) },
+    script: { ...scriptConfig(ctx, tx, context, 'picker'), ...(handoff ? { handoff: true } : {}) },
     ...(tx.intent !== 'connect' ? { intentNote: 'Reconnect the same account you connected before.' } : {}),
   });
 }
 
-function sendConfirm(ctx: LinkContext, req: Request, res: Response, hop: HopState): void {
+function labeled(provider: LinkProviderSlug, scope: string): LabeledScope {
+  return { scope, label: findScopeCatalogEntry(provider, scope)?.label ?? scope };
+}
+
+/** A grant a confirmation screen was rendered against. */
+interface ReconnectBasis {
+  grant_id: string;
+  scopes: string[];
+}
+
+/**
+ * The confirm form's value for a basis: which grant and which scopes the
+ * screen was rendered against, or none. Scopes, not the grant version, so
+ * a status-only change (the old token died) does not count as a change,
+ * the same rule the store applies at activation.
+ */
+function basisToken(basis: ReconnectBasis | null): string {
+  return basis ? `${basis.grant_id}:${basis.scopes.join(' ')}` : 'none';
+}
+
+/**
+ * The scopes a live connection grants today when this connect flow lands on
+ * an account already connected for the transaction's own client and
+ * subject (the store will stage onto it). Strictly the transaction's
+ * client, subject, provider, audience and the account the provider just
+ * returned; never another subject's or client's connection. null for a
+ * first connection, update and reauth.
+ */
+async function reconnectToday(ctx: LinkContext, tx: LinkTransaction, provider: LinkProviderSlug): Promise<ReconnectBasis | null> {
+  if (tx.intent !== 'connect' || !tx.provider_account_id) return null;
+  const audience = linkAudienceFor(provider, tx.instance_url ?? null);
+  const live = (await ctx.store.listConnections({ client_id: tx.client_id, subject: tx.subject })).find((c) => (
+    c.client_id === tx.client_id
+    && c.subject === tx.subject
+    && c.provider === provider
+    && c.audience === audience
+    && c.provider_account_id === tx.provider_account_id
+    && c.status !== 'pending'
+    && c.status !== 'revoked'
+  ));
+  if (!live) return null;
+  const grant = await ctx.store.getGrantForConnection(live.id);
+  if (!grant) return { grant_id: 'none', scopes: [] };
+  return { grant_id: grant.id, scopes: canonicalScopeSet(grant.status !== 'revoked' ? grant.scopes : []) };
+}
+
+/**
+ * The current grant a confirmation screen is rendered against: for connect,
+ * the live connection the flow would land on (reconnectToday, shown as the
+ * diff); for update and reauth, the target connection's grant (not shown
+ * as a diff, but recorded the same way so a grant that moves between the
+ * screen and the commit is caught). null when there is none.
+ */
+async function shownGrant(ctx: LinkContext, tx: LinkTransaction, provider: LinkProviderSlug): Promise<ReconnectBasis | null> {
+  if (tx.intent === 'connect') return reconnectToday(ctx, tx, provider);
+  if (!tx.connection_id) return null;
+  const grant = await ctx.store.getGrantForConnection(tx.connection_id);
+  if (!grant) return null;
+  return { grant_id: grant.id, scopes: canonicalScopeSet(grant.status !== 'revoked' ? grant.scopes : []) };
+}
+
+async function sendConfirm(ctx: LinkContext, req: Request, res: Response, hop: HopState, notice?: string): Promise<void> {
   const { tx, client } = hop;
   const provider = tx.provider as LinkProviderSlug;
   const selected = new Set(tx.selected_scopes ?? []);
@@ -288,14 +411,37 @@ function sendConfirm(ctx: LinkContext, req: Request, res: Response, hop: HopStat
     const locked = required.has(scope);
     return { entry, checked: locked || selected.has(scope), locked };
   });
+  const script = scriptConfig(ctx, tx, 'top', 'confirm', provider);
+  let reconnect: ReconnectView | undefined;
+  const basis = await shownGrant(ctx, tx, provider);
+  // The diff is shown only for a connect that lands on a live connection.
+  const today = tx.intent === 'connect' && basis ? basis.scopes : null;
+  if (today) {
+    // Replace semantics: after confirming, the grant is exactly the checked
+    // toggles. Held today but not offered here (not requested, or not
+    // granted this time) is removed unconditionally.
+    const checked = new Set(entries.filter((e) => e.checked).map((e) => e.entry.scope));
+    reconnect = {
+      today: today.map((s) => labeled(provider, s)),
+      kept: today.filter((s) => checked.has(s)).map((s) => labeled(provider, s)),
+      added: [...checked].filter((s) => !today.includes(s)).sort().map((s) => labeled(provider, s)),
+      removed: today.filter((s) => !checked.has(s)).map((s) => labeled(provider, s)),
+    };
+    const labels: Record<string, string> = {};
+    for (const s of [...today, ...entries.map((e) => e.entry.scope)]) labels[s] = labeled(provider, s).label;
+    script.reconnect = { today, labels };
+  }
   sendConfirmPage(req, res, {
     envelope: envelopeFor(tx, hop.handle),
     provider,
     theme: themeFor(client, tx),
     ...(tx.account_label ? { accountLabel: tx.account_label } : {}),
     entries,
+    ...(reconnect ? { reconnect } : {}),
+    reconnectBasis: basisToken(basis),
+    ...(notice ? { notice } : {}),
     security: { frameAncestor: null, formActions: formActionOrigins(ctx, tx, [provider]) },
-    script: scriptConfig(ctx, tx, 'top', 'confirm', provider),
+    script,
   });
 }
 
@@ -326,7 +472,7 @@ async function renderCurrentStep(ctx: LinkContext, req: Request, res: Response, 
       redirectToProvider(ctx, req, res, tx, hop.handle);
       return;
     case 'confirm':
-      sendConfirm(ctx, req, res, hop);
+      await sendConfirm(ctx, req, res, hop);
       return;
     case 'done': {
       // A repeated confirm returns the first result. Only the code hash is
@@ -494,6 +640,12 @@ export async function handlePicker(ctx: LinkContext, req: Request, res: Response
     sendLocalErrorPage(req, res);
     return;
   }
+  // Record whether this window started the flow with an opener (see
+  // LINK_OPENER_COOKIE_NAME). A handoff fetch never records it.
+  const opener = singleField(body[LINK_PICKER_OPENER_FIELD]);
+  const hadOpener = modeOf(advanced) === 'embedded' ? !inIframe : modeOf(advanced) === 'popup' && opener === '1';
+  if (hadOpener) setOpenerCookie(res, advanced);
+  else clearOpenerCookie(req, res);
   redirectToProvider(ctx, req, res, advanced, handle);
 }
 
@@ -602,7 +754,7 @@ export async function handleCallback(ctx: LinkContext, req: Request, res: Respon
     sendLocalErrorPage(req, res);
     return;
   }
-  sendConfirm(ctx, req, res, { ...hop, tx: advanced });
+  await sendConfirm(ctx, req, res, { ...hop, tx: advanced });
 }
 
 /** POST /link/v1/confirm */
@@ -679,6 +831,18 @@ export async function handleConfirm(ctx: LinkContext, req: Request, res: Respons
     await failToClient(ctx, req, res, hop, 'server_error');
     return;
   }
+  // The page was rendered against one grant and its scopes (or none). If
+  // the grant is different now (another flow was activated, or its scopes
+  // changed), show the current picture instead of committing what the user
+  // did not see. What passed this check is handed to commitConfirm as
+  // shown_grant_scopes, so a change between here and the commit is
+  // refused at activation.
+  const shown = singleField(body[LINK_RECONNECT_BASIS_FIELD]);
+  const basis = await shownGrant(ctx, tx, provider);
+  if (shown !== basisToken(basis)) {
+    await sendConfirm(ctx, req, res, hop, 'The access this app has to this account changed while this page was open. Review it and confirm again.');
+    return;
+  }
 
   const code = newActivationCode();
   let commit;
@@ -702,6 +866,14 @@ export async function handleConfirm(ctx: LinkContext, req: Request, res: Respons
         org_policy: { ...LINK_DEFAULT_ORG_POLICY },
         authorization_details_types: [],
       },
+      // connect: the live grant shown in the diff, or null for "a new
+      // connection" (activation then refuses if the flow lands on a live
+      // one after all). update and reauth: the target grant rendered
+      // against; omitted when there was none (the store then records the
+      // grant as of the commit).
+      ...(tx.intent === 'connect'
+        ? { shown_grant_scopes: basis ? basis.scopes : null }
+        : basis ? { shown_grant_scopes: basis.scopes } : {}),
       now: nowIso(),
     });
   } catch (error) {

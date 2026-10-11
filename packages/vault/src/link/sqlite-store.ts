@@ -69,6 +69,7 @@ export type LinkStoreErrorCode =
   | 'not_claimed'
   | 'connection_unavailable'
   | 'activation_superseded'
+  | 'grant_changed'
   | 'invalid_transition'
   | 'invalid_scopes'
   | 'invalid_input';
@@ -216,13 +217,13 @@ export class SqliteLinkStore implements LinkStore {
   }
 
   /**
-   * Creates or verifies the schema. user_version 0 is a new file; anything
-   * above LINK_SCHEMA_VERSION was written by a newer build and is refused.
+   * Creates, upgrades or verifies the schema, in one IMMEDIATE transaction
+   * (SQLite DDL is transactional, so a failed upgrade leaves the file as it
+   * was). user_version 0 is a new file and gets LINK_SCHEMA_SQL directly;
+   * an older version runs one guarded step per version first; anything above
+   * LINK_SCHEMA_VERSION was written by a newer build and is refused.
    * LINK_SCHEMA_SQL is idempotent, so reopening a current file is a no-op.
-   *
-   * Future migrations go in the marked spot, one guarded step per version,
-   * for example `if (current >= 1 && current < 2) { ...alter v1 to v2... }`,
-   * all inside this one IMMEDIATE transaction.
+   * Add future steps after the last one, as `if (current < N) { ... }`.
    */
   private migrate(): void {
     const current = this.db.pragma('user_version', { simple: true }) as number;
@@ -230,12 +231,31 @@ export class SqliteLinkStore implements LinkStore {
       throw new Error(`Link database schema version ${current} is newer than this build supports (${LINK_SCHEMA_VERSION})`);
     }
     this.db.transaction(() => {
-      // Migration steps from older versions go here (none yet: version 1 is the first layout).
+      if (current >= 1 && current < 2) {
+        // 1 -> 2: new link_transactions columns, nothing else. Activations
+        // recorded by a version 1 build are deliberately left unsettled: one
+        // of them may be a crash between the activation commit and the token
+        // move, and the store cannot tell which. The server's startup heal
+        // resolves each of them once on the first start after the upgrade
+        // (it settles the ones whose tokens moved and marks the others
+        // needs_reauth). The unsettled index is created by LINK_SCHEMA_SQL
+        // below, after the column exists.
+        this.addColumnIfMissing('link_transactions', 'tokens_settled_at', 'TEXT');
+        this.addColumnIfMissing('link_transactions', 'grant_scopes_at_confirm_json', 'TEXT');
+      }
       this.db.exec(LINK_SCHEMA_SQL);
       if (current < LINK_SCHEMA_VERSION) {
         this.db.pragma(`user_version = ${LINK_SCHEMA_VERSION}`);
       }
     }).immediate();
+  }
+
+  /** Migration helper. Table, column and type come from this file only. */
+  private addColumnIfMissing(table: string, column: string, type: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   /** Runs `fn` in one BEGIN IMMEDIATE transaction. */
@@ -601,11 +621,25 @@ export class SqliteLinkStore implements LinkStore {
       'id' | 'audience' | 'provider_account_id' | 'account_label' | 'provider_scopes' | 'instance_url' | 'custody'
     >;
     new_grant: Pick<ClientGrant, 'id' | 'org_policy' | 'authorization_details_types'>;
+    shown_grant_scopes?: string[] | null;
     now: string;
   }): Promise<LinkConfirmCommit> {
     const now = iso(input.now, 'now');
     const codeHash = requireString(input.activation_code_hash, 'activation_code_hash');
     const confirmed = JSON.parse(scopesJson(input.confirmed_scopes, 'confirmed_scopes')) as string[];
+    // What the confirm screen showed as the current grant: an array is
+    // recorded (canonical), null records nothing, omitted (undefined) means
+    // "the grant as of this commit".
+    let shown: string | null | undefined;
+    if (input.shown_grant_scopes === null) {
+      shown = null;
+    } else if (input.shown_grant_scopes !== undefined) {
+      const list: unknown = input.shown_grant_scopes;
+      if (!Array.isArray(list) || !list.every((x) => typeof x === 'string')) {
+        throw new LinkStoreError('invalid_input', 'shown_grant_scopes must be an array of strings or null');
+      }
+      shown = JSON.stringify(canonicalScopeSet(list as string[]));
+    }
 
     return this.write((): LinkConfirmCommit => {
       const row = this.txRow(input.tid);
@@ -634,6 +668,11 @@ export class SqliteLinkStore implements LinkStore {
       let connectionId: string;
       let grantId: string;
       let creates: boolean;
+      // The grant scopes the user confirmed against, when this transaction
+      // stages onto an existing grant (JSON, canonical). NULL otherwise.
+      let grantScopesAtConfirm: string | null = null;
+      const scopesAtConfirm = (grant: GrantRow): string | null =>
+        shown === undefined ? JSON.stringify(canonicalScopeSet(JSON.parse(grant.scopes_json) as string[])) : shown;
 
       if (tx.intent === 'connect') {
         const nc = input.new_connection;
@@ -655,6 +694,7 @@ export class SqliteLinkStore implements LinkStore {
           }
           connectionId = live.id;
           grantId = grant.id;
+          grantScopesAtConfirm = scopesAtConfirm(grant);
           creates = false;
         } else {
           // No live connection: this transaction always gets its own pending
@@ -703,6 +743,7 @@ export class SqliteLinkStore implements LinkStore {
         }
         connectionId = conn.id;
         grantId = grant.id;
+        grantScopesAtConfirm = scopesAtConfirm(grant);
         creates = false;
       }
 
@@ -713,6 +754,7 @@ export class SqliteLinkStore implements LinkStore {
         connection_id: connectionId,
         grant_id: grantId,
         creates_connection: creates ? 1 : 0,
+        grant_scopes_at_confirm_json: grantScopesAtConfirm,
         step: 'done',
         updated_at: now,
       });
@@ -826,6 +868,15 @@ export class SqliteLinkStore implements LinkStore {
         if (conn.status === 'revoked' || conn.status === 'pending' || grant.status === 'revoked' || grant.status === 'pending') {
           return refuse('connection_unavailable', `connection is ${conn.status}, grant is ${grant.status}`);
         }
+        // The consent was given against the grant's scopes at confirm time. A
+        // later change to those scopes (narrowing, provider reduction, another
+        // activation) wins, and this flow has to be run again. A status-only
+        // change (active to needs_reauth) does not count: repairing that is
+        // what a reauth is for. NULL means unknown and is refused.
+        if (row.grant_scopes_at_confirm_json === null
+          || !scopeSetsEqual(JSON.parse(grant.scopes_json) as string[], JSON.parse(row.grant_scopes_at_confirm_json) as string[])) {
+          return refuse('grant_changed', 'the grant scopes changed after this transaction was confirmed');
+        }
         if (row.provider_granted_scopes_json === null || row.confirmed_scopes_json === null) {
           throw new LinkStoreError('wrong_step', 'transaction has no staged scopes');
         }
@@ -890,6 +941,31 @@ export class SqliteLinkStore implements LinkStore {
       `).all(now, claimCutoff, limit) as TransactionRow[];
       return rows.map((row) => rowToTransaction(this.endTx(row, 'expired', null, now)));
     });
+  }
+
+  /**
+   * One UPDATE: sets tokens_settled_at on an activated transaction unless it
+   * is already set (COALESCE keeps the first timestamp). A matched row counts
+   * as a change even when nothing changes, so a repeat call is still true.
+   */
+  async settleActivation(input: { tid: TransactionId; now: string }): Promise<boolean> {
+    const now = iso(input.now, 'now');
+    const info = this.db.prepare(`
+      UPDATE link_transactions
+      SET updated_at = CASE WHEN tokens_settled_at IS NULL THEN @now ELSE updated_at END,
+          tokens_settled_at = COALESCE(tokens_settled_at, @now)
+      WHERE tid = @tid AND outcome = 'activated'
+    `).run({ tid: input.tid, now });
+    return info.changes > 0;
+  }
+
+  async listUnsettledActivations(): Promise<LinkTransaction[]> {
+    const rows = this.db.prepare(`
+      SELECT * FROM link_transactions
+      WHERE outcome = 'activated' AND tokens_settled_at IS NULL
+      ORDER BY activated_at ASC, tid ASC
+    `).all() as TransactionRow[];
+    return rows.map(rowToTransaction);
   }
 
   // ── Connections ───────────────────────────────────────────────────────────
