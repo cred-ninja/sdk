@@ -794,6 +794,129 @@ describe('createLinkHooks().onGrantUpdated', () => {
     });
     expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual(['calendar.readonly']);
   });
+
+  describe('previous_scopes bound (a missed earlier call cannot be undone by a widening)', () => {
+    const CAL = 'calendar.readonly';
+    const SEND = 'gmail.send';
+
+    it('review example: a narrowing whose intersect was missed, then a widening, leaves agent A at the narrowed scopes', async () => {
+      // Grant [calendar, gmail.send]; agent A holds both.
+      const { hooks, port, state } = setup({ grant: makeGrant({ scopes: [CAL, SEND] }), seed: { allowedScopes: [CAL, SEND] } });
+
+      // A narrowing commits grant [calendar]; its onGrantUpdated call is missed.
+      state.grants.set(CONN, makeGrant({ scopes: [CAL], version: 4 }));
+
+      // A later update for another agent widens the grant back.
+      const widened = makeGrant({ scopes: [CAL, SEND], version: 5 });
+      state.grants.set(CONN, widened);
+      await hooks.onGrantUpdated({ grant: widened, previous_scopes: [CAL], reason: 'activate' });
+      await hooks.onActivate({
+        intent: 'update',
+        connection: makeConnection(),
+        grant: widened,
+        agent_id: 'agt_b',
+        tid: 'ltx_abc',
+        actor: `link:${CLIENT}`,
+      });
+
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL]);
+      expect((await port.get('agt_b', CONN))?.allowedScopes).toEqual([CAL, SEND]);
+      expect(await hooks.checkLinkAccess(check({ requested_scopes: [SEND] })))
+        .toMatchObject({ ok: false, code: 'permission_required', missing_scopes: [SEND] });
+      expect((await hooks.checkLinkAccess(check({ agent_id: 'agt_b', requested_scopes: [SEND] }))).ok).toBe(true);
+    });
+
+    it('a Permission within the previous scopes is untouched by a widening', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL] } });
+      const before = await port.get(AGENT, CONN);
+      const spy = vi.spyOn(port, 'intersectForConnection');
+      await hooks.onGrantUpdated({ grant: makeGrant({ scopes: [CAL, SEND] }), previous_scopes: [CAL], reason: 'activate' });
+      expect(spy).toHaveBeenCalledOnce();
+      expect(await spy.mock.results[0].value).toEqual([]);
+      expect(await port.get(AGENT, CONN)).toEqual(before);
+    });
+
+    it('a narrowing still narrows', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL, SEND] } });
+      await hooks.onGrantUpdated({ grant: makeGrant({ scopes: [CAL] }), previous_scopes: [CAL, SEND], reason: 'narrow' });
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL]);
+    });
+
+    it('previous_scopes equal to grant.scopes (a repair or heal) is the plain grant intersect', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: ['calendar.events', CAL, SEND] } });
+      const spy = vi.spyOn(port, 'intersectForConnection');
+      const grant = makeGrant({ scopes: [SEND, CAL] });
+      await hooks.onGrantUpdated({ grant, previous_scopes: grant.scopes, reason: 'activate' });
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy).toHaveBeenCalledWith(CONN, [CAL, SEND]);
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL, SEND]);
+    });
+
+    it('uses one store operation with the canonical intersection of grant and previous scopes', async () => {
+      const { hooks, port } = setup({ seed: null });
+      const spy = vi.spyOn(port, 'intersectForConnection');
+      await hooks.onGrantUpdated({
+        grant: makeGrant({ scopes: [`${GOOGLE_PREFIX}gmail.send`, CAL, 'drive.file'] }),
+        previous_scopes: [SEND, `${GOOGLE_PREFIX}calendar.readonly/`, 'calendar.events'],
+        reason: 'activate',
+      });
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy).toHaveBeenCalledWith(CONN, [CAL, SEND]);
+    });
+
+    it('long-form and short-form Google names in previous_scopes match canonically', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL, SEND] } });
+      await hooks.onGrantUpdated({
+        grant: makeGrant({ scopes: [CAL, SEND, 'drive.file'] }),
+        previous_scopes: [`${GOOGLE_PREFIX}calendar.readonly`, `${GOOGLE_PREFIX}gmail.send`],
+        reason: 'activate',
+      });
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL, SEND]);
+    });
+
+    it('a long-form previous_scopes still clips what it does not name', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL, SEND] } });
+      await hooks.onGrantUpdated({
+        grant: makeGrant({ scopes: [CAL, SEND] }),
+        previous_scopes: [`${GOOGLE_PREFIX.toUpperCase()}CALENDAR.READONLY`],
+        reason: 'activate',
+      });
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL]);
+    });
+
+    it('an empty previous_scopes empties every Permission on the connection', async () => {
+      const { hooks, port, rows } = setup({ seed: { allowedScopes: [CAL, SEND] } });
+      seedPermission(rows, { id: 'perm_b', agentId: 'agt_b', allowedScopes: [CAL] });
+      await hooks.onGrantUpdated({ grant: makeGrant({ scopes: [CAL, SEND] }), previous_scopes: [], reason: 'activate' });
+      const all = await port.listForConnection(CONN);
+      expect(all).toHaveLength(2);
+      for (const p of all) expect(p.allowedScopes).toEqual([]);
+    });
+
+    it('a malformed previous_scopes throws and writes nothing', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL, SEND] } });
+      const spy = vi.spyOn(port, 'intersectForConnection');
+      for (const bad of [undefined, 'calendar.readonly', [CAL, 3]]) {
+        await expect(hooks.onGrantUpdated({
+          grant: makeGrant({ scopes: [CAL] }),
+          previous_scopes: bad as unknown as string[],
+          reason: 'narrow',
+        })).rejects.toThrow(TypeError);
+      }
+      expect(spy).not.toHaveBeenCalled();
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL, SEND]);
+    });
+
+    it('never widens, whatever previous_scopes says', async () => {
+      const { hooks, port } = setup({ seed: { allowedScopes: [CAL] } });
+      await hooks.onGrantUpdated({
+        grant: makeGrant({ scopes: [CAL, SEND, 'drive.file'] }),
+        previous_scopes: [CAL, SEND, 'drive.file'],
+        reason: 'activate',
+      });
+      expect((await port.get(AGENT, CONN))?.allowedScopes).toEqual([CAL]);
+    });
+  });
 });
 
 // ── setAgentPermission ───────────────────────────────────────────────────────

@@ -125,9 +125,24 @@ export function createLinkHooks(deps: LinkHooksDeps, options: LinkHooksOptions =
     await reconcileWithCurrentGrant(store, permissions, connection.id);
   }
 
+  /**
+   * Clip every Permission on the connection to grant.scopes ∩ previous_scopes,
+   * in one store operation. A Permission is never wider than the grant it was
+   * written under, so the previous_scopes bound changes nothing unless an
+   * earlier onGrantUpdated was missed; then it removes what that call should
+   * have removed before a widened grant could hand it back. An intersect can
+   * only narrow. A caller that only re-applies the current grant passes
+   * previous_scopes = grant.scopes, which is the plain grant intersect.
+   */
   async function onGrantUpdated(input: LinkGrantUpdatedHookInput): Promise<void> {
-    const { grant } = input;
-    await permissions.intersectForConnection(grant.connection_id, canonicalScopeSet(grant.scopes));
+    const { grant, previous_scopes } = input;
+    if (!Array.isArray(previous_scopes) || !previous_scopes.every((s) => typeof s === 'string')) {
+      // Fail loudly rather than skip the previous bound: the server keeps the
+      // activation unsettled and its heal runs this again.
+      throw new TypeError('onGrantUpdated: previous_scopes must be a string array');
+    }
+    const bound = intersectScopes(canonicalScopeSet(grant.scopes), canonicalScopeSet(previous_scopes));
+    await permissions.intersectForConnection(grant.connection_id, bound);
   }
 
   async function setAgentPermission(input: LinkSetAgentPermissionInput): Promise<LinkSetAgentPermissionResult> {

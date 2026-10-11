@@ -154,44 +154,75 @@ The connection stays `pending` until the backend calls
 `POST /link/v1/connections/:id/activate` with that code and the `subject` of
 its own current session; any mismatch revokes it. Transactions expire after
 10 minutes; anything unactivated is cleaned up by a background sweep (and
-revoked at the provider under the revocation rule below). Activation commits
-the database first and moves the tokens second; if the token move fails the
-connection is set to `needs_reauth`, never left active without tokens.
+revoked at the provider under the revocation rule below). Activation runs,
+under the connection's token lock: the database commit, the token move, the
+permission intersect for an existing grant (every agent Permission clipped to
+the new grant and the previous one), and only then marks the activation
+settled. If the token move fails, the connection is set to `needs_reauth`,
+never left active without tokens; if that write fails too, the staged tokens
+are kept and the activation stays unsettled for the startup heal. If the
+intersect fails, the client gets the opaque failure and the activation stays
+unsettled; the startup heal runs the intersect again.
 
-**Startup heal.** If the process dies between the database commit and the
-token move, the next start resolves every such activation before Link serves
-any request (the `/link/v1/*` routes and the Link branches of
-`/api/v1/delegate` and `/api/v1/use` wait for it; other routes do not). Only
-state changes happen before Link opens: a finished move is marked settled, an
-unfinished one leaves the connection `needs_reauth` (`reauth_required`) and
-keeps its old tokens for an update or reauth. Provider revocation of the
-discarded staged tokens (under the revocation rule below, bounded by the
-provider call timeout) and their deletion run afterwards in the background;
-the transaction stays unsettled until that is done, so a restart finds it
-again. A transaction is acted on only if its connection is still exactly as
-that activation left it (still active, and not written since: its
-`updated_at` equals the activation time). If anything happened to the
-connection afterwards (a later reauth, update or narrowing, the failure
-handling of the activation itself, or the heal's own earlier pass), the
-transaction is stale: its staged copy is deleted locally, nothing is revoked
-at the provider and the connection is left alone. A consequence: if the
-process dies after the heal marked a connection `needs_reauth` but before
-the background revocation ran, the next start only deletes the staged tokens
-locally. An activation whose token move finished is settled before Link
-opens even when its leftover staged copy is still there, also when a refresh
-has rotated the tokens since (the connection was created by that activation,
-or still holds the refresh token it staged); only removing the leftover copy
-runs afterwards. Known limit, which fails closed: an update or reauth on a
-provider that rotates refresh tokens, a crash inside the token move, and a
-refresh before the next start leave tokens the heal cannot attribute, so
-that connection ends `needs_reauth` although its tokens work, and the user
-reconnects. A transaction that cannot be resolved is logged and retried on the
-next start; startup never fails because of it. The first start after
-upgrading from a version 1 Link database re-checks every earlier activation
-once (that version did not record whether the token move finished); healthy
-ones are only marked settled, and no provider is called before Link opens. If the crash also skipped the
-seeding of the pushed `agent_id`'s Permission, that agent is refused until the
-app adds it with `POST /link/v1/connections/:id/permissions`.
+**Startup heal.** Every activation that is not settled (the process died
+between the database commit and the settle, or a step failed) is resolved
+once at the next start, before Link serves any request (the `/link/v1/*`
+routes and the Link branches of `/api/v1/delegate` and `/api/v1/use` wait for
+it; other routes do not). Before Link opens, only local work happens: for
+every transaction whose connection still exists, the permission intersect
+with the connection's current grant runs first (whatever its status; it
+never widens), and then:
+
+- no staged tokens left: settled. An active connection with no stored
+  tokens at all becomes `needs_reauth`.
+- staged tokens equal to the stored ones: settled; the leftover staged copy
+  is deleted afterwards.
+- the connection was written since that activation (a later reauth, update
+  or narrowing, the activation's own failure handling, or the heal's own
+  earlier pass; detected as a status other than active or an `updated_at`
+  that is not the activation time): stale. The connection is left alone, the
+  staged copy is deleted locally, nothing is revoked at the provider.
+- the activation created the connection and the connection holds tokens:
+  the move finished and a refresh rotated the tokens since; settled.
+- a refresh token was staged and the stored one equals it: moved then
+  refreshed, or never moved and the provider answered the re-consent with the
+  same refresh token, which cannot be told apart. The staged tokens are
+  written onto the connection marked expired, so the next use refreshes with
+  that refresh token (the same credential either way) and gets tokens for
+  the current consent; a refresh that fails with `invalid_grant` moves the
+  connection to `needs_reauth` as usual. Settled; the connection stays
+  active.
+- otherwise the move never happened: the connection becomes `needs_reauth`
+  (`reauth_required`) and keeps its old tokens for an update or reauth.
+
+Provider revocation of discarded staged tokens (under the revocation rule
+below, bounded by the provider call timeout, never while the connection
+holds tokens) and the deletion of staged copies run afterwards in the
+background. A reverted or stale transaction stays unsettled until that is
+done, so a restart finds it again. A transaction whose intersect or any
+other step fails is logged and left unsettled for the next start; startup
+never fails because of it. The first start after upgrading from a version 1
+Link database re-checks every earlier activation once (that version did not
+record whether the token move finished); no provider is called before Link
+opens. The heal does not re-run `onActivate`: if a crash skipped the seeding
+of the pushed `agent_id`'s Permission, that agent is refused until the app
+adds it with `POST /link/v1/connections/:id/permissions`.
+
+Known limits of the heal:
+
+- Two cases fail closed (a working connection ends `needs_reauth` and the
+  user reconnects): an update or reauth on a provider that rotates refresh
+  tokens, a crash inside the token move, and a refresh before the next start;
+  and a transaction where no refresh token was staged and the access token
+  was refreshed before the heal decided (this needs an earlier start whose
+  heal failed for that transaction, or a version 1 leftover).
+- If the process dies after the heal marked a connection `needs_reauth` but
+  before the background revocation ran, the next start treats the
+  transaction as stale and only deletes the staged tokens locally; they are
+  never revoked at the provider.
+- A leftover staged copy whose background deletion failed after its
+  transaction was settled is never swept; it is an orphan that no connection
+  reads again.
 
 **Reconnecting an account.** When a connect flow lands on a provider account
 this client and subject already have connected, the confirmation screen shows
