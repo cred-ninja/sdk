@@ -53,7 +53,8 @@ npm run dev
 | POST | `/admin/login` | None | Create admin session cookie |
 | GET | `/providers` | Admin | List configured providers + connection status |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
-| GET | `/connect/:provider` | Admin | Start OAuth flow (browser) |
+| GET | `/connect/:provider` | Admin | Start OAuth flow (browser): `?request=<id>` from a connect request; see [User ids](#user-ids) |
+| POST | `/connect/:provider/start` | Admin | JSON `{ user_id, scopes }`: mint a single-use connect request, answers `{ url }` |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
@@ -100,6 +101,56 @@ npm run dev
 > lineage and degrade to a parent-only check for that hop until they age out under
 > `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
 > `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
+
+## User ids
+
+Every legacy route that acts on stored provider tokens (`/providers`,
+`/connect`, `/api/token/:provider`, `/api/v1/delegate`,
+`/api/v1/subdelegate`, `/api/v1/connections`, `/api/v1/audit` and its
+stream) works for one user id, sent as `user_id` in the JSON body or the
+query string. Cred Link routes are not affected.
+
+- **Multi-user mode (the default).** A request without `user_id` (or with a
+  blank one) is refused with `400 {"error":"user_id_required"}`, so a
+  backend that forgets it on one call never silently acts on someone else's
+  tokens. Browser pages (`/connect`, and `/providers` for a browser) answer
+  with a short page saying to add `?user_id=`.
+- **Single-user mode** (`SINGLE_USER_MODE=true`). A request without
+  `user_id` acts on the shared user `default`, as in earlier versions. The
+  quickstart `.env.example` sets this.
+
+Naming a user id explicitly works in both modes, `default` included. The
+reserved Link ids (`link:...`, `link-staged:...`) are always refused. The
+server logs the mode once at startup.
+
+**Agents bound to a user.** A custom `agentRequestVerifier` may return a
+principal with `userId`. A request from that agent without `user_id` then
+acts on that user (in both modes), and one that names a different
+`user_id` is refused with `403 {"error":"user_id_mismatch"}`. The static
+`AGENT_TOKEN` principal is never bound to a user. Admin routes are not
+affected.
+
+**Starting a connection.** `GET /connect/:provider` no longer takes the user
+id and scopes from the query string when the browser is signed in with the
+admin session cookie (that cookie is sent on a cross-site top-level link, so
+a crafted link could otherwise connect an account under a user id and scopes
+the operator did not choose). Instead:
+
+- `POST /api/v1/delegate` answers `consent_required` with a `consent_url` of
+  the form `/connect/<provider>?request=<id>`: a single-use connect request
+  (random 256-bit id, 10 minutes) bound to the user id and scopes of that
+  call. Open it signed in as the operator.
+- The `/connect?user_id=<id>` page starts a connection with
+  `POST /connect/<provider>/start` (JSON `{ user_id, scopes }`, answers
+  `{ url }`, requires `Content-Type: application/json`) and then opens that
+  url.
+- `GET /connect/<provider>?user_id=...&scopes=...` with the admin Bearer
+  token (scripts, curl) still starts the flow directly, since a Bearer
+  header cannot be sent cross-site. With only the session cookie it starts
+  nothing and redirects to `/connect?user_id=...`.
+
+An unknown, expired, already used or wrong-provider request id gives a
+generic error page with a request id; nothing starts.
 
 ## Cred Link (Phase 1)
 
@@ -343,6 +394,7 @@ All configuration via environment variables (or `.env` file):
 | `VAULT_STORAGE` | No | `sqlite` (default, audit-capable) or `file` |
 | `VAULT_PATH` | No | Path to vault file (default: `./data/vault.sqlite`) |
 | `REDIRECT_BASE_URI` | No | OAuth redirect base (default: `http://localhost:3456`) |
+| `SINGLE_USER_MODE` | No | `true`: legacy requests without `user_id` act on the shared user `default`. `false` (default): they are refused with `400 user_id_required`. See [User ids](#user-ids) |
 | `RECEIPT_TTL_SECONDS` | No | TTL (seconds) for the `exp` claim on delegation receipts, and the max age for legacy receipts minted without one (default: `3600`) |
 | `RECEIPT_AUDIENCE` | No | Audience (`aud` claim) for delegation receipts (default: `REDIRECT_BASE_URI`) |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |

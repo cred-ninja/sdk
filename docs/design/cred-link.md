@@ -227,7 +227,7 @@ Multi-tenancy **[Later]**: `org_` ids own clients, clients own connections. Ever
 | Consent phishing (victim completes an attacker's flow) and connection injection | Connection stays `pending` until backend activation with the one-time `code` and the session's `subject` |
 | Hijack of an existing connection through `update` or `reauth` | Request must carry the session's `subject`. Link rejects a `connection_id` outside that (client, subject). Same provider account required. Changes staged until `activate` (section 6) |
 | Use of a pending or revoked connection | Holder call-time check on every brokered call (section 4) |
-| Subject spoofing | `subject` only from the authenticated PAR call. Today `requestUserId()` reads `user_id` from the query string and defaults to `default` |
+| Subject spoofing | `subject` only from the authenticated PAR call. Legacy routes no longer fall back to `default` silently: a request must name `user_id` unless the server runs with `SINGLE_USER_MODE=true`, a verified principal can be bound to one user, and the OAuth start takes its user id from a single-use connect request, not the query string |
 | Token theft at rest or in the agent | AES-256-GCM per field and short handles revocable by `grant_id`. **[Later]** per-org keys, holder-only role, DPoP binding |
 | A consent confirmed before a later narrowing overwrites it | Activation compares the grant's scopes with the ones the confirmation screen showed and fails closed on a difference (section 2) |
 | Enumeration | Unknown client, bad secret, unknown or foreign connection all return the same `401 {"error":"access_denied"}` plus `Cred-Request-Id` |
