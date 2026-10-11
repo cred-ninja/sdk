@@ -55,7 +55,8 @@
     "tsx": "^4.7.0",
     "vitest": "^4.1.7",
     "supertest": "^7.0.0",
-    "@types/supertest": "^6.0.2"
+    "@types/supertest": "^6.0.2",
+    "jsdom": "^26.1.0"
   },
   "repository": {
     "type": "git",

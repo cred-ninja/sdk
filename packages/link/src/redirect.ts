@@ -1,7 +1,24 @@
-import { LINK_REDIRECT_PARAMS, parseLinkRedirectResult } from '@credninja/protocol';
+import {
+  LINK_REDIRECT_PARAMS,
+  linkResultMessage,
+  parseLinkRedirectFlowId,
+  parseLinkRedirectResult,
+} from '@credninja/protocol';
 import type { LinkResult } from '@credninja/protocol';
 import { deliverResult } from './link.js';
 import type { CredLinkCallbacks } from './options.js';
+import {
+  LINK_RELAY_ACCEPT_WINDOW_MS,
+  LINK_RELAY_CLAIM_TIMEOUT_MS,
+  LINK_RELAY_MESSAGE_TYPES,
+  LINK_RELAY_RECEIPT_GRACE_MS,
+  LINK_RELAY_RECEIPT_TIMEOUT_MS,
+  LINK_RELAY_VERSION,
+  closeRelayChannel,
+  openRelayChannel,
+  parseRelayMessage,
+  relayId,
+} from './relay.js';
 
 /** Options for handleRedirect(). */
 export interface HandleRedirectOptions extends CredLinkCallbacks {
@@ -11,6 +28,21 @@ export interface HandleRedirectOptions extends CredLinkCallbacks {
    * untouched.
    */
   url?: string;
+  /**
+   * Popup fallback relay (default true). When the result arrived with
+   * `cred_link_via=popup` and a valid `cred_link_flow`, offer it to the
+   * widget for that flow if it is still waiting on another page of this
+   * origin, before handling it here. false always handles it here.
+   */
+  relay?: boolean;
+  /**
+   * Called instead of onSuccess, onError and onExit when the result was
+   * handed over to the waiting widget on another page (popup fallback).
+   * This page then tries window.close(), which the browser may refuse (for
+   * example for a window the user opened); use this to show "Connected, you
+   * can close this window".
+   */
+  onRelayed?(): void;
 }
 
 const REDIRECT_KEYS: ReadonlySet<string> = new Set(Object.values(LINK_REDIRECT_PARAMS));
@@ -97,6 +129,18 @@ export function parseRedirectResult(input: string | { search: string }): LinkRes
  * not delivered and the URL is left untouched, so nothing is cleaned away
  * that was not delivered. Safe during server-side rendering (returns null
  * without a window).
+ *
+ * Popup fallback: when the result carries `cred_link_via=popup` and
+ * `cred_link_flow` (a popup or embedded flow lost its opener and the Link
+ * service redirected here instead), the result is first offered on a
+ * BroadcastChannel to the widget for that flow, if it is still waiting on
+ * another page of this origin. If that widget takes it (claim, then a
+ * receipt), onRelayed runs instead of the result callbacks and this window
+ * is asked to close; otherwise this page's callbacks run. In the relay case
+ * the callbacks run asynchronously, after the relay decision; the return
+ * value and the URL cleanup stay synchronous. Use the callbacks, not the
+ * return value, to trigger activation: when the result is handed over, the
+ * other page activates it.
  */
 export function handleRedirect(options: HandleRedirectOptions = {}): LinkResult | null {
   if (options.url !== undefined) {
@@ -122,6 +166,91 @@ export function handleRedirect(options: HandleRedirectOptions = {}): LinkResult 
     // Ignore: some sandboxed documents refuse history changes; the result is still delivered once.
   }
 
-  deliverResult(result, options);
+  // Relay only for a popup fallback that names its flow; a via marker without a flow id is delivered here.
+  const flowId = parseLinkRedirectFlowId(linkPartsOf(query));
+  if (flowId !== null && options.relay !== false) {
+    relayOrDeliver(win, result, flowId, options);
+  } else {
+    deliverResult(result, options);
+  }
   return result;
+}
+
+/**
+ * Offer, claim, deliver, receipt. The offer names the flow, so only the
+ * widget holding that token claims. The first claim gets the delivery; the
+ * result counts as handed over only once its receipt arrives, and then
+ * onRelayed runs and this window is asked to close. No claim, no receipt in
+ * time, or no BroadcastChannel: the result is delivered here, and this
+ * window is never closed.
+ */
+function relayOrDeliver(win: Window, result: LinkResult, flowId: string, options: HandleRedirectOptions): void {
+  const channel = openRelayChannel();
+  if (!channel) {
+    deliverResult(result, options);
+    return;
+  }
+  const offer_id = relayId();
+  let claimId: string | null = null;
+  let decided = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const decide = (): boolean => {
+    if (decided) return false;
+    decided = true;
+    if (timer !== null) clearTimeout(timer);
+    channel.removeEventListener('message', onMessage);
+    closeRelayChannel(channel);
+    return true;
+  };
+  const deliverHere = (): void => {
+    if (decide()) deliverResult(result, options);
+  };
+  const handedOver = (): void => {
+    if (!decide()) return;
+    options.onRelayed?.();
+    try {
+      win.close();
+    } catch {
+      // Ignore: the browser may refuse to close a window it did not open by script.
+    }
+  };
+  const onMessage = (event: MessageEvent): void => {
+    if (decided) return;
+    const message = parseRelayMessage(event.data);
+    if (!message || message.offer_id !== offer_id) return;
+    if (message.type === LINK_RELAY_MESSAGE_TYPES.claim && claimId === null) {
+      claimId = message.claim_id;
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        // Do not deliver yet: a receipt may already be queued behind this timer if the page was busy.
+        // One more short timer lets queued messages run first; a receipt then still takes the handover branch.
+        timer = setTimeout(deliverHere, LINK_RELAY_RECEIPT_GRACE_MS);
+      }, LINK_RELAY_RECEIPT_TIMEOUT_MS);
+      try {
+        channel.postMessage({
+          type: LINK_RELAY_MESSAGE_TYPES.deliver,
+          v: LINK_RELAY_VERSION,
+          offer_id,
+          claim_id: claimId,
+          deadline: Date.now() + LINK_RELAY_ACCEPT_WINDOW_MS,
+          message: linkResultMessage(result),
+        });
+      } catch {
+        deliverHere();
+      }
+      return;
+    }
+    if (message.type === LINK_RELAY_MESSAGE_TYPES.receipt && claimId !== null && message.claim_id === claimId) {
+      handedOver();
+    }
+  };
+
+  timer = setTimeout(deliverHere, LINK_RELAY_CLAIM_TIMEOUT_MS);
+  channel.addEventListener('message', onMessage);
+  try {
+    channel.postMessage({ type: LINK_RELAY_MESSAGE_TYPES.offer, v: LINK_RELAY_VERSION, offer_id, flow_id: flowId });
+  } catch {
+    deliverHere();
+  }
 }

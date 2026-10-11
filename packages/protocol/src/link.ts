@@ -948,10 +948,29 @@ export interface LinkTransaction {
   confirmed_at?: string;
   confirmed_scopes?: string[];
   activation_code_hash?: string;
+  /**
+   * For a transaction that changes an existing grant (update, reauth, or a
+   * connect onto a live connection): the scopes of that grant that the user
+   * confirmed against (see commitConfirm). commitActivation refuses if the
+   * grant's scopes differ from these, so a consent given before a later
+   * narrowing, provider scope reduction or other activation can never
+   * overwrite it. A status change alone does not count: a connection that
+   * went needs_reauth after the confirm is exactly what a reauth repairs.
+   * Absent on such a transaction means "unknown" and is refused.
+   */
+  grant_scopes_at_confirm?: string[];
 
   // Activation
   activation_claimed_at?: string;
   activated_at?: string;
+  /**
+   * Set once the staged tokens of an activated transaction have been moved
+   * to the connection (or the activation was healed after a crash). An
+   * activated transaction without it is an unfinished activation: the
+   * server's startup heal resolves every one before Link serves a request
+   * (spec 10).
+   */
+  tokens_settled_at?: string;
 
   // Lifecycle
   created_at: string;
@@ -1067,6 +1086,8 @@ export const LINK_PATHS = {
   refresh: '/link/v1/connections/:id/refresh',
   reauth: '/link/v1/connections/:id/reauth',
   permissions: '/link/v1/connections/:id/permissions',
+  /** Narrow a grant without a provider round trip (spec 6). */
+  narrow: '/link/v1/connections/:id/narrow',
 } as const;
 
 /** A Link route template. */
@@ -1257,6 +1278,13 @@ export const LINK_MESSAGE_TYPES = {
   step: 'cred.link.step',
   /** Posted by the embedded picker iframe with its content height in CSS px. */
   resize: 'cred.link.resize',
+  /**
+   * The one message that travels the other way: the widget posts it back to
+   * the window that delivered a result, before running any callback. The
+   * hosted result page waits LINK_POPUP_ACK_TIMEOUT_MS for it; without it
+   * (or with no opener at all) the page falls back to redirect delivery.
+   */
+  ack: 'cred.link.ack',
 } as const;
 
 /** Message schema version, carried as `v`. */
@@ -1270,6 +1298,19 @@ export interface LinkStepMessage {
   v: 1;
   step: LinkExitStep;
   provider?: LinkProviderSlug;
+  /**
+   * Popup mode only, with step 'provider': this browser has seen the
+   * provider's consent pages cut the popup off from its opener before
+   * (LINK_REDIRECT_ONLY_STORAGE_KEY), so the picker has recorded the choice
+   * and asks the widget to close the popup and continue in redirect mode by
+   * navigating the top window to the same authorize URL (spec 9 Q12).
+   */
+  handoff?: 'redirect';
+}
+/** cred.link.ack message: widget to hosted page. */
+export interface LinkAckMessage {
+  type: 'cred.link.ack';
+  v: 1;
 }
 /** cred.link.resize message. */
 export interface LinkResizeMessage {
@@ -1300,6 +1341,21 @@ export type LinkMessage = LinkResultMessage | LinkStepMessage | LinkResizeMessag
  */
 export const LINK_REDIRECT_PARAMS = {
   outcome: 'cred_link',
+  /**
+   * Present with value LINK_REDIRECT_VIA_POPUP when a flow that started in
+   * popup or embedded mode delivered its result by redirect because the
+   * opener was lost (spec 9 Q12). Not part of the result itself: read it
+   * with parseLinkRedirectVia.
+   */
+  via: 'cred_link_via',
+  /**
+   * Sent together with `cred_link_via`: the transaction's request_uri_hash
+   * (lowercase hex SHA-256 of the widget's token). The widget that opened
+   * the flow can recompute it from its own token, so the redirect helper's
+   * relay reaches exactly that widget and a crafted return URL cannot
+   * reach any live widget. Read it with parseLinkRedirectFlowId.
+   */
+  flow: 'cred_link_flow',
   connection_id: 'connection_id',
   code: 'code',
   grant_id: 'grant_id',
@@ -1310,6 +1366,25 @@ export const LINK_REDIRECT_PARAMS = {
   request_id: 'request_id',
   step: 'step',
 } as const;
+
+/** Value of the `cred_link_via` redirect parameter for a popup fallback. */
+export const LINK_REDIRECT_VIA_POPUP = 'popup';
+
+/**
+ * How long the hosted result page waits for cred.link.ack after posting a
+ * result to its opener before it falls back to redirect delivery.
+ */
+export const LINK_POPUP_ACK_TIMEOUT_MS = 2000;
+
+/**
+ * localStorage key on the Link origin under which hosted pages remember,
+ * per browser, the providers whose consent pages cut a popup off from its
+ * opener: a JSON object {provider slug: epoch ms when observed}. Written
+ * only on a real opener loss (window.opener is null), never on an ack
+ * timeout. Entries older than LINK_REDIRECT_ONLY_TTL_DAYS are ignored.
+ */
+export const LINK_REDIRECT_ONLY_STORAGE_KEY = 'cred.link.redirect_only';
+export const LINK_REDIRECT_ONLY_TTL_DAYS = 30;
 
 // ── Connection management API (spec 4) ──────────────────────────────────────
 
@@ -1400,6 +1475,71 @@ export interface ReauthConnectionRequest {
 }
 /** Reauth response, status 201. */
 export type ReauthConnectionResponse = ParResponse;
+
+/**
+ * POST /link/v1/connections/:id/narrow body (spec 6). Shrinks the grant to
+ * exactly `scopes`, with no provider round trip. Ownership is checked the
+ * same way as update and reauth: `subject` is the user in the backend's
+ * current session and the connection must belong to (client, subject),
+ * otherwise the opaque failure. `scopes` must be a non-empty subset of the
+ * current grant scopes (canonical comparison) and must keep every catalog
+ * scope flagged always_required that the grant holds; otherwise
+ * invalid_scope (400). To remove all access, DELETE the connection. A grant
+ * that is not active answers with its typed machine code. Used by the
+ * server.
+ */
+export interface NarrowConnectionRequest {
+  subject: string;
+  scopes: string[];
+}
+/**
+ * Narrow response, status 200: the connection after the change.
+ * `changed` is false when `scopes` equals the current grant (nothing is
+ * written, the version does not move, no audit event). `removed_scopes`
+ * lists what left the grant. Every Permission on the connection has been
+ * intersected with the new grant by the time this returns.
+ */
+export interface NarrowConnectionResponse {
+  connection: LinkConnectionView;
+  changed: boolean;
+  removed_scopes: string[];
+  /**
+   * What actually stops an agent from exercising a removed scope. Narrowing
+   * never changes the provider token, which keeps every scope the provider
+   * granted.
+   *   'broker': every removed scope took its whole provider API out of
+   *     the grant, and the broker refuses brokered calls to an API the grant
+   *     no longer covers. Google only in Phase 1: the broker maps Google
+   *     URLs to API families (Gmail, Calendar, Drive, ...), not to single
+   *     scopes. Removing the last Gmail scope blocks every Gmail URL.
+   *   'record': only the records change: the grant, every Permission, and
+   *     the scopes an agent may request or hold. A brokered call through a
+   *     still-valid handle is NOT restricted by the removed scopes. This is
+   *     the answer for every other provider, and for Google whenever a
+   *     removed scope shares an API family with a scope that stays (remove
+   *     gmail.send, keep gmail.readonly: the broker checks the API, not
+   *     read versus write, so sending still works). To really remove
+   *     access, run an update or reauth flow that asks the provider for
+   *     fewer scopes, or delete the connection.
+   */
+  enforcement: LinkNarrowEnforcement;
+}
+/** See NarrowConnectionResponse.enforcement. */
+export type LinkNarrowEnforcement = 'broker' | 'record';
+/**
+ * Providers for which the broker maps API URLs to API families, so a grant
+ * that lost a whole family is enforced on brokered calls. The map is per
+ * family, not per scope.
+ */
+export const LINK_BROKER_SCOPED_PROVIDERS: readonly LinkProviderSlug[] = Object.freeze(['google']);
+/**
+ * The strongest enforcement a narrow can have for a provider. The server
+ * answers 'record' instead of 'broker' when any removed scope shares an API
+ * family with a scope that stays in the grant.
+ */
+export function linkNarrowEnforcementFor(provider: LinkProviderSlug): LinkNarrowEnforcement {
+  return LINK_BROKER_SCOPED_PROVIDERS.includes(provider) ? 'broker' : 'record';
+}
 
 /**
  * POST /link/v1/connections/:id/permissions body (spec 3, 4). Upsert:
@@ -1564,6 +1704,11 @@ export interface LinkStore {
    *   connect onto a live connection, update, reauth: write nothing to the
    *     connection or grant; check the connection is not revoked and has the
    *     same provider_account_id; creates_connection = false.
+   * When the transaction targets an existing grant, record
+   * grant_scopes_at_confirm: `shown_grant_scopes` when the caller passed an
+   * array, nothing when it passed null (the screen showed a new connection,
+   * so activation must refuse), and the grant's scopes as of this commit
+   * when the field is omitted.
    * confirmed_scopes must be a subset of the transaction's requested_scopes
    * for the provider (the browser can only narrow what was pushed, spec 1)
    * and of what the provider granted; otherwise the call is refused. The
@@ -1581,6 +1726,14 @@ export interface LinkStore {
       'id' | 'audience' | 'provider_account_id' | 'account_label' | 'provider_scopes' | 'instance_url' | 'custody'
     >;
     new_grant: Pick<ClientGrant, 'id' | 'org_policy' | 'authorization_details_types'>;
+    /**
+     * What the confirmation screen showed as the current grant of the
+     * connection this transaction would change: its scopes, or null when the
+     * screen showed a new connection. Recording what was shown (not what is
+     * current at commit) lets commitActivation catch a grant that moved
+     * between rendering the screen and this commit.
+     */
+    shown_grant_scopes?: string[] | null;
     now: string;
   }): Promise<LinkConfirmCommit>;
   /**
@@ -1612,7 +1765,13 @@ export interface LinkStore {
    * subject, provider_account_id) now exists because another transaction
    * was activated first: then the call is refused, the transaction ends as
    * failed and the pending rows it created are revoked (first activation
-   * wins). Otherwise apply the staged change: connection
+   * wins). For a transaction that targets an existing grant, refuse the same
+   * way when that grant's scopes, compared as a set, no longer equal
+   * grant_scopes_at_confirm (the grant was narrowed, reduced by the
+   * provider or changed by another activation after the user confirmed):
+   * the newer state stands and the user must run the flow again. A status
+   * change alone (active to needs_reauth) does not refuse. Otherwise apply
+   * the staged change: connection
    * provider_scopes = provider_granted_scopes, status 'active',
    * status_reason cleared, version + 1; grant scopes = confirmed_scopes,
    * status 'active', version + 1. Ends the transaction (activated_at,
@@ -1644,6 +1803,22 @@ export interface LinkStore {
    * the server can revoke and delete their staged tokens.
    */
   sweepExpiredTransactions(input: { now: string; limit: number }): Promise<LinkTransaction[]>;
+  /**
+   * Mark an activated transaction's token move as finished (sets
+   * tokens_settled_at). Called by the server right after
+   * LinkSecretStore.commitStaged succeeds, and by the startup heal for each
+   * transaction it resolves. Idempotent; returns false when the transaction
+   * is unknown or was never activated.
+   */
+  settleActivation(input: { tid: TransactionId; now: string }): Promise<boolean>;
+  /**
+   * Every transaction with outcome 'activated' and no tokens_settled_at,
+   * oldest first: activations whose database commit happened but whose
+   * token move is not known to have finished (a crash between
+   * commitActivation and commitStaged, or right after). Used only by the
+   * server's startup heal.
+   */
+  listUnsettledActivations(): Promise<LinkTransaction[]>;
 
   // ── Connections ──────────────────────────────────────────────────────────
   getConnection(connection_id: string): Promise<Connection | null>;
@@ -2295,8 +2470,11 @@ export function parseLinkMessage(data: unknown): LinkMessage | null {
       const { step, provider } = data;
       if (!includesValue(LINK_EXIT_STEPS, step)) return null;
       if (provider !== undefined && !isLinkProviderSlug(provider)) return null;
+      const { handoff } = data;
+      if (handoff !== undefined && (handoff !== 'redirect' || step !== 'provider' || provider === undefined)) return null;
       const m: LinkStepMessage = { type: 'cred.link.step', v: 1, step };
       if (provider !== undefined) m.provider = provider;
+      if (handoff !== undefined) m.handoff = handoff;
       return m;
     }
     case LINK_MESSAGE_TYPES.resize: {
@@ -2307,6 +2485,16 @@ export function parseLinkMessage(data: unknown): LinkMessage | null {
     default:
       return null;
   }
+}
+
+/** Build the cred.link.ack message. Used by the widget. */
+export function linkAckMessage(): LinkAckMessage {
+  return { type: 'cred.link.ack', v: 1 };
+}
+
+/** True for a well-formed cred.link.ack message. Used by hosted pages (mirrored in their inline script) and tests. */
+export function isLinkAckMessage(data: unknown): data is LinkAckMessage {
+  return isPlainObject(data) && data.type === LINK_MESSAGE_TYPES.ack && data.v === LINK_MESSAGE_VERSION;
 }
 
 /** Build a cred.link.result message from a result. Used by the server. */
@@ -2352,10 +2540,49 @@ export function encodeLinkRedirectResult(result: LinkResult): string {
  * Append a redirect-mode result to a registered redirect_uri. Throws if the
  * redirect_uri has a fragment (registration must reject those). Used by the server.
  */
-export function appendLinkRedirectResult(redirect_uri: string, result: LinkResult): string {
+export function appendLinkRedirectResult(
+  redirect_uri: string,
+  result: LinkResult,
+  options: { via?: typeof LINK_REDIRECT_VIA_POPUP; flow_id?: string } = {},
+): string {
   if (redirect_uri.includes('#')) throw new TypeError('appendLinkRedirectResult: redirect_uri has a fragment');
+  if (options.flow_id !== undefined && (options.via !== LINK_REDIRECT_VIA_POPUP || !isLinkFlowId(options.flow_id))) {
+    throw new TypeError('appendLinkRedirectResult: flow_id needs via popup and a lowercase hex SHA-256');
+  }
   const sep = redirect_uri.includes('?') ? (redirect_uri.endsWith('?') || redirect_uri.endsWith('&') ? '' : '&') : '?';
-  return `${redirect_uri}${sep}${encodeLinkRedirectResult(result)}`;
+  const via = options.via === LINK_REDIRECT_VIA_POPUP ? `&${LINK_REDIRECT_PARAMS.via}=${LINK_REDIRECT_VIA_POPUP}` : '';
+  const flow = options.flow_id !== undefined ? `&${LINK_REDIRECT_PARAMS.flow}=${options.flow_id}` : '';
+  return `${redirect_uri}${sep}${encodeLinkRedirectResult(result)}${via}${flow}`;
+}
+
+/** A relay flow id: lowercase hex SHA-256 (64 characters). */
+export function isLinkFlowId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+/**
+ * The flow id of a popup-fallback redirect result: present only together
+ * with exactly one `cred_link_via=popup` and exactly one well-formed
+ * `cred_link_flow`. null otherwise. Used by the widget's redirect helper.
+ */
+export function parseLinkRedirectFlowId(input: string | Record<string, unknown>): string | null {
+  const q = queryFromInput(input);
+  if (!q) return null;
+  if (single(q, LINK_REDIRECT_PARAMS.via) !== LINK_REDIRECT_VIA_POPUP) return null;
+  const flow = single(q, LINK_REDIRECT_PARAMS.flow);
+  return isLinkFlowId(flow) ? flow : null;
+}
+
+/**
+ * Whether a redirect result arrived through the popup fallback. Returns
+ * 'popup' only for exactly one well-formed `cred_link_via=popup`; null
+ * otherwise. Used by the widget's redirect helper to decide whether to relay
+ * the result to the page that opened the popup.
+ */
+export function parseLinkRedirectVia(input: string | Record<string, unknown>): typeof LINK_REDIRECT_VIA_POPUP | null {
+  const q = queryFromInput(input);
+  if (!q) return null;
+  return single(q, LINK_REDIRECT_PARAMS.via) === LINK_REDIRECT_VIA_POPUP ? LINK_REDIRECT_VIA_POPUP : null;
 }
 
 /**
@@ -2372,6 +2599,15 @@ export function parseLinkRedirectResult(input: string | Record<string, unknown>)
   for (const key of Object.values(P)) {
     const v = single(q, key);
     if (v === null) return null;
+    if (key === P.via) {
+      if (v !== undefined && v !== LINK_REDIRECT_VIA_POPUP) return null;
+      continue;
+    }
+    if (key === P.flow) {
+      // Only meaningful with the via marker; malformed or stray values fail closed.
+      if (v !== undefined && (!isLinkFlowId(v) || single(q, P.via) !== LINK_REDIRECT_VIA_POPUP)) return null;
+      continue;
+    }
     if (v !== undefined) fields[key] = v;
   }
   const outcome = fields[P.outcome];

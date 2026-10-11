@@ -290,3 +290,208 @@ describe('review regressions: the Link vault capability cannot be captured', () 
     store.close();
   });
 });
+
+describe('review regressions: a confirmed consent never overwrites a later grant change', () => {
+  let store: SqliteLinkStore;
+  beforeEach(() => { store = new SqliteLinkStore(':memory:'); });
+  afterEach(() => { store.close(); });
+
+  const WIDE = { google: ['calendar.readonly', 'calendar.events', 'gmail.send'] };
+
+  /** An active connection whose grant holds calendar.readonly and gmail.send. */
+  async function existing() {
+    return connectActive(store, { requested_scopes: WIDE }, { scopes: ['calendar.readonly', 'gmail.send'] });
+  }
+
+  /** Drive and confirm a transaction that targets the existing grant. */
+  async function confirmOnto(
+    kind: 'update' | 'reauth' | 'connect',
+    connection_id: string,
+    scopes = ['calendar.readonly', 'calendar.events'],
+    extra: { shown?: string[] | null } = {},
+  ) {
+    const tx = kind === 'connect'
+      ? newTx({ requested_scopes: WIDE })
+      : newTx({ intent: kind, providers: ['google'], connection_id: connection_id as never, requested_scopes: WIDE });
+    await driveToConfirm(store, tx, { granted: ['calendar.readonly', 'calendar.events', 'gmail.send'] });
+    const c = await confirm(store, tx.tid, { scopes, ...extra });
+    expect(c.kind).toBe('committed');
+    return { tx, c };
+  }
+
+  async function claim(tid: TransactionId, connection_id: string, now = 60) {
+    const r = await store.claimActivation({ client_id: 'acme', connection_id, activation_code_hash: h(`code-${tid}`), subject: 'user-123', now: at(now) });
+    if (!r.ok) throw new Error(r.reason);
+  }
+
+  /** Activation must be refused with grant_changed, end the flow, and leave connection and grant exactly as they were. */
+  async function expectRefused(tid: TransactionId, connection_id: string) {
+    await claim(tid, connection_id);
+    const connBefore = await store.getConnection(connection_id);
+    const grantBefore = await store.getGrantForConnection(connection_id);
+    await expect(store.commitActivation({ tid, now: at(61) })).rejects.toMatchObject({ code: 'grant_changed' });
+    expect(await store.getTransaction(tid)).toMatchObject({ outcome: 'failed', error: 'access_denied', consumed_at: at(61) });
+    expect(await store.getConnection(connection_id)).toEqual(connBefore);
+    expect(await store.getGrantForConnection(connection_id)).toEqual(grantBefore);
+    // A refused activation is failed, not activated, so the startup heal never sees it.
+    expect((await store.listUnsettledActivations()).map((t) => t.tid)).not.toContain(tid);
+  }
+
+  it('records the target grant scopes at confirm (omitted shown_grant_scopes), and none for a connect that creates its own rows', async () => {
+    const e = await existing();
+    for (const kind of ['update', 'reauth', 'connect'] as const) {
+      const { c } = await confirmOnto(kind, e.connection_id);
+      expect(c.transaction.grant_scopes_at_confirm).toEqual(['calendar.readonly', 'gmail.send']);
+    }
+    const created = newTx({ requested_scopes: WIDE });
+    await driveToConfirm(store, created, { accountId: 'acct-new' });
+    const c = await confirm(store, created.tid, { accountId: 'acct-new', shown: ['gmail.send'] });
+    expect(c.transaction.creates_connection).toBe(true);
+    expect(c.transaction).not.toHaveProperty('grant_scopes_at_confirm');
+  });
+
+  for (const kind of ['update', 'reauth', 'connect'] as const) {
+    it(`${kind}: a narrow after confirm wins; activation is refused and the narrow stands`, async () => {
+      const e = await existing();
+      const { tx } = await confirmOnto(kind, e.connection_id);
+      const narrowed = await store.narrowGrant({ grant_id: e.grant_id, scopes: ['calendar.readonly'], now: at(50) });
+      expect(narrowed?.grant.scopes).toEqual(['calendar.readonly']);
+      await expectRefused(tx.tid, e.connection_id);
+      expect((await store.getGrant(e.grant_id))?.scopes).toEqual(['calendar.readonly']);
+    });
+  }
+
+  it('a provider scope reduction that shrinks the grant after confirm wins', async () => {
+    const e = await existing();
+    const { tx } = await confirmOnto('update', e.connection_id);
+    const r = await store.applyProviderScopes({ connection_id: e.connection_id, provider_scopes: ['calendar.readonly', 'calendar.events'], now: at(50) });
+    expect(r?.grant?.scopes).toEqual(['calendar.readonly']);
+    await expectRefused(tx.tid, e.connection_id);
+    expect((await store.getGrant(e.grant_id))?.scopes).toEqual(['calendar.readonly']);
+  });
+
+  it('reauth confirmed while active still activates after the connection went needs_reauth', async () => {
+    const e = await existing();
+    const { tx } = await confirmOnto('reauth', e.connection_id, ['calendar.readonly', 'gmail.send']);
+    const flipped = await store.setConnectionStatus({ connection_id: e.connection_id, status: 'needs_reauth', reason: 'grant_revoked', now: at(50) });
+    expect(flipped?.grant?.status).toBe('needs_reauth');
+    await claim(tx.tid, e.connection_id);
+    const r = await store.commitActivation({ tid: tx.tid, now: at(61) });
+    expect(r.connection).toMatchObject({ status: 'active' });
+    expect(r.connection.status_reason).toBeUndefined();
+    expect(r.grant).toMatchObject({ status: 'active', scopes: ['calendar.readonly', 'gmail.send'] });
+    expect(r.grant.version).toBe((flipped?.grant?.version ?? 0) + 1);
+  });
+
+  it('another activation that changed the scopes after confirm wins', async () => {
+    const e = await existing();
+    const first = await confirmOnto('update', e.connection_id, ['calendar.readonly', 'calendar.events']);
+    const second = await confirmOnto('update', e.connection_id, ['gmail.send']);
+    await claim(first.tx.tid, e.connection_id, 55);
+    const r = await store.commitActivation({ tid: first.tx.tid, now: at(56) });
+    expect(r.grant.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+    await expectRefused(second.tx.tid, e.connection_id);
+    expect((await store.getGrant(e.grant_id))?.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+  });
+
+  it('another activation that left the scopes identical does not invalidate the confirm', async () => {
+    const e = await existing();
+    const first = await confirmOnto('reauth', e.connection_id, ['calendar.readonly', 'gmail.send']);
+    const second = await confirmOnto('update', e.connection_id, ['calendar.readonly', 'calendar.events']);
+    await claim(first.tx.tid, e.connection_id, 55);
+    const r1 = await store.commitActivation({ tid: first.tx.tid, now: at(56) });
+    expect(r1.grant.scopes).toEqual(['calendar.readonly', 'gmail.send']);
+    await claim(second.tx.tid, e.connection_id, 57);
+    const r2 = await store.commitActivation({ tid: second.tx.tid, now: at(58) });
+    expect(r2.grant.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+    expect(r2.previous_grant_scopes).toEqual(['calendar.readonly', 'gmail.send']);
+  });
+
+  it('a revoke after confirm is refused as connection_unavailable', async () => {
+    const e = await existing();
+    const { tx } = await confirmOnto('update', e.connection_id);
+    await claim(tx.tid, e.connection_id);
+    await store.setConnectionStatus({ connection_id: e.connection_id, status: 'revoked', now: at(60) });
+    await expect(store.commitActivation({ tid: tx.tid, now: at(61) })).rejects.toMatchObject({ code: 'connection_unavailable' });
+  });
+
+  it('changes that leave the grant scopes untouched do not invalidate the confirm', async () => {
+    const e = await existing();
+    const { tx } = await confirmOnto('update', e.connection_id);
+    // Provider drops a scope the grant never held: the connection changes, the grant scopes do not.
+    await store.applyProviderScopes({ connection_id: e.connection_id, provider_scopes: ['calendar.readonly', 'gmail.send', 'drive'], now: at(50) });
+    await store.narrowGrant({ grant_id: e.grant_id, scopes: ['calendar.readonly', 'gmail.send', 'drive'], now: at(51) });
+    await store.setConnectionStatus({ connection_id: e.connection_id, status: 'frozen', reason: 'grant_reuse_detected', now: at(52) });
+    await claim(tx.tid, e.connection_id);
+    const r = await store.commitActivation({ tid: tx.tid, now: at(61) });
+    expect(r.grant.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+    expect(r.connection.status).toBe('active');
+  });
+
+  it('legitimate sequences still activate: reauth of a needs_reauth connection, plain update, connect onto live', async () => {
+    const e = await existing();
+    await store.setConnectionStatus({ connection_id: e.connection_id, status: 'needs_reauth', reason: 'grant_revoked', now: at(30) });
+    const reauth = await confirmOnto('reauth', e.connection_id, ['calendar.readonly', 'gmail.send']);
+    await claim(reauth.tx.tid, e.connection_id, 40);
+    const r1 = await store.commitActivation({ tid: reauth.tx.tid, now: at(41) });
+    expect(r1.connection).toMatchObject({ status: 'active' });
+    expect(r1.grant).toMatchObject({ status: 'active', scopes: ['calendar.readonly', 'gmail.send'] });
+
+    const update = await confirmOnto('update', e.connection_id, ['calendar.readonly', 'calendar.events']);
+    await claim(update.tx.tid, e.connection_id, 50);
+    const r2 = await store.commitActivation({ tid: update.tx.tid, now: at(51) });
+    expect(r2.grant.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+    expect(r2.grant.version).toBe(r1.grant.version + 1);
+
+    const onto = await confirmOnto('connect', e.connection_id, ['gmail.send']);
+    await claim(onto.tx.tid, e.connection_id, 60);
+    const r3 = await store.commitActivation({ tid: onto.tx.tid, now: at(61) });
+    expect(r3.grant.scopes).toEqual(['gmail.send']);
+    expect(r3.previous_grant_scopes).toEqual(['calendar.events', 'calendar.readonly']);
+  });
+
+  it('a repeated confirm (already_committed) keeps the originally recorded scopes, so the later narrow still wins', async () => {
+    const e = await existing();
+    const { tx, c } = await confirmOnto('update', e.connection_id);
+    expect(c.transaction.grant_scopes_at_confirm).toEqual(['calendar.readonly', 'gmail.send']);
+    await store.narrowGrant({ grant_id: e.grant_id, scopes: ['calendar.readonly'], now: at(50) });
+    const again = await confirm(store, tx.tid, { scopes: ['calendar.readonly'], shown: ['calendar.readonly'] });
+    expect(again.kind).toBe('already_committed');
+    expect(again.transaction.grant_scopes_at_confirm).toEqual(['calendar.readonly', 'gmail.send']);
+    await expectRefused(tx.tid, e.connection_id);
+  });
+
+  it('shown_grant_scopes as an array is recorded in canonical form and must match the live grant', async () => {
+    const e = await existing();
+    // What the screen showed matches the grant (different order and Google long form): activates.
+    const ok = await confirmOnto('update', e.connection_id, ['calendar.readonly', 'calendar.events'], {
+      shown: ['gmail.send', 'https://www.googleapis.com/auth/calendar.readonly', 'gmail.send'],
+    });
+    expect(ok.c.transaction.grant_scopes_at_confirm).toEqual(['calendar.readonly', 'gmail.send']);
+    await claim(ok.tx.tid, e.connection_id, 40);
+    expect((await store.commitActivation({ tid: ok.tx.tid, now: at(41) })).grant.scopes).toEqual(['calendar.events', 'calendar.readonly']);
+
+    // The screen showed a stale grant: recorded verbatim, refused at activation.
+    const stale = await confirmOnto('update', e.connection_id, ['calendar.readonly'], { shown: ['calendar.readonly', 'gmail.send'] });
+    expect(stale.c.transaction.grant_scopes_at_confirm).toEqual(['calendar.readonly', 'gmail.send']);
+    await expectRefused(stale.tx.tid, e.connection_id);
+  });
+
+  it('shown_grant_scopes: null records nothing and activation is refused', async () => {
+    const e = await existing();
+    const { tx, c } = await confirmOnto('reauth', e.connection_id, ['calendar.readonly', 'gmail.send'], { shown: null });
+    expect(c.transaction).not.toHaveProperty('grant_scopes_at_confirm');
+    await expectRefused(tx.tid, e.connection_id);
+    expect((await store.getGrant(e.grant_id))?.scopes).toEqual(['calendar.readonly', 'gmail.send']);
+  });
+
+  it('a malformed shown_grant_scopes is refused at confirm', async () => {
+    const e = await existing();
+    const tx = newTx({ intent: 'update', providers: ['google'], connection_id: e.connection_id, requested_scopes: WIDE });
+    await driveToConfirm(store, tx);
+    for (const bad of [['ok', 3], 'calendar.readonly', { a: 1 }] as unknown[]) {
+      await expect(confirm(store, tx.tid, { shown: bad as string[] })).rejects.toMatchObject({ code: 'invalid_input' });
+    }
+    expect((await store.getTransaction(tx.tid))?.step).toBe('confirm');
+  });
+});

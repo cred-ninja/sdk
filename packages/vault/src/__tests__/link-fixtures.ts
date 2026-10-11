@@ -131,7 +131,15 @@ export function newIds(): { connection: ConnectionId; grant: GrantId } {
 export async function confirm(
   store: SqliteLinkStore,
   tid: TransactionId,
-  opts: { scopes?: string[]; code?: string; accountId?: string; now?: number; granted?: string[] } = {},
+  opts: {
+    scopes?: string[];
+    code?: string;
+    accountId?: string;
+    now?: number;
+    granted?: string[];
+    /** Passed through as shown_grant_scopes only when the key is present. */
+    shown?: string[] | null;
+  } = {},
 ): Promise<LinkConfirmCommit> {
   const ids = newIds();
   const tx = await store.getTransaction(tid);
@@ -149,6 +157,7 @@ export async function confirm(
       custody: 'self',
     },
     new_grant: { id: ids.grant, org_policy: { usage: 'allow' }, authorization_details_types: [] },
+    ...('shown' in opts ? { shown_grant_scopes: opts.shown } : {}),
     now: at(opts.now ?? 10),
   });
 }

@@ -42,6 +42,8 @@ export interface Harness {
   app: Server['app'];
   fake: FakeProviders;
   close(): void;
+  /** Simulate a process restart on the same database files. */
+  restart(overrides?: Partial<ServerConfig>): Promise<Server>;
 }
 
 export async function makeHarness(overrides: Partial<ServerConfig> = {}): Promise<Harness> {
@@ -67,7 +69,7 @@ export async function makeHarness(overrides: Partial<ServerConfig> = {}): Promis
   await server.tofu.init();
   const fake = new FakeProviders();
   fake.install();
-  return {
+  const harness: Harness = {
     dir,
     config,
     server,
@@ -75,10 +77,22 @@ export async function makeHarness(overrides: Partial<ServerConfig> = {}): Promis
     fake,
     close() {
       fake.restore();
-      server.link?.close();
+      harness.server.link?.close();
       fs.rmSync(dir, { recursive: true, force: true });
     },
+    async restart(overrides: Partial<ServerConfig> = {}) {
+      // A process restart: the old Link service stops, a fresh one opens
+      // the same database files (and runs the startup heal).
+      harness.server.link?.close();
+      const next = createServer({ ...harness.config, ...overrides });
+      await next.vault.init();
+      await next.tofu.init();
+      harness.server = next;
+      harness.app = next.app;
+      return next;
+    },
   };
+  return harness;
 }
 
 // ── Fake providers ───────────────────────────────────────────────────────────
@@ -273,21 +287,35 @@ export async function par(app: Server['app'], client: RegisteredClient, override
 
 // ── Browser ──────────────────────────────────────────────────────────────────
 
-/** One browser: a cookie jar holding the Link binding cookie. */
+/**
+ * One browser: a cookie jar. `cookie` is the Link binding cookie; `jar`
+ * holds every cookie the server set (a Max-Age=0 Set-Cookie removes it).
+ */
 export class Browser {
   cookie: string | null = null;
+  jar = new Map<string, string>();
 
   remember(res: request.Response): void {
     const raw = res.headers['set-cookie'] as unknown as string[] | undefined;
     for (const c of raw ?? []) {
-      const m = new RegExp(`^${COOKIE_NAME}=([^;]+)`).exec(c);
-      if (m) this.cookie = m[1];
+      const m = /^([^=;\s]+)=([^;]*)/.exec(c);
+      if (!m) continue;
+      const cleared = /;\s*Max-Age=0(;|$)/i.test(c);
+      if (cleared) this.jar.delete(m[1]);
+      else this.jar.set(m[1], m[2]);
+      if (m[1] === COOKIE_NAME) this.cookie = cleared ? null : m[2];
     }
+  }
+
+  private header(): string | null {
+    if (this.jar.size === 0) return null;
+    return [...this.jar].map(([k, v]) => `${k}=${v}`).join('; ');
   }
 
   async get(app: Server['app'], url: string): Promise<request.Response> {
     const r = request(app).get(url);
-    if (this.cookie) r.set('Cookie', `${COOKIE_NAME}=${this.cookie}`);
+    const cookies = this.header();
+    if (cookies) r.set('Cookie', cookies);
     const res = await r;
     this.remember(res);
     return res;
@@ -295,7 +323,8 @@ export class Browser {
 
   async post(app: Server['app'], url: string, form: Array<[string, string]>): Promise<request.Response> {
     const r = request(app).post(url).type('form').send(new URLSearchParams(form).toString());
-    if (this.cookie) r.set('Cookie', `${COOKIE_NAME}=${this.cookie}`);
+    const cookies = this.header();
+    if (cookies) r.set('Cookie', cookies);
     const res = await r;
     this.remember(res);
     return res;
@@ -325,7 +354,7 @@ export async function toProvider(
   app: Server['app'],
   browser: Browser,
   requestUri: string,
-  input: { mode?: 'popup' | 'redirect' | 'embedded'; provider?: string; scopes?: string[] } = {},
+  input: { mode?: 'popup' | 'redirect' | 'embedded'; provider?: string; scopes?: string[]; opener?: '0' | '1' | 'handoff' } = {},
 ): Promise<URL> {
   const picker = await browser.get(app, authorizePath(requestUri, input.mode ?? 'redirect'));
   expect(picker.status).toBe(200);
@@ -333,6 +362,8 @@ export async function toProvider(
     ['e', envelopeOf(picker.text)],
     ['action', 'continue'],
     ['provider', input.provider ?? 'google'],
+    // What the page script reports: did this window have an opener?
+    ['opener', input.opener ?? (input.mode === 'popup' ? '1' : '0')],
     ...(input.scopes ?? ['calendar.readonly', 'gmail.send']).map((s): [string, string] => ['scope', s]),
   ]);
   expect(res.status).toBe(303);
@@ -345,10 +376,18 @@ export async function callback(app: Server['app'], browser: Browser, providerUrl
   return browser.get(app, `/link/v1/callback/${provider}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
 }
 
+/** The reconnect basis the confirm form echoes back (what its diff was computed against). */
+export function reconnectBasisOf(html: string): string | null {
+  const m = /name="reconnect_basis" value="([^"]*)"/.exec(html);
+  return m ? m[1] : null;
+}
+
 export async function confirm(app: Server['app'], browser: Browser, confirmPage: string, scopes: string[], action = 'confirm'): Promise<request.Response> {
+  const basis = reconnectBasisOf(confirmPage);
   return browser.post(app, '/link/v1/confirm', [
     ['e', envelopeOf(confirmPage)],
     ['action', action],
+    ...(basis !== null ? [['reconnect_basis', basis] as [string, string]] : []),
     ...scopes.map((s): [string, string] => ['scope', s]),
   ]);
 }

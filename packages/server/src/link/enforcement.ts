@@ -32,9 +32,11 @@ import {
   LINK_ID_PREFIXES,
   LINK_MACHINE_ERROR_STATUS,
   canonicalScopeSet,
+  findScopeCatalogEntry,
   intersectScopes,
+  scopeDifference,
 } from '@credninja/protocol';
-import type { Connection, LinkAccessResult, LinkMachineErrorCode } from '@credninja/protocol';
+import type { Connection, LinkAccessResult, LinkMachineErrorCode, LinkProviderSlug } from '@credninja/protocol';
 import { linkVaultUserId } from '@credninja/vault';
 import type { RequestAgentPrincipal } from '../config.js';
 import { resolveTofuPrincipal, toTofuPrincipalId } from '../tofu-bridge.js';
@@ -169,6 +171,20 @@ async function sendLinkDenial(
 }
 
 /**
+ * The non-hidden catalog scopes the provider actually granted for a
+ * connection (what a raw provider token can exercise and a grant can hold).
+ * Cred-enforced scopes are not provider-granted and are left out.
+ */
+function providerGrantedGrantable(provider: LinkProviderSlug, providerScopes: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const scope of canonicalScopeSet(providerScopes)) {
+    const entry = findScopeCatalogEntry(provider, scope);
+    if (entry && entry.enforced_by === 'provider' && !entry.flags.includes('hidden')) out.push(entry.scope);
+  }
+  return canonicalScopeSet(out);
+}
+
+/**
  * Middleware for POST /api/v1/delegate, after agent auth and Web Bot Auth
  * and before Guard and any vault access. A no-op unless the body names
  * `connection_id`; then it runs checkLinkAccess and either denies with the
@@ -290,6 +306,17 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
       sendLinkError(req, res, 400, 'invalid_request', { message: 'raw tokens are not available for this connection' });
       return;
     }
+    // A raw provider token carries everything the provider granted. Issue
+    // one only when the delegated scopes cover every grantable scope the
+    // provider granted for this connection; anything narrower (a narrowed
+    // grant, a Permission or request for fewer scopes) gets a handle only.
+    const uncovered = scopeDifference(providerGrantedGrantable(connection.provider, connection.provider_scopes), scopes);
+    if (uncovered.length > 0) {
+      sendLinkError(req, res, 400, 'invalid_request', {
+        message: 'raw tokens are issued only for every scope the provider granted; request a handle',
+      });
+      return;
+    }
     const expiresIn = Math.max(1, Math.floor((Date.parse(loaded.tokens.expires_at as string) - Date.now()) / 1000));
     // Its own audit event per raw issuance (spec 4); fail closed.
     ctx.vault.writeAuditEvent({
@@ -405,16 +432,35 @@ export async function authorizeLinkUse(
     sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS.permission_required, 'permission_required');
     return null;
   }
-  const access = await deps.ctx.hooks.checkLinkAccess({
+  const check = (scopes: string[]) => deps.ctx.hooks.checkLinkAccess({
     operation: 'use',
     connection_id: handle.link.connectionId,
     agent_id: agentId,
     provider: handle.service,
-    requested_scopes: handle.scopes,
+    requested_scopes: scopes,
     grant_id: handle.link.grantId,
     grant_version: handle.link.grantVersion,
     now: nowIso(),
   });
+  let access = await check(handle.scopes);
+  // After a narrow (or a permission change) the handle keeps working for
+  // the scopes that remain: re-check with them. The broker URL check then
+  // runs against the remaining effective scopes only. That check is per
+  // Google API family (google-scopes.ts), not per scope and not read versus
+  // write: a call is refused only when no remaining scope unlocks its
+  // family. gmail.readonly and gmail.send, calendar.readonly and
+  // calendar.events, drive.file and drive, spreadsheets.readonly and
+  // spreadsheets, documents.readonly and documents, contacts.readonly and
+  // contacts are not separated, and other providers have no URL-to-scope
+  // check at all (the narrow response says 'record' in those cases).
+  if (!access.ok && (access.code === 'insufficient_scope' || access.code === 'permission_required')
+    && access.missing_scopes && access.missing_scopes.length > 0) {
+    const remaining = scopeDifference(handle.scopes, access.missing_scopes);
+    if (remaining.length > 0) {
+      const retry = await check(remaining);
+      if (retry.ok) access = retry;
+    }
+  }
   if (!access.ok) {
     await sendLinkDenial(deps, req, res, access, handle.link.connectionId, agentId);
     return null;

@@ -100,6 +100,11 @@ export interface ResolvedLinkConfig {
   origin: string;
   /** Absolute GET /link/v1/authorize URL for this token and mode. */
   authorizeUrl: string;
+  /**
+   * The same authorize URL with mode 'redirect': same token, narrowing and
+   * theme. Used when a popup flow hands off to redirect mode.
+   */
+  handoffUrl: string;
 }
 
 function invalid(message: string): CredLinkError {
@@ -232,5 +237,6 @@ export function resolveLinkConfig(options: CredLinkOptions): ResolvedLinkConfig 
     if (!isElement(options.container)) throw invalid("mode 'embedded' requires container to be an HTMLElement");
     container = options.container;
   }
-  return { token: options.token, mode, container, origin, authorizeUrl };
+  const handoffUrl = mode === 'redirect' ? authorizeUrl : buildAuthorizeUrl({ ...options, mode: 'redirect' });
+  return { token: options.token, mode, container, origin, authorizeUrl, handoffUrl };
 }

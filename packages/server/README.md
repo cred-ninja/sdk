@@ -83,6 +83,7 @@ npm run dev
 | POST | `/link/v1/connections/:id/refresh` | Link client | Force a refresh, status only |
 | POST | `/link/v1/connections/:id/reauth` | Link client | `{ subject }`: reauth pushed request |
 | POST | `/link/v1/connections/:id/permissions` | Link client | `{ agent_id, scopes }`: grant an agent scopes within the grant |
+| POST | `/link/v1/connections/:id/narrow` | Link client | `{ subject, scopes }`: narrow the grant to a subset, no provider round trip |
 
 > **Sub-delegation is broker-only.** Scope attenuation on a raw provider access token can't be
 > enforced once it has left the server, so every response from `/api/v1/subdelegate`
@@ -157,6 +158,126 @@ revoked at the provider under the revocation rule below). Activation commits
 the database first and moves the tokens second; if the token move fails the
 connection is set to `needs_reauth`, never left active without tokens.
 
+**Startup heal.** If the process dies between the database commit and the
+token move, the next start resolves every such activation before Link serves
+any request (the `/link/v1/*` routes and the Link branches of
+`/api/v1/delegate` and `/api/v1/use` wait for it; other routes do not). Only
+state changes happen before Link opens: a finished move is marked settled, an
+unfinished one leaves the connection `needs_reauth` (`reauth_required`) and
+keeps its old tokens for an update or reauth. Provider revocation of the
+discarded staged tokens (under the revocation rule below, bounded by the
+provider call timeout) and their deletion run afterwards in the background;
+the transaction stays unsettled until that is done, so a restart finds it
+again. A transaction is acted on only if its connection is still exactly as
+that activation left it (still active, and not written since: its
+`updated_at` equals the activation time). If anything happened to the
+connection afterwards (a later reauth, update or narrowing, the failure
+handling of the activation itself, or the heal's own earlier pass), the
+transaction is stale: its staged copy is deleted locally, nothing is revoked
+at the provider and the connection is left alone. A consequence: if the
+process dies after the heal marked a connection `needs_reauth` but before
+the background revocation ran, the next start only deletes the staged tokens
+locally. An activation whose token move finished is settled before Link
+opens even when its leftover staged copy is still there, also when a refresh
+has rotated the tokens since (the connection was created by that activation,
+or still holds the refresh token it staged); only removing the leftover copy
+runs afterwards. Known limit, which fails closed: an update or reauth on a
+provider that rotates refresh tokens, a crash inside the token move, and a
+refresh before the next start leave tokens the heal cannot attribute, so
+that connection ends `needs_reauth` although its tokens work, and the user
+reconnects. A transaction that cannot be resolved is logged and retried on the
+next start; startup never fails because of it. The first start after
+upgrading from a version 1 Link database re-checks every earlier activation
+once (that version did not record whether the token move finished); healthy
+ones are only marked settled, and no provider is called before Link opens. If the crash also skipped the
+seeding of the pushed `agent_id`'s Permission, that agent is refused until the
+app adds it with `POST /link/v1/connections/:id/permissions`.
+
+**Reconnecting an account.** When a connect flow lands on a provider account
+this client and subject already have connected, the confirmation screen shows
+what the app can do today and what it keeps, gains and loses on confirm.
+Confirming replaces the grant with exactly the confirmed permissions; anything
+unchecked or not offered in this flow is removed. The form carries which grant
+and which scopes the page was rendered against (or that it showed none); if
+the account's grant is different when the user confirms (another flow went
+live, or its scopes changed), the page is shown again with the current
+picture instead of committing. What the page showed is recorded with the
+confirmation, and activation compares it with the grant's scopes at that
+moment: an update, reauth or reconnect whose grant scopes changed after the
+screen (a narrowing, a provider scope reduction, or another activation) is
+refused, the client gets the opaque failure, the staged tokens are discarded
+under the revocation rule, and the newer grant stands. A status change alone
+does not refuse it: a reauth confirmed while the old token was still
+working activates normally after that token died and the connection went to
+`needs_reauth`.
+
+**Narrowing without a round trip.** `POST /link/v1/connections/:id/narrow`
+with `{ "subject", "scopes" }` replaces the grant with a subset of itself
+(canonical scope names, non-empty, keeping every scope the provider always
+grants). It answers `{ connection, changed, removed_scopes, enforcement }`;
+repeating it with the same scopes answers `changed: false` and changes
+nothing (it re-runs the Permission intersect). A grant that changed
+underneath the request answers `503 temporarily_unavailable`; retry it.
+
+What narrowing enforces, exactly. Narrowing never contacts the provider and
+never changes the stored token, which keeps every scope the provider
+granted.
+
+- Always: the grant and every agent Permission shrink, and agents can no
+  longer request or be issued the removed scopes (`/api/v1/delegate` refuses
+  them, and new handles never carry them). Raw tokens are no longer issued
+  for the connection (see below).
+- Google: the broker tells Google API families apart (Gmail, Calendar,
+  Drive, Sheets, Docs, Admin, Contacts), not single scopes, and not read
+  versus write. Any remaining scope of a family unlocks every URL of that
+  family. When every removed scope belongs to a family that no remaining
+  scope unlocks, the response says `enforcement: "broker"` and a brokered
+  call into that family is refused before it reaches Google, also through a
+  handle issued before the narrowing. When a removed scope shares a family
+  with a remaining one, the response says `enforcement: "record"` and the
+  call still reaches Google: gmail.readonly and gmail.send, calendar.readonly
+  and calendar.events, drive.file and drive, spreadsheets.readonly and
+  spreadsheets, documents.readonly and documents, contacts.readonly and
+  contacts are not separated. Narrowing `[gmail.readonly, gmail.send]` to
+  `[gmail.readonly]` therefore still lets a handle send mail.
+- GitHub, Slack, Notion, Linear, HubSpot and Salesforce (always
+  `enforcement: "record"`): the broker cannot tell which scope a URL needs,
+  so a still-valid handle can reach any allowlisted URL of the provider,
+  including ones that need a removed scope, because the provider token is
+  unchanged.
+
+To really remove access at the provider, run an update or reauth flow that
+asks the provider for fewer scopes, or delete the connection.
+
+**Popup fallback.** In popup mode the result page posts the result to the
+opener at the registered origin and waits up to 2 seconds for the widget's
+`cred.link.ack`. Without an opener, or without an ack, it falls back to
+redirect delivery: it navigates to the registered `redirect_uri` with the
+usual result parameters plus `cred_link_via=popup` and `cred_link_flow` (the
+SHA-256 hex of the flow's `request_uri`, which binds the result to the widget
+that started the flow); read them with `parseLinkRedirectResult`,
+`parseLinkRedirectVia` and `parseLinkRedirectFlowId` from
+`@credninja/protocol`. The embedded mode's top-level window behaves the same
+way, with the iframe as its opener. One case delivers twice: an opener page
+that is blocked (busy, or throttled in the background) for longer than the
+ack timeout still receives the postMessage after the popup already fell back
+to the redirect. The activation code is single use, so one of the two
+activation attempts fails; the app should treat that failure as harmless when
+the connection is already active.
+
+A provider whose consent page cut the opener is remembered in the browser
+(`localStorage`, 30 days), and the next popup for it hands the flow to the
+top window in redirect delivery. The memory is written only by a window that
+demonstrably started the flow with an opener and lost it: the picker reports
+whether the window had an opener when the user submitted, the server records
+that in a short-lived, HttpOnly cookie bound to the transaction, and the
+result page writes the memory only when that cookie matches. A popup-mode
+link opened directly in a tab never writes it, and neither does the top
+window that completes a handoff (so an entry expires after 30 days). Only
+the popup picker page allows `connect-src 'self'` (for that handoff); every
+other Link page sends `connect-src 'none'`. Link pages send no
+Cross-Origin-Opener-Policy.
+
 **Agents and enforcement.** Link is deny-by-default per agent: an agent can
 use a connection only through a Permission, seeded on activation from the
 pushed `agent_id` or added with `POST /link/v1/connections/:id/permissions`.
@@ -164,11 +285,17 @@ pushed `agent_id` or added with `POST /link/v1/connections/:id/permissions`.
 vault access whether or not a Guard is configured, returns a brokered handle
 by default (300 seconds, see `LINK_HANDLE_TTL_SECONDS`), and
 `POST /api/v1/use` re-runs the check on every call, so a
-revoked, narrowed or `needs_reauth` connection is refused at once with a typed
-code (`grant_revoked`, `reauth_required`, `permission_required`,
-`insufficient_scope`, ...). Raw tokens are issued only when the client has
-`allow_raw_tokens` and the provider's tokens expire and refresh (never Slack,
-Notion or GitHub OAuth App tokens), each with its own audit event.
+revoked or `needs_reauth` connection is refused at once with a typed code
+(`grant_revoked`, `reauth_required`, `permission_required`,
+`insufficient_scope`, ...); for a narrowed one see "What narrowing enforces"
+above. Raw tokens are issued only when the client has `allow_raw_tokens`, the
+provider's tokens expire and refresh (never Slack, Notion or GitHub OAuth App
+tokens), and the delegated scopes cover every scope the provider granted for
+the connection (a raw provider token carries all of them; a narrower grant,
+Permission or request gets a handle only). The check counts only scopes in
+Link's catalog, so a raw token can still carry provider scopes no grant can
+express (for example the app-level scopes HubSpot requires). Each raw
+issuance has its own audit event.
 
 The agent id for Link checks comes from verified request state only: a custom
 `agentRequestVerifier`'s `principalId`; otherwise a signature-verified TOFU

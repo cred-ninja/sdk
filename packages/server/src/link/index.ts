@@ -15,6 +15,7 @@
  *   POST   /link/v1/connections/:id/activate         client auth
  *   POST   /link/v1/connections/:id/refresh          client auth
  *   POST   /link/v1/connections/:id/reauth           client auth
+ *   POST   /link/v1/connections/:id/narrow           client auth
  *   POST   /link/v1/connections/:id/permissions      client auth
  *   POST   /admin/link/clients                       admin auth
  *   GET    /admin/link/clients                       admin auth
@@ -37,6 +38,7 @@ import {
   handleAdminSetClientStatus,
   handleGetConnection,
   handleListConnections,
+  handleNarrowConnection,
   handlePar,
   handleReauthConnection,
   handleRefreshConnection,
@@ -57,12 +59,15 @@ import {
 } from './enforcement.js';
 import type { LinkEnforcementDeps, LinkHandleBinding } from './enforcement.js';
 import { handleAuthorize, handleCallback, handleConfirm, handlePicker } from './flow.js';
+import { healUnsettledActivations } from './heal.js';
+import type { LinkHealFollowUpReport, LinkHealReport } from './heal.js';
 import { sendLocalErrorPage } from './pages.js';
 import { LinkProviderRuntime } from './providers.js';
 import { ConnectionLocks, LinkTokenLoader } from './tokens.js';
 import { sendLinkError } from './util.js';
 
 export type { LinkHandleBinding } from './enforcement.js';
+export type { LinkHealFollowUpOutcome, LinkHealFollowUpReport, LinkHealOutcome, LinkHealReport } from './heal.js';
 export { STATIC_BEARER_AGENT_ID } from './enforcement.js';
 
 /** Default lifetime of a Link brokered handle, seconds. */
@@ -112,6 +117,17 @@ export interface LinkService {
   upstreamAllowed: typeof linkUpstreamAllowed;
   /** One expiry sweep pass (also run on an interval). */
   sweep(nowMs?: number): Promise<number>;
+  /**
+   * Resolves when the startup heal of unfinished activations has run
+   * (spec 10). Every Link route and the Link branches of /api/v1/delegate
+   * and /api/v1/use wait on it; no other route does.
+   */
+  ready: Promise<LinkHealReport>;
+  /**
+   * Resolves when the heal's background phase (provider revocation and
+   * staged-token deletion, after the gate opened) has finished too.
+   */
+  healed: Promise<LinkHealFollowUpReport>;
   /** Stop the sweep and close the store. */
   close(): void;
 }
@@ -170,6 +186,13 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
   });
   ctx = { store, secrets, hooks, permissions, providers, tokens, locks, clientAuth, vault: options.vault, baseUrl, selfOrigin };
 
+  // The heal starts now; requests that touch Link wait for it (gate below).
+  const heal = healUnsettledActivations(ctx);
+  const ready = heal.ready;
+  const gate: RequestHandler = (_req, _res, next) => {
+    ready.then(() => next(), () => next());
+  };
+
   const enforcement: LinkEnforcementDeps = { ctx, tofu: options.tofu, customVerifier: options.customVerifier };
   const delegateDeps = {
     ...enforcement,
@@ -214,26 +237,38 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
       const adminLimiter = options.makeRateLimiter(30);
       const clientAuthMw = requireLinkClient(ctx);
 
-      app.post(LINK_PATHS.par, parLimiter, clientAuthMw, api(handlePar));
-      app.get(LINK_PATHS.authorize, pageLimiter, page(handleAuthorize));
-      app.post(LINK_PATHS.picker, pageLimiter, page(handlePicker));
-      app.get(LINK_PATHS.callback, pageLimiter, page(handleCallback));
-      app.post(LINK_PATHS.confirm, pageLimiter, page(handleConfirm));
+      app.post(LINK_PATHS.par, parLimiter, gate, clientAuthMw, api(handlePar));
+      app.get(LINK_PATHS.authorize, pageLimiter, gate, page(handleAuthorize));
+      app.post(LINK_PATHS.picker, pageLimiter, gate, page(handlePicker));
+      app.get(LINK_PATHS.callback, pageLimiter, gate, page(handleCallback));
+      app.post(LINK_PATHS.confirm, pageLimiter, gate, page(handleConfirm));
 
-      app.get(LINK_PATHS.connections, apiLimiter, clientAuthMw, api(handleListConnections));
-      app.get(LINK_PATHS.connection, apiLimiter, clientAuthMw, api(handleGetConnection));
-      app.delete(LINK_PATHS.connection, apiLimiter, clientAuthMw, api(handleRevokeConnection));
-      app.post(LINK_PATHS.activate, apiLimiter, clientAuthMw, api(handleActivate));
-      app.post(LINK_PATHS.refresh, apiLimiter, clientAuthMw, api(handleRefreshConnection));
-      app.post(LINK_PATHS.reauth, apiLimiter, clientAuthMw, api(handleReauthConnection));
-      app.post(LINK_PATHS.permissions, apiLimiter, clientAuthMw, api(handleSetPermission));
+      app.get(LINK_PATHS.connections, apiLimiter, gate, clientAuthMw, api(handleListConnections));
+      app.get(LINK_PATHS.connection, apiLimiter, gate, clientAuthMw, api(handleGetConnection));
+      app.delete(LINK_PATHS.connection, apiLimiter, gate, clientAuthMw, api(handleRevokeConnection));
+      app.post(LINK_PATHS.activate, apiLimiter, gate, clientAuthMw, api(handleActivate));
+      app.post(LINK_PATHS.refresh, apiLimiter, gate, clientAuthMw, api(handleRefreshConnection));
+      app.post(LINK_PATHS.reauth, apiLimiter, gate, clientAuthMw, api(handleReauthConnection));
+      app.post(LINK_PATHS.narrow, apiLimiter, gate, clientAuthMw, api(handleNarrowConnection));
+      app.post(LINK_PATHS.permissions, apiLimiter, gate, clientAuthMw, api(handleSetPermission));
 
-      app.post('/admin/link/clients', adminLimiter, adminAuth, admin(handleAdminCreateClient));
-      app.get('/admin/link/clients', adminLimiter, adminAuth, admin(handleAdminListClients));
-      app.post('/admin/link/clients/:client_id/disable', adminLimiter, adminAuth, admin((c, req, res) => handleAdminSetClientStatus(c, req, res, 'disabled')));
-      app.post('/admin/link/clients/:client_id/enable', adminLimiter, adminAuth, admin((c, req, res) => handleAdminSetClientStatus(c, req, res, 'active')));
+      app.post('/admin/link/clients', adminLimiter, gate, adminAuth, admin(handleAdminCreateClient));
+      app.get('/admin/link/clients', adminLimiter, gate, adminAuth, admin(handleAdminListClients));
+      app.post('/admin/link/clients/:client_id/disable', adminLimiter, gate, adminAuth, admin((c, req, res) => handleAdminSetClientStatus(c, req, res, 'disabled')));
+      app.post('/admin/link/clients/:client_id/enable', adminLimiter, gate, adminAuth, admin((c, req, res) => handleAdminSetClientStatus(c, req, res, 'active')));
     },
-    delegatePrecheck: linkDelegatePrecheck(enforcement),
+    delegatePrecheck: (() => {
+      const precheck = linkDelegatePrecheck(enforcement);
+      // Only calls naming a Link connection wait for the heal.
+      return (req: Request, res: Response, next: NextFunction) => {
+        const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : null;
+        if (!body || body.connection_id === undefined) {
+          next();
+          return;
+        }
+        ready.then(() => precheck(req, res, next), () => precheck(req, res, next));
+      };
+    })(),
     resolveGuardLinkContext(req) {
       const state = linkDelegateState(req);
       return state ? { connectionId: state.access.connection.id, agentId: state.agentId, operation: 'delegate' } : undefined;
@@ -244,13 +279,16 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
       await handleLinkDelegate(delegateDeps, req, res, state);
       return true;
     },
-    authorizeUse(req, res, handle) {
+    async authorizeUse(req, res, handle) {
+      await ready.catch(() => undefined);
       return authorizeLinkUse(enforcement, req, res, handle);
     },
     loadUseToken(req, res, access, agentId) {
       return loadLinkUseToken(enforcement, req, res, access.connection, agentId);
     },
     upstreamAllowed: linkUpstreamAllowed,
+    ready,
+    healed: heal.done,
     sweep(nowMs) {
       return sweepExpired(ctx, nowMs);
     },

@@ -122,6 +122,19 @@ function EmbeddedPicker({ token }: { token: string }) {
 
 Redirect mode: on the page your `redirect_uri` points to, call `handleRedirect` (re-exported from `@credninja/link`) once on mount.
 
+## Popup fallback
+
+If a provider's consent pages cut the popup off from your page, Link falls back to redirect delivery by itself, and next time continues in redirect mode for that provider. The full description is in the [`@credninja/link` README](../link/README.md#popup-fallback). For React apps:
+
+- **The page at your registered `redirect_uri` must call `handleRedirect()`** (once, on mount), the same requirement as redirect mode. Without it the fallback delivers nothing. The return URL names the flow (`cred_link_flow`, the SHA-256 of the widget's token), and only the widget holding that token claims the result. Once that widget confirms with a receipt, its `onSuccess` (or `onError`, `onExit`) runs, `handleRedirect()` calls `onRelayed` instead of its own result callbacks, and the window is asked to close. Otherwise `handleRedirect()`'s own callbacks run and the window stays open.
+- **Pass `onRelayed` to show "Connected. You can close this window."** The browser may refuse to close it.
+- **Trigger activation from the callbacks, not from `handleRedirect()`'s return value**: in the fallback case another page may be the one that delivers and activates.
+- **The relay needs the `redirect_uri` page and the page hosting the widget on the same origin.** Otherwise the return page handles the result and the widget page eventually reports an exit.
+- **The relay is bound to the flow, but not secret from your own origin.** A crafted return URL cannot reach a waiting widget, and two tabs cannot take each other's results, but the relay channel trusts every script on your page's origin: such a script can read a relayed result, or keep it from being delivered. Backend activation with `{code, subject}` (subject from your session) after checking `state` remains the real check.
+- **Rare double delivery.** If the widget page's main thread is blocked for seconds, the popup can fall back to the redirect while the original result is still queued for the widget page, and both pages deliver. The code is single use, so one activation fails with the opaque `401`.
+- **After a handoff the top window navigates away**, as in redirect mode, so persist in-progress state the same way.
+- While the widget waits on a suspected lost popup, `ready` stays `true` and `error` stays `null`. If the popup reads closed within 3 seconds of choosing a provider, `onExit` is delayed until the transaction expires (10 minutes); `open()` again or unmounting ends the wait sooner. Unmounting also closes the widget's `BroadcastChannel`.
+
 ## Behavior
 
 - The widget is created after mount and re-created only when `token`, `mode`, `baseUrl`, `container`, `providers`, `scopes` or `theme` change by value. Inline arrays and objects are fine.
