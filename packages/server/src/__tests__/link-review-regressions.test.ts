@@ -1437,8 +1437,7 @@ describe('review of main: activation settles only after the intersect, and never
 
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
-    // Both attempts of the needs_reauth write fail.
-    vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY')).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     const res = await activate(hx.app, client, pending.connection_id, pending.code);
     expect(res.status).toBe(401);
     expect(res.text).toBe(JSON.stringify(LINK_OPAQUE_FAILURE_BODY));
@@ -1507,7 +1506,7 @@ describe('review of main: activation settles only after the intersect, and never
 
 // ── Verification of the activation fix (formerly zz-review-fix) ─────────────
 
-describe('verification: quarantine after a failed token move whose needs_reauth write failed twice', () => {
+describe('verification: quarantine after a failed token move whose needs_reauth write failed', () => {
   const BOTH = ['calendar.readonly', 'gmail.send'];
   const CAL = ['calendar.readonly'];
   const G_CAL_ONLY = 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.readonly';
@@ -1525,7 +1524,7 @@ describe('verification: quarantine after a failed token move whose needs_reauth 
     return r;
   }
 
-  /** A narrow connection, then a widening update whose move and both status writes fail. */
+  /** A narrow connection, then a widening update whose move and status write fail. */
   async function quarantined() {
     const hx = await harness();
     hx.fake.googleScope = G_CAL_ONLY;
@@ -1539,31 +1538,16 @@ describe('verification: quarantine after a failed token move whose needs_reauth 
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const commit = vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
     const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus')
-      .mockRejectedValueOnce(new Error('SQLITE_BUSY'))
       .mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     expect((await activate(hx.app, client, pending.connection_id, pending.code)).status).toBe(401);
-    expect(status).toHaveBeenCalledTimes(2);
+    // One attempt only: the quarantine, not a retry, covers a failed write.
+    expect(status).toHaveBeenCalledTimes(1);
     commit.mockRestore();
     status.mockRestore();
     const [left] = await ctx.store.listUnsettledActivations();
     expect(left).toBeDefined();
     return { hx, client, conn, ctx, oldTokens, handle, left };
   }
-
-  it('one failed status write is retried: needs_reauth, staged copy discarded, settled, no quarantine', async () => {
-    const hx = await harness();
-    const client = await registerClient(hx.app);
-    const conn = await connectAndActivate(hx.app, client, { confirmScopes: CAL });
-    const ctx = hx.server.link!.context;
-    const pending = await updateTo(hx, client, conn, BOTH);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
-    vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
-    expect((await activate(hx.app, client, pending.connection_id, pending.code)).status).toBe(401);
-    expect(await ctx.store.getConnection(conn)).toMatchObject({ status: 'needs_reauth', status_reason: 'reauth_required' });
-    expect(await ctx.store.listUnsettledActivations()).toEqual([]);
-    expect(ctx.quarantine.has(conn)).toBe(false);
-  });
 
   it('denies delegate, use and the refresh endpoint in process without a provider call; the next start reverts', async () => {
     const { hx, client, conn, ctx, oldTokens, handle, left } = await quarantined();

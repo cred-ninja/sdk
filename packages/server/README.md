@@ -159,7 +159,7 @@ under the connection's token lock: the database commit, the token move, the
 permission intersect for an existing grant (every agent Permission clipped to
 the new grant and the previous one), and only then marks the activation
 settled. If the token move fails, the connection is set to `needs_reauth`,
-never left active without tokens. If that write fails twice, the staged
+never left active without tokens. If that write fails, the staged
 tokens are kept, the activation stays unsettled for the startup heal, and
 the connection is quarantined in memory: until a later activation of it
 succeeds or it is revoked, this process hands out no token for it and does

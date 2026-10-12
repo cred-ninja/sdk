@@ -491,15 +491,12 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     if (!moved) {
       // The database says active but the tokens did not move: never leave an
       // active connection without (or with the wrong) tokens.
-      const markReauth = () => ctx.store.setConnectionStatus({
+      const marked = await ctx.store.setConnectionStatus({
         connection_id: activated.connection.id,
         status: 'needs_reauth',
         reason: 'reauth_required',
         now: nowIso(),
       }).catch(() => null);
-      // One retry before giving up on the status write.
-      let marked = await markReauth();
-      if (!marked) marked = await markReauth();
       if (marked) {
         ctx.quarantine.delete(activated.connection.id);
       } else {

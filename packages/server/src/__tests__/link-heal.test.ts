@@ -744,8 +744,7 @@ describe('startup heal: the permission intersect runs in every branch', () => {
 
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const commit = vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
-    // Both attempts of the needs_reauth write fail.
-    const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY')).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     const settle = vi.spyOn(SqliteLinkStore.prototype, 'settleActivation').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
     expect((await activate(hx.app, client, pending.connection_id, pending.code)).status).not.toBe(200);
     commit.mockRestore();
