@@ -449,7 +449,7 @@ describe('@credninja/server', () => {
     });
 
     it('surfaces Web Bot Auth metadata in the audit API', async () => {
-      const { app, tofu, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+      const { app, tofu, vault } = createServer(makeTestConfig({ singleUserMode: true, vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
       await tofu.init();
       await vault.init();
 
@@ -742,7 +742,7 @@ describe('@credninja/server', () => {
     });
 
     it('lists configured providers', async () => {
-      const { app, vault } = createServer(makeTestConfig());
+      const { app, vault } = createServer(makeTestConfig({ singleUserMode: true }));
       await vault.init();
 
       const res = await request(app)
@@ -818,7 +818,7 @@ describe('@credninja/server', () => {
 
   describe('GET /connect/:provider', () => {
     it('returns 404 for unconfigured provider', async () => {
-      const { app, vault } = createServer(makeTestConfig());
+      const { app, vault } = createServer(makeTestConfig({ singleUserMode: true }));
       await vault.init();
 
       const res = await request(app)
@@ -830,7 +830,7 @@ describe('@credninja/server', () => {
     });
 
     it('redirects to Google OAuth for configured provider', async () => {
-      const { app, vault } = createServer(makeTestConfig());
+      const { app, vault } = createServer(makeTestConfig({ singleUserMode: true }));
       await vault.init();
 
       const res = await request(app)
@@ -865,7 +865,7 @@ describe('@credninja/server', () => {
     });
 
     it('returns 404 when no credentials stored', async () => {
-      const { app, vault } = createServer(makeTestConfig());
+      const { app, vault } = createServer(makeTestConfig({ singleUserMode: true }));
       await vault.init();
 
       const res = await request(app)
@@ -877,7 +877,7 @@ describe('@credninja/server', () => {
     });
 
     it('returns stored token when credentials exist', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -915,7 +915,7 @@ describe('@credninja/server', () => {
     });
 
     it('returns 204 on successful revoke', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -1041,11 +1041,20 @@ describe('@credninja/server', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('consent_required');
-      expect(res.body.consent_url).toContain('/connect/google');
-      expect(res.body.consent_url).toContain('user_id=needs-consent-user');
-      expect(res.body.consent_url).toContain('app_client_id=app_123');
-      expect(res.body.consent_url).toContain('scopes=calendar.readonly');
+      // A single-use connect request: the URL carries no user id or scopes.
+      const consent = new URL(res.body.consent_url);
+      expect(consent.origin).toBe('http://localhost:3456');
+      expect(consent.pathname).toBe('/connect/google');
+      expect([...consent.searchParams.keys()]).toEqual(['request']);
+      expect(consent.searchParams.get('request')).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(res.body.access_token).toBeUndefined();
+
+      // It starts OAuth for the stored user id and scopes, once.
+      const start = await adminGet(app, `${consent.pathname}${consent.search}&user_id=someone-else&scopes=drive`);
+      expect(start.status).toBe(302);
+      const authorize = new URL(start.headers.location);
+      expect(authorize.searchParams.get('scope')).toContain('calendar.readonly');
+      expect(authorize.searchParams.get('scope')).not.toContain('drive');
     });
 
     it('returns a delegated token with requested scopes', async () => {
@@ -2580,7 +2589,7 @@ describe('@credninja/server', () => {
     });
 
     it('returns audit entries from sqlite-backed vaults', async () => {
-      const { app, vault } = createServer(makeTestConfig({
+      const { app, vault } = createServer(makeTestConfig({ singleUserMode: true,
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,
       }));
@@ -2877,7 +2886,7 @@ describe('@credninja/server', () => {
 
   describe('Security', () => {
     it('never returns refresh tokens in API response', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -2902,7 +2911,7 @@ describe('@credninja/server', () => {
     it('uses constant-time token comparison', async () => {
       // Use a separate vault to avoid pollution from other tests
       const isolatedPath = TEST_VAULT_PATH + '.timing';
-      const config = makeTestConfig({ vaultPath: isolatedPath });
+      const config = makeTestConfig({ singleUserMode: true, vaultPath: isolatedPath });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -2934,7 +2943,7 @@ describe('@credninja/server', () => {
 
   describe('Default Scopes', () => {
     it('uses default scopes when no ?scopes param is provided', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -2954,7 +2963,7 @@ describe('@credninja/server', () => {
     });
 
     it('overrides default scopes when ?scopes param is provided', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3085,7 +3094,7 @@ describe('@credninja/server', () => {
     });
 
     it('uses empty scopes when no defaults configured and no param', async () => {
-      const config = makeTestConfig({
+      const config = makeTestConfig({ singleUserMode: true,
         providers: [
           {
             slug: 'github',
@@ -3113,7 +3122,7 @@ describe('@credninja/server', () => {
 
   describe('GET /connect (Admin UI)', () => {
     it('returns HTML admin page', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3126,7 +3135,7 @@ describe('@credninja/server', () => {
     });
 
     it('lists configured providers', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3137,7 +3146,7 @@ describe('@credninja/server', () => {
     });
 
     it('shows connected status when tokens are stored', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3157,7 +3166,7 @@ describe('@credninja/server', () => {
     });
 
     it('pre-checks default scopes in the UI', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3172,7 +3181,7 @@ describe('@credninja/server', () => {
     });
 
     it('does not pre-check non-default scopes', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3185,7 +3194,7 @@ describe('@credninja/server', () => {
     });
 
     it('shows multiple providers when configured', async () => {
-      const config = makeTestConfig({
+      const config = makeTestConfig({ singleUserMode: true,
         providers: [
           { slug: 'google', clientId: 'g-id', clientSecret: 'g-secret', defaultScopes: ['openid'] },
           { slug: 'github', clientId: 'gh-id', clientSecret: 'gh-secret', defaultScopes: ['repo'] },
@@ -3233,7 +3242,7 @@ describe('@credninja/server', () => {
     });
 
     it('creates a browser admin session from login form', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3308,7 +3317,7 @@ describe('@credninja/server', () => {
     });
 
     it('custom scope input is text-only (no script injection path)', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3359,7 +3368,7 @@ describe('@credninja/server', () => {
 
   describe('Guard integration', () => {
     it('works without guard configured (no guard = no policy enforcement)', async () => {
-      const config = makeTestConfig();
+      const config = makeTestConfig({ singleUserMode: true });
       // No guard in config — default behavior
       const { app, vault } = createServer(config);
       await vault.init();
@@ -3393,7 +3402,7 @@ describe('@credninja/server', () => {
         ],
       });
 
-      const config = makeTestConfig({ guard });
+      const config = makeTestConfig({ singleUserMode: true, guard });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3464,7 +3473,7 @@ describe('@credninja/server', () => {
         ],
       });
 
-      const config = makeTestConfig({ guard });
+      const config = makeTestConfig({ singleUserMode: true, guard });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3527,7 +3536,7 @@ describe('@credninja/server', () => {
         }],
       });
 
-      const config = makeTestConfig({ guard });
+      const config = makeTestConfig({ singleUserMode: true, guard });
       const { app, vault } = createServer(config);
       await vault.init();
 
@@ -3939,7 +3948,7 @@ describe('@credninja/server', () => {
       });
 
       it('supports the service and limit filters', async () => {
-        const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
+        const { app, vault } = createServer(makeTestConfig({ singleUserMode: true, vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH }));
         await vault.init();
 
         await vault.store({

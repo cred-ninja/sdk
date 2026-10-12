@@ -186,6 +186,7 @@ describe('wildcard scope ceilings over HTTP', () => {
         parent_receipt: parentReceipt,
         agent_did: 'did:key:z6MkWildChild',
         service: 'google',
+        user_id: 'default',
         scopes: ['calendar.readonly'],
       });
     expect(res.status).toBe(200);
@@ -210,6 +211,7 @@ describe('wildcard scope ceilings over HTTP', () => {
         parent_receipt: parentReceipt,
         agent_did: 'did:key:z6MkWildChild',
         service: 'google',
+        user_id: 'default',
         scopes: ['calendar.readonly'],
       });
     expect(res.status).toBe(403);

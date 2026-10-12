@@ -20,6 +20,14 @@ export interface ProviderConfig {
 export interface RequestAgentPrincipal {
   type: string;
   principalId?: string;
+  /**
+   * The user this principal acts for, when the verifier knows it. Only a
+   * custom agentRequestVerifier can set it (the static bearer principal
+   * never has one). On legacy routes a request without user_id then acts on
+   * this user, and a request naming a different user_id is refused with
+   * 403 user_id_mismatch.
+   */
+  userId?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -53,6 +61,12 @@ export interface ServerConfig {
 
   // Redirect base URI (e.g. http://localhost:3456 or https://cred.example.com)
   redirectBaseUri: string;
+
+  // Single-user mode (env SINGLE_USER_MODE). When true, a legacy request
+  // that names no user_id acts on the shared user 'default'. When false (the
+  // default), such a request is refused with 400 user_id_required. Naming a
+  // user_id explicitly, including 'default', works in both modes.
+  singleUserMode?: boolean;
 
   // Delegation receipt TTL, in seconds. Controls the `exp` claim minted onto
   // new receipts, and the age at which legacy receipts (no `exp` claim) are
@@ -201,6 +215,16 @@ export function loadConfig(): ServerConfig {
     }
   }
 
+  const singleUserRaw = (process.env.SINGLE_USER_MODE ?? '').trim().toLowerCase();
+  let singleUserMode: boolean;
+  if (singleUserRaw === '' || singleUserRaw === 'false' || singleUserRaw === '0') {
+    singleUserMode = false;
+  } else if (singleUserRaw === 'true' || singleUserRaw === '1') {
+    singleUserMode = true;
+  } else {
+    throw new Error('SINGLE_USER_MODE must be true or false');
+  }
+
   const linkEnabledRaw = (process.env.LINK_ENABLED ?? '').trim().toLowerCase();
   const linkEnabled = linkEnabledRaw === 'true' || linkEnabledRaw === '1';
   const linkStorePath = process.env.LINK_STORE_PATH || undefined;
@@ -220,6 +244,7 @@ export function loadConfig(): ServerConfig {
     agentToken,
     providers,
     redirectBaseUri,
+    singleUserMode,
     receiptTtlSeconds,
     receiptAudience,
     webBotAuthMode,

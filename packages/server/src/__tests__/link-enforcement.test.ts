@@ -519,12 +519,12 @@ describe('Configuration and pre-existing gap fixes', () => {
     const { app, server } = await harness({ linkEnabled: false });
     await server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
-    const lin = await delegate(app, { service: 'linear', token_format: 'handle' });
+    const lin = await delegate(app, { service: 'linear', user_id: 'default', token_format: 'handle' });
     expect(lin.status).toBe(200);
     const linUse = await use(app, { delegation_id: lin.body.delegation_id, url: 'https://api.linear.app/graphql', method: 'POST', body: { query: '{ viewer { id } }' } });
     expect(linUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)).toEqual({ url: 'https://api.linear.app/graphql', authorization: 'Bearer lin_tok' });
-    const hub = await delegate(app, { service: 'hubspot', token_format: 'handle' });
+    const hub = await delegate(app, { service: 'hubspot', user_id: 'default', token_format: 'handle' });
     const hubUse = await use(app, { delegation_id: hub.body.delegation_id, url: 'https://api.hubapi.com/crm/v3/objects/contacts', method: 'GET' });
     expect(hubUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.url).toBe('https://api.hubapi.com/crm/v3/objects/contacts');
