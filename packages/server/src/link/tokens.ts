@@ -59,11 +59,41 @@ export class ConnectionLocks {
   }
 }
 
+/**
+ * In-memory quarantine of connections whose activation committed the new
+ * grant but could neither move the tokens nor record needs_reauth. Such a
+ * connection still reads as active on its old tokens, and its staged copy
+ * and unsettled transaction are kept for the startup heal, which reverts it
+ * on the next start as long as nothing rewrote the connection row. While a
+ * connection is quarantined the token loader hands out nothing and does not
+ * refresh (a refresh can rewrite the row through the provider-scope path).
+ * The set dies with the process, which is fine: the next start reverts the
+ * connection. Cleared when a later activation of the connection succeeds or
+ * records its status.
+ */
+export class ConnectionQuarantine {
+  private readonly ids = new Set<string>();
+
+  add(connectionId: string): void {
+    this.ids.add(connectionId);
+  }
+
+  delete(connectionId: string): void {
+    this.ids.delete(connectionId);
+  }
+
+  has(connectionId: string): boolean {
+    return this.ids.has(connectionId);
+  }
+}
+
 export interface LinkTokenLoaderOptions {
   store: LinkStore;
   secrets: LinkSecretStore;
   providers: LinkProviderRuntime;
   locks: ConnectionLocks;
+  /** Connections the loader must refuse without any write or provider call. */
+  quarantine?: ConnectionQuarantine;
   /** Called after a connection moved to needs_reauth (for audit). Must not throw. */
   onReauthRequired?: (connection: Connection, code: LinkMachineErrorCode) => void;
   /**
@@ -110,6 +140,8 @@ export class LinkTokenLoader {
     const { secrets, providers, store } = this.options;
     const calledAt = Date.now();
     const id = connection.id as ConnectionId;
+    // Denied the way a needs_reauth connection is, without any write.
+    if (this.options.quarantine?.has(id)) return { ok: false, kind: 'reauth', code: 'reauth_required' };
     const needsRefresh = (tokens: LinkTokenSet, nowMs: number): boolean => isExpired(tokens, nowMs)
       || (options.force === true && (this.lastRefreshAt.get(id) ?? 0) < calledAt);
     const refreshable = (tokens: LinkTokenSet): boolean => providers.supportsRefresh(connection.provider)

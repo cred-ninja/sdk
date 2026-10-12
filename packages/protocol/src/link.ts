@@ -2006,6 +2006,10 @@ export interface LinkActivateHookInput {
 export interface LinkGrantUpdatedHookInput {
   /** The grant after the change. */
   grant: ClientGrant;
+  /**
+   * The grant's scopes before the change. A caller that only re-applies the
+   * current grant (a repair or a startup heal) passes grant.scopes.
+   */
   previous_scopes: string[];
   reason: 'activate' | 'provider_scope_changed' | 'narrow';
 }
@@ -2070,11 +2074,15 @@ export type LinkSetAgentPermissionResult =
  * Implemented by the guard hooks over a LinkStore and a LinkPermissionPort.
  * Called by the server.
  *
- * Call order on activation: commitActivation, then onGrantUpdated (only
- * when previous_grant_scopes is non-null and differs), then onActivate.
- * If a hook throws, the server answers server_error; the connection stays
- * active, which is safe because access is deny-by-default per agent and
- * checkLinkAccess re-checks Permission ⊆ grant at call time.
+ * Call order on activation: commitActivation, then onGrantUpdated
+ * (whenever previous_grant_scopes is non-null, also when the scopes did not
+ * change), then onActivate. The server marks the activation settled only
+ * after onGrantUpdated succeeded; if it throws or the process dies first,
+ * the startup heal runs it again. Until then access stays safe, because
+ * access is deny-by-default per agent and checkLinkAccess re-checks
+ * Permission ⊆ grant at call time, and because onGrantUpdated also clips to
+ * previous_scopes (below), so a Permission that missed one intersect cannot
+ * regain a scope when the grant widens again.
  */
 export interface LinkHooks {
   /**
@@ -2083,7 +2091,14 @@ export interface LinkHooks {
    * otherwise.
    */
   onActivate(input: LinkActivateHookInput): Promise<void>;
-  /** Intersect every Permission on the grant's connection with grant.scopes. */
+  /**
+   * Intersect every Permission on the grant's connection with grant.scopes
+   * and with previous_scopes. A Permission is never wider than the grant it
+   * was written under, so the second intersect changes nothing unless an
+   * earlier call was missed (a crash or a store error after the grant
+   * changed). In that case it removes what the missed call should have
+   * removed, before the new grant could hand it back. Never widens.
+   */
   onGrantUpdated(input: LinkGrantUpdatedHookInput): Promise<void>;
   /**
    * The enforcement check for /api/v1/delegate and /api/v1/use calls that
