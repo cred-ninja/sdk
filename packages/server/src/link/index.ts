@@ -63,7 +63,7 @@ import { healUnsettledActivations } from './heal.js';
 import type { LinkHealFollowUpReport, LinkHealReport } from './heal.js';
 import { sendLocalErrorPage } from './pages.js';
 import { LinkProviderRuntime } from './providers.js';
-import { ConnectionLocks, LinkTokenLoader } from './tokens.js';
+import { ConnectionLocks, ConnectionQuarantine, LinkTokenLoader } from './tokens.js';
 import { sendLinkError } from './util.js';
 
 export type { LinkHandleBinding } from './enforcement.js';
@@ -146,11 +146,13 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
   // The loader reports to the audit log through the context built below.
   let ctx!: LinkContext;
   const locks = new ConnectionLocks();
+  const quarantine = new ConnectionQuarantine();
   const tokens = new LinkTokenLoader({
     store,
     secrets,
     providers,
     locks,
+    quarantine,
     // Spec 7 provider_scope_changed: a refresh that reports fewer scopes
     // narrows the connection and intersects the grant (never widens).
     onProviderScopes: async (connection, scopes) => {
@@ -184,7 +186,7 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
       }).catch(() => undefined);
     },
   });
-  ctx = { store, secrets, hooks, permissions, providers, tokens, locks, clientAuth, vault: options.vault, baseUrl, selfOrigin };
+  ctx = { store, secrets, hooks, permissions, providers, tokens, locks, quarantine, clientAuth, vault: options.vault, baseUrl, selfOrigin };
 
   // The heal starts now; requests that touch Link wait for it (gate below).
   const heal = healUnsettledActivations(ctx);

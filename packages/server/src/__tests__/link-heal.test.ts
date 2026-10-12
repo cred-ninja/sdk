@@ -12,7 +12,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { SqliteLinkStore, VaultLinkSecretStore } from '@credninja/vault';
+import { PermissionStore, SqliteLinkStore, VaultLinkSecretStore } from '@credninja/vault';
 import {
   Browser,
   activate,
@@ -82,9 +82,9 @@ async function newConnection(hx: Harness, client: RegisteredClient, subject = 'u
   return { connection_id: result.connection_id, code: result.code, subject };
 }
 
-async function finishFlow(hx: Harness, requestUri: string, confirmScopes = ['calendar.readonly', 'gmail.send']): Promise<Pending> {
+async function finishFlow(hx: Harness, requestUri: string, confirmScopes = ['calendar.readonly', 'gmail.send'], pickerScopes?: string[]): Promise<Pending> {
   const browser = new Browser();
-  const page = await callback(hx.app, browser, await toProvider(hx.app, browser, requestUri), 'google', 'auth-code-2');
+  const page = await callback(hx.app, browser, await toProvider(hx.app, browser, requestUri, pickerScopes ? { scopes: pickerScopes } : {}), 'google', 'auth-code-2');
   expect(page.status).toBe(200);
   const result = resultOf(await confirm(hx.app, browser, page.text, confirmScopes));
   if (result.outcome !== 'success') throw new Error(`flow failed: ${JSON.stringify(result)}`);
@@ -563,21 +563,89 @@ describe('startup heal: a finished move whose tokens were refreshed since', () =
     expect(await second.ctx.store.getConnection(pending.connection_id)).toMatchObject({ status: 'active' });
   });
 
-  it('an update whose move finished and whose access token was refreshed since (same refresh token) stays active', async () => {
+  it('same refresh token, the move DID happen and the access token was refreshed since: reapplied, stays active, next use refreshes, nothing revoked', async () => {
     const hx = await harness();
     const client = await registerClient(hx.app);
     const conn = await connectAndActivate(hx.app, client);
     const pending = await updateFlow(hx, client, conn);
     const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
     expect(staged.refresh_token).toBeDefined();
-    const refreshed = { ...staged, access_token: 'rotated-access-token' };
-    await hx.server.link!.context.secrets.put(conn as never, refreshed);
+    await hx.server.link!.context.secrets.put(conn as never, { ...staged, access_token: 'rotated-access-token' });
 
+    const before = Date.now();
     const { report, followUps, ctx } = await restartAndHeal(hx);
-    expect(report.outcomes).toEqual([{ tid, outcome: 'cleaned' }]);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
     expect(followUps).toEqual([{ tid, outcome: 'deleted' }]);
     expect(await ctx.store.getConnection(conn)).toMatchObject({ status: 'active' });
-    expect(await ctx.secrets.get(conn as never)).toEqual(refreshed);
+    const stored = (await ctx.secrets.get(conn as never))!;
+    expect(stored.access_token).toBe(staged.access_token);
+    expect(stored.refresh_token).toBe(staged.refresh_token);
+    expect(Date.parse(stored.expires_at!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(stored.expires_at!)).toBeLessThanOrEqual(Date.now());
+    expect(await ctx.store.listUnsettledActivations()).toEqual([]);
+
+    // The next use refreshes with that refresh token before any call.
+    const refreshesBefore = hx.fake.refreshCalls;
+    const handle = await delegate(hx.app, { connection_id: conn, token_format: 'handle' });
+    expect(handle.status).toBe(200);
+    expect(hx.fake.refreshCalls).toBe(refreshesBefore + 1);
+    expect((await ctx.secrets.get(conn as never))!.access_token).toMatch(/^ya29\.refreshed-/);
+    expect(hx.fake.revocations).toEqual([]);
+  });
+
+  it('same refresh token, and the forced refresh fails with invalid_grant: the loader moves the connection to needs_reauth', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const pending = await updateFlow(hx, client, conn);
+    const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
+    await hx.server.link!.context.secrets.put(conn as never, { ...staged, access_token: 'rotated-access-token' });
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+
+    hx.fake.refreshMode = 'invalid_grant';
+    const d = await delegate(hx.app, { connection_id: conn });
+    expect(d.body.error).toBe('grant_revoked');
+    expect(await ctx.store.getConnection(conn)).toMatchObject({ status: 'needs_reauth', status_reason: 'grant_revoked' });
+    expect(hx.fake.upstream).toEqual([]);
+  });
+
+  it('reviewer: a provider that re-issues the same refresh token and a crash before the move: the connection never stays on its pre-activation access token', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client, { confirmScopes: ['calendar.readonly'] });
+    const ctx0 = hx.server.link!.context;
+    const oldTokens = (await ctx0.secrets.get(conn as never))!;
+    expect(oldTokens.refresh_token).toBeDefined();
+    // Widening update; the provider answers with a new access token and
+    // the SAME refresh token string. Crash after the database commit.
+    const pending = await updateFlow(hx, client, conn, ['calendar.readonly', 'gmail.send']);
+    const now = new Date().toISOString();
+    const claim = await ctx0.store.claimActivation({
+      client_id: client.client_id,
+      connection_id: conn,
+      activation_code_hash: crypto.createHash('sha256').update(pending.code).digest('hex'),
+      subject: 'user-a',
+      now,
+    });
+    if (!claim.ok) throw new Error('claim failed');
+    const tid = claim.transaction.tid;
+    const staged = (await ctx0.secrets.getStaged(tid as never))!;
+    await ctx0.secrets.putStaged(tid as never, { ...staged, refresh_token: oldTokens.refresh_token });
+    await ctx0.store.commitActivation({ tid, now });
+    expect((await ctx0.secrets.get(conn as never))!.access_token).toBe(oldTokens.access_token);
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly', 'gmail.send']);
+    const stored = (await ctx.secrets.get(conn as never))!;
+    expect(stored.access_token).not.toBe(oldTokens.access_token);
+    expect(stored.access_token).toBe(staged.access_token);
+    expect(Date.parse(stored.expires_at!)).toBeLessThanOrEqual(Date.now());
+    // Next use refreshes before any upstream call.
+    const refreshesBefore = hx.fake.refreshCalls;
+    expect((await delegate(hx.app, { connection_id: conn })).status).toBe(200);
+    expect(hx.fake.refreshCalls).toBe(refreshesBefore + 1);
   });
 
   it('known limit: an update on a provider that rotates refresh tokens, refreshed after a crash inside the move, ends needs_reauth', async () => {
@@ -603,3 +671,237 @@ describe('startup heal: a finished move whose tokens were refreshed since', () =
   });
 });
 
+
+describe('startup heal: the permission intersect runs in every branch', () => {
+  const BOTH = ['calendar.readonly', 'gmail.send'];
+  const CAL = ['calendar.readonly'];
+
+  /**
+   * A narrowing update (BOTH to CAL) whose database commit happened but whose
+   * hooks never ran: server-agent still holds BOTH. `prepare` then shapes the
+   * crash into the branch under test.
+   */
+  async function narrowedWithoutIntersect(prepare: (ctx: NonNullable<Harness['server']['link']>['context'], conn: string, tid: string) => Promise<void>, point: CrashPoint) {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const pending = await updateFlow(hx, client, conn, CAL);
+    const tid = await crashActivation(hx, client, pending, point);
+    const ctx = hx.server.link!.context;
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(CAL);
+    expect((await ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+    await prepare(ctx, conn, tid);
+    return { hx, conn, tid };
+  }
+
+  const cases: Array<[string, CrashPoint, (ctx: NonNullable<Harness['server']['link']>['context'], conn: string, tid: string) => Promise<void>]> = [
+    ['reverted', 'before-move', async () => undefined],
+    ['settled_reauth', 'before-move', async (ctx, conn, tid) => {
+      await ctx.secrets.deleteStaged(tid as never);
+      await ctx.secrets.delete(conn as never);
+    }],
+    ['stale', 'before-move', async (ctx, conn) => {
+      await ctx.store.setConnectionStatus({ connection_id: conn, status: 'needs_reauth', reason: 'reauth_required', now: new Date(Date.now() + 5).toISOString() });
+    }],
+    ['cleaned', 'after-vault-write', async () => undefined],
+    ['settled', 'after-move', async () => undefined],
+  ];
+
+  for (const [outcome, point, prepare] of cases) {
+    it(`${outcome}: the agent Permission is intersected with the current grant before the settle`, async () => {
+      const { hx, conn, tid } = await narrowedWithoutIntersect(prepare, point);
+      const { report, ctx } = await restartAndHeal(hx);
+      expect(report.outcomes).toEqual([{ tid, outcome }]);
+      expect((await ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+      expect(await ctx.store.listUnsettledActivations()).toEqual([]);
+    });
+  }
+
+  it('an intersect that fails leaves the transaction unsettled and changes nothing else; the next start finishes it', async () => {
+    const { hx, conn, tid } = await narrowedWithoutIntersect(async () => undefined, 'before-move');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const spy = vi.spyOn(PermissionStore.prototype, 'intersectForConnection').mockRejectedValueOnce(new Error('permission store down'));
+    const first = await restartAndHeal(hx);
+    expect(first.report.outcomes).toEqual([{ tid, outcome: 'failed' }]);
+    expect(first.followUps).toEqual([]);
+    expect(await first.ctx.store.getConnection(conn)).toMatchObject({ status: 'active' });
+    expect((await first.ctx.store.listUnsettledActivations()).map((t) => t.tid)).toEqual([tid]);
+    spy.mockRestore();
+
+    const second = await restartAndHeal(hx);
+    expect(second.report.outcomes).toEqual([{ tid, outcome: 'reverted' }]);
+    expect((await second.ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+    expect(await second.ctx.store.listUnsettledActivations()).toEqual([]);
+  });
+
+  it('reviewer: with the needs_reauth write and the settle both lost, the staged copy is kept and the heal reverts the connection', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client, { confirmScopes: CAL });
+    const ctx0 = hx.server.link!.context;
+    const oldTokens = (await ctx0.secrets.get(conn as never))!;
+    const pending = await updateFlow(hx, client, conn, BOTH);
+
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const commit = vi.spyOn(VaultLinkSecretStore.prototype, 'commitStaged').mockRejectedValueOnce(new Error('vault write failed'));
+    const status = vi.spyOn(SqliteLinkStore.prototype, 'setConnectionStatus').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    const settle = vi.spyOn(SqliteLinkStore.prototype, 'settleActivation').mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    expect((await activate(hx.app, client, pending.connection_id, pending.code)).status).not.toBe(200);
+    commit.mockRestore();
+    status.mockRestore();
+    settle.mockRestore();
+    const [left] = await ctx0.store.listUnsettledActivations();
+    expect(left).toBeDefined();
+    expect(await ctx0.secrets.getStaged(left.tid as never)).not.toBeNull();
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid: left.tid, outcome: 'reverted' }]);
+    const connection = (await ctx.store.getConnection(conn))!;
+    expect(connection).toMatchObject({ status: 'needs_reauth', status_reason: 'reauth_required' });
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(BOTH);
+    expect((await ctx.secrets.get(conn as never))!.access_token).toBe(oldTokens.access_token);
+    expect(await ctx.secrets.getStaged(left.tid as never)).toBeNull();
+  });
+
+  it('reviewer: a narrowing update crashed before the move is intersected by the heal; after reauth and a widening for another agent the old agent does not get the removed scope back', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const pending = await updateFlow(hx, client, conn, CAL);
+    await crashActivation(hx, client, pending, 'before-move');
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes.map((o) => o.outcome)).toEqual(['reverted']);
+    expect((await ctx.store.getGrantForConnection(conn))!.scopes).toEqual(CAL);
+    expect((await ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+
+    // Reauth with no agent (as mintAgentReauthUrl does) for the grant's scopes.
+    const re = await request(hx.app).post(`/link/v1/connections/${conn}/reauth`).set('Authorization', client.auth).send({ subject: 'user-a' });
+    expect(re.status).toBe(201);
+    const reauth = await finishFlow(hx, re.body.request_uri, CAL, CAL);
+    expect((await activate(hx.app, client, reauth.connection_id, reauth.code)).body.status).toBe('active');
+
+    // The backend widens the grant again for a different agent.
+    const uri = await par(hx.app, client, { intent: 'update', connection_id: conn, scopes: { google: BOTH }, required_scopes: {}, agent_id: 'other-agent' });
+    const widening = await finishFlow(hx, uri, BOTH);
+    expect((await activate(hx.app, client, widening.connection_id, widening.code)).status).toBe(200);
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+  });
+});
+
+describe('startup heal: the intersect uses the activation\'s previous scopes', () => {
+  const BOTH = ['calendar.readonly', 'gmail.send'];
+  const CAL = ['calendar.readonly'];
+
+  type Ctx = NonNullable<Harness['server']['link']>['context'];
+  const branches: Array<[string, CrashPoint, (ctx: Ctx, conn: string, tid: string, staged: { refresh_token?: string }) => Promise<void>]> = [
+    ['reverted', 'before-move', async () => undefined],
+    ['settled_reauth', 'before-move', async (ctx, conn, tid) => {
+      await ctx.secrets.deleteStaged(tid as never);
+      await ctx.secrets.delete(conn as never);
+    }],
+    ['stale', 'before-move', async (ctx, conn) => {
+      await ctx.store.setConnectionStatus({ connection_id: conn, status: 'needs_reauth', reason: 'reauth_required', now: new Date(Date.now() + 5).toISOString() });
+    }],
+    ['cleaned', 'after-vault-write', async () => undefined],
+    ['settled', 'after-move', async () => undefined],
+    ['reapplied', 'after-vault-write', async (ctx, conn) => {
+      const stored = (await ctx.secrets.get(conn as never))!;
+      await ctx.secrets.put(conn as never, { ...stored, access_token: 'rotated-access-token' });
+    }],
+  ];
+
+  for (const [outcome, point, prepare] of branches) {
+    it(`${outcome}: a widening update clips to grant ∩ grant_scopes_at_confirm`, async () => {
+      const hx = await harness();
+      const client = await registerClient(hx.app);
+      const conn = await connectAndActivate(hx.app, client, { confirmScopes: CAL });
+      const pending = await updateFlow(hx, client, conn, BOTH);
+      const { tid, staged } = await crashActivationWithTokens(hx, client, pending, point);
+      await prepare(hx.server.link!.context, conn, tid, staged);
+      const spy = vi.spyOn(PermissionStore.prototype, 'intersectForConnection');
+      const { report } = await restartAndHeal(hx);
+      expect(report.outcomes).toEqual([{ tid, outcome }]);
+      expect(spy.mock.calls.map(([id, scopes]) => [id, [...scopes]])).toContainEqual([conn, CAL]);
+    });
+  }
+
+  it('a transaction that created its connection has no recorded previous scopes: the plain current grant', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const pending = await newConnection(hx, client);
+    const tid = await crashActivation(hx, client, pending, 'after-move');
+    const spy = vi.spyOn(PermissionStore.prototype, 'intersectForConnection');
+    const { report } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'settled' }]);
+    expect(spy.mock.calls.map(([id, scopes]) => [id, [...scopes]])).toContainEqual([pending.connection_id, BOTH]);
+  });
+
+  it('reviewer: a permission that missed a narrowing intersect does not regain the scope when the heal finishes the widening', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const ctx0 = hx.server.link!.context;
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+
+    // Miss 1: the narrowing intersect fails.
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const hook = vi.spyOn(ctx0.hooks, 'onGrantUpdated').mockRejectedValueOnce(new Error('permission store down'));
+    const narrowed = await request(hx.app).post(`/link/v1/connections/${conn}/narrow`).set('Authorization', client.auth)
+      .send({ subject: 'user-a', scopes: CAL });
+    expect(narrowed.status).toBe(500);
+    expect((await ctx0.permissions.get('server-agent', conn))!.allowedScopes).toEqual(BOTH);
+    hook.mockRestore();
+
+    // A widening for another agent; its intersect does not take effect.
+    const uri = await par(hx.app, client, { intent: 'update', connection_id: conn, scopes: { google: BOTH }, required_scopes: {}, agent_id: 'other-agent' });
+    const widening = await finishFlow(hx, uri, BOTH, BOTH);
+    vi.spyOn(ctx0.hooks, 'onGrantUpdated').mockRejectedValueOnce(new Error('process died here'));
+    expect((await activate(hx.app, client, widening.connection_id, widening.code)).status).toBe(401);
+    expect(await ctx0.store.listUnsettledActivations()).toHaveLength(1);
+    vi.restoreAllMocks();
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes.map((o) => o.outcome)).toEqual(['settled']);
+    expect((await ctx.permissions.get('server-agent', conn))!.allowedScopes).toEqual(CAL);
+    expect((await delegate(hx.app, { connection_id: conn, scopes: ['gmail.send'] })).status).toBe(403);
+  });
+});
+
+describe('startup heal: reapplied keeps the newer access token', () => {
+  it('the stored token refreshed after the staged one is kept, with the staged refresh token and expires_at now', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const conn = await connectAndActivate(hx.app, client);
+    const pending = await updateFlow(hx, client, conn);
+    const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
+    const later = new Date(Date.parse(staged.expires_at!) + 60_000).toISOString();
+    await hx.server.link!.context.secrets.put(conn as never, { ...staged, access_token: 'rotated-access-token', expires_at: later });
+
+    const { report, ctx } = await restartAndHeal(hx);
+    expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+    const stored = (await ctx.secrets.get(conn as never))!;
+    expect(stored.access_token).toBe('rotated-access-token');
+    expect(stored.refresh_token).toBe(staged.refresh_token);
+    expect(Date.parse(stored.expires_at!)).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('a staged token newer than the stored one wins, and so does staged when either has no expiry', async () => {
+    for (const storedExpiry of ['earlier', 'none'] as const) {
+      const hx = await harness();
+      const client = await registerClient(hx.app);
+      const conn = await connectAndActivate(hx.app, client);
+      const pending = await updateFlow(hx, client, conn);
+      const { tid, staged } = await crashActivationWithTokens(hx, client, pending, 'after-vault-write');
+      const { expires_at: _drop, ...noExpiry } = staged;
+      await hx.server.link!.context.secrets.put(conn as never, storedExpiry === 'none'
+        ? { ...noExpiry, access_token: 'older-access-token' }
+        : { ...staged, access_token: 'older-access-token', expires_at: new Date(Date.parse(staged.expires_at!) - 60_000).toISOString() });
+      const { report, ctx } = await restartAndHeal(hx);
+      expect(report.outcomes).toEqual([{ tid, outcome: 'reapplied' }]);
+      expect({ storedExpiry, token: (await ctx.secrets.get(conn as never))!.access_token }).toEqual({ storedExpiry, token: staged.access_token });
+      h?.close();
+      h = null;
+    }
+  });
+});

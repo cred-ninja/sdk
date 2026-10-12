@@ -386,12 +386,14 @@ function writeOperationAudit(
  * POST /link/v1/connections/:id/activate (decision 12, revised).
  *
  * Order: claimActivation; a pending audit record (fail closed: if it cannot
- * be written nothing changes); store.commitActivation (the database commit,
- * before any token moves, so a refused activation never touches a live
- * connection's tokens); secrets.commitStaged under the connection's token
- * lock; the success audit record; onGrantUpdated (only when the previous
- * scopes exist and differ); onActivate. Every failure answers with the
- * opaque failure.
+ * be written nothing changes); then, under the connection's token lock,
+ * store.commitActivation (the database commit, before any token moves, so a
+ * refused activation never touches a live connection's tokens),
+ * secrets.commitStaged, onGrantUpdated for every activation of an existing
+ * grant (true previous scopes, grant re-read under the lock), and the settle
+ * only if that intersect succeeded; after the lock, the success audit record
+ * and onActivate. Every failure answers with the opaque failure; a failed
+ * intersect leaves the activation unsettled for the startup heal.
  */
 export async function handleActivate(ctx: LinkContext, req: Request, res: Response): Promise<void> {
   const client = clientOf(req);
@@ -436,14 +438,34 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     return;
   }
 
-  // The connection's token lock is held from the database commit through
-  // the token commit, so a refresh either finishes entirely before the
-  // activation or starts after the new tokens are in place. Cleanup that
-  // needs the same lock runs after it is released.
+  // All inside the connection's token lock, in this order: the database
+  // commit, the token move, the permission intersect (onGrantUpdated, for
+  // every activation of an existing grant, with the true previous scopes
+  // and the grant re-read under the lock), then the settle, only if the
+  // intersect succeeded. A failed or interrupted intersect leaves the
+  // transaction unsettled, so the startup heal runs it again. A refresh
+  // either finishes entirely before the activation or starts after the new
+  // tokens are in place. Cleanup that needs the same lock, and onActivate
+  // (permission writes only, no tokens), run after the lock is released.
   type ActivationStep =
     | { kind: 'refused'; storeEnded: boolean }
-    | { kind: 'tokens_failed'; connection: Connection; grant: ClientGrant; previous: string[] | null; createsConnection: boolean }
+    | { kind: 'tokens_failed'; connection: Connection; createsConnection: boolean; markedReauth: boolean; intersected: boolean }
+    | { kind: 'hook_failed'; connection: Connection; grant: ClientGrant; previous: string[] | null }
     | { kind: 'ok'; connection: Connection; grant: ClientGrant; previous: string[] | null };
+  const intersect = async (previous: string[] | null, fallback: ClientGrant): Promise<boolean> => {
+    if (previous === null) return true;
+    try {
+      const grant = (await ctx.store.getGrantForConnection(connectionId)) ?? fallback;
+      await ctx.hooks.onGrantUpdated({ grant, previous_scopes: previous, reason: 'activate' });
+      return true;
+    } catch (error) {
+      console.error('[link] activation permission intersect failed; left for the startup heal', {
+        tid: tx.tid,
+        kind: error instanceof Error ? error.name : 'unknown',
+      });
+      return false;
+    }
+  };
   const step = await ctx.locks.run(connectionId, async (): Promise<ActivationStep> => {
     let activated;
     try {
@@ -469,22 +491,37 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     if (!moved) {
       // The database says active but the tokens did not move: never leave an
       // active connection without (or with the wrong) tokens.
-      await ctx.store.setConnectionStatus({
+      const marked = await ctx.store.setConnectionStatus({
         connection_id: activated.connection.id,
         status: 'needs_reauth',
         reason: 'reauth_required',
         now: nowIso(),
       }).catch(() => null);
+      if (marked) {
+        ctx.quarantine.delete(activated.connection.id);
+      } else {
+        // Still reads as active on its old tokens: hand out nothing for it in
+        // this process (no refresh either, which could rewrite the row), so
+        // the next start can revert it. Added before the lock is released.
+        ctx.quarantine.add(activated.connection.id);
+      }
+      const intersected = await intersect(activated.previous_grant_scopes, activated.grant);
       return {
         kind: 'tokens_failed',
         connection: activated.connection,
-        grant: activated.grant,
-        previous: activated.previous_grant_scopes,
         createsConnection: tx.creates_connection === true,
+        markedReauth: marked !== null,
+        intersected,
       };
     }
-    // The move finished: mark it settled so the startup heal leaves it alone.
-    // If this write is lost, the heal finds the tokens moved and settles it.
+    // The tokens moved: whatever quarantined this connection is resolved.
+    ctx.quarantine.delete(activated.connection.id);
+    if (!(await intersect(activated.previous_grant_scopes, activated.grant))) {
+      return { kind: 'hook_failed', connection: activated.connection, grant: activated.grant, previous: activated.previous_grant_scopes };
+    }
+    // The move and the intersect finished: mark it settled so the startup
+    // heal leaves it alone. If this write is lost, the heal finds the tokens
+    // moved, runs the intersect again and settles it.
     await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() }).catch(() => false);
     return { kind: 'ok', connection: activated.connection, grant: activated.grant, previous: activated.previous_grant_scopes };
   });
@@ -503,13 +540,14 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
     return;
   }
   if (step.kind === 'tokens_failed') {
-    // The database commit stands (the grant may have been narrowed), so the
-    // Permissions must not stay wider than it: run the intersect with the
-    // committed grant. Best effort; it never changes the response.
-    try {
-      await ctx.hooks.onGrantUpdated({ grant: step.grant, previous_scopes: step.previous ?? step.grant.scopes, reason: 'activate' });
-    } catch (error) {
-      console.error('[link] permission intersect after a failed token move failed', { tid: tx.tid, kind: error instanceof Error ? error.name : 'unknown' });
+    if (!step.markedReauth) {
+      // The needs_reauth write failed too: the connection may still be
+      // active on its old tokens under the new grant. Keep the staged copy
+      // and leave the transaction unsettled, so the startup heal finds
+      // staged differing from stored on an untouched connection and
+      // reverts it.
+      sendOpaqueFailure(req, res);
+      return;
     }
     // Discard the staged tokens under the revocation rule. A connection this
     // transaction created holds no tokens, so it does not block revocation;
@@ -525,16 +563,18 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
       });
     }
     const deleted = await ctx.secrets.deleteStaged(tx.tid).then(() => true, () => false);
-    // Resolved in process (the connection is needs_reauth); a staged copy
-    // that could not be deleted is left for the startup heal.
-    if (deleted) await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() }).catch(() => false);
+    // Resolved in process (the connection is needs_reauth) once the staged
+    // copy is gone and the intersect ran; otherwise the startup heal
+    // finishes it.
+    if (deleted && step.intersected) await ctx.store.settleActivation({ tid: tx.tid, now: nowIso() }).catch(() => false);
     sendOpaqueFailure(req, res);
     return;
   }
   const { connection, grant, previous } = step;
 
-  // The pending record already made this fail closed: a failure of the
-  // success record is logged and does not abort the activation.
+  // The grant change is committed (also when the intersect failed), so the
+  // success record is written. The pending record already made this fail
+  // closed: a failure here is logged and does not change the response.
   try {
     writeGrantAudit(ctx, {
       action: 'update',
@@ -548,10 +588,12 @@ export async function handleActivate(ctx: LinkContext, req: Request, res: Respon
   } catch (error) {
     console.error('[link] activation success audit failed', { tid: tx.tid, kind: error instanceof Error ? error.name : 'unknown' });
   }
+  if (step.kind === 'hook_failed') {
+    // Same answer as any hook failure; the heal re-runs the intersect.
+    sendOpaqueFailure(req, res);
+    return;
+  }
   try {
-    if (previous !== null && !scopeSetsEqual(previous, grant.scopes)) {
-      await ctx.hooks.onGrantUpdated({ grant, previous_scopes: previous, reason: 'activate' });
-    }
     await ctx.hooks.onActivate({
       intent: tx.intent,
       connection,
@@ -602,6 +644,7 @@ export async function handleRevokeConnection(ctx: LinkContext, req: Request, res
       const before = await ctx.store.getGrantForConnection(connection.id);
       const tokens = await ctx.secrets.get(connection.id).catch(() => null);
       const updated = await ctx.store.setConnectionStatus({ connection_id: connection.id, status: 'revoked', now: nowIso() });
+      if (updated) ctx.quarantine.delete(connection.id);
       let revoked = false;
       if (tokens) {
         revoked = await revokeAtProviderIfSafe(ctx, tokens, {
@@ -652,6 +695,13 @@ export async function handleRefreshConnection(ctx: LinkContext, req: Request, re
     const result = await ctx.tokens.load(connection, { force: true });
     if (!result.ok && result.kind === 'unavailable') {
       sendLinkError(req, res, 503, 'temporarily_unavailable');
+      return;
+    }
+    if (ctx.quarantine.has(connection.id)) {
+      // The row still says active, but this process will not use or refresh
+      // the connection, and the next start reverts it: report that.
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ connection_id: connection.id, status: 'needs_reauth', status_reason: 'reauth_required' });
       return;
     }
   }
