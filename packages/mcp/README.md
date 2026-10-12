@@ -178,7 +178,7 @@ Assistant: I'll need access to your Google Calendar.
         It looks like you haven't connected your Google account yet.
         Please visit this link to authorize:
 
-        https://cred.example.com/connect/google?app_client_id=...
+        https://cred.example.com/connect/google?request=...
 
         Once you've authorized, let me know and I'll check your calendar.
 ```

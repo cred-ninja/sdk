@@ -161,7 +161,7 @@ describe('POST /api/v1/subdelegate', () => {
     const res = await request(app)
       .post('/api/v1/subdelegate')
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({ agent_did: 'did:key:z6MkChild', service: 'google' });
+      .send({ agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('parent_receipt');
@@ -184,7 +184,7 @@ describe('POST /api/v1/subdelegate', () => {
     const res = await request(app)
       .post('/api/v1/subdelegate')
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({ parent_receipt: parentReceipt, service: 'google' });
+      .send({ parent_receipt: parentReceipt, service: 'google', user_id: 'default' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('agent_did');
@@ -207,7 +207,7 @@ describe('POST /api/v1/subdelegate', () => {
     const res = await request(app)
       .post('/api/v1/subdelegate')
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({ parent_receipt: parentReceipt, agent_did: 'did:key:z6MkChild' });
+      .send({ parent_receipt: parentReceipt, agent_did: 'did:key:z6MkChild', user_id: 'default' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('service');
@@ -234,6 +234,7 @@ describe('POST /api/v1/subdelegate', () => {
         parent_receipt: badReceipt,
         agent_did: 'did:key:z6MkChild',
         service: 'google',
+        user_id: 'default',
       });
 
     expect(res.status).toBe(403);
@@ -251,6 +252,7 @@ describe('POST /api/v1/subdelegate', () => {
         parent_receipt: 'not.a.valid.receipt.with.five.parts',
         agent_did: 'did:key:z6MkChild',
         service: 'google',
+        user_id: 'default',
       });
 
     expect(res.status).toBe(403);
@@ -278,6 +280,7 @@ describe('POST /api/v1/subdelegate', () => {
         parent_receipt: parentReceipt,
         agent_did: 'did:key:z6MkChild',
         service: 'google',  // mismatch!
+        user_id: 'default',
       });
 
     expect(res.status).toBe(403);
@@ -541,6 +544,7 @@ describe('POST /api/v1/subdelegate', () => {
         // Linear and HubSpot now have brokered-use paths (SERVICE_ALLOWLIST);
         // Stripe still has none.
         service: 'stripe',
+        user_id: 'default',
       });
 
     expect(res.status).toBe(400);

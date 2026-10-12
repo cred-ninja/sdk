@@ -65,6 +65,20 @@ interface PendingOAuth {
   createdAt: number;
 }
 
+/**
+ * A connect request minted by an authenticated call (an agent's
+ * consent_url, or the admin page's POST /connect/:provider/start). The
+ * browser only carries its random id, so GET /connect/:provider never takes
+ * the user id or scopes from the query string under the admin cookie.
+ */
+interface PendingConnectRequest {
+  provider: string;
+  userId: string;
+  scopes: string[];
+  appClientId?: string;
+  expiresAt: number;
+}
+
 interface BrokeredDelegation {
   accessToken: string;
   service: string;
@@ -280,12 +294,23 @@ export function createServer(config: ServerConfig) {
 
   // Pending OAuth sessions (state → PendingOAuth). Cleaned up after 10 min.
   const pendingOAuth = new Map<string, PendingOAuth>();
+  // Pending connect requests (SHA-256 of the request id → request). Single
+  // use, 10 minutes.
+  const pendingConnect = new Map<string, PendingConnectRequest>();
+  const CONNECT_REQUEST_TTL_MS = 10 * 60 * 1000;
   const brokeredDelegations = new Map<string, BrokeredDelegation>();
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
     path: config.webBotAuthNoncePath,
   });
+
+  // Legacy routes: does a request without user_id act on the shared
+  // 'default' user (single-user mode) or is it refused (multi-user mode)?
+  const singleUserMode = config.singleUserMode === true;
+  console.log(singleUserMode
+    ? '[cred] SINGLE_USER_MODE=true: legacy requests without user_id act on the shared "default" user'
+    : '[cred] Multi-user mode: legacy requests must name user_id (set SINGLE_USER_MODE=true for a single shared user)');
 
   // Cred Link (Phase 1): off unless config.linkEnabled. Routes are mounted
   // here; delegate and use call into it below.
@@ -440,11 +465,106 @@ export function createServer(config: ServerConfig) {
     return result;
   }
 
-  function requestUserId(req: Request): string {
-    const queryUserId = queryStringValue(req.query.user_id);
-    const bodyUserId = typeof req.body?.user_id === 'string' ? req.body.user_id : undefined;
-    const userId = (bodyUserId ?? queryUserId ?? 'default').trim();
-    return userId || 'default';
+  // ── User id resolution (legacy, non-Link routes) ───────────────────────
+  //
+  // One resolver for every legacy handler that acts on a user's stored
+  // tokens. Rules, in order:
+  //   1. An agent principal that carries a userId (only a custom
+  //      agentRequestVerifier can set one) binds the request to it: no
+  //      user_id means that user, a different user_id is 403
+  //      user_id_mismatch. Admin routes never apply this rule.
+  //   2. An explicit, non-blank user_id is used as given (trimmed),
+  //      'default' included.
+  //   3. Otherwise SINGLE_USER_MODE decides: true acts on 'default', false
+  //      (the default) refuses with 400 user_id_required.
+  // The reserved Link user ids are refused after resolution.
+
+  type UserIdResolution =
+    | { ok: true; userId: string }
+    | { ok: false; status: 400 | 403; error: 'user_id_required' | 'user_id_mismatch'; message: string };
+
+  const USER_ID_REQUIRED_MESSAGE =
+    'user_id is required: send the user_id of the user this call is for, or set SINGLE_USER_MODE=true on the server to act on the shared "default" user when user_id is omitted.';
+
+  /** A user_id value as given, trimmed; undefined when absent, not a string, or blank. */
+  function explicitUserIdValue(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  }
+
+  /** user_id from the JSON body, else from the query string. */
+  function explicitRequestUserId(req: Request): string | undefined {
+    return explicitUserIdValue(req.body?.user_id) ?? explicitUserIdValue(queryStringValue(req.query.user_id));
+  }
+
+  /** The user id the authenticated agent principal is bound to, if any. */
+  function principalBoundUserId(req: Request): string | undefined {
+    const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    if (!principal || principal.type === 'static-bearer') return undefined;
+    return explicitUserIdValue(principal.userId);
+  }
+
+  function resolveUserId(req: Request, input: { explicit: string | undefined; agent: boolean }): UserIdResolution {
+    const bound = input.agent ? principalBoundUserId(req) : undefined;
+    if (bound !== undefined) {
+      if (input.explicit !== undefined && input.explicit !== bound) {
+        return {
+          ok: false,
+          status: 403,
+          error: 'user_id_mismatch',
+          message: 'user_id does not match the user the authenticated agent is bound to',
+        };
+      }
+      return { ok: true, userId: bound };
+    }
+    if (input.explicit !== undefined) return { ok: true, userId: input.explicit };
+    if (singleUserMode) return { ok: true, userId: 'default' };
+    return { ok: false, status: 400, error: 'user_id_required', message: USER_ID_REQUIRED_MESSAGE };
+  }
+
+  /**
+   * Resolve the request's user id for a JSON route, or send the refusal
+   * (user_id_required, user_id_mismatch, or the reserved-id 400) and
+   * return null. `source` 'body' reads only the JSON body (delegate,
+   * subdelegate); the default reads the body, then the query string.
+   */
+  function requestUserId(
+    req: Request,
+    res: Response,
+    opts: { agent: boolean; source?: 'body' | 'body-or-query' },
+  ): string | null {
+    const explicit = opts.source === 'body' ? explicitUserIdValue(req.body?.user_id) : explicitRequestUserId(req);
+    const resolved = resolveUserId(req, { explicit, agent: opts.agent });
+    if (!resolved.ok) {
+      res.status(resolved.status).json({ error: resolved.error, message: resolved.message });
+      return null;
+    }
+    if (rejectReservedUserId(res, resolved.userId)) return null;
+    return resolved.userId;
+  }
+
+  /**
+   * The same for the admin browser pages (/connect, and /providers when the
+   * client prefers HTML): a short readable page instead of raw JSON.
+   */
+  function adminPageUserId(req: Request, res: Response, html: boolean): string | null {
+    if (!html) return requestUserId(req, res, { agent: false });
+    const resolved = resolveUserId(req, { explicit: explicitRequestUserId(req), agent: false });
+    if (!resolved.ok) {
+      const path = req.path === '/providers' ? '/providers' : '/connect';
+      res.status(400).type('html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Cred: user_id required</title></head>
+<body style="background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,system-ui,sans-serif;padding:40px;max-width:640px;margin:0 auto;">
+<h2>Which user?</h2>
+<p>This server runs in multi-user mode, so this page needs the user whose connections you want to manage.</p>
+<p>Add <code>?user_id=&lt;user id&gt;</code> to the address, for example <code>${escapeHtml(path)}?user_id=alice</code>.</p>
+<p style="color:#888;">To act on the shared <code>default</code> user when no user_id is given, set <code>SINGLE_USER_MODE=true</code> on the server.</p>
+</body></html>`);
+      return null;
+    }
+    if (rejectReservedUserId(res, resolved.userId)) return null;
+    return resolved.userId;
   }
 
   /**
@@ -474,21 +594,24 @@ export function createServer(config: ServerConfig) {
     return true;
   }
 
+  /**
+   * The consent URL handed to an agent: a single-use connect request bound
+   * to the user id that already passed the user id rules, so the URL itself
+   * carries no user id and no scopes.
+   */
   function buildConsentUrl(input: {
     service: string;
     userId: string;
     appClientId?: string;
     scopes?: string[];
   }): string {
-    const url = new URL(`/connect/${encodeURIComponent(input.service)}`, config.redirectBaseUri);
-    url.searchParams.set('user_id', input.userId);
-    if (input.appClientId) {
-      url.searchParams.set('app_client_id', input.appClientId);
-    }
-    if (input.scopes && input.scopes.length > 0) {
-      url.searchParams.set('scopes', input.scopes.join(','));
-    }
-    return url.toString();
+    const id = mintConnectRequest({
+      provider: input.service,
+      userId: input.userId,
+      scopes: input.scopes ?? [],
+      ...(input.appClientId ? { appClientId: input.appClientId } : {}),
+    });
+    return new URL(connectRequestPath(input.service, id), config.redirectBaseUri).toString();
   }
 
   function tokenFormatFromBody(req: Request): 'raw' | 'handle' {
@@ -642,13 +765,19 @@ export function createServer(config: ServerConfig) {
     );
   }
 
-  function validateAdminRequest(req: Request): boolean {
+  /**
+   * Which admin credential the request carries: the Bearer admin token, the
+   * admin session cookie, or neither. A Bearer header cannot be sent by a
+   * cross-site navigation; the session cookie (SameSite=Lax) can, on a
+   * top-level GET.
+   */
+  function validateAdminRequest(req: Request): 'bearer' | 'cookie' | null {
     const token = extractBearerToken(req);
     if (token && tokenMatchesHash(token, adminTokenHash)) {
-      return true;
+      return 'bearer';
     }
     const cookies = parseCookies(req);
-    return validateAdminSessionValue(cookies[ADMIN_SESSION_COOKIE]);
+    return validateAdminSessionValue(cookies[ADMIN_SESSION_COOKIE]) ? 'cookie' : null;
   }
 
   /**
@@ -658,10 +787,12 @@ export function createServer(config: ServerConfig) {
    * HttpOnly same-site cookie. API callers may also use Bearer admin auth.
    */
   function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
-    if (!validateAdminRequest(req)) {
+    const credential = validateAdminRequest(req);
+    if (!credential) {
       res.status(401).json({ error: 'Unauthorized. Provide a valid admin Bearer token or sign in at /admin/login.' });
       return;
     }
+    (req as any).adminCredential = credential;
 
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
@@ -836,6 +967,41 @@ export function createServer(config: ServerConfig) {
       status: 403,
       error: 'Forbidden. A verified identity matching this agent is required for this action.',
     };
+  }
+
+  function connectRequestKey(id: string): string {
+    return crypto.createHash('sha256').update(id).digest('hex');
+  }
+
+  /** Mint a single-use connect request; returns its id (256 random bits). */
+  function mintConnectRequest(input: { provider: string; userId: string; scopes: string[]; appClientId?: string }): string {
+    const now = Date.now();
+    for (const [key, pending] of pendingConnect) {
+      if (pending.expiresAt <= now) pendingConnect.delete(key);
+    }
+    const id = crypto.randomBytes(32).toString('base64url');
+    pendingConnect.set(connectRequestKey(id), {
+      provider: input.provider,
+      userId: input.userId,
+      scopes: [...input.scopes],
+      ...(input.appClientId ? { appClientId: input.appClientId } : {}),
+      expiresAt: now + CONNECT_REQUEST_TTL_MS,
+    });
+    return id;
+  }
+
+  /** Consume a connect request: null when unknown, expired, already used, or for another provider. */
+  function consumeConnectRequest(id: string, provider: string): PendingConnectRequest | null {
+    const key = connectRequestKey(id);
+    const pending = pendingConnect.get(key);
+    if (!pending) return null;
+    pendingConnect.delete(key);
+    if (pending.expiresAt <= Date.now() || pending.provider !== provider) return null;
+    return pending;
+  }
+
+  function connectRequestPath(provider: string, id: string): string {
+    return `/connect/${encodeURIComponent(provider)}?request=${encodeURIComponent(id)}`;
   }
 
   /**
@@ -1617,8 +1783,8 @@ export function createServer(config: ServerConfig) {
    */
   app.get('/providers', providersRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = adminPageUserId(req, res, req.accepts(['json', 'html']) === 'html');
+      if (userId === null) return;
       const entries = await vault.list({ userId });
       const connected = new Set(entries.map((e) => e.provider));
 
@@ -2037,8 +2203,8 @@ export function createServer(config: ServerConfig) {
    */
   app.get('/connect', connectUiRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = adminPageUserId(req, res, true);
+      if (userId === null) return;
       const safeUserId = escapeHtml(userId);
       const encodedUserId = encodeURIComponent(userId);
       const entries = await vault.list({ userId });
@@ -2123,7 +2289,7 @@ export function createServer(config: ServerConfig) {
               </span>
             </div>
             ${isConnected && currentScopes ? `<div class="current-scopes">Current scopes: <code>${currentScopes}</code></div>` : ''}
-            <form class="scope-form" action="/connect/${encodedSlug}?user_id=${encodedUserId}" method="GET" data-provider="${safeSlug}" data-user-id="${safeUserId}">
+            <form class="scope-form" action="/connect/${encodedSlug}/start" method="POST" data-provider="${safeSlug}" data-user-id="${safeUserId}">
               <div class="scope-grid">
                 ${safeScopeItems}
               </div>
@@ -2251,7 +2417,7 @@ export function createServer(config: ServerConfig) {
 </div>
 <script>
 const currentUserId = ${jsonScriptString(userId)};
-function buildScopes(e, provider) {
+async function buildScopes(e, provider) {
   e.preventDefault();
   const form = e.target;
   const checked = [...form.querySelectorAll('input[name="scope"]:checked')].map(i => i.value);
@@ -2261,7 +2427,16 @@ function buildScopes(e, provider) {
     alert('Select at least one scope');
     return;
   }
-  window.location.href = '/connect/' + provider + '?user_id=' + encodeURIComponent(currentUserId) + '&scopes=' + encodeURIComponent(checked.join(','));
+  // Mint a single-use connect request, then open it.
+  const res = await fetch('/connect/' + encodeURIComponent(provider) + '/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ user_id: currentUserId, scopes: checked }),
+  });
+  if (!res.ok) { alert('Failed: ' + res.status); return; }
+  const data = await res.json();
+  window.location.href = data.url;
 }
 async function revoke(provider) {
   if (!confirm('Revoke ' + provider + ' credentials?')) return;
@@ -2306,8 +2481,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: false });
+      if (userId === null) return;
       await revokeStoredProvider(slug, userId);
       res.status(204).send();
     } catch (err) {
@@ -2317,11 +2492,94 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
+  /** Scopes from a list, a comma-separated string, or a list of those. */
+  function parseScopeInput(value: unknown): string[] {
+    const values = Array.isArray(value)
+      ? value.filter((scope): scope is string => typeof scope === 'string')
+      : (typeof value === 'string' ? [value] : []);
+    return values.flatMap((entry) => entry.split(',').map((scope) => scope.trim()).filter(Boolean));
+  }
+
+  async function startOAuth(res: Response, providerConfig: ProviderConfig, userId: string, requestedScopes: string[]): Promise<void> {
+    const client = makeOAuthClient(providerConfig);
+    // Requested scopes, else the provider's default scopes from config.
+    const scopes = requestedScopes.length > 0 ? requestedScopes : providerConfig.defaultScopes;
+    const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes });
+    cleanPendingOAuth();
+    pendingOAuth.set(state, {
+      provider: providerConfig.slug,
+      userId,
+      scopes,
+      state,
+      codeVerifier,
+      createdAt: Date.now(),
+    });
+    res.redirect(url);
+  }
+
+  function sendConnectRequestErrorPage(res: Response): void {
+    // Generic: never say which check failed.
+    const requestId = crypto.randomUUID();
+    res.status(400).type('html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Cred: link not valid</title></head>
+<body style="background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,system-ui,sans-serif;padding:40px;max-width:640px;margin:0 auto;">
+<h2>This connect link can't be used</h2>
+<p>It may have expired or already been used. Start the connection again from the app or from the <a href="/connect" style="color:#4ade80;">connect page</a>.</p>
+<p style="color:#888;">Request ID: <code>${requestId}</code></p>
+</body></html>`);
+  }
+
   /**
-   * GET /connect/:provider — start OAuth flow
+   * POST /connect/:provider/start: mint a single-use connect request.
    *
-   * Opens in a browser. Redirects to the provider's authorization page.
-   * Scopes can be specified via ?scopes=calendar.readonly,gmail.readonly
+   * Admin auth (Bearer token or session cookie). JSON body
+   * `{ user_id, scopes }` (user id rules apply). Answers `{ url }`, a
+   * same-origin path `/connect/:provider?request=<id>` that starts the
+   * OAuth flow once. Requires Content-Type: application/json, which a
+   * cross-site form cannot send.
+   */
+  app.post('/connect/:provider/start', connectUiRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      if (!req.is('application/json')) {
+        res.status(415).json({ error: 'unsupported_media_type', message: 'Send a JSON body with Content-Type: application/json' });
+        return;
+      }
+      const slug = routeParam(req.params.provider);
+      if (!slug) {
+        res.status(400).json({ error: 'Missing provider parameter' });
+        return;
+      }
+      const providerConfig = getProviderConfig(slug);
+      if (!providerConfig) {
+        res.status(404).json({ error: `Provider '${slug}' not configured` });
+        return;
+      }
+      const userId = requestUserId(req, res, { agent: false, source: 'body' });
+      if (userId === null) return;
+      const id = mintConnectRequest({ provider: slug, userId, scopes: parseScopeInput(req.body?.scopes) });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ url: connectRequestPath(slug, id) });
+    } catch (err) {
+      console.error('[/connect/:provider/start] Error:', err);
+      res.status(500).json({ error: 'Failed to start the connection' });
+    }
+  });
+
+  /**
+   * GET /connect/:provider: start the OAuth flow.
+   *
+   * Opens in a browser and redirects to the provider's authorization page.
+   *   ?request=<id>  a single-use connect request (consent_url, or the
+   *                  admin page via POST /connect/:provider/start): the
+   *                  stored user id and scopes are used; any user_id or
+   *                  scopes in the query are ignored.
+   *   no request     with the Bearer admin token: ?user_id and
+   *                  ?scopes=a,b as before (user id rules apply). With the
+   *                  admin session cookie: nothing starts; the browser is
+   *                  sent to the /connect page, where the operator starts
+   *                  it with a click (a cross-site link carries the cookie
+   *                  on a top-level GET and must not choose the user or
+   *                  scopes).
    */
   app.get('/connect/:provider', connectRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
@@ -2330,38 +2588,33 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
       }
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const requestIdParam = queryStringValue(req.query.request);
+      if (requestIdParam !== undefined) {
+        const pending = consumeConnectRequest(requestIdParam, slug);
+        const providerConfig = pending ? getProviderConfig(slug) : undefined;
+        if (!pending || !providerConfig || isReservedLinkVaultUserId(pending.userId)) {
+          sendConnectRequestErrorPage(res);
+          return;
+        }
+        await startOAuth(res, providerConfig, pending.userId, pending.scopes);
+        return;
+      }
+
+      if ((req as any).adminCredential !== 'bearer') {
+        const named = explicitRequestUserId(req);
+        res.setHeader('Cache-Control', 'no-store');
+        res.redirect(303, named !== undefined ? `/connect?user_id=${encodeURIComponent(named)}` : '/connect');
+        return;
+      }
+
+      const userId = requestUserId(req, res, { agent: false });
+      if (userId === null) return;
       const providerConfig = getProviderConfig(slug);
       if (!providerConfig) {
         res.status(404).json({ error: `Provider '${slug}' not configured. Available: ${config.providers.map((p) => p.slug).join(', ')}` });
         return;
       }
-
-      const client = makeOAuthClient(providerConfig);
-
-      // Parse scopes from query string, fall back to provider's default scopes from config
-      const scopeValues = Array.isArray(req.query.scopes)
-        ? req.query.scopes.filter((scope): scope is string => typeof scope === 'string')
-        : (typeof req.query.scopes === 'string' ? [req.query.scopes] : []);
-      const scopes = scopeValues.length > 0
-        ? scopeValues.flatMap((value) => value.split(',').map((scope) => scope.trim()).filter(Boolean))
-        : providerConfig.defaultScopes;
-
-      const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes });
-
-      // Store pending session
-      cleanPendingOAuth();
-      pendingOAuth.set(state, {
-        provider: slug,
-        userId,
-        scopes,
-        state,
-        codeVerifier,
-        createdAt: Date.now(),
-      });
-
-      res.redirect(url);
+      await startOAuth(res, providerConfig, userId, parseScopeInput(req.query.scopes));
     } catch (err) {
       if (sendReservedUserIdError(res, err)) return;
       console.error('[/connect] Error:', err);
@@ -2536,7 +2789,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       return {
         status: 404,
         body: {
-          error: `No credentials stored for '${service}/${userId}'. Connect first: GET /connect/${service}?user_id=${encodeURIComponent(userId)}`,
+          error: `No credentials stored for '${service}/${userId}'. Connect it first: an operator opens /connect?user_id=${encodeURIComponent(userId)} and clicks Connect for ${service}, or POST /api/v1/delegate returns a consent_url.`,
         },
       } as const;
     }
@@ -2834,8 +3087,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
       }
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
       const vaultEntry = await getVaultEntry(slug, userId);
       if ('status' in vaultEntry) {
         res.status(vaultEntry.status).json(vaultEntry.body);
@@ -2917,8 +3170,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
   app.get('/api/v1/connections', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
       const entries = await vault.list({ userId });
       res.json({
         connections: entries.map((entry) => ({
@@ -3091,7 +3344,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       const {
         service,
-        user_id: requestedUserId,
         appClientId = 'local',
         scopes,
         constraints: requestedConstraintsRaw,
@@ -3134,8 +3386,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true, source: 'body' });
+      if (userId === null) return;
       const requestedScopes = normalizeRequestedScopes(scopes);
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
@@ -3673,8 +3925,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   app.get('/api/v1/audit', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;
       const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : undefined;
       const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
@@ -3755,8 +4007,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * plus required auth is the accepted protection level for now.
    */
   app.get('/api/v1/audit/stream', auditRateLimiter, requireAgentAuth, verifyWebBotAuth, (req: Request, res: Response) => {
-    const userId = requestUserId(req);
-    if (rejectReservedUserId(res, userId)) return;
+    const userId = requestUserId(req, res, { agent: true });
+    if (userId === null) return;
 
     // Fail fast with the same 501 GET /api/v1/audit would give, rather than
     // opening a stream that can never emit anything.
@@ -3862,7 +4114,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         parent_receipt: parentReceipt,
         agent_did: agentDid,
         service,
-        user_id: requestedUserId,
         appClientId = 'local',
         scopes: requestedScopes,
         constraints: requestedConstraintsRaw,
@@ -3890,14 +4141,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
          */
         ancestor_receipts?: string[];
       };
-      const userId = typeof requestedUserId === 'string' && requestedUserId.trim() ? requestedUserId.trim() : 'default';
       // Sub-delegation of a Cred Link connection is refused in Phase 1, and
       // no caller-supplied user id may reach the reserved Link vault rows.
       if (req.body?.connection_id !== undefined) {
         res.status(400).json({ error: 'invalid_request', message: 'Sub-delegation of a Link connection is not supported' });
         return;
       }
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true, source: 'body' });
+      if (userId === null) return;
       // Sub-delegation always returns a brokered handle — see route doc
       // comment above. `requestedTokenFormat` is only used to detect (and
       // flag) a caller asking for the raw provider token.
@@ -4213,7 +4464,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const entry = await vault.get(getOpts);
       if (!entry) {
         res.status(404).json({
-          error: `No credentials stored for '${service}'. Connect first: GET /connect/${service}`,
+          error: `No credentials stored for '${service}/${userId}'. Connect it first: an operator opens /connect?user_id=${encodeURIComponent(userId)} and clicks Connect for ${service}.`,
         });
         return;
       }
@@ -4340,8 +4591,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
       }
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
       await revokeStoredProvider(slug, userId);
 
       res.status(204).send();
@@ -4354,8 +4605,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
   app.delete('/api/v1/connections/:provider', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
-      const userId = requestUserId(req);
-      if (rejectReservedUserId(res, userId)) return;
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
       const slug = routeParam(req.params.provider);
       if (!slug) {
         res.status(400).json({ error: 'Missing provider parameter' });
