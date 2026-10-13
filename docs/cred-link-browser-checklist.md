@@ -77,3 +77,7 @@ Mobile only:
 - A provider that always cuts the opener in the major browsers should start in redirect mode by default, so users never wait for the 2 second timeout. That is a small follow-up change; record the provider here first.
 - A browser where `window.close()` is refused after the relay needs a visible `onRelayed` message in the app's return page. Note it in the widget README.
 - Any double delivery outside check 8, and any flow that delivers nothing, is a bug: file it with the row from the table above.
+
+## Results so far
+
+- 2026-10-13, desktop Chrome, partial (GitHub denial path only, no provider could complete): [cred-link-browser-results-2026-10-13.md](./cred-link-browser-results-2026-10-13.md). Pass criteria not yet met.
