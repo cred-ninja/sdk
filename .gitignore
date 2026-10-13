@@ -49,3 +49,4 @@ venv/
 dist/
 *.dist-info/
 packages/sdk-python/.venv/
+.claude/
