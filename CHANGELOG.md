@@ -2,11 +2,43 @@
 
 ## [Unreleased]
 
-### Breaking: explicit user ids on the legacy routes (`@credninja/server`)
+Nothing yet.
+
+## [2.0.0] - prepared 2026-10-13, not yet published to npm
+
+npm only; Python package versions are unchanged. Nothing between 1.0.0 and
+2.0.0 was ever published, so everything below ships in this one major. Read
+the [release and migration notes](docs/releases/npm-2.0.0.md) before
+upgrading.
+
+### BREAKING: explicit user ids on the legacy routes (`@credninja/server`)
 
 These change behavior for callers that relied on the silent fallback to the
 shared `default` user. Migration, one line: set `SINGLE_USER_MODE=true` on
 the server, or send `user_id` on every call.
+
+Migration for legacy-route callers:
+
+1. Find calls that omit `user_id` (or send it blank) to `/providers`,
+   `/connect`, `DELETE /connect/:provider`, `/api/token/:provider`,
+   `/api/v1/delegate`, `/api/v1/subdelegate`, `/api/v1/connections`,
+   `/api/v1/audit` or `/api/v1/audit/stream`. After upgrading, they get
+   `400 {"error":"user_id_required"}`.
+2. Single-tenant deployment that always meant the `default` user: set
+   `SINGLE_USER_MODE=true` (or `singleUserMode: true` in `createServer`).
+   Nothing else changes. New `create-cred-app` projects already set it.
+3. Multi-user deployment: send `user_id` on every call. To keep acting on
+   the old shared user, send `user_id=default` explicitly.
+4. Stop building or parsing consent links by hand. Use the `consent_url`
+   returned by `POST /api/v1/delegate`; it is now an opaque single-use
+   `/connect/<provider>?request=<id>` link valid for 10 minutes.
+5. Admin tooling that opened `/connect/<provider>?user_id=...&scopes=...`
+   under the admin cookie now lands on the operator connect page. Start the
+   flow there, call `POST /connect/<provider>/start`, or send the admin
+   Bearer token.
+6. Custom `agentRequestVerifier`: if it returns a principal with `userId`,
+   requests naming a different user now get
+   `403 {"error":"user_id_mismatch"}`.
 
 - New setting `SINGLE_USER_MODE` (`singleUserMode` in `createServer`),
   default `false`. A legacy request without `user_id` (blank counts as
@@ -95,12 +127,12 @@ Polish round:
 
 ### npm 2.0.0 release preparation
 
-This release is prepared but not yet published. Python package versions remain
-unchanged. The npm major version reflects integration changes since the public
-March 2026 packages; the wire-protocol version remains `0.1.0`.
+The npm major version reflects integration changes since the public March 2026
+packages; the wire-protocol version remains `0.1.0`.
 
-- Align all ten npm packages and internal dependency ranges at 2.0.0. Include
-  the previously unpublished `@credninja/protocol` and `@credninja/tofu` packages.
+- Align all twelve npm packages and internal dependency ranges at 2.0.0. Include
+  the previously unpublished `@credninja/protocol`, `@credninja/tofu`,
+  `@credninja/link` and `@credninja/link-react` packages.
 - Publish the scaffold as `@credninja/create-app`. The unscoped npm name belongs
   to an unrelated project. Update quickstart commands and the packaged-install
   smoke test to use the scoped package.
@@ -123,4 +155,3 @@ March 2026 packages; the wire-protocol version remains `0.1.0`.
 - Admin permission CRUD, incremental audit reads, and revocation-event streaming.
 - Dependency updates and the fixes already merged into main through `ff00421`.
 
-See [release and migration notes](docs/releases/npm-2.0.0.md) before upgrading.

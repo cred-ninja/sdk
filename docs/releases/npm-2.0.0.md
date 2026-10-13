@@ -1,14 +1,19 @@
 # npm 2.0.0 release and migration notes
 
-Status: prepared locally, not published. Baseline: `ff00421` on 2026-09-24.
+Status: prepared, not published. First prepared at `ff00421` on 2026-09-24;
+refreshed on 2026-10-13 at `09f9488` to cover Cred Link Phase 1 (#46, #48) and
+the explicit-user-id break on the legacy routes (#47).
 
 ## Registry inventory
 
-Checked against the public npm registry on 2026-09-24:
+Checked against the public npm registry on 2026-10-13 (unchanged since
+2026-09-24 for the original ten; nothing at 2.0.0 is published):
 
 | Package | Public latest | Prepared |
 | --- | --- | --- |
 | @credninja/protocol | Not found | 2.0.0 |
+| @credninja/link | Not found | 2.0.0 |
+| @credninja/link-react | Not found | 2.0.0 |
 | @credninja/oauth | 1.0.0 | 2.0.0 |
 | @credninja/tofu | Not found | 2.0.0 |
 | @credninja/vault | 1.0.0 | 2.0.0 |
@@ -48,7 +53,23 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    an unsupported wire version. Upgrade both sides together.
 7. Review Guard configuration. Permission narrowing constrains future grants;
    it does not retroactively rewrite an existing handle's permission snapshot.
-8. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+8. Legacy routes now require a user id. A request to `/providers`,
+   `/connect`, `DELETE /connect/:provider`, `/api/token/:provider`,
+   `/api/v1/delegate`, `/api/v1/subdelegate`, `/api/v1/connections`,
+   `/api/v1/audit` or `/api/v1/audit/stream` without `user_id` gets
+   `400 {"error":"user_id_required"}`. Single-tenant deployments set
+   `SINGLE_USER_MODE=true` and keep the old behavior; everyone else sends
+   `user_id` on every call (`default` is still a valid explicit value).
+9. Treat `consent_url` from `POST /api/v1/delegate` as opaque: it is now a
+   single-use `/connect/<provider>?request=<id>` link that expires after 10
+   minutes. Hand-built `getConsentUrl()` / `get_consent_url()` links still
+   work but land on the operator connect page and ignore their scopes.
+10. User ids starting with `link:` or `link-staged:` are reserved and refused
+   everywhere, whether or not Link is enabled. Rename any such users first.
+11. Cred Link stays off unless `LINK_ENABLED` is set, and needs the SQLite
+   vault. See the Link sections of the `@credninja/server` and
+   `@credninja/link` READMEs before turning it on.
+12. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities
@@ -70,7 +91,7 @@ npm audit --omit=dev --audit-level=high
 npm run smoke:npm
 ```
 
-The package smoke test packs all ten workspaces, installs their tarballs in a
+The package smoke test packs all twelve workspaces, installs their tarballs in a
 clean temporary consumer, exercises a brokered SDK call against a local server
 with a mocked upstream API, and starts a generated scaffold. This is packaging
 and local integration validation, not a real-provider OAuth acceptance test.
@@ -83,16 +104,24 @@ gate and reported two existing moderate dependency findings in Hono and qs. No e
 dependency versions were changed by this release preparation. Registry install
 and real-provider verification remain publish-time checks.
 
+Revalidation on 2026-10-13 at `09f9488` (Linux, Node 22.22.0): release hygiene,
+lint, build, workspace type checks, and 1754 tests passed (one opt-in live Web Bot
+Auth test skipped). Python packages: 133 tests passed. The twelve-package tarball
+smoke, brokered SDK/server smoke, and generated scaffold startup passed. The
+production dependency audit reported 0 vulnerabilities.
+
 ## Publish sequence
 
 Complete review and validation first. Authenticate to npm using an account with
-publish rights to `@credninja`. Check new-package access for protocol, tofu, and
-create-app. Do not paste credentials into this document or source control.
+publish rights to `@credninja`. Check new-package access for protocol, link,
+link-react, tofu, and create-app. Do not paste credentials into this document or source control.
 
 Stage the release under `next` in dependency order:
 
 ```sh
 npm publish --workspace packages/protocol --access public --tag next
+npm publish --workspace packages/link --access public --tag next
+npm publish --workspace packages/link-react --access public --tag next
 npm publish --workspace packages/oauth --access public --tag next
 npm publish --workspace packages/tofu --access public --tag next
 npm publish --workspace packages/vault --access public --tag next
@@ -119,7 +148,7 @@ npm start
 
 Confirm `/health`, log into `/admin/login`, configure a test provider, complete
 OAuth consent, then exercise delegation and revocation with the published SDK.
-Only after these checks, promote each of the ten packages with
+Only after these checks, promote each of the twelve packages with
 `npm dist-tag add <package>@2.0.0 latest`. Update website quickstarts and publish
 the announcement after the complete package set is available.
 
