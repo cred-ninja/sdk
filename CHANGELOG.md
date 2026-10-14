@@ -23,7 +23,10 @@ Migration for legacy-route callers:
    `/connect`, `DELETE /connect/:provider`, `/api/token/:provider`,
    `/api/v1/delegate`, `/api/v1/subdelegate`, `/api/v1/connections`,
    `/api/v1/audit` or `/api/v1/audit/stream`. After upgrading, they get
-   `400 {"error":"user_id_required"}`.
+   `400 {"error":"user_id_required"}`. Exception: when a custom
+   `agentRequestVerifier` binds the agent to a user (its principal carries
+   `userId`), an omitted or blank `user_id` acts on that user, and a
+   different explicit `user_id` gets `403 {"error":"user_id_mismatch"}`.
 2. Single-tenant deployment that always meant the `default` user: set
    `SINGLE_USER_MODE=true` (or `singleUserMode: true` in `createServer`).
    Nothing else changes. New `create-cred-app` projects already set it.
@@ -44,7 +47,10 @@ Migration for legacy-route callers:
   default `false`. A legacy request without `user_id` (blank counts as
   missing) is now refused with `400 {"error":"user_id_required"}` instead
   of acting on `default`. With `SINGLE_USER_MODE=true` it acts on `default`
-  as before. Naming `user_id`, `default` included, works in both modes. This
+  as before. Naming `user_id`, `default` included, works in both modes. A
+  request whose agent a custom `agentRequestVerifier` binds to a user
+  (principal `userId`) resolves to that user instead, and a different
+  explicit `user_id` gets `403 {"error":"user_id_mismatch"}`. This
   covers `/providers`, `/connect`, `DELETE /connect/:provider`,
   `/api/token/:provider`, `/api/v1/delegate`, `/api/v1/subdelegate`,
   `/api/v1/connections`, `/api/v1/audit` and `/api/v1/audit/stream`.

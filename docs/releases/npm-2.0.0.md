@@ -60,6 +60,9 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    `400 {"error":"user_id_required"}`. Single-tenant deployments set
    `SINGLE_USER_MODE=true` and keep the old behavior; everyone else sends
    `user_id` on every call (`default` is still a valid explicit value).
+   If a custom `agentRequestVerifier` binds the agent to a user (principal
+   `userId`), an omitted `user_id` acts on that user and a different one
+   gets `403 {"error":"user_id_mismatch"}`.
 9. Treat `consent_url` from `POST /api/v1/delegate` as opaque: it is now a
    single-use `/connect/<provider>?request=<id>` link that expires after 10
    minutes. Hand-built `getConsentUrl()` / `get_consent_url()` links still
