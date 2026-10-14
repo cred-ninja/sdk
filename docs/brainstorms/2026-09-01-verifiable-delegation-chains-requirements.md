@@ -47,11 +47,11 @@ This SDK is the named reference implementation of a pre-submission IETF draft (`
 - R2. Verifiable status propagates automatically to every descendant sub-delegation of a verifiable root, without the caller re-requesting it at each hop.
 
 **Mint-time provenance**
-- R3. For a verifiable lineage, every sub-delegation mint validates the full ancestor chain (signature, parent-hash linkage, depth, scope narrowing, expiry ordering) before minting the child, reusing the existing chain-verification engine rather than a new algorithm.
+- R3. For a verifiable lineage, every sub-delegation mint validates the full ancestor chain (signature, parent-hash linkage, depth, scope narrowing, expiry ordering) before minting the child, reusing the existing chain-verification engine rather than a new algorithm. The chain must be complete: the server either loads every ancestor receipt from its own store or rejects the mint when the caller's ancestry is missing or incomplete. Today's `/api/v1/subdelegate` verifies the chain only when the caller supplies `ancestor_receipts`; that optional behavior must not carry over to the verifiable track.
 - R4. If ancestor-chain validation fails for a verifiable lineage, the mint is rejected rather than silently downgraded to non-verifiable.
 
 **Revocation and freshness**
-- R5. Receipts minted on the verifiable track carry a shorter TTL than default-track receipts, bounding how long an independent verifier can trust a receipt without rechecking.
+- R5. Receipts minted on the verifiable track carry a shorter TTL than default-track receipts, bounding how long an independent verifier can trust a receipt without rechecking. An independent verifier observes revocation only when the receipt expires, so the TTL is the offline acceptance window. The absolute maximum is deferred to planning; until it is set, R5 is not a complete offline-verification contract (`RECEIPT_TTL_SECONDS` currently accepts any positive value, default 3600).
 
 **Key distribution**
 - R6. The receipt-signing public key is published at a stable, fetchable location, so an independent verifier can check receipt signatures without any other call to the Cred API.
