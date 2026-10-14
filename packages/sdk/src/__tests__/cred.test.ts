@@ -87,6 +87,87 @@ describe('Cred constructor', () => {
   });
 });
 
+// ── token isolation in errors ─────────────────────────────────────────────────
+//
+// Backs the SECURITY-AUDITS.md design principle: "Agent tokens are not
+// interpolated into thrown errors, response messages, or log output anywhere
+// in the SDK or MCP code paths." If a future refactor starts echoing the
+// token (or any prefix of it) into validation errors or API error bodies,
+// these tests fail.
+
+describe('Cred — token isolation in errors', () => {
+  const SECRET = 'cred_at_super_secret_value_do_not_leak_42';
+  // A distinctive prefix catches truncated echoes of the token, not only the full value.
+  const SECRET_PREFIX = SECRET.slice(0, 20);
+
+  function expectNoLeak(text: string): void {
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(SECRET_PREFIX);
+  }
+
+  function thrownBy(fn: () => unknown): unknown {
+    try {
+      fn();
+    } catch (err) {
+      return err;
+    }
+    throw new Error('expected the call to throw');
+  }
+
+  async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+    try {
+      await promise;
+    } catch (err) {
+      return err;
+    }
+    throw new Error('expected the call to reject');
+  }
+
+  it('does not leak agent token in HTTPS-rejection error', () => {
+    const err = thrownBy(() => new Cred({ agentToken: SECRET, baseUrl: 'http://remote.example.com' }));
+    expect(err).toBeInstanceOf(CredError);
+    const e = err as CredError;
+    expectNoLeak(e.message);
+    expectNoLeak(JSON.stringify(e));
+    expectNoLeak(e.stack ?? '');
+  });
+
+  it('does not leak agent token in invalid-URL error', () => {
+    const err = thrownBy(() => new Cred({ agentToken: SECRET, baseUrl: 'not a url' }));
+    expect(err).toBeInstanceOf(CredError);
+    const e = err as CredError;
+    expectNoLeak(e.message);
+    expectNoLeak(JSON.stringify(e));
+  });
+
+  it('does not leak agent token in API error response', async () => {
+    const client = new Cred({ agentToken: SECRET, baseUrl: BASE_URL });
+    mockFetch.mockResolvedValue(mockResponse(500, {
+      error: 'server_error',
+      message: 'something blew up',
+    }));
+    const err = await rejectionOf(
+      client.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' }),
+    );
+    expect(err).toBeInstanceOf(CredError);
+    const e = err as CredError;
+    expectNoLeak(e.message);
+    expectNoLeak(JSON.stringify(e));
+    expectNoLeak(e.stack ?? '');
+  });
+
+  it('does not leak agent token in network-failure error', async () => {
+    const client = new Cred({ agentToken: SECRET, baseUrl: BASE_URL });
+    mockFetch.mockRejectedValue(new Error('ECONNREFUSED upstream'));
+    const err = await rejectionOf(
+      client.delegate({ service: 'google', userId: 'u1', appClientId: 'app1' }),
+    );
+    expect(err).toBeInstanceOf(Error);
+    expectNoLeak((err as Error).message);
+    expectNoLeak((err as Error).stack ?? '');
+  });
+});
+
 // ── delegate() ────────────────────────────────────────────────────────────────
 
 describe('Cred.delegate()', () => {
