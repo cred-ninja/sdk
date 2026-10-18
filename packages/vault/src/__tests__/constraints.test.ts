@@ -165,8 +165,8 @@ describe('verifyDelegationChain constraints', () => {
 });
 
 describe('asor-01 section 4.2 constraint types', () => {
-  it('registers exactly the six section 10 types', () => {
-    expect([...DELEGATION_CONSTRAINT_TYPES]).toEqual(['max', 'min', 'one_of', 'not_one_of', 'prefix', 'rank']);
+  it('registers the six section 10 types, then the two -02 cumulative types', () => {
+    expect([...DELEGATION_CONSTRAINT_TYPES]).toEqual(['max', 'min', 'one_of', 'not_one_of', 'prefix', 'rank', 'max_lifetime', 'max_subtree']);
   });
 
   it('parses every type and reports it back', () => {
