@@ -15,7 +15,19 @@ export type { CreatePermissionInput } from './permissions.js';
 export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope, classifyScope } from './delegation-chain.js';
 export type { ScopeClass } from './delegation-chain.js';
 export { verifyDelegationChain } from './chain-verify.js';
-export { parseConstraints, constraintsSubsume, constraintTypeOf, unresolvableRankLabels, DEFAULT_RANK_ORDERINGS, DELEGATION_CONSTRAINT_TYPES } from './constraints.js';
+export {
+  parseConstraints,
+  constraintsSubsume,
+  constraintTypeOf,
+  unresolvableRankLabels,
+  cumulativeConstraints,
+  producerConstraintViolations,
+  DEFAULT_RANK_ORDERINGS,
+  DEFAULT_RUNNING_COUNT_KEYS,
+  DELEGATION_CONSTRAINT_TYPES,
+  CUMULATIVE_CONSTRAINT_TYPES,
+  CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+} from './constraints.js';
 export type {
   DelegationConstraint,
   DelegationConstraintType,
@@ -25,6 +37,9 @@ export type {
   NotOneOfConstraint,
   PrefixConstraint,
   RankConstraint,
+  MaxLifetimeConstraint,
+  MaxSubtreeConstraint,
+  ProducerConstraintOptions,
   ConstraintSetMember,
   RankOrderings,
   ConstraintSubsumptionOptions,
