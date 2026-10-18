@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -1238,12 +1238,12 @@ describe('POST /api/v1/subdelegate', () => {
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
       .send(subdelegateBody({
         parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }], 'del_cp_tighter'),
-        constraints: [{ key: 'max_rows', max: 100 }, { key: 'max_calls', max: 3 }],
+        constraints: [{ key: 'max_rows', max: 100 }, { key: 'max_results', max: 3 }],
       }));
 
     expect(res.status).toBe(200);
     const child = decodeReceiptPayload(res.body.receipt);
-    expect(child.constraints).toEqual([{ key: 'max_rows', max: 100 }, { key: 'max_calls', max: 3 }]);
+    expect(child.constraints).toEqual([{ key: 'max_rows', max: 100 }, { key: 'max_results', max: 3 }]);
   });
 
   it('rejects loosened constraints with constraint_escalation_denied', async () => {
@@ -1329,5 +1329,110 @@ describe('POST /api/v1/subdelegate', () => {
 
     expect(res.status).toBe(403);
     expect(String(res.body.error)).toContain('constraints');
+  });
+
+  // ── draft-asor-wimse-agent-delegation-chain-02 (non-breaking subset) ────
+
+  it('mints -02 constraints: rank with order, a min/max range, cumulative bounds', async () => {
+    const order = ['none', 'internal', 'any'];
+    const parentConstraints = [
+      { key: 'egress', rank: 'any', order },
+      { key: 'max_rows', max: 5000 },
+      { key: 'max_rows', min: 1 },
+      { key: 'max_calls', max_lifetime: 50 },
+    ];
+    const childConstraints = [
+      { key: 'egress', rank: 'internal', order },
+      { key: 'max_rows', max: 100 },
+      { key: 'max_rows', min: 2 },
+      { key: 'max_calls', max_lifetime: 10 },
+    ];
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent(parentConstraints, 'del_cp_asor02_mint'),
+        constraints: childConstraints,
+      }));
+
+    expect(res.status).toBe(200);
+    expect(decodeReceiptPayload(res.body.receipt).constraints).toEqual(childConstraints);
+  });
+
+  it("rejects a child whose rank order differs from the parent's", async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'egress', rank: 'any', order: ['none', 'internal', 'any'] }], 'del_cp_asor02_order'),
+        constraints: [{ key: 'egress', rank: 'none', order: ['none', 'any'] }],
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('constraint_escalation_denied');
+  });
+
+  it('rejects a cross-type restatement (max_lifetime under a parent max)', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_rows', max: 5000 }], 'del_cp_asor02_cross'),
+        constraints: [{ key: 'max_rows', max_lifetime: 1 }],
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('constraint_escalation_denied');
+  });
+
+  it('keeps a legacy parent max_calls max verifiable: inherited unchanged is not re-judged', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_calls', max: 50 }], 'del_cp_asor02_legacy_calls'),
+      }));
+
+    expect(res.status).toBe(200);
+    expect(decodeReceiptPayload(res.body.receipt).constraints).toEqual([{ key: 'max_calls', max: 50 }]);
+  });
+
+  it('refuses to mint a newly produced max on a running-count key', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_calls', max: 50 }], 'del_cp_asor02_new_calls'),
+        constraints: [{ key: 'max_calls', max: 10 }],
+      }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+  });
+
+  it('a sub-delegated handle under an inherited cumulative bound is denied at /api/v1/use', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_spend', max_subtree: 100 }], 'del_cp_asor02_use'),
+      }));
+    expect(res.status).toBe(200);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const useRes = await request(app)
+      .post('/api/v1/use')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ delegation_id: res.body.delegation_id, url: 'https://www.googleapis.com/oauth2/v3/userinfo', method: 'GET' });
+    expect(useRes.status).toBe(403);
+    expect(useRes.body.error).toBe('cumulative_constraint_unenforceable');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 });
