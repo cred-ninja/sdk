@@ -29,7 +29,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError } from '@credninja/vault';
 import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
@@ -86,6 +86,14 @@ interface BrokeredDelegation {
   scopes: string[];
   expiresAt: number;
   createdAt: number;
+  /**
+   * Constraint ceilings of the delegation this handle exercises (the same
+   * list its receipt carries). /api/v1/use denies every action under a
+   * cumulative constraint (max_lifetime, max_subtree), because no component
+   * here holds the running total (draft-asor-wimse-agent-delegation-chain-02
+   * section 6, step 8). Absent on handles minted without constraints.
+   */
+  constraints?: DelegationConstraint[];
   /**
    * Set for handles minted for a Cred Link connection. Such handles hold no
    * provider token (accessToken is ''): /api/v1/use re-runs the Link check
@@ -2838,6 +2846,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     scopes: string[];
     expiresIn: number;
     link?: LinkHandleBinding;
+    constraints?: DelegationConstraint[];
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -2848,6 +2857,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       expiresAt,
       createdAt: Date.now(),
       ...(input.link ? { link: input.link } : {}),
+      ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -2876,6 +2886,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     chainDepth?: number;
     parentDelegationId?: string;
     guard?: Record<string, unknown>;
+    constraints?: DelegationConstraint[];
   }): Record<string, unknown> {
     if (input.tokenFormat === 'handle') {
       storeBrokeredDelegation({
@@ -2885,6 +2896,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         userId: input.userId,
         scopes: input.scopes,
         expiresIn: input.expiresIn,
+        ...(input.constraints ? { constraints: input.constraints } : {}),
       });
     }
 
@@ -3227,6 +3239,32 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
+      // Cumulative constraints (max_lifetime, max_subtree) are checked only
+      // where the running total is held, and an enforcement point that holds
+      // none MUST deny (draft-asor-wimse-agent-delegation-chain-02 section 6,
+      // step 8). Cred has no running-total store yet, so every action under
+      // such a delegation is refused here, before any upstream call. This is
+      // fail-closed by design, not a ceiling being exceeded.
+      const unenforceable = cumulativeConstraints(delegation.constraints ?? []);
+      if (unenforceable.length > 0) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
+          action: 'deny',
+          resource: { type: 'token', id: delegationId },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          metadata: { constraints: unenforceable.map((c) => c.key) },
+        });
+        res.status(403).json({
+          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          message: 'This delegation carries a cumulative constraint and no running total is held for it; the action is denied',
+          constraints: unenforceable.map((c) => c.key),
+        });
+        return;
+      }
       // Link handles: re-run the Link check (revoked, narrowed or
       // needs_reauth connections are refused at once) before anything else.
       let linkAccess: Awaited<ReturnType<LinkService['authorizeUse']>> = null;
@@ -3385,6 +3423,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_constraints', message: `No rank ordering is registered for: ${unresolvableRoot.join(', ')}` });
         return;
       }
+      // max is per action only (asor-02 section 4.2): refuse to mint a
+      // running-count bound under it.
+      const rootProducerViolations = producerConstraintViolations(rootConstraints.constraints);
+      if (rootProducerViolations.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', message: rootProducerViolations.join('; ') });
+        return;
+      }
 
       const userId = requestUserId(req, res, { agent: true, source: 'body' });
       if (userId === null) return;
@@ -3412,6 +3457,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
       const effectiveRequestedScopes: string[] | undefined = guardDecision?.effectiveScopes ?? requestedScopes;
       const tokenFormat = tokenFormatFromBody(req);
+      // A raw provider token leaves the server, so nothing can hold it to a
+      // running total. Under a cumulative constraint only a brokered handle
+      // is issued, and /api/v1/use then fails closed on it (asor-02
+      // section 6, step 8).
+      if (tokenFormat === 'raw' && cumulativeConstraints(rootConstraints.constraints).length > 0) {
+        res.status(400).json({
+          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          message: 'A raw token cannot be held to a cumulative constraint (max_lifetime, max_subtree); request token_format "handle"',
+        });
+        return;
+      }
 
       let principalId: string | null = null;
       let principalFingerprint: string | undefined;
@@ -3559,6 +3615,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         scopes: grantedScopes,
         delegationId,
         receipt,
+        constraints: rootConstraints.constraints,
       }));
     } catch (err) {
       if (sendReservedUserIdError(res, err)) return;
@@ -4497,6 +4554,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Issue child receipt ──────────────────────────────────────────────
 
+      // max is per action only (asor-02 section 4.2). Judge only what this
+      // hop mints: a ceiling carried unchanged from the parent is inherited,
+      // so chains under receipts minted before this rule keep working.
+      const childProducerViolations = producerConstraintViolations(validation.grantedConstraints, { inherited: parent.constraints });
+      if (childProducerViolations.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', message: childProducerViolations.join('; ') });
+        return;
+      }
+
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
       const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');
 
@@ -4564,6 +4630,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           receipt,
           chainDepth: validation.chainDepth,
           parentDelegationId: validation.parentDelegationId,
+          constraints: validation.grantedConstraints,
         }),
         // Always present: sub-delegation is broker-only at every depth, so
         // this both confirms the format and flags any downgrade from a
