@@ -26,7 +26,7 @@ import {
   isLinkClientId,
 } from '@credninja/protocol';
 import type { LinkClient, LinkJwk, LinkStore } from '@credninja/protocol';
-import { hexDigestsEqual, sha256Hex } from './util.js';
+import { hexDigestsEqual, sha256Hex, trimTrailingSlashes } from './util.js';
 
 /** Clock skew tolerated on assertion iat/exp/nbf, seconds. */
 const ASSERTION_SKEW_SECONDS = 30;
@@ -210,7 +210,7 @@ export class LinkClientAuthenticator {
 
   constructor(private readonly options: LinkClientAuthenticatorOptions) {
     this.replay = options.replay ?? new AssertionReplayCache();
-    this.audiences = new Set(options.audiences.map((a) => a.replace(/\/+$/, '')));
+    this.audiences = new Set(options.audiences.map(trimTrailingSlashes));
   }
 
   /** The authenticated, active client, or null for any failure. */
@@ -258,7 +258,7 @@ export class LinkClientAuthenticator {
     const aud = payload.aud;
     const auds = Array.isArray(aud) ? aud : [aud];
     if (auds.length === 0 || !auds.every((a) => typeof a === 'string')) return null;
-    if (!auds.some((a) => this.audiences.has((a as string).replace(/\/+$/, '')))) return null;
+    if (!auds.some((a) => this.audiences.has(trimTrailingSlashes(a as string)))) return null;
     const exp = payload.exp;
     const iat = payload.iat;
     if (typeof exp !== 'number' || typeof iat !== 'number' || !Number.isFinite(exp) || !Number.isFinite(iat)) return null;

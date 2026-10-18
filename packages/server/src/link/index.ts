@@ -64,7 +64,7 @@ import type { LinkHealFollowUpReport, LinkHealReport } from './heal.js';
 import { sendLocalErrorPage } from './pages.js';
 import { LinkProviderRuntime } from './providers.js';
 import { ConnectionLocks, ConnectionQuarantine, LinkTokenLoader } from './tokens.js';
-import { sendLinkError } from './util.js';
+import { sendLinkError, trimTrailingSlashes } from './util.js';
 
 export type { LinkHandleBinding } from './enforcement.js';
 export type { LinkHealFollowUpOutcome, LinkHealFollowUpReport, LinkHealOutcome, LinkHealReport } from './heal.js';
@@ -134,7 +134,7 @@ export interface LinkService {
 
 /** Build the Link service. Requires a vault with permission storage (the SQLite backend). */
 export function createLinkService(options: CreateLinkServiceOptions): LinkService {
-  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const baseUrl = trimTrailingSlashes(options.baseUrl);
   const selfOrigin = new URL(baseUrl).origin;
   const { store, secrets } = createLinkStorage({ vault: options.vault, path: options.storePath });
   const permissions = options.vault.getLinkPermissionPort();
