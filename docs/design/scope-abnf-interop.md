@@ -95,3 +95,24 @@ the trailing `.*` segment) still matches itself by exact equality, so legacy
 receipts carrying such strings keep verifying; asor-01 rejects the token
 instead. The three list vectors (wildcard over opaque: deny; opaque over
 wildcard: deny; wildcard over literal: accept) pass under both readings.
+
+## Landed in asor-02 (2026-10-15)
+
+draft-asor-wimse-agent-delegation-chain-02 Section 4.1 carries the three-form
+grammar above verbatim, classification by bytes alone in the order literal,
+wildcard, opaque, and no case folding. The residual ambiguity for dotted
+provider strings is stated next to the grammar as lowercase guidance ("should
+not grant a wildcard over its prefix"), not a normative MUST NOT, so it does
+not constrain broker deployments that pass provider scopes through. Appendix A
+credits the opaque form; three of the four proposed vectors are in the -02
+set (`valid_wildcard_over_literal` was left out as a duplicate of
+`valid_chain`).
+
+Divergence that remains on the Cred side: the Cred-local allowance above (a
+malformed scope matches itself by exact equality) conflicts with -02, which
+says a verifier that encounters an invalid scope MUST reject the token as
+malformed before evaluating subsumption. Track it with the -02 vector run in
+`docs/protocol-conformance.md`.
+
+Source: https://www.ietf.org/archive/id/draft-asor-wimse-agent-delegation-chain-02.txt
+

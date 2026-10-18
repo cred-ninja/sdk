@@ -117,11 +117,23 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
 - [ ] Remaining convergence: wrap scopes + constraints in an RFC 9396
   `authorization_details` entry of type `agent_delegation` so offline-minted
   chains and server-issued receipts read the same (next wire version).
-- [ ] Raise with Asor for -02: `rank` labels have no on-wire ordering. The
-  draft names one example ordering (`egress`: none < internal < any) and the
-  vectors depend on it. Either the registry entry for a key carries its
-  ordering, or the token does. Cred fails closed on any label without a
-  registered ordering.
+- [x] Raised with Asor for -02: `rank` labels had no on-wire ordering.
+  Resolved in `draft-asor-wimse-agent-delegation-chain-02` §4.2 (2026-10-15):
+  a label-valued `rank` carries an `order` array, least to most permissive,
+  and a child's `order` must equal its parent's. Cred still resolves labels
+  through `DEFAULT_RANK_ORDERINGS`; reading `order` from the token is a
+  follow-up below.
+- [ ] Run the asor-02 vector set (35 files, published with attenu-guard
+  0.20.0 / attenu-guard-ts 0.14.0) through the conformance runner in
+  cred-ninja/protocol. Expected gaps against Cred main today, from the -02
+  text: principal invariance (§3, step 3: `sub` identical at every hop;
+  Cred receipts put the agent in `sub`), required `cnf` and `client_id` on
+  every token, `max_lifetime` / `max_subtree` (§4.2) and the rule that
+  `max` is per action only, closed detail and constraint objects with
+  uniqueness per (key, type) rather than per key, `rank` with on-wire
+  `order`, the leaf audience check (step 8), and rejection of an invalid
+  scope as malformed instead of the Cred-local exact-match allowance. The
+  -01 twenty stay byte-stable and Cred's 20 of 20 on them stands.
 
 ## WIMSE composition tracking
 
