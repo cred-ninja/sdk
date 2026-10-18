@@ -3252,11 +3252,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           timestamp: new Date(),
           actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
           action: 'deny',
-          resource: { type: 'token', id: delegationId },
+          // service/userId, like every other deny event, so the owning
+          // user's /api/v1/audit and audit stream can see it.
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
           outcome: 'denied',
           correlationId: crypto.randomUUID(),
           errorMessage: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
-          metadata: { constraints: unenforceable.map((c) => c.key) },
+          metadata: { delegationId, constraints: unenforceable.map((c) => c.key) },
         });
         res.status(403).json({
           error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
@@ -3378,6 +3380,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const correlationId = crypto.randomUUID();
 
     try {
+      // Link handles carry no constraints, so a Link request that sends some
+      // would get an unconstrained credential. Refuse rather than drop them.
+      if (linkService && req.body?.connection_id !== undefined && req.body?.constraints !== undefined) {
+        res.status(400).json({
+          error: 'invalid_constraints',
+          message: 'constraints are not supported on Cred Link delegation (connection_id)',
+        });
+        return;
+      }
       if (linkService && await linkService.handleDelegate(req, res)) return;
 
       const {
@@ -3430,6 +3441,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_constraints', message: rootProducerViolations.join('; ') });
         return;
       }
+      // A raw provider token leaves the server, so nothing can hold it to a
+      // running total. Under a cumulative constraint only a brokered handle
+      // is issued, and /api/v1/use then fails closed on it (asor-02
+      // section 6, step 8). Checked before any vault lookup.
+      if (tokenFormatFromBody(req) === 'raw' && cumulativeConstraints(rootConstraints.constraints).length > 0) {
+        res.status(400).json({
+          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          message: 'A raw token cannot be held to a cumulative constraint (max_lifetime, max_subtree); request token_format "handle"',
+        });
+        return;
+      }
 
       const userId = requestUserId(req, res, { agent: true, source: 'body' });
       if (userId === null) return;
@@ -3457,17 +3479,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
       const effectiveRequestedScopes: string[] | undefined = guardDecision?.effectiveScopes ?? requestedScopes;
       const tokenFormat = tokenFormatFromBody(req);
-      // A raw provider token leaves the server, so nothing can hold it to a
-      // running total. Under a cumulative constraint only a brokered handle
-      // is issued, and /api/v1/use then fails closed on it (asor-02
-      // section 6, step 8).
-      if (tokenFormat === 'raw' && cumulativeConstraints(rootConstraints.constraints).length > 0) {
-        res.status(400).json({
-          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
-          message: 'A raw token cannot be held to a cumulative constraint (max_lifetime, max_subtree); request token_format "handle"',
-        });
-        return;
-      }
 
       let principalId: string | null = null;
       let principalFingerprint: string | undefined;
@@ -4489,6 +4500,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         validation.grantedScopes = withinCeiling;
       }
 
+      // max is per action only (asor-02 section 4.2). Judge only what this
+      // hop mints: a ceiling carried unchanged from the parent is inherited,
+      // so chains under receipts minted before this rule keep working. Checked before the vault read, which can refresh a
+      // stored credential.
+      const childProducerViolations = producerConstraintViolations(validation.grantedConstraints, { inherited: parent.constraints });
+      if (childProducerViolations.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', message: childProducerViolations.join('; ') });
+        return;
+      }
+
       // ── Retrieve token from vault ────────────────────────────────────────
 
       const providerConfig = getProviderConfig(service);
@@ -4553,15 +4574,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       // ── Issue child receipt ──────────────────────────────────────────────
-
-      // max is per action only (asor-02 section 4.2). Judge only what this
-      // hop mints: a ceiling carried unchanged from the parent is inherited,
-      // so chains under receipts minted before this rule keep working.
-      const childProducerViolations = producerConstraintViolations(validation.grantedConstraints, { inherited: parent.constraints });
-      if (childProducerViolations.length > 0) {
-        res.status(400).json({ error: 'invalid_constraints', message: childProducerViolations.join('; ') });
-        return;
-      }
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
       const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');

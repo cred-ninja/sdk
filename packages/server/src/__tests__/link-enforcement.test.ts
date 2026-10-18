@@ -559,3 +559,21 @@ describe('Hosted flow and request_uri via authorize with narrowing', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('Link delegation and constraints', () => {
+  it('refuses constraints on a connection_id delegation instead of dropping them', async () => {
+    const { app } = await harness();
+    const client = await registerClient(app);
+    const connectionId = await connectAndActivate(app, client);
+    const res = await delegate(app, {
+      connection_id: connectionId,
+      constraints: [{ key: 'max_calls', max_lifetime: 5 }],
+      token_format: 'handle',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+
+    const ok = await delegate(app, { connection_id: connectionId, token_format: 'handle' });
+    expect(ok.status).toBe(200);
+  });
+});

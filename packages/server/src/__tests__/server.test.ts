@@ -1159,8 +1159,8 @@ describe('@credninja/server', () => {
     // max_lifetime / max_subtree are checked only where the running total is
     // held; Cred holds none yet, so /api/v1/use must deny (section 6, step 8).
 
-    async function delegateHandle(constraints: unknown, extra: Record<string, unknown> = {}) {
-      const { app, vault } = createServer(makeTestConfig());
+    async function delegateHandle(constraints: unknown, extra: Record<string, unknown> = {}, config: Partial<ServerConfig> = {}) {
+      const { app, vault } = createServer(makeTestConfig(config));
       await vault.init();
       await vault.store({
         provider: 'google',
@@ -1224,6 +1224,44 @@ describe('@credninja/server', () => {
       expect(useRes.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       fetchSpy.mockRestore();
+    });
+
+    it("records the cumulative deny where the owning user's audit log can see it", async () => {
+      const { app, res } = await delegateHandle(
+        [{ key: 'max_calls', max_lifetime: 50 }],
+        {},
+        { vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH },
+      );
+      expect(res.status).toBe(200);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const useRes = await useHandle(app, res.body.delegation_id);
+      expect(useRes.status).toBe(403);
+      fetchSpy.mockRestore();
+
+      const audit = await request(app)
+        .get('/api/v1/audit?user_id=user-asor02&service=google')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`);
+      expect(audit.status).toBe(200);
+      expect(audit.body.entries.some((e: any) =>
+        e.action === 'deny' && e.metadata?.errorMessage === 'cumulative_constraint_unenforceable')).toBe(true);
+    });
+
+    it('refuses a raw token under a cumulative constraint before looking up credentials', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+      const res = await request(app)
+        .post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({
+          service: 'google',
+          user_id: 'user-asor02-nothing-stored',
+          scopes: ['calendar.readonly'],
+          token_format: 'raw',
+          constraints: [{ key: 'max_calls', max_lifetime: 50 }],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('cumulative_constraint_unenforceable');
+      expect(res.body.consent_url).toBeUndefined();
     });
 
     it('refuses a raw token under a cumulative constraint', async () => {

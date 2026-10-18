@@ -1415,6 +1415,21 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.body.error).toBe('invalid_constraints');
   });
 
+  it('refuses a new running-count max before reading stored credentials', async () => {
+    const { app, vault } = await setupVaultWithTokenAndPermissions();
+    await vault.delete({ provider: 'google', userId: 'default' });
+    const res = await request(app)
+      .post('/api/v1/subdelegate')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send(subdelegateBody({
+        parent_receipt: constrainedParent([{ key: 'max_calls', max: 50 }], 'del_cp_asor02_before_vault'),
+        constraints: [{ key: 'max_calls', max: 10 }],
+      }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+  });
+
   it('a sub-delegated handle under an inherited cumulative bound is denied at /api/v1/use', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
     const res = await request(app)
