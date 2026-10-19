@@ -22,6 +22,17 @@ export function newSecret(): string {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+/**
+ * The string without its trailing '/' characters. A linear scan: the
+ * /\/+$/ regex backtracks quadratically on long runs of '/' that are not at
+ * the end, and client assertion audiences reach this from the network.
+ */
+export function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 /** Lowercase hex SHA-256 of the UTF-8 string (LINK_SECRET_HASH_ALGORITHM). */
 export function sha256Hex(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
