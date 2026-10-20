@@ -27,6 +27,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 - Section 4 allows only "Ed25519 or P-256". Allow ML-DSA and add the asor -02 Section 6 step 1 rule: deny a chain whose algorithm is not on the verifier's local list. (PQ agent identity)
 - Section 7: say that `revoked_count` reports invalidation, not closure; a token exchanged for direct presentation to a resource server leaves closure PARTIAL until the resource server checks authority at commit. (Revocation closure)
+- Section 7: state that synchronous cascading revocation holds within one Delegation Server only, and that enforcement of a revoked delegation across administrative domains is out of scope. Watts asked proponents on 2026-10-19 for exactly this limit. (Revocation closure)
 - Related Work, Nelson paragraph: principal-signed receipts add assurance only when the principal's key is user-held and user-verified. (Nelson receipts)
 - Security Considerations: retained receipts and consent records are classical-signature evidence; long-term retention needs anchoring. (PQ agent identity)
 
@@ -43,7 +44,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### Fine-grained authorization in OAuth (oauth)
 
-- Last read: 2026-10-18. Latest: Omri Gazitt, 2026-10-15 22:03 UTC. Interim on draft-mcguinness-oauth-mission, 2026-10-26 17:00 UTC.
+- Last read: 2026-10-19. Latest: Omri Gazitt, 2026-10-15 22:03 UTC. Interim on draft-mcguinness-oauth-mission, 2026-10-26 17:00 UTC. Related: on the OAuth IETF 127 agenda thread, Dapeng Liu (Max, Alibaba) asked the chairs on 2026-10-17 (Gmail 1a14a38a87cfb310) for 15 minutes in the OAuth session for draft-liu-mcguinness-oauth-bounded-work ("OAuth 2.0 Bounded Work Authorization", Liu and Karl McGuinness: use case, framework, requirements), offering to share time with related drafts. Not yet read on Datatracker (fetch failed 2026-10-19); the Thursday sweep should read it before Kieran replies to Karl, since it is likely where Karl's position now lives.
 - State: three tracks. Before issuance: Yaron Zehavi's authority metadata with the `amb` digest, closed (Blake Morrison and Omri signed off Oct 15). After execution: Ron Bar-Tor's cross-resource-server join, moved to mission #1051 with a three-valued result. Instruction provenance: Arun, Iman Schrock and Mohamad Yossif on executor-side approval evidence. Open: who computes the join, fields or digests in evidence records (#1019).
 - Stance: SPEAK.
 - Position: Karl is right that an issuer cannot sign for what a resource server's fields mean, but that does not kill the portable artifact. The Mandate commits, per Authority Set entry, to the `amb` digest of the resource server's own authority description at approval. Any verifier holding the Mandate, the records and the metadata can then check each record against the description the approval used, and Ron's join is computable without the AS. Freshness stays with the issuer, the same split -02 Section 5.4 makes for receipt chains. Do not answer Karl's downstream-instruction question; that space is crowded.
@@ -52,11 +53,12 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### Revocation closure semantics for delegated agents (oauth, Deonté O'dell Watts)
 
-- Last read: 2026-10-18. Latest: Caleb Dayton, 2026-10-18 04:22 UTC (R1 to R13 negative tests). Duplicate posts under "Scoped revocation closure" (Gmail 1a141a4937ed6891, 1a140b2fda35514e) have no replies.
-- State: Watts separates receipt of a revocation, invalidation, and evidence that queued or derived work can no longer commit (CLOSED, PARTIAL, FAILED, UNKNOWN). Thilina Senarath and Jeff Lombardo asked what is AI-specific; Watts conceded nothing and leaned to negative vectors. Open: how another domain authenticates a pre-revocation acceptance time.
-- Stance: SPEAK.
+- Last read: 2026-10-19. Latest: Watts, 2026-10-19 10:32 UTC (Gmail 1a153b94633d2af6). Earlier: Caleb Dayton, 2026-10-18 04:22 UTC (R1 to R13 negative tests). Duplicate posts under "Scoped revocation closure" (Gmail 1a141a4937ed6891, 1a140b2fda35514e) have no replies.
+- State: Watts separates receipt of a revocation, invalidation, and evidence that queued or derived work can no longer commit (CLOSED, PARTIAL, FAILED, UNKNOWN). Thilina Senarath and Jeff Lombardo asked what is AI-specific; Watts conceded nothing and leaned to negative vectors. Open: how another domain authenticates a pre-revocation acceptance time. Watts (Oct 19) thanked Caleb for the 13 scenarios and Ornella for GUARDAID and Guardalpha, said an audit chain recording issue or dispatch time does not show a downstream system cannot later commit a queued effect, and asked proponents for public, versioned specifications or reproducible tests defining (1) when a ticket is consumed versus when the action commits, (2) how a revoked epoch is enforced across administrative domains, (3) how unknown downstream paths or already-accepted obligations are represented.
+- Stance: SPEAK. The Oct 19 ask is a direct opening: Kieran's -01 is a public, versioned specification for (1) and part of (2).
 - Position: where a mediator executes the call, it is the single commit-time enforcement point and its signed per-hop record is the authenticated acceptance time. Closure should be claimable only for sinks the claimant gates. Cred's own `revoked_count` is an invalidation report, not closure; a token exchanged to a resource server makes the result PARTIAL. Caleb's R6 and R7 cannot both hold past a token's lifetime.
-- Reply to: Watts, 2026-10-18 03:29 UTC (Gmail 1a14d0feec558b39, thread 1a13e7e127e56a04).
+- Position addendum (2026-10-19): answer Watts's three questions with section pointers, not claims. (1) In draft-sweeney -01 the Delegation Server consumes at admission and executes the call, so consume and commit coincide for calls it mediates; it says nothing about effects queued behind the resource server. (2) Revocation is synchronous and cascading within one DS; across administrative domains it is not solved, and the draft should say so. (3) Unknown downstream paths: a token exchanged out of the DS's path is exactly the PARTIAL case. State the limits plainly.
+- Reply to: Watts, 2026-10-19 10:32 UTC (Gmail 1a153b94633d2af6, thread 1a13e7e127e56a04). Supersedes the Oct 18 target (Gmail 1a14d0feec558b39).
 - Speak by: 2026-10-20.
 
 ### Nelson delegation receipts (wimse, oauth, private)
@@ -102,6 +104,31 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Stance: WATCH.
 - Position: say only with results. Cred can produce a mapped run, not a native one. R10 one-time reliance is where Cred has a real answer (single-use grant, DS as single writer), but the single-use grant is not implemented yet.
 - Trigger: Cred has a mapped run or Arun's refuse-accept-refuse sequence against the DS. Then reply to Arun, 2026-10-10 (Gmail 1a127bf969ce6686).
+
+### draft-asor-wimse-agent-delegation-chain-02: Principal standing at time of use (wimse)
+
+- Last read: 2026-10-19. Latest: Rafael Asor, 2026-10-18 17:24 UTC (Gmail 1a1500b970029d4c).
+- State: Cliff Singletary (Oct 16, Gmail 1a145fc495439c10): Section 9.7 says verification shows no hop exceeded the root, never that the root was right; a second limit is that nothing shows the Principal in "sub" still holds the DT_0 authority when an action is taken. Asked for a Table 1 row: "chain alone - no; with the request - no". Asor (Oct 18) agreed; the row goes into -03 as written, credited to Cliff, before the 2 November cutoff.
+- Stance: WATCH. No separate post.
+- Position: the row is right for the chain. It should not read as "nobody can know". A server in the call path that holds the Principal's deposited grant learns at use time whether the upstream grant still stands, because the upstream refresh or call fails when it is withdrawn. That covers the withdrawn-grant case, not role loss inside the Principal's own organization. If Kieran wants it said, one sentence rides in the owed reply to Asor under the -01 call for comments, not a new thread.
+- Trigger: -03 posts and the row or its prose implies the property cannot be established anywhere; or the shared constraint section changes.
+
+### Brokered OAuth security as a separate document (oauth, Pedram Hosseyni)
+
+- Last read: 2026-10-19. Latest: Pedram Hosseyni, 2026-10-19 08:49 UTC (Gmail 1a1535ae3ad26d26). No replies yet.
+- State: Pedram asks whether there is interest in a separate document on brokered OAuth architectures, their common deployment patterns and security considerations, moving Section 2.4 (shared consent in brokered OAuth) of draft-ietf-oauth-security-topics-update-03 into it. Presented at IETF 126. Section 2.4 not yet read (Datatracker fetch failed 2026-10-19).
+- Stance: SPEAK, short.
+- Position: support the separate document. Cred is a brokered deployment in practice: the Delegation Server holds user-deposited OAuth credentials and agents exercise them by proxy without ever holding the token. That is a different pattern from a broker that hands tokens to multiple clients under one consent, with different risks: the custody broker concentrates refresh tokens and must bound who can cause a call, while the pass-through broker leaks consent scope across clients. The document should name both patterns and keep them apart. Offer the custody pattern as one worked case; do not pitch Cred. Read Section 2.4 first so the reply builds on its terms.
+- Reply to: Pedram, 2026-10-19 08:49 UTC (Gmail 1a1535ae3ad26d26).
+- Speak by: 2026-10-26.
+
+### draft-rampalli-pedigree status correction (wimse, Karthik Rampalli)
+
+- Last read: 2026-10-19. Latest: Karthik Rampalli, 2026-10-18 13:00 UTC (Gmail 1a14f1ae8c94c1c8).
+- State: Karthik corrected his July messages: draft-rampalli-pedigree-01 was never posted; only -00 (April 2026) exists. draft-rampalli-cross-org-delegation-mapping-05 cites -01 and should cite -00. The fail-closed revocation text and IANA fixes promised for -01 are in no posted revision. He will post when a revision is on the datatracker.
+- Stance: WATCH.
+- Position: nothing to add; a status correction. Do not cite pedigree -01 or its revocation text anywhere, including Kieran's -02 Related Work.
+- Trigger: a pedigree revision posts with the fail-closed revocation text; then compare it with -02 Section 7.
 
 ### PQ requirements for agent identity (wimse)
 
