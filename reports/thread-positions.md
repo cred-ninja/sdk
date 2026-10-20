@@ -53,7 +53,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### Revocation closure semantics for delegated agents (oauth, Deonté O'dell Watts)
 
-- Last read: 2026-10-19. Latest: Watts, 2026-10-19 10:32 UTC (Gmail 1a153b94633d2af6). Earlier: Caleb Dayton, 2026-10-18 04:22 UTC (R1 to R13 negative tests). Duplicate posts under "Scoped revocation closure" (Gmail 1a141a4937ed6891, 1a140b2fda35514e) have no replies.
+- Last read: 2026-10-20 (no new messages since Watts on Oct 19; Kieran has not posted). Latest: Watts, 2026-10-19 10:32 UTC (Gmail 1a153b94633d2af6). Earlier: Caleb Dayton, 2026-10-18 04:22 UTC (R1 to R13 negative tests). Duplicate posts under "Scoped revocation closure" (Gmail 1a141a4937ed6891, 1a140b2fda35514e) have no replies.
 - State: Watts separates receipt of a revocation, invalidation, and evidence that queued or derived work can no longer commit (CLOSED, PARTIAL, FAILED, UNKNOWN). Thilina Senarath and Jeff Lombardo asked what is AI-specific; Watts conceded nothing and leaned to negative vectors. Open: how another domain authenticates a pre-revocation acceptance time. Watts (Oct 19) thanked Caleb for the 13 scenarios and Ornella for GUARDAID and Guardalpha, said an audit chain recording issue or dispatch time does not show a downstream system cannot later commit a queued effect, and asked proponents for public, versioned specifications or reproducible tests defining (1) when a ticket is consumed versus when the action commits, (2) how a revoked epoch is enforced across administrative domains, (3) how unknown downstream paths or already-accepted obligations are represented.
 - Stance: SPEAK. The Oct 19 ask is a direct opening: Kieran's -01 is a public, versioned specification for (1) and part of (2).
 - Position: where a mediator executes the call, it is the single commit-time enforcement point and its signed per-hop record is the authenticated acceptance time. Closure should be claimable only for sinks the claimant gates. Cred's own `revoked_count` is an invalidation report, not closure; a token exchanged to a resource server makes the result PARTIAL. Caleb's R6 and R7 cannot both hold past a token's lifetime.
@@ -90,8 +90,8 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### Gilda agent audit record, "could not evaluate" (wimse, moving to AUDIT BOF)
 
-- Last read: 2026-10-18. Latest: Cliff Singletary, 2026-10-16 18:28 UTC. Replaced by draft-gilda-audit-agent-audit-record-00 (2026-10-16).
-- State: settled. Required evaluation member, unavailableInput from a closed set, required lastResult and maxAge, age measured from decision.reportedAt.
+- Last read: 2026-10-20. Latest: Cliff Singletary, 2026-10-19 23:53 UTC (Gmail 1a15696283ee0628). Replaced by draft-gilda-audit-agent-audit-record-00 (2026-10-16).
+- State: settled. Required evaluation member, unavailableInput from a closed set, required lastResult and maxAge, age measured from decision.reportedAt. Girish Konda (Oct 19, Gmail 1a156455320eaf70) reviewed -00 and vectors PR 185 and closed both his points: Section 5.4 measures age from lastResult to decision.reportedAt with age equal to maxAge still fresh, evaluated records carry their inputs, and a later hop writes its own record rather than amending the sealed one (FR15a, FR15b). Cliff confirmed the same day. Wes Jackson (Oct 19, separate "Heads-up: audit-record draft renamed", Gmail 1a15630793d22fc6) noted the rename keeps section numbers and that the PQ draft's planned citation and draft-thaha-wimse-agent-evidence-binding-00 (posted Oct 19) still cite the old name.
 - Stance: WATCH here; SPEAK on the AUDIT list.
 - Position: -00 models effects only as path writes and admits only below-observed vantage as authoritative, so a mediator that makes every credentialed call itself has no effect profile and no authoritative tier. Add a mediated-call effect profile (resource, request digest, credential reference digest, upstream status) and admit a mediator for the effects it mediates.
 - Reply to: a new thread on the AUDIT list about -00, using sweep Draft 7 retargeted.
@@ -115,7 +115,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### Brokered OAuth security as a separate document (oauth, Pedram Hosseyni)
 
-- Last read: 2026-10-19. Latest: Pedram Hosseyni, 2026-10-19 08:49 UTC (Gmail 1a1535ae3ad26d26). No replies yet.
+- Last read: 2026-10-20. Latest: Pedram Hosseyni, 2026-10-19 08:49 UTC (Gmail 1a1535ae3ad26d26). No replies yet.
 - State: Pedram asks whether there is interest in a separate document on brokered OAuth architectures, their common deployment patterns and security considerations, moving Section 2.4 (shared consent in brokered OAuth) of draft-ietf-oauth-security-topics-update-03 into it. Presented at IETF 126. Section 2.4 not yet read (Datatracker fetch failed 2026-10-19).
 - Stance: SPEAK, short.
 - Position: support the separate document. Cred is a brokered deployment in practice: the Delegation Server holds user-deposited OAuth credentials and agents exercise them by proxy without ever holding the token. That is a different pattern from a broker that hands tokens to multiple clients under one consent, with different risks: the custody broker concentrates refresh tokens and must bound who can cause a call, while the pass-through broker leaks consent scope across clients. The document should name both patterns and keep them apart. Offer the custody pattern as one worked case; do not pitch Cred. Read Section 2.4 first so the reply builds on its terms.
@@ -132,10 +132,43 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 ### PQ requirements for agent identity (wimse)
 
-- Last read: 2026-10-18. Latest: Venkata Uppalapati, 2026-10-15 02:33 UTC.
+- Last read: 2026-10-20. Latest: Venkata Uppalapati, 2026-10-15 02:33 UTC. Related: Wes Jackson, 2026-10-19, asked VK to retarget the planned Gilda -03 citation (Sections 4.7 and 4.6) to draft-gilda-audit-agent-audit-record-00.
 - State: converged on splitting PQ-R7 between Gilda -03 and the audit architecture; (e) is a verifier rule. Questions 1 to 3 (transition date, algorithm-profile claim, ML-DSA for workload credentials) unanswered. Root-key provenance has no home.
 - Stance: WATCH. The fixes go in Kieran's own -02 (see above).
 - Trigger: question 2 resurfaces. Kieran's answer: a server that re-verifies every hop can sign the per-hop algorithm profile into its receipt. Reply to Uppalapati, 2026-09-29 (Gmail 1a0ee4c35e29237b).
+
+### agentproto Topic 2: terminology and architectural concepts (agentproto)
+
+- Last read: 2026-10-20. Latest: Girish Konda, 2026-10-20 05:54 UTC (Gmail 1a157e071dba98f2). Companion thread: Songbo Bu, "Topic 2: participant, principal and instance terminology", 2026-10-20 02:45 UTC (Gmail 1a157341368ceb6e), no replies.
+- State: chairs Leslie Daigle and Orie opened Topic 2 on 2026-10-19 (Gmail 1a1564de7d707d22): candidate terms and architecture text for the Reference Architecture, naming dialog, dialog context, participants and intermediaries; Topic 1 closed the same day with draft-agentic-ai-usecases-requirements-04 as the starting point. Lars Kroehl (Oct 20): no candidate document separates a step that forwards a task unchanged from a step that narrows the authority it carries; "hop" has three meanings and the conveyed authority five names; offers a quote table. Girish (Oct 20): agrees with Lars; an intermediary that narrows authority is a decision point and records its own decision, one that only forwards must not change earlier results; proposes UCR-04 Section 2 as base plus Sections 2 and 5 of draft-konda-agentproto-evaluation-state-02. Songbo: separate a participant's role from the instance performing it and the principal it represents (Principal Binding -08 Section 8); continued authorization across instance replacement is not established by authentication or dialog correlation.
+- Stance: SPEAK, short.
+- Position: support the forward versus narrow split; this is the sub-delegation step in Kieran's draft. A narrowing step is a delegation: it is valid only if the result is a subset of what was received (monotonic attenuation over typed constraints, the same ceilings draft-asor uses), and the party that performs it should be the one that signs the record of it, so the record says whose decision it holds. A pure forwarder carries the authority by reference and makes no authorization claim. On Songbo's point, authority should attach to the delegation from the principal, not to the instance, so an instance replacement needs no new grant but does need the authority-holding party to recognize the replacement. Offer draft-sweeney-wimse-credential-delegation Section 5 as one worked definition; do not propose it as the base document.
+- Reply to: Girish, 2026-10-20 05:54 UTC (Gmail 1a157e071dba98f2), which already agrees with Lars. Songbo's point can be answered in the same message.
+- Speak by: 2026-10-27, before the chairs summarize Topic 2 (Topic 1 ran about two and a half weeks).
+
+### Use case input: recomputing whether an agent acted within a delegated grant (agentproto, Toshikatsu Oga)
+
+- Last read: 2026-10-20. Latest: Toshikatsu Oga, 2026-10-20 04:53 UTC (Gmail 1a157a8d9bd45b88). No replies.
+- State: Oga offers a use case from a running system: two operators sign a contract granting an agent a bounded set of actions, the agent signs a record of each action, records are timestamped, and a third party recomputes compliance later (draft-oga-musubi-settlement-01, Informational). His narrow ask: a stable way to bind each action record to its delegation; today a request digest in his own format. He offers short use case text.
+- Stance: WATCH.
+- Position: the binding he asks for is real and is what DS-signed per-hop receipts provide when a server is in the call path: the record names the delegation it was exercised under, signed by the party that admitted the call. An agent-signed record binds the action to the agent's claim, not to an admission decision. Nothing to post until the editors decide whether to take the use case.
+- Trigger: the use case editors take it up or the group proposes a binding identifier in dialog context. Then one short reply to Oga with the admission-side point.
+
+### draft-heigh-wimse-workload-identity-metadata-00 (wimse, Joe Salowey)
+
+- Last read: 2026-10-20. Latest: Joe Salowey, 2026-10-19 16:55 UTC (Gmail 1a15516d0197938c). No replies. Authors Heigh, Rosomakho, Salowey; asking for time at IETF 127.
+- State: separates the workload identifier from metadata (group, role, owner), carried in WIT claims or an authenticated metadata endpoint. Datatracker (read 2026-10-20): Section 4.2 says per-request delegation belongs in the authorization context, such as an OAuth access token, and points to Token Exchange; Section 5 says a delegated agent's credential still identifies the agent and the agent does not take on the delegating principal's groups or roles. The durable principal association (owner or operator) has no claim yet and is an open issue.
+- Stance: WATCH.
+- Position: agrees with Kieran's draft: identity stays with the agent, authority travels in the delegation. Nothing to add now.
+- Trigger: the open principal-association claim is defined in a way that lets an identity credential carry delegated authority, or an adoption call.
+
+### draft-ietf-wimse-http-signature-08 (wimse, Yaron Sheffer and Joe Salowey)
+
+- Last read: 2026-10-20. Latest: Yaron Sheffer, 2026-10-20 12:51 UTC (Gmail 1a1595e14e178225).
+- State: -08 addresses Justin Richer's shepherd review, Yaroslav's CONNECT comment, "and an earlier comment from Kieran that we missed before". That is Kieran's 2026-10-08 post (Gmail 1a11970aa51f43cc) asking how wimse-aud is compared. -08 Section 3.2 (read 2026-10-20) now says the recipient MUST verify wimse-aud against its configured values using RFC 3986 Simple String Comparison, that trailing slash and default port variants do not match unless configured, and that the recipient MUST NOT derive an acceptable audience from untrusted fields such as Host (change log: #396). This is the first of the two fixes Kieran proposed. Acknowledgments credit Kieran's WGLC review.
+- Stance: WATCH.
+- Position: resolved as asked. No post needed; a thank-you is optional.
+- Trigger: IETF last call, or #396 reopened.
 
 ### IETF 127 agenda (wimse, joint session)
 
