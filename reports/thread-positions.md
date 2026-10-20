@@ -14,11 +14,11 @@ How it is kept:
 
 | Item | Since | Speak by | Entry |
 |---|---|---|---|
-| Songbo Bu, review of -01 (client_id requester, WAG in act) | 2026-10-14 | before -02 upload, 2026-11-02 | Call for comments on -01 |
-| Karl McGuinness, objection to the portable-artifact proposal | 2026-10-06 | 2026-10-23 | Fine-grained authorization |
-| Ryan Nelson, private ask for adoption support | 2026-10-13 | 2026-10-22 | Nelson delegation receipts |
-| Caleb Dayton, answers to the three -01 questions | 2026-10-16 | with the Songbo reply | Call for comments on -01 |
-| Rafael Asor, list answer on rank order | 2026-10-18 | with the Songbo reply | Call for comments on -01 |
+| Songbo Bu, review of -01 (client_id requester, WAG in act) | 2026-10-14 | done 2026-10-20 (Gmail 1a15967d468bb7e7) | Call for comments on -01 |
+| Karl McGuinness, objection to the portable-artifact proposal | 2026-10-06 | done 2026-10-20 on list (Gmail 1a159680603a93ae); same text on mission #1051 still to post by Kieran | Fine-grained authorization |
+| Ryan Nelson, private ask for adoption support | 2026-10-13 | done 2026-10-20 (private Gmail 1a15967b8aa2efb5; list Gmail 1a15967e1dd7edcd) | Nelson delegation receipts |
+| Caleb Dayton, answers to the three -01 questions | 2026-10-16 | done 2026-10-20, in the Songbo reply | Call for comments on -01 |
+| Rafael Asor, list answer on rank order | 2026-10-18 | done 2026-10-20, in the Songbo reply | Call for comments on -01 |
 | WIMSE chairs, IETF 127 presenter | 2026-10-15 | 2026-11-02 | IETF 127 agenda |
 
 ## Fix in Kieran's own -02 before 2026-11-02
@@ -41,6 +41,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: -02 answers all three. Section 5.4.1 makes the receiving agent the requester, so client_id, act.sub and the authenticated client are one party at every hop. Caleb's user-minted shape is real; adopting the agent_delegation detail lets a custody server at least read the authority of such a token, and full composition is -03 work.
 - Reply to: Songbo, 2026-10-14 03:17 UTC (Gmail 1a1386a21b4cde4b). Caleb, 2026-10-16 16:34 UTC (Gmail 1a145911c6f0a7ee). Asor, 2026-10-18 (Gmail 1a1500edd7fa586f).
 - Speak by: after the REVISION-02 decisions, before the -02 upload.
+- Done: posted 2026-10-20 (Gmail 1a15967d468bb7e7), one reply to Songbo, Caleb and Rafael, including the one-sentence Principal-standing point for Cliff's thread. Stance now WATCH. Trigger: any reply, or -02 posting with a change that departs from what the reply promised.
 
 ### Fine-grained authorization in OAuth (oauth)
 
@@ -50,6 +51,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: Karl is right that an issuer cannot sign for what a resource server's fields mean, but that does not kill the portable artifact. The Mandate commits, per Authority Set entry, to the `amb` digest of the resource server's own authority description at approval. Any verifier holding the Mandate, the records and the metadata can then check each record against the description the approval used, and Ron's join is computable without the AS. Freshness stays with the issuer, the same split -02 Section 5.4 makes for receipt chains. Do not answer Karl's downstream-instruction question; that space is crowded.
 - Reply to: Karl McGuinness, 2026-10-06 18:16 UTC (Gmail 1a1126e3d9f3da88). Same text on mission #1051, where Karl asked to continue.
 - Speak by: 2026-10-23.
+- Done: posted on list 2026-10-20 (Gmail 1a159680603a93ae), to Karl, cc oauth. The reply says "I'll put the same on #1051"; Kieran posts that himself. Stance now WATCH. Trigger: Karl's reply, or the 2026-10-26 interim. Note (read 2026-10-20): draft-liu-mcguinness-oauth-bounded-work defines AS-signed approval evidence that is explicitly not a permission and keeps lifecycle with the AS, which is consistent with the reply's freshness split.
 
 ### Revocation closure semantics for delegated agents (oauth, Deonté O'dell Watts)
 
@@ -60,6 +62,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position addendum (2026-10-19): answer Watts's three questions with section pointers, not claims. (1) In draft-sweeney -01 the Delegation Server consumes at admission and executes the call, so consume and commit coincide for calls it mediates; it says nothing about effects queued behind the resource server. (2) Revocation is synchronous and cascading within one DS; across administrative domains it is not solved, and the draft should say so. (3) Unknown downstream paths: a token exchanged out of the DS's path is exactly the PARTIAL case. State the limits plainly.
 - Reply to: Watts, 2026-10-19 10:32 UTC (Gmail 1a153b94633d2af6, thread 1a13e7e127e56a04). Supersedes the Oct 18 target (Gmail 1a14d0feec558b39).
 - Speak by: 2026-10-20.
+- Done: posted 2026-10-20 (Gmail 1a15967ca94391c2), answering (1) to (3) with section pointers and stating the limits. Stance now WATCH. Trigger: a reply from Watts or Caleb, especially on how a domain authenticates a pre-revocation acceptance time.
 
 ### Nelson delegation receipts (wimse, oauth, private)
 
@@ -69,6 +72,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: the first hop belongs at the AS, but an AS sees only hops that pass through it; later hops need a server in the loop or an offline chain. A principal-signed root adds proof that the human, not the operator, authorized it, only with a user-verified, non-exportable key. Without that, delegatee binding and an OAuth binding, -14 is not adoptable. Do not promise support; judge any adoption call on its text.
 - Reply to: Nelson private, 2026-10-13 17:40 UTC (Gmail 1a1365a71ab1e9ab). On list: Nelson's charter-fit post, 2026-10-10 19:26 UTC (Gmail 1a1274918384d30d), using sweep Draft 5. Not the April wimse thread.
 - Speak by: private 2026-10-22; list before 2026-10-26.
+- Done: private reply 2026-10-20 (Gmail 1a15967b8aa2efb5), no support promised, three conditions named; list reply on the charter-fit thread 2026-10-20 (Gmail 1a15967e1dd7edcd). Stance now WATCH. Trigger: Nelson replies or posts -15.
 
 ### AIMS-00 multi-hop delegation context (wimse)
 
@@ -78,6 +82,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: AIMS should state a property, not defer to a profile. Every deployment states its exposure bound after revocation: the receiver's maximum state age plus the lifetime of a permit issued on that state. A server in the call path states near zero; a caching PDP states its own number. Each is measured against its own bound, and no implementation's semantics go into WG text.
 - Reply to: Mikhail Sergeev, 2026-10-12 05:42 UTC (Gmail 1a12ea23a19e1dee), cc Girish. Base on sweep Draft 2, last paragraph cut.
 - Speak by: 2026-10-22.
+- Done: posted 2026-10-20 (Gmail 1a15967f8e860a4b), stating the exposure bound as a property. Stance now WATCH. Trigger: Mikhail revises PR #158 or replies.
 
 ### draft-seymour-wimse-connected-flight-06 (wimse)
 
@@ -87,6 +92,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: consumption has to be a check-and-set at admission by the single party that admits the call (the STS if it is in the path, otherwise the executor), written at admission, not at completion. The cost is that a pass admitted and then failed is spent; the draft should say so.
 - Reply to: Girish, 2026-10-15 17:30 UTC (Gmail 1a1409ecb0271555).
 - Speak by: before Errol posts -07.
+- Done: posted 2026-10-20 (Gmail 1a15967eabe4fd21). Stance now WATCH. Trigger: Errol replies or posts -07.
 
 ### Gilda agent audit record, "could not evaluate" (wimse, moving to AUDIT BOF)
 
@@ -121,6 +127,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Position: support the separate document. Cred is a brokered deployment in practice: the Delegation Server holds user-deposited OAuth credentials and agents exercise them by proxy without ever holding the token. That is a different pattern from a broker that hands tokens to multiple clients under one consent, with different risks: the custody broker concentrates refresh tokens and must bound who can cause a call, while the pass-through broker leaks consent scope across clients. The document should name both patterns and keep them apart. Offer the custody pattern as one worked case; do not pitch Cred. Read Section 2.4 first so the reply builds on its terms.
 - Reply to: Pedram, 2026-10-19 08:49 UTC (Gmail 1a1535ae3ad26d26).
 - Speak by: 2026-10-26.
+- Done: posted 2026-10-20 (Gmail 1a159681be9a15b2). Section 2.4 read first (2026-10-20): it describes a broker that is one OAuth client for many downstream clients and leaves open whether tokens are passed on; the reply asks the document to name both the pass-on and the custody patterns and notes shared consent applies to both. Stance now WATCH. Trigger: chairs or Pedram move to start the document.
 
 ### draft-rampalli-pedigree status correction (wimse, Karthik Rampalli)
 
@@ -174,7 +181,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 
 - Last read: 2026-10-18.
 - State: Asor declined to present (private, 2026-10-15). Justin Richer, Oct 10: no presenter, no slot. The held agenda-request draft that names Asor must not be sent.
-- Stance: SPEAK once Kieran picks: present remotely, or ask the chairs for a presenter. Sweep Draft 8.
+- Stance: SPEAK once Kieran picks: present remotely, or ask the chairs for a presenter. Sweep Draft 8. A Gmail draft (2026-10-20, to Pieter and Justin) is ready but holds a pick-one placeholder; it was not sent on 2026-10-20 and needs Kieran's choice.
 - Speak by: 2026-11-02.
 
 ## Closed
