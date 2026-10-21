@@ -62,6 +62,12 @@ export function createReceiptKeys(options: ReceiptKeyOptions): ReceiptKeys {
   for (const k of [signerVerification, ...(options.verificationKeys ?? []), derivedVerification]) {
     if (k && !keys.some((existing) => existing.kid === k.kid)) keys.push(k);
   }
+  // A signer exposes no key, so a custom one needs its public key among
+  // verificationKeys under the same kid, or the server could not verify the
+  // receipts it mints. Refuse that configuration up front.
+  if (!keys.some((k) => k.kid === signer.kid && k.alg === signer.alg)) {
+    throw new Error(`Receipt signer kid ${signer.kid} has no ${signer.alg} verification key; add its public key to receiptVerificationKeys`);
+  }
   const acceptedAlgs = options.acceptedAlgs ?? DEFAULT_RECEIPT_ACCEPTED_ALGS;
   if (!acceptedAlgs.includes(signer.alg)) {
     throw new Error(`Receipt signer algorithm ${signer.alg} is not on the accepted list (${acceptedAlgs.join(', ')})`);

@@ -432,6 +432,10 @@ export function verifyAgentDelegationChain(
       depthBound = own;
     }
   }
+  // A tighter del_max_depth on a child bounds the chain below it, as DT_0's does.
+  if (n >= depthBound) {
+    return fail('depth_invalid', n, `leaf del_depth ${n} is not below the tightest del_max_depth in the chain (${depthBound})`);
+  }
 
   // Step 5: time, including rule 4.
   for (let i = 0; i < verified.length; i++) {

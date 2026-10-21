@@ -157,6 +157,17 @@ describe('mintAgentDelegationToken / verifyAgentDelegationChain', () => {
       .toMatchObject({ ok: false, reason: 'not_narrower', hop: 1 });
   });
 
+  it('enforces a tighter del_max_depth carried by a child', () => {
+    const signer = createKeySigner(ed.privateKey);
+    const resolveKey = staticKeyResolver([createVerificationKey(ed.publicKey)]);
+    const t0 = root(signer, { delMaxDepth: 6 });
+    const t1 = child(t0, signer, { delMaxDepth: 2 });
+    const t2 = child(t1, signer, { jti: 'dt-2', clientId: 'did:key:z6MkFormatter' });
+    expect(verifyAgentDelegationChain([t0, t1], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 }).ok).toBe(true);
+    expect(verifyAgentDelegationChain([t0, t1, t2], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 }))
+      .toMatchObject({ ok: false, reason: 'depth_invalid', hop: 2 });
+  });
+
   it('refuses to mint a wider child', () => {
     const t0 = root();
     expect(() => child(t0, undefined, { scopes: ['mail.send'] })).toThrow(/not covered/);

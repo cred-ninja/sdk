@@ -1506,6 +1506,12 @@ export function createServer(config: ServerConfig) {
     });
     return receiptKeys;
   }
+  // A misconfigured signer (algorithm off the accepted list, or a custom
+  // signer with no matching verification key) fails createServer, not the
+  // first delegation.
+  if (config.receiptSigner || config.receiptSigningKeyPem || config.receiptAcceptedAlgs || config.receiptVerificationKeys) {
+    getReceiptKeys();
+  }
 
   function getReceiptTtlSeconds(): number {
     return config.receiptTtlSeconds ?? DEFAULT_RECEIPT_TTL_SECONDS;
@@ -4915,7 +4921,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           expires_in: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000)),
           agent_did: agentDid,
           delegation_id: delegationId,
-          receipt,
+          // The signed child receipt is a credential in its own right (it
+          // anchors further hops), so it is released only to the agent that
+          // redeems the grant at /api/v1/token, never to the delegator.
           chain_depth: validation.chainDepth,
           parent_delegation_id: validation.parentDelegationId,
           scopes: validation.grantedScopes,
@@ -5030,7 +5038,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation grant is unknown, expired, or already redeemed' });
         return;
       }
-      const tokenEndpoint = `${config.redirectBaseUri.replace(/\/+$/, '')}/api/v1/token`;
+      let tokenBase = config.redirectBaseUri;
+      while (tokenBase.endsWith('/')) tokenBase = tokenBase.slice(0, -1);
+      const tokenEndpoint = `${tokenBase}/api/v1/token`;
       const actor = verifyActorToken(body.actor_token, pending.agentDid, tokenEndpoint, actorTokenJtiSeen);
       if (!actor.ok) {
         writeAuditEventIfSupported({

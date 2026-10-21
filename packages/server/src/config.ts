@@ -86,7 +86,9 @@ export interface ServerConfig {
   receiptSigner?: JwsSigner;
   receiptSigningKeyPem?: string;
   // Further keys receipts may verify under (for example the key a rotation
-  // replaced), matched by `kid`.
+  // replaced), matched by `kid`. With a custom `receiptSigner`, its own
+  // public key MUST be listed here under the signer's `kid`; createServer
+  // throws otherwise.
   receiptVerificationKeys?: JwsVerificationKey[];
   // The verifier's accepted algorithms (env RECEIPT_ACCEPTED_ALGS, comma
   // separated). Defaults to EdDSA and ES256. A receipt whose header alg is

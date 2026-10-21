@@ -188,6 +188,16 @@ describe('receipt signing', () => {
     expect(child.body.error).toMatch(/signature/i);
   });
 
+  it('needs a custom signer\'s verification key, and then verifies its own receipts', async () => {
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const signer = { alg: 'EdDSA' as const, kid: 'hsm-1', sign: (input: Uint8Array) => crypto.sign(null, input, privateKey) };
+    expect(() => createServer(makeTestConfig({ receiptSigner: signer }))).toThrow(/receiptVerificationKeys/);
+    const { app } = await setup({ receiptSigner: signer, receiptVerificationKeys: [createVerificationKey(privateKey, 'hsm-1')] });
+    const root = await delegateRoot(app);
+    expect(decode(root.body.receipt, 0).kid).toBe('hsm-1');
+    expect((await subdelegate(app, root.body.receipt, CHILD)).status).toBe(200);
+  });
+
   it('keeps the legacy claim layout when configured', async () => {
     const { app } = await setup({ receiptClaimLayout: 'legacy' });
     const root = await delegateRoot(app);
@@ -233,6 +243,8 @@ describe('Sub-Delegation Exchange', () => {
     const { app, res } = await grantFor(CHILD);
     expect(res.body.delegation_grant).toBeTypeOf('string');
     expect(res.body.agent_did).toBe(CHILD.did);
+    // The child receipt anchors further hops, so the delegator never sees it.
+    expect(res.body.receipt).toBeUndefined();
     // No handle exists until the grant is redeemed.
     expect((await use(app, res.body.delegation_id)).status).toBe(404);
 
@@ -242,9 +254,9 @@ describe('Sub-Delegation Exchange', () => {
       delegation_id: res.body.delegation_id,
       access_token: res.body.delegation_id,
       issued_token_type: 'urn:credninja:params:oauth:token-type:delegation-handle',
-      receipt: res.body.receipt,
       chain_depth: 1,
     });
+    expect(decode(issued.body.receipt, 1)).toMatchObject({ client_id: CHILD.did, delegationId: res.body.delegation_id });
 
     const again = await exchange(app, res.body.delegation_grant, actorToken(CHILD));
     expect(again.status).toBe(400);
