@@ -86,6 +86,7 @@ const guard = new CredGuard({
 | `urlAllowlistPolicy` | Restrict which URLs agents can call (cred_use) | `{ allowedUrls }` (origin-scoped string prefix or RegExp) |
 | `maxTtlPolicy` | Cap delegation TTL | `{ maxTtlSeconds, perProvider? }` |
 | `webBotAuthPolicy` | Require or constrain Web Bot Auth identity metadata | `{ requireKeyId?, allowedIdentitySources?, allowedSignatureAgentPrefixes? }` |
+| `approvalRequiredPolicy` | Hold matching requests until a human approves them | `{ when?, match?, verifyApproval?, approver?, maxApprovalTtlSeconds?, forbidSelfApproval?, resolveSponsor? }` |
 
 ## Policy Chain Behavior
 
@@ -95,6 +96,42 @@ const guard = new CredGuard({
 4. All `ALLOW`/`SKIP` = request proceeds
 5. No policies registered = `ALLOW` (opt-in guardrails)
 6. Policy errors = `DENY` by default (fail-closed)
+7. `REQUIRE_APPROVAL` refuses the request (`allowed: false`) but does not short-circuit, so a later `DENY` still wins. With no `DENY`, the first `REQUIRE_APPROVAL` becomes `deniedBy` and `decision.approvalRequired`
+
+## Human Approval
+
+`approvalRequiredPolicy` holds a request until a named human approves it, for example writes to restricted data or a payment to a new payee. A matching request is refused with `REQUIRE_APPROVAL` and the typed code `approval_required`. Callers that only check `decision.allowed` keep failing closed.
+
+```typescript
+import { CredGuard, approvalRequiredPolicy } from '@credninja/guard';
+
+const guard = new CredGuard({
+  policies: [
+    approvalRequiredPolicy({
+      // Any rule (or `when(ctx)`) matching means approval is needed.
+      match: [{ providers: ['stripe'], methods: ['POST'], metadata: { newPayee: true } }],
+      approver: { role: 'finance-approver' },
+      reason: 'Payment to a new payee',
+      maxApprovalTtlSeconds: 900,
+      // Required: without it every approval is unverified and refused.
+      verifyApproval: ({ approval, requestDigest }) => approvals.verify(approval, requestDigest),
+      // Separation of duties: the agent's sponsor cannot approve its requests.
+      forbidSelfApproval: true,
+      resolveSponsor: (ctx) => sponsors.lookup(ctx.agentTokenHash),
+    }),
+  ],
+});
+```
+
+The flow:
+
+1. The agent calls without an approval. Express answers `403 { error: 'approval_required', code: 'approval_required', approval }`; the MCP wrapper returns an error result with the same `structuredContent`. `approval` carries `policy`, `reason`, `approver`, `requestDigest` and, when capped, `expiresAt`.
+2. Your approval service prompts the approver (for example a CIBA-style backchannel request) and issues a signed `GuardApproval` for that `requestDigest`.
+3. The agent retries the same request with `approval: { approverId, requestDigest, expiresAt, signature }` in the body (Express) or tool input (MCP).
+
+The policy accepts the approval only if its `requestDigest` matches the request (`computeApprovalDigest`: provider, agent token hash, method, URL, scopes and the matched metadata keys), it has not expired, `verifyApproval` returns `true`, and, with `forbidSelfApproval`, the approver is not the sponsor. Anything else, including a throwing verifier, stays `REQUIRE_APPROVAL`. An approval can be presented again for the same request until it expires; enforce single use in `verifyApproval` (for example by `approval.id`) if you need it.
+
+Pass `onApprovalRequired` to `expressMiddleware()` or `wrapMcpTool()` to shape the response. A custom `onDeny` without `onApprovalRequired` keeps handling every refusal, with `deniedBy.code` set to `approval_required`.
 
 ## API Reference
 
@@ -118,7 +155,7 @@ class CredGuard {
 interface GuardConfig {
   policies: CredPolicy[];
   onError?: 'deny' | 'allow' | 'log-and-deny';  // default: 'deny'
-  onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
+  onDecision?: (ctx: GuardContext, results: PolicyResult[], decision: GuardDecision) => void;
 }
 ```
 
@@ -135,6 +172,7 @@ interface GuardContext {
   timestamp: string;           // ISO 8601
   delegationId?: string;
   metadata?: Record<string, unknown>;
+  approval?: GuardApproval;    // Presented human approval (untrusted until verified)
 }
 ```
 
@@ -142,10 +180,12 @@ interface GuardContext {
 
 ```typescript
 interface PolicyResult {
-  decision: 'ALLOW' | 'DENY' | 'SKIP';
+  decision: 'ALLOW' | 'DENY' | 'SKIP' | 'REQUIRE_APPROVAL';
   reason?: string;
   policy: string;
   narrowedScopes?: string[];   // For scope narrowing
+  code?: string;               // Typed code, 'approval_required' on REQUIRE_APPROVAL
+  approval?: ApprovalRequirement;  // On REQUIRE_APPROVAL
 }
 ```
 
@@ -155,7 +195,8 @@ interface PolicyResult {
 interface GuardDecision {
   allowed: boolean;
   results: PolicyResult[];
-  deniedBy?: PolicyResult;
+  deniedBy?: PolicyResult;     // First DENY, else first REQUIRE_APPROVAL
+  approvalRequired?: ApprovalRequirement;  // Set only when approval is the sole blocker
   effectiveScopes: string[];
   evaluationMs: number;
 }

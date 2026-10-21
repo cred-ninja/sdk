@@ -4,7 +4,9 @@
  * Policy evaluation engine for credential delegation guardrails.
  */
 
+import { APPROVAL_REQUIRED_CODE, computeApprovalDigest } from './policies/approval-required.js';
 import type {
+  ApprovalRequirement,
   CredPolicy,
   GuardConfig,
   GuardContext,
@@ -15,7 +17,7 @@ import type {
 export class CredGuard {
   private readonly policies: CredPolicy[];
   private readonly onError: 'deny' | 'allow' | 'log-and-deny';
-  private readonly onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
+  private readonly onDecision?: (ctx: GuardContext, results: PolicyResult[], decision: GuardDecision) => void;
 
   constructor(config: GuardConfig) {
     this.policies = [...config.policies];
@@ -32,6 +34,7 @@ export class CredGuard {
     const results: PolicyResult[] = [];
     let effectiveScopes = [...ctx.requestedScopes];
     let deniedBy: PolicyResult | undefined;
+    let pendingApproval: PolicyResult | undefined;
 
     // No policies = ALLOW (opt-in guardrails)
     if (this.policies.length === 0) {
@@ -41,7 +44,7 @@ export class CredGuard {
         effectiveScopes,
         evaluationMs: performance.now() - startTime,
       };
-      this.onDecision?.(ctx, results);
+      this.onDecision?.(ctx, results, decision);
       return decision;
     }
 
@@ -104,17 +107,31 @@ export class CredGuard {
         deniedBy = result;
         break;
       }
+
+      // REQUIRE_APPROVAL does not short-circuit: a later DENY must still win.
+      if (result.decision === 'REQUIRE_APPROVAL') {
+        this.normalizeApproval(result, { ...ctx, requestedScopes: effectiveScopes });
+        pendingApproval ??= result;
+      }
+    }
+
+    // No DENY: a pending approval blocks (fail closed) until it is satisfied.
+    let approvalRequired: ApprovalRequirement | undefined;
+    if (!deniedBy && pendingApproval) {
+      deniedBy = pendingApproval;
+      approvalRequired = pendingApproval.approval;
     }
 
     const decision: GuardDecision = {
       allowed: !deniedBy,
       results,
       deniedBy,
+      ...(approvalRequired ? { approvalRequired } : {}),
       effectiveScopes,
       evaluationMs: performance.now() - startTime,
     };
 
-    this.onDecision?.(ctx, results);
+    this.onDecision?.(ctx, results, decision);
 
     return decision;
   }
@@ -146,9 +163,27 @@ export class CredGuard {
     return this.policies.map((p) => p.name);
   }
 
+  /**
+   * Fill in whatever a REQUIRE_APPROVAL result left out, so callers always
+   * get the typed code, a reason and a request digest.
+   */
+  private normalizeApproval(result: PolicyResult, ctx: GuardContext): void {
+    const given = result.approval && typeof result.approval === 'object' ? result.approval : undefined;
+    const reason = typeof given?.reason === 'string' ? given.reason : (result.reason ?? 'Human approval required');
+    result.code = APPROVAL_REQUIRED_CODE;
+    result.reason = result.reason ?? reason;
+    result.approval = {
+      ...given,
+      code: APPROVAL_REQUIRED_CODE,
+      policy: result.policy,
+      reason,
+      requestDigest: typeof given?.requestDigest === 'string' ? given.requestDigest : computeApprovalDigest(ctx),
+    };
+  }
+
   private isValidResult(result: PolicyResult): boolean {
     if (!result || typeof result !== 'object') return false;
-    if (!['ALLOW', 'DENY', 'SKIP'].includes(result.decision)) return false;
+    if (!['ALLOW', 'DENY', 'SKIP', 'REQUIRE_APPROVAL'].includes(result.decision)) return false;
     if (typeof result.policy !== 'string') return false;
     return true;
   }

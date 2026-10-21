@@ -41,6 +41,58 @@ export interface GuardContext {
    * the authenticated principal's id, never a request body field.
    */
   link?: GuardLinkContext;
+  /**
+   * A human approval presented with this request (see approvalRequiredPolicy).
+   * Untrusted until a policy verifies it: the agent supplies it, so a policy
+   * must check its binding, expiry and signature before relying on it.
+   */
+  approval?: GuardApproval;
+}
+
+/**
+ * A human approval for one specific request, as presented by the caller.
+ * Issued by an approval service (for example after a CIBA-style backchannel
+ * prompt to the approver) and checked by approvalRequiredPolicy.
+ */
+export interface GuardApproval {
+  /** Principal id of the human who approved. */
+  approverId: string;
+  /** The `requestDigest` from the ApprovalRequirement this approval answers. */
+  requestDigest: string;
+  /** ISO timestamp after which the approval is no longer accepted. */
+  expiresAt: string;
+  /** ISO timestamp of the approval, when the issuer records one. */
+  approvedAt?: string;
+  /** Issuer's id for this approval (for example to enforce single use in the verifier). */
+  id?: string;
+  /** Issuer signature or token over the approval, checked by the policy's verifyApproval. */
+  signature?: string;
+}
+
+/** Typed code carried by every REQUIRE_APPROVAL result and response. */
+export type ApprovalRequiredCode = 'approval_required';
+
+/** Who should approve. A hint for routing the approval prompt, not an authorization rule. */
+export interface ApproverHint {
+  /** Role expected to approve (for example 'finance-approver'). */
+  role?: string;
+  /** Specific principal expected to approve. */
+  principal?: string;
+}
+
+/** What a REQUIRE_APPROVAL result asks for. */
+export interface ApprovalRequirement {
+  code: ApprovalRequiredCode;
+  /** Policy that asked for the approval. */
+  policy: string;
+  /** Human-readable reason, suitable for showing the approver. */
+  reason: string;
+  /** Digest the approval must carry; binds it to this exact request. */
+  requestDigest: string;
+  /** Who should approve, when the policy knows. */
+  approver?: ApproverHint;
+  /** Latest `expiresAt` an approval for this request may carry, when the policy caps it. */
+  expiresAt?: string;
 }
 
 /**
@@ -73,10 +125,16 @@ export interface GuardLinkContext {
   grantVersion?: number;
 }
 
+/**
+ * A single policy's decision. REQUIRE_APPROVAL means the request may proceed
+ * only after a human approves it; until then the guard refuses it.
+ */
+export type PolicyDecision = 'ALLOW' | 'DENY' | 'SKIP' | 'REQUIRE_APPROVAL';
+
 /** Result of a single policy evaluation */
 export interface PolicyResult {
-  decision: 'ALLOW' | 'DENY' | 'SKIP';
-  /** Human-readable reason (required for DENY, optional for ALLOW/SKIP) */
+  decision: PolicyDecision;
+  /** Human-readable reason (required for DENY and REQUIRE_APPROVAL, optional for ALLOW/SKIP) */
   reason?: string;
   /** Policy name for audit trail */
   policy: string;
@@ -90,6 +148,13 @@ export interface PolicyResult {
    * have one, so callers never need to parse `reason`.
    */
   code?: string;
+  /**
+   * On REQUIRE_APPROVAL: the approval needed. The guard fills in anything
+   * missing (code, policy, reason, a default request digest).
+   */
+  approval?: ApprovalRequirement;
+  /** On ALLOW by an approval policy: the approver id of the verified approval. */
+  approvedBy?: string;
 }
 
 /** A single policy — the core extension point */
@@ -106,8 +171,12 @@ export interface GuardConfig {
   policies: CredPolicy[];
   /** What to do if a policy throws an error. Default: 'deny' */
   onError?: 'deny' | 'allow' | 'log-and-deny';
-  /** Callback for every policy decision (for audit/logging) */
-  onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
+  /**
+   * Callback for every policy decision (for audit/logging). `decision` is the
+   * final GuardDecision (for example to pass to buildAuditEvent, or to see
+   * `approvalRequired`).
+   */
+  onDecision?: (ctx: GuardContext, results: PolicyResult[], decision: GuardDecision) => void;
 }
 
 /** Final decision from the guard */
@@ -115,8 +184,16 @@ export interface GuardDecision {
   allowed: boolean;
   /** All policy results in evaluation order */
   results: PolicyResult[];
-  /** The DENY result that blocked, if any */
+  /**
+   * The result that blocked, if any: the first DENY, or when no policy
+   * denied, the first REQUIRE_APPROVAL (its `code` is 'approval_required').
+   */
   deniedBy?: PolicyResult;
+  /**
+   * Set when the request is refused only because it needs human approval.
+   * Never set together with a DENY: any DENY wins.
+   */
+  approvalRequired?: ApprovalRequirement;
   /** Final scopes after any narrowing */
   effectiveScopes: string[];
   /** Duration of policy evaluation in ms */
@@ -132,14 +209,18 @@ export interface GuardAuditEvent {
   allowed: boolean;
   policies: Array<{
     name: string;
-    decision: 'ALLOW' | 'DENY' | 'SKIP';
+    decision: PolicyDecision;
     reason?: string;
     /** The policy's typed code, when it set one. */
     code?: string;
     durationMs: number;
   }>;
-  /** The denying policy's typed code, when it set one. */
+  /** The denying policy's typed code, when it set one ('approval_required' for approval). */
   code?: string;
+  /** Present when the request was refused pending human approval. */
+  approvalRequired?: ApprovalRequirement;
+  /** Approver ids of approvals a policy verified and accepted for this request. */
+  approvedBy?: string[];
   /** Present when the call named a Cred Link connection. */
   link?: GuardLinkContext;
   requestedScopes: string[];
@@ -233,4 +314,59 @@ export interface ReceiptClaimsPolicyConfig {
   requiredClaims?: string[];
   /** Optional per-provider claim requirements */
   perProvider?: Record<string, string[]>;
+}
+
+/** One matching rule for approvalRequiredPolicy. Every field set must match. */
+export interface ApprovalMatchRule {
+  /** Providers the rule covers. Default: any. */
+  providers?: string[];
+  /** HTTP methods the rule covers (case-insensitive). Default: any. */
+  methods?: string[];
+  /**
+   * Metadata the request must carry. Each key must be present with an equal
+   * value, or one of the listed values when an array is given (for example
+   * `{ classification: ['secret', 'restricted'] }` or `{ newPayee: true }`).
+   */
+  metadata?: Record<string, unknown>;
+}
+
+/** Input to ApprovalRequiredPolicyConfig.verifyApproval. */
+export interface ApprovalVerificationInput {
+  approval: GuardApproval;
+  /** The digest computed for this request (already compared with approval.requestDigest). */
+  requestDigest: string;
+  ctx: GuardContext;
+}
+
+/** Require a human approval before a matching request proceeds */
+export interface ApprovalRequiredPolicyConfig {
+  /** Policy name for results and audit events. Default: 'approval-required'. */
+  name?: string;
+  /** Requests for which this returns true need approval. */
+  when?: (ctx: GuardContext) => boolean;
+  /** Requests matching any rule need approval. Combined with `when` by OR. */
+  match?: ApprovalMatchRule[];
+  /** Reason shown to the caller and approver. */
+  reason?: string;
+  /** Who should approve. */
+  approver?: ApproverHint;
+  /**
+   * Metadata keys bound into the request digest, in addition to provider,
+   * agent, method, URL and scopes. Default: the keys named by `match` rules.
+   */
+  digestMetadataKeys?: string[];
+  /**
+   * Check that an approval is genuine (for example its signature). Return
+   * true only for a valid approval. Without it every approval is treated as
+   * unverified and refused (fail closed). A throw is a refusal.
+   */
+  verifyApproval?: (input: ApprovalVerificationInput) => boolean | Promise<boolean>;
+  /** Refuse approvals whose expiry is further than this from now. */
+  maxApprovalTtlSeconds?: number;
+  /** Refuse approvals by the agent's own sponsor. Requires resolveSponsor. */
+  forbidSelfApproval?: boolean;
+  /** The agent's sponsor principal id, in the same id space as GuardApproval.approverId. */
+  resolveSponsor?: (ctx: GuardContext) => string | undefined | Promise<string | undefined>;
+  /** Clock. Default: ctx.timestamp, else the current time. */
+  now?: () => Date;
 }

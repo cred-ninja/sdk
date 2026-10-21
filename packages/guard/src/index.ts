@@ -2,7 +2,7 @@
  * @credninja/guard — Policy engine for credential delegation guardrails
  *
  * Composable middleware for rate limiting, scope filtering, time windows,
- * URL allowlisting, and custom policies. Works with @credninja/server,
+ * URL allowlisting, human approval, and custom policies. Works with @credninja/server,
  * MCP tools, and any Express app.
  *
  * @example
@@ -48,6 +48,14 @@ export type {
   WebBotAuthPolicyConfig,
   ReceiptClaimsPolicyConfig,
   GuardLinkContext,
+  PolicyDecision,
+  GuardApproval,
+  ApprovalRequiredCode,
+  ApproverHint,
+  ApprovalRequirement,
+  ApprovalMatchRule,
+  ApprovalVerificationInput,
+  ApprovalRequiredPolicyConfig,
 } from './types.js';
 
 // Policies
@@ -64,8 +72,13 @@ export {
   maxTtlPolicy,
   webBotAuthPolicy,
   receiptClaimsPolicy,
+  approvalRequiredPolicy,
+  computeApprovalDigest,
+  toGuardApproval,
+  APPROVAL_REQUIRED_CODE,
+  APPROVAL_REQUIRED_POLICY_NAME,
 } from './policies/index.js';
-export type { MaxTtlPolicyResult, RateLimitPolicyResult } from './policies/index.js';
+export type { MaxTtlPolicyResult, RateLimitPolicyResult, ApprovalDigestOptions } from './policies/index.js';
 
 // Cred Link policy
 export { createLinkHooks, LINK_CHECK_ERROR_CODE, clientGrantPolicy, CLIENT_GRANT_POLICY_NAME } from './link/index.js';
