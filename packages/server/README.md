@@ -118,7 +118,9 @@ npm run dev
 > `act.sub` (equal to `client_id`) instead, and the principal from `sub`. Until it does, set
 > `RECEIPT_CLAIM_LAYOUT=legacy` on the server. The SDK verifiers (`verifyDelegationReceipt`,
 > Python `verify_delegation_receipt`), SDK local mode, and the server's own receipt checks already
-> read both layouts.
+> read both layouts. The SDK verifiers check EdDSA (Ed25519) receipts only: with a P-256
+> `RECEIPT_SIGNING_KEY_PEM` the server mints ES256 receipts they reject, so keep the default EdDSA
+> key while clients verify receipts with the SDK.
 
 > **Cumulative constraints.** `max_lifetime` and `max_subtree` are enforced by this server as
 > the single writer of their running totals. `/api/v1/use` debits, in one SQLite transaction, the

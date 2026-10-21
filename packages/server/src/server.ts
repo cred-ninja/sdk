@@ -1775,6 +1775,8 @@ export function createServer(config: ServerConfig) {
     delMaxDepth?: number;
     /** The verified parent token, for a child. */
     parentToken?: string;
+    /** Tightest del_max_depth in the parent's verified chain. */
+    chainDepthBound?: number;
   }): { ok: true; token: string } | { ok: false; body: Record<string, unknown> } {
     const receiptPayload = JSON.parse(Buffer.from(input.receipt.split('.')[1]!, 'base64url').toString('utf8')) as { iat: number; exp: number };
     const cnf = didKeyConfirmation(input.agentDid);
@@ -1793,6 +1795,7 @@ export function createServer(config: ServerConfig) {
         scopes: input.scopes,
         constraints: input.constraints,
         ...(input.parentToken ? { parent: input.parentToken } : {}),
+        ...(input.chainDepthBound !== undefined ? { chainDepthBound: input.chainDepthBound } : {}),
         ...(input.delMaxDepth !== undefined
           ? { delMaxDepth: input.delMaxDepth }
           : input.parentToken ? {} : { delMaxDepth: DEFAULT_CHAIN_PROFILE_MAX_DEPTH + 1 }),
@@ -1812,7 +1815,7 @@ export function createServer(config: ServerConfig) {
    * is minted from it.
    */
   function verifyParentChainProfile(chain: unknown, parent: { delegationId: string; sub: string; userId: string }):
-    { ok: true; parentToken: string } | { ok: false; body: Record<string, unknown> } {
+    { ok: true; parentToken: string; depthBound: number } | { ok: false; body: Record<string, unknown> } {
     if (!Array.isArray(chain) || chain.length === 0 || chain.some((t) => typeof t !== 'string')) {
       return { ok: false, body: { error: 'invalid_request', message: 'agent_delegation_chain must be the parent\'s agent_delegation token chain, root first' } };
     }
@@ -1824,7 +1827,7 @@ export function createServer(config: ServerConfig) {
     if (verified.leaf.claims.jti !== parent.delegationId || verified.actingAgent !== parent.sub || verified.principal !== parent.userId) {
       return { ok: false, body: { error: 'invalid_parent_chain', message: 'agent_delegation_chain does not end in the token issued with parent_receipt' } };
     }
-    return { ok: true, parentToken: chain[chain.length - 1] as string };
+    return { ok: true, parentToken: chain[chain.length - 1] as string, depthBound: verified.depthBound };
   }
 
   function extractTrustedReceiptClaims(req: Request): string[] | undefined {
@@ -4824,6 +4827,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       let parentChainToken: string | undefined;
+      let parentChainDepthBound: number | undefined;
       if (chainProfile.wanted) {
         const parentChain = verifyParentChainProfile(parentAgentDelegationChain, parent);
         if (!parentChain.ok) {
@@ -4831,6 +4835,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
         parentChainToken = parentChain.parentToken;
+        parentChainDepthBound = parentChain.depthBound;
       }
 
       // ── Issue child receipt ──────────────────────────────────────────────
@@ -4866,6 +4871,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           audience: chainProfile.audience,
           delMaxDepth: chainProfile.delMaxDepth,
           parentToken: parentChainToken,
+          chainDepthBound: parentChainDepthBound,
         });
         if (!minted.ok) {
           res.status(400).json(minted.body);
@@ -5058,7 +5064,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       // A custom agentRequestVerifier that binds this caller to a user may
       // only redeem that user's grants (as on every legacy route).
-      const boundUserId = ((req as any).agentPrincipal as RequestAgentPrincipal | undefined)?.userId;
+      const boundUserId = principalBoundUserId(req);
       if (boundUserId !== undefined && boundUserId !== pending.userId) {
         res.status(403).json({ error: 'user_id_mismatch' });
         return;

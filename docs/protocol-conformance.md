@@ -178,13 +178,14 @@ Against `draft-asor-wimse-agent-delegation-chain-02` sections 4.2, 4.3 and
   calls them malformed).
 - [x] `max_lifetime` and `max_subtree` parse and subsume; no inference across
   types.
-- [x] Fail closed at exercise: `POST /api/v1/use` denies any action under a
-  cumulative constraint with `403 cumulative_constraint_unenforceable`, since
-  no running total is held. `token_format: "raw"` is refused under one.
+- [x] Cumulative constraints at exercise: `POST /api/v1/use` debits them
+  through `SqliteCumulativeLedger` and refuses with `403
+  cumulative_constraint_unenforceable` when the ledger does not hold the
+  delegation's ancestors. `token_format: "raw"` is refused under one.
 - [x] Producer rule: `max` is per action only; issuance refuses a new `max` on
   a running-count key (`max_calls`).
-- [ ] DS-side atomic check-and-debit for cumulative constraints.
+- [x] DS-side atomic check-and-debit for cumulative constraints.
 - [ ] Per-action constraint evaluation at `/api/v1/use`.
-- [ ] Breaking, next wire version: principal in `sub`; mandatory `cnf` and
+- [ ] Breaking, next wire version: mandatory `cnf` and
   `client_id`; one closed `agent_delegation` detail; reject legacy malformed
   scopes and label `rank` without `order`.

@@ -120,6 +120,8 @@ export type AgentDelegationChainResult =
   | {
     ok: true;
     depth: number;
+    /** The tightest del_max_depth in the chain: what a further child's depth must stay below. */
+    depthBound: number;
     principal: string;
     /** `client_id` of DT_n. */
     actingAgent: string;
@@ -455,7 +457,7 @@ export function verifyAgentDelegationChain(
     if (!names) return fail('audience_mismatch', n, `DT_n aud does not name this verifier (${options.audience})`);
   }
 
-  return { ok: true, depth: n, principal: root.sub, actingAgent: leaf.claims.client_id, tokens: verified, leaf };
+  return { ok: true, depth: n, depthBound, principal: root.sub, actingAgent: leaf.claims.client_id, tokens: verified, leaf };
 }
 
 export interface MintAgentDelegationTokenInput {
@@ -478,10 +480,17 @@ export interface MintAgentDelegationTokenInput {
   delMaxDepth?: number;
   /** The parent token, already verified by the caller. Absent for DT_0. */
   parent?: string;
+  /**
+   * On a child: the tightest del_max_depth in the parent's verified chain
+   * (`depthBound` from verifyAgentDelegationChain). The parent token alone
+   * does not carry its ancestors' bounds; without this the producer checks
+   * only the parent's own del_max_depth.
+   */
+  chainDepthBound?: number;
 }
 
 export class AgentDelegationMintError extends Error {
-  constructor(message: string, public readonly reason: 'malformed' | 'not_narrower' | 'expired' | 'principal_altered') {
+  constructor(message: string, public readonly reason: 'malformed' | 'not_narrower' | 'expired' | 'principal_altered' | 'depth_invalid') {
     super(message);
     this.name = 'AgentDelegationMintError';
   }
@@ -536,9 +545,17 @@ export function mintAgentDelegationToken(input: MintAgentDelegationTokenInput): 
     const unknown = unknownSubsumes(parent.unknownConstraints, detail.unknownConstraints);
     if (unknown) throw new AgentDelegationMintError(unknown, 'not_narrower');
     if (input.exp > parent.claims.exp) throw new AgentDelegationMintError('a child cannot expire after its parent', 'expired');
-    const bound = parent.claims.del_max_depth;
+    const known = [input.chainDepthBound, parent.claims.del_max_depth].filter((b): b is number => typeof b === 'number');
+    const bound = known.length > 0 ? Math.min(...known) : undefined;
     if (input.delMaxDepth !== undefined && bound !== undefined && input.delMaxDepth > bound) {
       throw new AgentDelegationMintError('a child cannot raise del_max_depth', 'not_narrower');
+    }
+    // The child's own depth must stay below the tightest bound, as the
+    // verifier's step 3 requires.
+    const effective = input.delMaxDepth !== undefined ? Math.min(input.delMaxDepth, bound ?? Infinity) : bound;
+    const depth = parent.claims.del_depth + 1;
+    if (effective !== undefined && depth >= effective) {
+      throw new AgentDelegationMintError(`del_depth ${depth} is not below del_max_depth ${effective}`, 'depth_invalid');
     }
   }
   return signCompactJws(claims, input.signer, { typ: 'at+jwt', c14n: 'JCS' });

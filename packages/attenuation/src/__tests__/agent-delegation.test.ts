@@ -162,10 +162,28 @@ describe('mintAgentDelegationToken / verifyAgentDelegationChain', () => {
     const resolveKey = staticKeyResolver([createVerificationKey(ed.publicKey)]);
     const t0 = root(signer, { delMaxDepth: 6 });
     const t1 = child(t0, signer, { delMaxDepth: 2 });
-    const t2 = child(t1, signer, { jti: 'dt-2', clientId: 'did:key:z6MkFormatter' });
-    expect(verifyAgentDelegationChain([t0, t1], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 }).ok).toBe(true);
+    // The producer refuses this hop, so sign it by hand to reach the verifier.
+    const { del_max_depth: _dropped, ...p1 } = payload(t1);
+    const t2 = signCompactJws(
+      { ...p1, client_id: 'did:key:z6MkFormatter', jti: 'dt-2', del_depth: 2, par_hash: agentDelegationCommitment(t1) },
+      signer,
+      { typ: 'at+jwt', c14n: 'JCS' },
+    );
+    expect(verifyAgentDelegationChain([t0, t1], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 })).toMatchObject({ ok: true, depthBound: 2 });
     expect(verifyAgentDelegationChain([t0, t1, t2], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 }))
       .toMatchObject({ ok: false, reason: 'depth_invalid', hop: 2 });
+  });
+
+  it('refuses to mint a child at or past the chain depth bound', () => {
+    const signer = createKeySigner(ed.privateKey);
+    const t0 = root(signer, { delMaxDepth: 1 });
+    expect(() => child(t0, signer)).toThrow(/del_depth 1 is not below del_max_depth 1/);
+    const deep = root(signer, { delMaxDepth: 6 });
+    const t1 = child(deep, signer, { delMaxDepth: 3 });
+    const t2 = child(t1, signer, { jti: 'dt-2', clientId: 'did:key:z6MkFormatter' });
+    // t2 omits del_max_depth; only the chain's bound (3) stops a raise and a too-deep child.
+    expect(() => child(t2, signer, { jti: 'dt-3', clientId: 'did:key:z6MkX', delMaxDepth: 5, chainDepthBound: 3 })).toThrow(/raise/);
+    expect(() => child(t2, signer, { jti: 'dt-3', clientId: 'did:key:z6MkX', chainDepthBound: 3 })).toThrow(/not below/);
   });
 
   it('refuses to mint a wider child', () => {
