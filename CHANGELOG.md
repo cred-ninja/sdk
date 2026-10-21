@@ -33,6 +33,11 @@ server can keep minting the old layout with `RECEIPT_CLAIM_LAYOUT=legacy`.
 Under a cumulative constraint other than `max_calls`, `/api/v1/use` now
 needs the exercise's quantity in `quantities`.
 
+Migration: read the agent DID from `act.sub` (equal to `client_id`) and
+the principal from `sub`; until every verifier does, set
+`RECEIPT_CLAIM_LAYOUT=legacy`. Known downstream consumer needing the same
+change: Cred Link, which is moving to `cred-ninja/link`.
+
 ## [2.0.0] - prepared 2026-10-13, not yet published to npm
 
 npm only; Python package versions are unchanged. Nothing between 1.0.0 and

@@ -113,6 +113,12 @@ npm run dev
 > the delegation id as `jti`, and `cnf.jkt` bound to the agent's did:key. Receipts in the old
 > layout (agent in `sub`) are still accepted; `RECEIPT_CLAIM_LAYOUT=legacy` keeps minting them
 > for verifiers that key on `sub`.
+>
+> **Migration.** A verifier of your own that reads the agent DID from receipt `sub` must read
+> `act.sub` (equal to `client_id`) instead, and the principal from `sub`. Until it does, set
+> `RECEIPT_CLAIM_LAYOUT=legacy` on the server. The SDK verifiers (`verifyDelegationReceipt`,
+> Python `verify_delegation_receipt`), SDK local mode, and the server's own receipt checks already
+> read both layouts.
 
 > **Cumulative constraints.** `max_lifetime` and `max_subtree` are enforced by this server as
 > the single writer of their running totals. `/api/v1/use` debits, in one SQLite transaction, the
