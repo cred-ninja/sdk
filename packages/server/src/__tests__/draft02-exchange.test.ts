@@ -117,9 +117,11 @@ function delegateRoot(app: Parameters<typeof request>[0], body: Record<string, u
   });
 }
 
-function subdelegate(app: Parameters<typeof request>[0], parentReceipt: string, agent: Agent, body: Record<string, unknown> = {}) {
+function subdelegate(app: Parameters<typeof request>[0], parentReceipt: string, agent: Agent, body: Record<string, unknown> = {}, delegator: Agent = ROOT) {
   return request(app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${TEST_TOKEN}`).send({
     parent_receipt: parentReceipt,
+    // The delegating agent proves it is the agent the parent receipt names.
+    actor_token: actorToken(delegator, { aud: `${BASE}/api/v1/subdelegate` }),
     agent_did: agent.did,
     service: 'google',
     user_id: 'alice',
@@ -206,6 +208,50 @@ describe('receipt signing', () => {
     expect(payload.act).toBeUndefined();
     const child = await subdelegate(app, root.body.receipt, CHILD);
     expect(child.status).toBe(200);
+  });
+});
+
+describe('caller identity on /api/v1/subdelegate', () => {
+  it('rejects a valid receipt presented by a different agent', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    const res = await subdelegate(app, root.body.receipt, CHILD, {}, SIBLING);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('agent_identity_mismatch');
+  });
+
+  it('rejects a call without an actor token', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    const res = await subdelegate(app, root.body.receipt, CHILD, { actor_token: undefined });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('agent_identity_required');
+  });
+
+  it('rejects an actor token addressed to another endpoint, and a replayed one', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    const wrongAud = await subdelegate(app, root.body.receipt, CHILD, { actor_token: actorToken(ROOT) });
+    expect(wrongAud.body.error).toBe('agent_identity_mismatch');
+    const once = actorToken(ROOT, { aud: `${BASE}/api/v1/subdelegate`, jti: 'subdelegate-once' });
+    expect((await subdelegate(app, root.body.receipt, CHILD, { actor_token: once })).status).toBe(200);
+    expect((await subdelegate(app, root.body.receipt, SIBLING, { actor_token: once })).body.error).toBe('agent_identity_mismatch');
+  });
+
+  it('accepts the matching agent', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    expect((await subdelegate(app, root.body.receipt, CHILD)).status).toBe(200);
+  });
+
+  it('keeps the legacy behaviour with the flag off, and warns at startup', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app } = await setup({ requireAgentIdentity: false });
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('CRED_REQUIRE_AGENT_IDENTITY=false'))).toBe(true);
+    warn.mockRestore();
+    const root = await delegateRoot(app);
+    const res = await subdelegate(app, root.body.receipt, CHILD, { actor_token: undefined });
+    expect(res.status).toBe(200);
   });
 });
 

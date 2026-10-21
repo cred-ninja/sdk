@@ -312,6 +312,13 @@ export interface SubDelegateParams extends Omit<DelegateParams, 'agentDid'> {
   parentReceipt: string;
   /** DID of the child agent receiving the attenuated delegation. */
   agentDid: string;
+  /**
+   * Cloud mode: the identity of the delegating agent, the one the parent
+   * receipt names. The SDK signs an `actor_token` with it so the server can
+   * check the caller is that agent, which servers require unless they run
+   * with CRED_REQUIRE_AGENT_IDENTITY=false.
+   */
+  delegatorIdentity?: Pick<import('./identity.js').AgentIdentity, 'did' | 'privateKey'>;
 }
 
 export interface SubDelegationResult extends DelegationResult {

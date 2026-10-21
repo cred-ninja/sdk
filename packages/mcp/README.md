@@ -81,6 +81,7 @@ When your MCP client needs your calendar, you approve interactively. The token i
 |----------|----------|---------|-------------|
 | `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
 | `CRED_AGENT_DID` | No | | Stable agent identifier used when Cred should return signed delegation receipts |
+| `CRED_AGENT_PRIVATE_KEY_HEX` | No | | Cloud mode: 32-byte Ed25519 private key (hex) of the did:key in `CRED_AGENT_DID`. `cred_subdelegate` signs an `actor_token` with it, which servers require unless they run with `CRED_REQUIRE_AGENT_IDENTITY=false` |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
 | `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
 | `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing |

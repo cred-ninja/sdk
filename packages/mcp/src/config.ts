@@ -22,6 +22,13 @@ export interface CredMcpCloudConfig {
   agentToken: string;
   /** Stable agent identifier used when Cred should return signed delegation receipts */
   agentDid?: string;
+  /**
+   * The 32-byte Ed25519 private key (hex) of the did:key in `agentDid`
+   * (env CRED_AGENT_PRIVATE_KEY_HEX). With it, `cred_subdelegate` signs the
+   * actor_token servers require to prove this agent is the one its parent
+   * receipt names.
+   */
+  agentPrivateKeyHex?: string;
   /** Your Cred app's client ID */
   appClientId: string;
   /** Your Cred server URL (e.g. https://cred.example.com) */
@@ -209,11 +216,19 @@ export function loadConfig(args?: string[]): CredMcpConfig {
   }
 
   const baseUrl = validateBaseUrl(rawBaseUrl);
+  const agentPrivateKeyHex = process.env.CRED_AGENT_PRIVATE_KEY_HEX;
+  if (agentPrivateKeyHex !== undefined) {
+    if (!process.env.CRED_AGENT_DID) throw new Error('CRED_AGENT_PRIVATE_KEY_HEX needs CRED_AGENT_DID');
+    if (!/^[0-9a-fA-F]{64}$/.test(agentPrivateKeyHex)) {
+      throw new Error('CRED_AGENT_PRIVATE_KEY_HEX must be 64 hex characters (32-byte Ed25519 private key)');
+    }
+  }
 
   return {
     mode: 'cloud',
     agentToken,
     agentDid: process.env.CRED_AGENT_DID,
+    ...(agentPrivateKeyHex ? { agentPrivateKeyHex: agentPrivateKeyHex.toLowerCase() } : {}),
     appClientId,
     baseUrl,
     webBotAuth,

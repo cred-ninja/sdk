@@ -60,6 +60,8 @@ export interface SubdelegateToolContext {
   appClientId: string;
   tokenCache: TokenCache;
   useServerBroker?: boolean;
+  /** This agent's identity, to sign the actor_token proving it holds the parent receipt. */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleSubdelegate(
@@ -74,6 +76,7 @@ export async function handleSubdelegate(
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
+      ...(context.delegatorIdentity ? { delegatorIdentity: context.delegatorIdentity } : {}),
     };
     const result = context.useServerBroker
       ? await context.cred.subDelegateHandle(request)

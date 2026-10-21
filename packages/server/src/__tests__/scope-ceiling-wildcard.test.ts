@@ -35,6 +35,9 @@ function makeTestConfig(): ServerConfig {
       },
     ],
     redirectBaseUri: 'http://localhost:3456',
+    // Fixture DIDs here are not real did:keys, so these suites exercise the
+    // deprecated legacy path; agent-identity.test.ts covers the default.
+    requireAgentIdentity: false,
   };
 }
 

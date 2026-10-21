@@ -22,6 +22,27 @@
   then `POST /api/v1/token`); `token_profile: "agent_delegation"` on
   `/api/v1/delegate` and `/api/v1/subdelegate`.
 
+### BREAKING: caller identity on `/api/v1/subdelegate` (`@credninja/server`)
+
+`/api/v1/subdelegate` now requires the caller to prove it is the agent the
+parent receipt names, with an RFC 7523 `actor_token` signed by that agent's
+did:key. Before, any caller holding the deployment's Bearer token and a
+validly signed receipt could sub-delegate from it. Errors:
+`401 agent_identity_required`, `403 agent_identity_mismatch`,
+`403 agent_identity_unverifiable` (parent agent not a did:key).
+
+Migration:
+
+1. SDK callers: pass the delegating agent's identity as
+   `delegatorIdentity` to `subDelegate()` / `subDelegateHandle()`; the SDK
+   signs the token (`createActorToken()` is exported for other clients).
+2. MCP in cloud mode: set `CRED_AGENT_PRIVATE_KEY_HEX` to the key of
+   `CRED_AGENT_DID`.
+3. Other clients: send `actor_token` as described in the server README.
+4. Until every caller does, set `CRED_REQUIRE_AGENT_IDENTITY=false` on the
+   server. That keeps the old behaviour, logs a deprecation warning at
+   startup, and will be removed.
+
 ### Changed: receipt claim layout (`@credninja/server`, `@credninja/sdk` local mode)
 
 New receipts put the principal in `sub` and the acting agent in

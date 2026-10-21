@@ -2291,6 +2291,7 @@ describe('@credninja/server', () => {
 
     it('preserves trusted receipt claims across guarded sub-delegation', async () => {
       const config = makeTestConfig({
+        requireAgentIdentity: false,
         agentToken: undefined,
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,
