@@ -7,6 +7,16 @@ so an agent can discover what it can do without guessing. It is generated
 from source, not aspirational; if something here doesn't match the code,
 the code is authoritative.
 
+## What never goes in this repo
+
+This repository is public. Standards-work registers, sweep reports and
+anything else built from private mail live in the private
+`cred-ninja/standards-private` repository, never here. Do not put the
+content of private mail, mailbox message or draft identifiers, or stances
+on named people into files, commit messages, or PR titles and bodies. Cite only public archives (mailarchive.ietf.org,
+datatracker.ietf.org). `.github/workflows/public-leak-guard.yml` enforces
+this on every PR and push to `main`.
+
 ## What this repo does
 
 Cred is OAuth2 credential delegation middleware for AI agents. An agent

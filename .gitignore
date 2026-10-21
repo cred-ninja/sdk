@@ -25,6 +25,11 @@ HANDOFF.md
 VALIDATION.md
 MARKETING-VALIDATION.md
 FINAL-SUBMISSION-VALIDATION.md
+
+# Standards-work registers and sweep reports are built from private mail.
+# They live in the private cred-ninja/standards-private repo, never here.
+reports/
+
 .next/
 out/
 coverage/
