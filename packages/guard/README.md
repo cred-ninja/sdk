@@ -86,12 +86,12 @@ const guard = new CredGuard({
 | `urlAllowlistPolicy` | Restrict which URLs agents can call (cred_use) | `{ allowedUrls }` (origin-scoped string prefix or RegExp) |
 | `maxTtlPolicy` | Cap delegation TTL | `{ maxTtlSeconds, perProvider? }` |
 | `webBotAuthPolicy` | Require or constrain Web Bot Auth identity metadata | `{ requireKeyId?, allowedIdentitySources?, allowedSignatureAgentPrefixes? }` |
-| `classificationCeilingPolicy` | Deny resources classified above the agent's ceiling | `{ levels, agentCeilings? \| resolveAgentCeiling?, resolveResourceLevel?, onMissing?, noWriteDown?, resolveFlow? }` |
-| `amountLimitPolicy` | Cap monetary amounts per request and per rolling period | `{ currency, maxPerRequest?, maxPerPeriod?, periodMs?, perAgent?, resolveAmount?, onMissing?, store? }` |
+| `classificationCeilingPolicy` | Deny resources classified above the agent's ceiling | `{ levels, agentCeilings? \| resolveAgentCeiling?, trustAgentDid?, resolveResourceLevel?, onMissing?, noWriteDown?, resolveFlow? }` |
+| `amountLimitPolicy` | Cap monetary amounts per request and per rolling period | `{ currency, maxPerRequest?, maxPerPeriod?, periodMs?, perAgent?, trustAgentDid?, resolveAmount?, onMissing?, store? }` |
 
 ### Classification Ceiling
 
-Orders `levels` lowest first and denies a request whose level (default `ctx.metadata.classification`) is above the agent's ceiling. Ceilings come from `agentCeilings`, keyed by `agentDid` or `agentTokenHash` (the lower one applies when both match), or from `resolveAgentCeiling`. It fails closed: an unknown level, an unknown agent or a resolver error is a DENY. A request with no classification is denied unless `onMissing: 'skip'`.
+Orders `levels` lowest first and denies a request whose level (default `ctx.metadata.classification`) is above the agent's ceiling. Ceilings come from `agentCeilings`, keyed by `agentTokenHash`, or from `resolveAgentCeiling`. It fails closed: an unknown level, an unknown agent or a resolver error is a DENY. A request with no classification is denied unless `onMissing: 'skip'`.
 
 With `noWriteDown: true`, `ctx.metadata.sourceClassification` and `ctx.metadata.destinationClassification` are also checked against the ceiling, and moving data to a lower level is denied.
 
@@ -100,7 +100,7 @@ import { classificationCeilingPolicy } from '@credninja/guard';
 
 classificationCeilingPolicy({
   levels: ['public', 'internal', 'confidential', 'restricted'],
-  agentCeilings: { 'did:web:reports.example.com': 'confidential' },
+  agentCeilings: { [reportsAgentTokenHash]: 'confidential' },
   noWriteDown: true,
 });
 ```
@@ -109,7 +109,7 @@ DENY codes: `classification_exceeded`, `write_down_blocked`, `classification_unk
 
 ### Amount Limit
 
-Reads `ctx.metadata.amount` and `ctx.metadata.currency` (override with `resolveAmount`). Amounts are **integer minor units** (`1050` is USD 10.50); decimals, negatives and strings are denied. `maxPerPeriod` is a rolling total per `agentTokenHash` over `periodMs` (default 24 hours), and only allowed amounts count toward it. `perAgent` overrides limits by `agentTokenHash` or `agentDid`.
+Reads `ctx.metadata.amount` and `ctx.metadata.currency` (override with `resolveAmount`). Amounts are **integer minor units** (`1050` is USD 10.50); decimals, negatives and strings are denied. `maxPerPeriod` is a rolling total per `agentTokenHash` over `periodMs` (default 24 hours), and only allowed amounts count toward it. `perAgent` overrides limits by `agentTokenHash`.
 
 ```typescript
 import { amountLimitPolicy } from '@credninja/guard';
@@ -118,11 +118,15 @@ amountLimitPolicy({
   currency: 'USD',
   maxPerRequest: 50_00,    // $50.00
   maxPerPeriod: 200_00,    // $200.00 per 24 hours
-  perAgent: { 'did:web:billing.example.com': { maxPerPeriod: 1_000_00 } },
+  perAgent: { [billingAgentTokenHash]: { maxPerPeriod: 1_000_00 } },
 });
 ```
 
 Totals live in memory by default and reset on restart. For multiple instances, pass a `store` implementing `AmountLimitStore` (`consume` must check and record atomically). DENY codes: `amount_exceeds_per_request`, `amount_exceeds_period`, `amount_missing`, `amount_invalid`, `currency_mismatch`, `amount_store_error`.
+
+### Agent DIDs (`trustAgentDid`)
+
+Both policies ignore `agentDid`-keyed entries in `agentCeilings` and `perAgent` unless `trustAgentDid: true`; then both identifiers are looked up and the stricter entry wins. Enable it only when `ctx.agentDid` comes from verified authentication state. The bundled Express middleware (`req.body.agent_did`) and MCP wrapper (`metadata.agentDid`) currently copy it from request input, so with those an agent could claim any DID and pick up that DID's entry.
 
 ## Policy Chain Behavior
 

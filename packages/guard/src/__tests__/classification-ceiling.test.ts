@@ -153,8 +153,11 @@ describe('ClassificationCeilingPolicy', () => {
       expect(result.code).toBe('ceiling_unknown');
     });
 
-    it('looks up the ceiling by agentDid', () => {
-      const policy = makePolicy({ agentCeilings: { 'did:web:agent.example': 'restricted' } });
+    it('looks up the ceiling by agentDid when trustAgentDid is set', () => {
+      const policy = makePolicy({
+        agentCeilings: { 'did:web:agent.example': 'restricted' },
+        trustAgentDid: true,
+      });
       const result = policy.evaluate(
         makeContext({ agentDid: 'did:web:agent.example', metadata: { classification: 'restricted' } }),
       );
@@ -162,9 +165,32 @@ describe('ClassificationCeilingPolicy', () => {
       expect(result.decision).toBe('ALLOW');
     });
 
+    it('ignores DID-keyed ceilings by default (unknown agent fails closed)', () => {
+      const policy = makePolicy({ agentCeilings: { 'did:web:agent.example': 'restricted' } });
+      const result = policy.evaluate(
+        makeContext({ agentDid: 'did:web:agent.example', metadata: { classification: 'public' } }),
+      );
+
+      expect(result.decision).toBe('DENY');
+      expect(result.code).toBe('ceiling_unknown');
+    });
+
+    it('ignores a request-claimed DID with a higher ceiling by default', () => {
+      const policy = makePolicy({
+        agentCeilings: { 'did:web:admin.example': 'restricted', 'agent-hash-123': 'internal' },
+      });
+      const result = policy.evaluate(
+        makeContext({ agentDid: 'did:web:admin.example', metadata: { classification: 'restricted' } }),
+      );
+
+      expect(result.code).toBe('classification_exceeded');
+      expect(result.reason).toContain('internal');
+    });
+
     it('applies the lower ceiling when agentDid and agentTokenHash both match', () => {
       const policy = makePolicy({
         agentCeilings: { 'did:web:agent.example': 'restricted', 'agent-hash-123': 'internal' },
+        trustAgentDid: true,
       });
       const result = policy.evaluate(
         makeContext({ agentDid: 'did:web:agent.example', metadata: { classification: 'confidential' } }),

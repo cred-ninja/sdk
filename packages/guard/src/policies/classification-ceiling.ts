@@ -141,7 +141,8 @@ export class ClassificationCeilingPolicy implements CredPolicy {
 
   /**
    * Resolve the agent's ceiling rank. A resolver wins over the map; with the
-   * map, the lower of the agentDid and agentTokenHash entries applies.
+   * map, the agentTokenHash entry applies, or with trustAgentDid the lower of
+   * the agentDid and agentTokenHash entries.
    */
   private resolveCeiling(ctx: GuardContext): number | { reason: string } {
     let candidates: unknown[];
@@ -150,7 +151,8 @@ export class ClassificationCeilingPolicy implements CredPolicy {
         candidates = [this.config.resolveAgentCeiling(ctx)];
       } else {
         const ceilings = this.config.agentCeilings ?? {};
-        candidates = [ctx.agentDid, ctx.agentTokenHash]
+        const ids = this.config.trustAgentDid ? [ctx.agentDid, ctx.agentTokenHash] : [ctx.agentTokenHash];
+        candidates = ids
           .filter((id): id is string => typeof id === 'string' && Object.hasOwn(ceilings, id))
           .map((id) => ceilings[id]);
       }

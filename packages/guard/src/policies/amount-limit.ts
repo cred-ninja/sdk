@@ -69,6 +69,11 @@ export class InMemoryAmountLimitStore implements AmountLimitStore {
       this.store(key, live);
       return { recorded: false, total };
     }
+    // A zero amount changes no total, so keep no entry for it
+    if (amount === 0) {
+      this.store(key, live);
+      return { recorded: true, total };
+    }
     live.push({ at, amount });
     this.store(key, live);
     return { recorded: true, total: total + amount };
@@ -195,11 +200,15 @@ export class AmountLimitPolicy implements CredPolicy {
 
     // Check and record in one store call so only allowed amounts count
     const now = Date.now();
-    let consumed: AmountLimitConsumeResult;
+    let consumed: unknown;
     try {
       consumed = await this.store.consume(ctx.agentTokenHash, amount, now, now - this.periodMs, maxPerPeriod);
     } catch (error) {
       return { ...limits, ...deny('amount_store_error', `Amount store failed: ${errorMessage(error)}`) };
+    }
+    // Stores may be third-party code: never trust the result's shape
+    if (!isConsumeResult(consumed)) {
+      return { ...limits, ...deny('amount_store_error', 'Amount store returned an invalid result') };
     }
 
     const periodTotal = consumed.total;
@@ -234,11 +243,13 @@ export class AmountLimitPolicy implements CredPolicy {
 
   /**
    * Limits for this agent: policy defaults, overridden per field by perAgent
-   * entries for agentTokenHash or agentDid (the lower value when both match).
+   * entries for agentTokenHash or, with trustAgentDid, agentDid (the lower
+   * value when both match).
    */
   private resolveLimits(ctx: GuardContext): AmountLimits {
     const perAgent = this.config.perAgent ?? {};
-    const overrides = [ctx.agentTokenHash, ctx.agentDid]
+    const ids = this.config.trustAgentDid ? [ctx.agentTokenHash, ctx.agentDid] : [ctx.agentTokenHash];
+    const overrides = ids
       .filter((id): id is string => typeof id === 'string' && Object.hasOwn(perAgent, id))
       .map((id) => perAgent[id]);
     return {
@@ -246,6 +257,12 @@ export class AmountLimitPolicy implements CredPolicy {
       maxPerPeriod: pickLimit(this.config.maxPerPeriod, overrides.map((o) => o.maxPerPeriod)),
     };
   }
+}
+
+function isConsumeResult(value: unknown): value is AmountLimitConsumeResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const { recorded, total } = value as Partial<Record<keyof AmountLimitConsumeResult, unknown>>; // narrowed by the checks below
+  return typeof recorded === 'boolean' && typeof total === 'number' && Number.isFinite(total);
 }
 
 function pickLimit(fallback: number | undefined, overrides: Array<number | undefined>): number | undefined {

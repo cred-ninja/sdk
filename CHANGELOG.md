@@ -17,6 +17,10 @@
   DENY codes: `amount_exceeds_per_request`, `amount_exceeds_period`,
   `amount_missing`, `amount_invalid`, `currency_mismatch`,
   `amount_store_error`.
+- Both policies key agent entries by `agentTokenHash` only. DID-keyed
+  entries apply only with `trustAgentDid: true`, which must be enabled only
+  when `agentDid` comes from verified authentication state (the bundled
+  Express and MCP adapters currently take it from request input).
 
 ## [2.0.0] - prepared 2026-10-13, not yet published to npm
 

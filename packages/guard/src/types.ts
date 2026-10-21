@@ -260,10 +260,19 @@ export interface ClassificationCeilingPolicyConfig {
    */
   levels: string[];
   /**
-   * Agent ceilings keyed by `agentDid` or `agentTokenHash`. When both
-   * identifiers have an entry, the lower ceiling applies.
+   * Agent ceilings keyed by `agentTokenHash`, or also by `agentDid` when
+   * `trustAgentDid` is set. When both identifiers have an entry, the lower
+   * ceiling applies.
    */
   agentCeilings?: Record<string, string>;
+  /**
+   * Look up `agentCeilings` by `ctx.agentDid` as well as `agentTokenHash`.
+   * Default: false, so DID-keyed entries are ignored. Enable only when
+   * `agentDid` comes from verified authentication state: the bundled Express
+   * middleware and MCP wrapper currently copy it from request input, so an
+   * agent could claim any DID.
+   */
+  trustAgentDid?: boolean;
   /**
    * Resolve the agent's ceiling. Takes precedence over `agentCeilings`.
    * Return undefined for an unknown agent (DENY).
@@ -322,10 +331,19 @@ export interface AmountLimitPolicyConfig extends AmountLimits {
   /** Rolling period for `maxPerPeriod` in milliseconds. Default: 86_400_000 (24 hours). */
   periodMs?: number;
   /**
-   * Per-agent overrides keyed by `agentTokenHash` or `agentDid`. When both
-   * identifiers have an entry, the lower value of each limit applies.
+   * Per-agent overrides keyed by `agentTokenHash`, or also by `agentDid`
+   * when `trustAgentDid` is set. When both identifiers have an entry, the
+   * lower value of each limit applies.
    */
   perAgent?: Record<string, AmountLimits>;
+  /**
+   * Look up `perAgent` by `ctx.agentDid` as well as `agentTokenHash`.
+   * Default: false, so DID-keyed entries are ignored. Enable only when
+   * `agentDid` comes from verified authentication state: the bundled Express
+   * middleware and MCP wrapper currently copy it from request input, so an
+   * agent could claim any DID.
+   */
+  trustAgentDid?: boolean;
   /** Read the amount and currency. Default: `ctx.metadata.amount` and `ctx.metadata.currency`. */
   resolveAmount?: (ctx: GuardContext) => { amount?: unknown; currency?: unknown } | undefined;
   /** What to do when no amount is present. Default: 'deny'. */

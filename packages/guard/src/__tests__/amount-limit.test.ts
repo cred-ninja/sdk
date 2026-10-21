@@ -187,12 +187,26 @@ describe('AmountLimitPolicy', () => {
       expect((await policy.evaluate(pay(501, 'USD', { agentTokenHash: 'other' }))).decision).toBe('ALLOW');
     });
 
-    it('applies an override by agentDid', async () => {
-      const policy = makePolicy({ perAgent: { 'did:web:agent.example': { maxPerRequest: 50_000, maxPerPeriod: 50_000 } } });
+    it('applies an override by agentDid when trustAgentDid is set', async () => {
+      const policy = makePolicy({
+        perAgent: { 'did:web:agent.example': { maxPerRequest: 50_000, maxPerPeriod: 50_000 } },
+        trustAgentDid: true,
+      });
       const result = await policy.evaluate(pay(40_000, 'USD', { agentDid: 'did:web:agent.example' }));
 
       expect(result.decision).toBe('ALLOW');
       expect(result.maxPerPeriod).toBe(50_000);
+    });
+
+    it('ignores a request-claimed DID with a permissive override by default', async () => {
+      const policy = makePolicy({
+        perAgent: { 'did:web:agent.example': { maxPerRequest: 50_000, maxPerPeriod: 50_000 } },
+      });
+      const result = await policy.evaluate(pay(40_000, 'USD', { agentDid: 'did:web:agent.example' }));
+
+      expect(result.decision).toBe('DENY');
+      expect(result.code).toBe('amount_exceeds_per_request');
+      expect(result.maxPerRequest).toBe(10_000);
     });
 
     it('falls back to the defaults for fields the override leaves unset', async () => {
@@ -209,6 +223,7 @@ describe('AmountLimitPolicy', () => {
           'agent-hash-123': { maxPerRequest: 1_000, maxPerPeriod: 90_000 },
           'did:web:agent.example': { maxPerRequest: 9_000, maxPerPeriod: 3_000 },
         },
+        trustAgentDid: true,
       });
       const result = await policy.evaluate(pay(1_000, 'USD', { agentDid: 'did:web:agent.example' }));
 
@@ -345,6 +360,51 @@ describe('AmountLimitPolicy', () => {
       expect(result.code).toBe('amount_store_error');
     });
 
+    it('keeps no entries for zero amounts', async () => {
+      const store = new InMemoryAmountLimitStore();
+      for (let i = 0; i < 100; i++) {
+        const result = store.consume('agent', 0, 1_000 + i, 0, 10);
+        expect(result).toEqual({ recorded: true, total: 0 });
+      }
+      expect(store.size()).toBe(0);
+
+      store.consume('agent', 5, 2_000, 0, 10);
+      for (let i = 0; i < 100; i++) {
+        expect(store.consume('agent', 0, 2_001 + i, 0, 10)).toEqual({ recorded: true, total: 5 });
+      }
+      // Only the one non-zero entry is stored
+      expect(store.size()).toBe(1);
+      expect(store.total('agent', 0)).toBe(5);
+    });
+
+    it('allows zero amounts through the policy without growing the store', async () => {
+      const store = new InMemoryAmountLimitStore();
+      const policy = makePolicy({ store });
+      for (let i = 0; i < 50; i++) {
+        expect((await policy.evaluate(pay(0))).decision).toBe('ALLOW');
+      }
+
+      expect(store.size()).toBe(0);
+    });
+
+    it.each([
+      ['undefined', undefined],
+      ['null', null],
+      ['a NaN total', { recorded: true, total: Number.NaN }],
+      ['a non-boolean recorded', { recorded: 'yes', total: 1 }],
+      ['an infinite total', { recorded: true, total: Number.POSITIVE_INFINITY }],
+    ])('denies when the store resolves %s', async (_label, value) => {
+      const store = {
+        consume: async () => value,
+        total: () => 0,
+      } as unknown as AmountLimitStore; // deliberately malformed store
+      const result = await makePolicy({ store }).evaluate(pay(100));
+
+      expect(result.decision).toBe('DENY');
+      expect(result.code).toBe('amount_store_error');
+      expect(result.reason).toBe('Amount store returned an invalid result');
+    });
+
     it('does not touch the store without a period limit', async () => {
       const consume = vi.fn();
       const policy = new AmountLimitPolicy({
@@ -421,6 +481,19 @@ describe('AmountLimitPolicy', () => {
 
       expect(decision.allowed).toBe(false);
       expect(decision.deniedBy?.code).toBe('amount_store_error');
+    });
+
+    it('stays closed on an invalid store result even with onError allow', async () => {
+      const store = {
+        consume: async () => null,
+        total: () => 0,
+      } as unknown as AmountLimitStore; // deliberately malformed store
+      const guard = new CredGuard({ policies: [makePolicy({ store })], onError: 'allow' });
+      const decision = await guard.evaluate(pay(100));
+
+      expect(decision.allowed).toBe(false);
+      expect(decision.deniedBy?.code).toBe('amount_store_error');
+      expect(decision.deniedBy?.reason).toBe('Amount store returned an invalid result');
     });
   });
 });
