@@ -114,7 +114,11 @@ jobs:
           private='Gmail (draft|drafts|thread|message|messages|id|ids|evidence|checked|delay|HOLD)\b|[Pp]rivate Gmail\b|Gmail r-?[0-9]{10,}|Gmail[^|)]{0,40}\b[0-9a-f]{16}\b|\b[Oo]ff-list\b|\b[Pp]rivately\b|Stance: (SPEAK|WATCH|DROP)\b|\b[Ss]peak[- ]by\b|(^|[[:space:]/])reports/'
           fail=0
 
-          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -nE "$private"; then
+          # CodeRabbit writes its own summary of the diff into the PR body. The diff
+          # itself is checked file by file above, so skip that generated block.
+          body=$(printf '%s\n' "$PR_BODY" | sed '/<!-- This is an auto-generated comment: release notes by coderabbit.ai -->/,/<!-- end of auto-generated comment: release notes by coderabbit.ai -->/d')
+
+          if printf '%s\n%s\n' "$PR_TITLE" "$body" | grep -nE "$private"; then
             echo "::error::Private correspondence marker found in the PR title or body."
             fail=1
           fi
