@@ -32,7 +32,7 @@ These came out of list threads and are edits to draft-sweeney-wimse-credential-d
 - Section 7: state that synchronous cascading revocation holds within one Delegation Server only, and that enforcement of a revoked delegation across administrative domains is out of scope. Watts asked proponents on 2026-10-19 for exactly this limit. (Revocation closure)
 - Related Work, Nelson paragraph: principal-signed receipts add assurance only when the principal's key is user-held and user-verified. (Nelson receipts)
 - Security Considerations: retained receipts and consent records are classical-signature evidence; long-term retention needs anchoring. (PQ agent identity)
-- Section 5.5 (tokens verified away from the issuing Delegation Server): say that cumulative ceilings (Asor's max_lifetime and max_subtree, daily spend totals) are enforced only where a single writer holds the total. A verifier away from the DS can enforce per-action ceilings only; across verifiers a cumulative ceiling is per verifier. Caleb's delegate-held tally (2026-10-20) makes this gap visible. (Call for comments on -01)
+- Section 5.5 (tokens verified away from the issuing Delegation Server): say that cumulative ceilings (Asor's max_lifetime and max_subtree, daily spend totals) are enforced only where a single writer holds the total. A verifier away from the DS enforces per-action ceilings and can hold a cumulative total only for the actions it sees itself; no one holds the total across verifiers. Caleb's delegate-held tally (2026-10-20) makes this gap visible. (Call for comments on -01)
 
 ## Active threads
 
