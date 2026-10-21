@@ -16,6 +16,21 @@ export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredB
 export type { ScopeClass } from './delegation-chain.js';
 export { verifyDelegationChain } from './chain-verify.js';
 export {
+  collectDelegationSubtree,
+  MemoryDelegationStore,
+  DelegationRevokedError,
+  DEFAULT_MAX_REVOCATION_DEPTH,
+} from './delegation-revocation.js';
+export type {
+  DelegationRecord,
+  DelegationStatus,
+  RecordDelegationInput,
+  DelegationRevocationSeed,
+  DelegationRevocationOptions,
+  DelegationRevocationResult,
+  RevokedDelegation,
+} from './delegation-revocation.js';
+export {
   parseConstraints,
   constraintsSubsume,
   constraintTypeOf,

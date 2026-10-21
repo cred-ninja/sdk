@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { performance } from 'perf_hooks';
 import { generateSalt, encryptWithKey, decryptWithKey, deriveKey } from './crypto.js';
 import { SQLiteBackend } from './storage/sqlite.js';
 import { FileBackend } from './storage/file.js';
@@ -21,6 +22,14 @@ import type {
 } from './types.js';
 import type { AuditEvent, AuditFilter } from './audit.js';
 import { RotationEngine } from './rotation.js';
+import {
+  MemoryDelegationStore,
+  type DelegationRecord,
+  type DelegationRevocationOptions,
+  type DelegationRevocationResult,
+  type DelegationRevocationSeed,
+  type RecordDelegationInput,
+} from './delegation-revocation.js';
 import { PermissionStore, type CreatePermissionInput } from './permissions.js';
 import { isReservedLinkVaultUserId, ReservedVaultUserIdError } from './link/vault-ids.js';
 import { LINK_VAULT_ACCESS, type LinkVaultAccess } from './link/vault-access.js';
@@ -64,6 +73,7 @@ export class CredVault {
   private initPromise: Promise<void> | null = null;
   private rotationEngine: RotationEngine | null = null;
   private permissionStore: PermissionStore | null = null;
+  private memoryDelegations: MemoryDelegationStore | null = null;
 
   constructor(options: VaultOptions) {
     genuineVaults.add(this);
@@ -428,6 +438,89 @@ export class CredVault {
     await this.backend.updateAgentStatus(agentId, 'revoked', now);
   }
 
+  /**
+   * Revoke an agent and cascade: every delegation issued to the agent's DID
+   * and every delegation derived from those is revoked too. The agent is
+   * marked revoked first, so a delegation recorded for it after this point
+   * is refused (see recordDelegation()). An agent without a DID has no
+   * delegations to reach and returns an empty result.
+   */
+  async revokeAgentCascade(agentId: string, options: DelegationRevocationOptions = {}): Promise<DelegationRevocationResult> {
+    const started = performance.now();
+    await this.ensureInit();
+    const agent = await this.getAgent(agentId);
+    await this.revokeAgent(agentId);
+    if (!agent?.did) {
+      return { revoked: [], revokedIds: [], count: 0, elapsedMs: performance.now() - started, truncated: false };
+    }
+    return this.revokeDelegationsSince(started, { agentDid: agent.did }, options);
+  }
+
+  // ── Delegation records ───────────────────────────────────────────────────
+
+  /**
+   * Backends with a delegation table persist records; the others (the file
+   * backend) keep them in process memory, alongside the in-memory brokered
+   * handles they describe.
+   */
+  private delegationStore(): Required<Pick<StorageBackend, 'storeDelegation' | 'getDelegation' | 'revokeDelegationTree'>> {
+    const backend = this.backend;
+    if (backend.storeDelegation && backend.getDelegation && backend.revokeDelegationTree) {
+      return {
+        storeDelegation: backend.storeDelegation.bind(backend),
+        getDelegation: backend.getDelegation.bind(backend),
+        revokeDelegationTree: backend.revokeDelegationTree.bind(backend),
+      };
+    }
+    this.memoryDelegations ??= new MemoryDelegationStore();
+    const memory = this.memoryDelegations;
+    return {
+      storeDelegation: memory.storeDelegation.bind(memory),
+      getDelegation: memory.getDelegation.bind(memory),
+      revokeDelegationTree: memory.revokeDelegationTree.bind(memory),
+    };
+  }
+
+  /**
+   * Record an issued delegation and its parent linkage. Throws
+   * DelegationRevokedError when the parent delegation (or, on SQLite, the
+   * agent) is already revoked; the caller must not hand the delegation out.
+   */
+  async recordDelegation(input: RecordDelegationInput): Promise<DelegationRecord> {
+    await this.ensureInit();
+    return this.delegationStore().storeDelegation(input, new Date().toISOString());
+  }
+
+  async getDelegation(id: string): Promise<DelegationRecord | null> {
+    await this.ensureInit();
+    return this.delegationStore().getDelegation(id);
+  }
+
+  /**
+   * Revoke delegations and, transitively, every delegation derived from
+   * them. Idempotent: delegations already revoked are not counted again.
+   */
+  async revokeDelegations(seed: DelegationRevocationSeed, options: DelegationRevocationOptions = {}): Promise<DelegationRevocationResult> {
+    const started = performance.now();
+    await this.ensureInit();
+    return this.revokeDelegationsSince(started, seed, options);
+  }
+
+  private async revokeDelegationsSince(
+    started: number,
+    seed: DelegationRevocationSeed,
+    options: DelegationRevocationOptions,
+  ): Promise<DelegationRevocationResult> {
+    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, new Date().toISOString(), options);
+    return {
+      revoked,
+      revokedIds: revoked.map((r) => r.id),
+      count: revoked.length,
+      elapsedMs: performance.now() - started,
+      truncated,
+    };
+  }
+
   // ── Permission methods ───────────────────────────────────────────────────
 
   async createPermission(permission: CreatePermissionInput): Promise<Permission> {
@@ -547,6 +640,18 @@ export class CredVault {
       throw new Error('Audit logging not supported by this storage backend');
     }
     this.backend.writeAuditEvent(event);
+  }
+
+  /**
+   * Write several audit events, in one transaction where the backend
+   * supports it (a cascading revocation writes one per revoked delegation).
+   */
+  writeAuditEvents(events: readonly AuditEvent[]): void {
+    if (this.backend.writeAuditEvents) {
+      this.backend.writeAuditEvents(events);
+      return;
+    }
+    for (const event of events) this.writeAuditEvent(event);
   }
 
   queryAuditEvents(filter: AuditFilter): AuditEvent[] {

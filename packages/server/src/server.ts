@@ -28,9 +28,10 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError } from '@credninja/vault';
-import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput } from '@credninja/vault';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -100,6 +101,14 @@ interface BrokeredDelegation {
    * and loads the current token at call time.
    */
   link?: LinkHandleBinding;
+  /** DID the handle was issued to, when the request named one. */
+  agentDid?: string;
+  /**
+   * Set by a cascading revocation that reached this handle. /api/v1/use
+   * refuses the handle from then on (and re-checks right before the
+   * upstream call, so a request already in flight is refused too).
+   */
+  revoked?: { at: number; revokedAncestorId: string };
 }
 
 interface WebBotAuthDirectoryResponse {
@@ -1460,6 +1469,20 @@ export function createServer(config: ServerConfig) {
     }
   }
 
+  /** Batched writeAuditEventIfSupported(): one transaction on SQLite. */
+  function writeAuditEventsIfSupported(events: AuditEvent[]) {
+    if (events.length === 0) return;
+    try {
+      vault.writeAuditEvents(events);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('not supported')) {
+        return;
+      }
+      throw err;
+    }
+  }
+
   // ── Receipt helpers (Ed25519, same key derivation as SDK local mode) ──────
 
   function getReceiptSigningKey() {
@@ -2176,18 +2199,27 @@ export function createServer(config: ServerConfig) {
         return;
       }
 
-      await vault.revokeAgent(agentId);
+      const started = performance.now();
+      const correlationId = crypto.randomUUID();
+      const actor: AuditActor = { type: 'system', id: 'admin' };
+      const cascade = applyRevocation(await vault.revokeAgentCascade(agentId), started, {
+        actor,
+        correlationId,
+        cause: `agent:${agent.id}`,
+      });
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'system', id: 'admin' },
+        actor,
         action: 'revoke',
         resource: { type: 'agent', id: agent.id },
         outcome: 'success',
-        correlationId: crypto.randomUUID(),
+        correlationId,
         metadata: {
           agentDid: agent.did,
+          revokedCount: cascade.count,
+          elapsedMs: cascade.elapsedMs,
         },
       });
 
@@ -2847,6 +2879,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     expiresIn: number;
     link?: LinkHandleBinding;
     constraints?: DelegationConstraint[];
+    agentDid?: string;
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -2858,6 +2891,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       createdAt: Date.now(),
       ...(input.link ? { link: input.link } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
+      ...(input.agentDid ? { agentDid: input.agentDid } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -2871,6 +2905,120 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       return null;
     }
     return delegation;
+  }
+
+  /**
+   * Record an issued delegation and its parent linkage, so a later
+   * revocation can reach it. Refuses with 401 delegation_revoked (or 403
+   * agent_revoked) when the parent or the agent was revoked meanwhile. On
+   * SQLite the check and the insert are one transaction, so a child issued
+   * while its parent is being revoked can never outlive the cascade.
+   * Returns false when it has already answered the request.
+   */
+  async function recordIssuedDelegation(res: Response, input: RecordDelegationInput, correlationId: string): Promise<boolean> {
+    try {
+      await vault.recordDelegation(input);
+      return true;
+    } catch (err) {
+      if (!(err instanceof DelegationRevokedError)) throw err;
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: input.agentDid ?? 'server-agent' },
+        action: 'deny',
+        resource: { type: 'token', id: `${input.service}/${input.userId}` },
+        outcome: 'denied',
+        correlationId,
+        errorMessage: err.code,
+        metadata: { delegationId: input.id, parentDelegationId: input.parentId ?? null, revokedAncestorId: err.revokedAncestorId },
+      });
+      if (err.code === 'agent_revoked') {
+        res.status(403).json({ error: 'agent_revoked', message: 'Agent has been revoked' });
+      } else {
+        res.status(401).json({
+          error: 'delegation_revoked',
+          message: 'The parent delegation has been revoked',
+          revoked_ancestor_id: err.revokedAncestorId,
+        });
+      }
+      return false;
+    }
+  }
+
+  /**
+   * The id of the revoked ancestor when `delegationId` has been revoked,
+   * else null. The handle's own mark is the fast path; the vault record is
+   * the source of truth, and also covers a handle stored just after a
+   * cascade passed its record.
+   */
+  async function delegationRevokedBy(delegationId: string, delegation?: BrokeredDelegation): Promise<string | null> {
+    if (delegation?.revoked) return delegation.revoked.revokedAncestorId;
+    const record = await vault.getDelegation(delegationId);
+    if (record?.status === 'revoked') return record.revokedAncestorId ?? record.id;
+    return null;
+  }
+
+  function refuseRevokedDelegation(res: Response, delegationId: string, revokedAncestorId: string, delegation: BrokeredDelegation): void {
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: delegation.agentDid ?? 'server-agent' },
+      action: 'deny',
+      resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: 'delegation_revoked',
+      metadata: { delegationId, revokedAncestorId },
+    });
+    res.status(401).json({
+      error: 'delegation_revoked',
+      message: 'This delegation has been revoked',
+      revoked_ancestor_id: revokedAncestorId,
+    });
+  }
+
+  /**
+   * Finish a cascade the vault has committed: mark every brokered handle it
+   * reached as revoked, then write one `revoke` audit event per revoked
+   * delegation naming the root cause. `elapsedMs` covers the vault
+   * transaction and the handle marks, the invalidation the draft bounds at
+   * 5 seconds; the audit writes follow it.
+   */
+  function applyRevocation(
+    result: DelegationRevocationResult,
+    started: number,
+    ctx: { actor: AuditActor; correlationId: string; cause: string },
+  ): DelegationRevocationResult {
+    const at = Date.now();
+    for (const revoked of result.revoked) {
+      const handle = brokeredDelegations.get(revoked.id);
+      if (handle) handle.revoked = { at, revokedAncestorId: revoked.revokedAncestorId };
+    }
+    const elapsedMs = performance.now() - started;
+
+    const revocationTime = new Date(at).toISOString();
+    writeAuditEventsIfSupported(result.revoked.map((revoked): AuditEvent => ({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(at),
+      actor: ctx.actor,
+      action: 'revoke',
+      resource: { type: 'token', id: `${revoked.service}/${revoked.userId}` },
+      outcome: 'success',
+      correlationId: ctx.correlationId,
+      metadata: {
+        delegationId: revoked.id,
+        parentDelegationId: revoked.parentId,
+        agentDid: revoked.agentDid,
+        revokedAncestorId: revoked.revokedAncestorId,
+        cascadeDepth: revoked.depth,
+        cause: ctx.cause,
+        revocationTime,
+      },
+    })));
+    if (result.truncated) {
+      console.error('[revocation] Cascade stopped at the depth bound; some descendants were not reached', { cause: ctx.cause });
+    }
+    return { ...result, elapsedMs };
   }
 
   function buildDelegationResponse(input: {
@@ -2887,9 +3035,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     parentDelegationId?: string;
     guard?: Record<string, unknown>;
     constraints?: DelegationConstraint[];
+    agentDid?: string;
   }): Record<string, unknown> {
     if (input.tokenFormat === 'handle') {
       storeBrokeredDelegation({
+        ...(input.agentDid ? { agentDid: input.agentDid } : {}),
         delegationId: input.delegationId,
         accessToken: input.accessToken,
         service: input.service,
@@ -3239,6 +3389,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
+      const revokedBy = await delegationRevokedBy(delegationId, delegation);
+      if (revokedBy !== null) {
+        refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
+        return;
+      }
       // Cumulative constraints (max_lifetime, max_subtree) are checked only
       // where the running total is held, and an enforcement point that holds
       // none MUST deny (draft-asor-wimse-agent-delegation-chain-02 section 6,
@@ -3302,6 +3457,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         const loaded = await linkService!.loadUseToken(req, res, linkAccess, delegation.link.agentId);
         if (loaded === null) return;
         upstreamToken = loaded;
+      }
+
+      // The guard and Link checks above can wait on I/O. A revocation that
+      // landed meanwhile must still stop this call before it goes upstream.
+      const revokedInFlight = await delegationRevokedBy(delegationId, delegation);
+      if (revokedInFlight !== null) {
+        refuseRevokedDelegation(res, delegationId, revokedInFlight, delegation);
+        return;
       }
 
       const hasBody = body !== undefined;
@@ -3577,6 +3740,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
         : DEFAULT_DELEGATION_TTL_SECONDS;
 
+      const recorded = await recordIssuedDelegation(res, {
+        id: delegationId,
+        parentId: null,
+        agentDid: agentDid ?? null,
+        service,
+        userId,
+        chainDepth: 0,
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      }, correlationId);
+      if (!recorded) return;
+
       const receipt = agentDid
         ? createReceipt({
             agentDid,
@@ -3627,6 +3801,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         delegationId,
         receipt,
         constraints: rootConstraints.constraints,
+        ...(agentDid ? { agentDid } : {}),
       }));
     } catch (err) {
       if (sendReservedUserIdError(res, err)) return;
@@ -3892,18 +4067,27 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      await vault.revokeAgent(agentId);
+      const started = performance.now();
+      const correlationId = crypto.randomUUID();
+      const actor: AuditActor = { type: 'agent', id: agent.id, fingerprint: agent.fingerprint };
+      const cascade = applyRevocation(await vault.revokeAgentCascade(agentId), started, {
+        actor,
+        correlationId,
+        cause: `agent:${agent.id}`,
+      });
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'agent', id: agent.id, fingerprint: agent.fingerprint },
+        actor,
         action: 'revoke',
         resource: { type: 'agent', id: agent.id },
         outcome: 'success',
-        correlationId: crypto.randomUUID(),
+        correlationId,
         metadata: {
           agentDid: agent.did,
+          revokedCount: cascade.count,
+          elapsedMs: cascade.elapsedMs,
         },
       });
 
@@ -4330,12 +4514,40 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         }
       }
 
+      // ── Parent delegation status ─────────────────────────────────────────
+      // A revoked parent (revoked directly, or reached by a cascade from any
+      // of its ancestors) can anchor no new child. Recording the child below
+      // re-checks this atomically with the insert.
+
+      const parentRecord = await vault.getDelegation(parent.delegationId);
+      if (parentRecord?.status === 'revoked') {
+        const revokedAncestorId = parentRecord.revokedAncestorId ?? parentRecord.id;
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'token', id: `${service}/${userId}` },
+          outcome: 'denied',
+          errorMessage: 'delegation_revoked',
+          correlationId,
+          metadata: { parentDelegationId: parent.delegationId, revokedAncestorId },
+        });
+        res.status(401).json({
+          error: 'delegation_revoked',
+          message: 'The parent delegation has been revoked',
+          revoked_ancestor_id: revokedAncestorId,
+        });
+        return;
+      }
+
       // ── Ancestor status check (if vault supports agents) ─────────────────
       // A revoked/suspended ancestor anywhere in the chain — not just the
       // immediate parent — must not be able to anchor a fresh sub-delegation
-      // to a still-active descendant DID. There's no persisted table of
-      // delegations keyed by delegationId to walk here, so this walks the
-      // chain embedded in the signed receipt itself: every receipt carries a
+      // to a still-active descendant DID. Delegation records (checked above)
+      // cover revoked delegations; a suspended agent revokes nothing, and a
+      // receipt may predate the records, so this also walks the chain
+      // embedded in the signed receipt itself: every receipt carries a
       // `lineage` of its ancestors' DIDs (oldest/root first), appended to
       // and re-signed at each hop by this same trusted issuer, so a
       // requesting agent cannot forge or truncate it. Checking
@@ -4575,7 +4787,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Issue child receipt ──────────────────────────────────────────────
 
+      // The child's handle, like its receipt, ends no later than the parent.
+      const entryExpiresIn = entry.expiresAt
+        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+        : DEFAULT_DELEGATION_TTL_SECONDS;
+      const expiresIn = parentExpiryBound !== undefined
+        ? Math.max(1, Math.min(entryExpiresIn, parentExpiryBound - nowSecondsForChild))
+        : entryExpiresIn;
+
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
+      const recorded = await recordIssuedDelegation(res, {
+        id: delegationId,
+        parentId: parent.delegationId,
+        agentDid,
+        service,
+        userId,
+        chainDepth: validation.chainDepth,
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      }, correlationId);
+      if (!recorded) return;
+
       const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');
 
       const receipt = createReceipt({
@@ -4621,10 +4852,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Response ─────────────────────────────────────────────────────────
 
-      const expiresIn = entry.expiresAt
-        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_DELEGATION_TTL_SECONDS;
-
       // Sub-delegated responses are always brokered handles — chainDepth is
       // always >= 1 here — regardless of the requested token_format, since
       // scope attenuation on a raw provider token can't be enforced once
@@ -4643,6 +4870,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           chainDepth: validation.chainDepth,
           parentDelegationId: validation.parentDelegationId,
           constraints: validation.grantedConstraints,
+          agentDid,
         }),
         // Always present: sub-delegation is broker-only at every depth, so
         // this both confirms the format and flags any downgrade from a
@@ -4654,6 +4882,57 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (sendReservedUserIdError(res, err)) return;
       console.error('[POST /api/v1/subdelegate] Error:', err);
       res.status(500).json({ error: 'Sub-delegation failed' });
+    }
+  });
+
+  /**
+   * DELETE /api/v1/delegations/:delegationId: revoke a delegation and every
+   * delegation derived from it (draft-sweeney-wimse-credential-delegation,
+   * "Revocation"). The vault walks the recorded parent linkage and revokes
+   * the whole subtree in one transaction; brokered handles in the subtree
+   * are refused by /api/v1/use from then on, including calls already in
+   * flight that have not yet gone upstream. Raw provider tokens already
+   * handed out cannot be recalled and live until they expire.
+   *
+   * Scoped like the other agent routes: the delegation must belong to the
+   * resolved user, otherwise 404. Idempotent: revoking again reports
+   * revoked_count 0.
+   */
+  app.delete('/api/v1/delegations/:delegationId', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    try {
+      const delegationId = routeParam(req.params.delegationId);
+      if (!delegationId) {
+        res.status(400).json({ error: 'Missing delegationId parameter' });
+        return;
+      }
+      const userId = requestUserId(req, res, { agent: true });
+      if (userId === null) return;
+
+      const started = performance.now();
+      const record = await vault.getDelegation(delegationId);
+      if (!record || record.userId !== userId) {
+        res.status(404).json({ error: 'delegation_not_found' });
+        return;
+      }
+
+      const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+      const result = applyRevocation(await vault.revokeDelegations({ delegationIds: [delegationId] }), started, {
+        actor: { type: 'agent', id: (req as any).webBotAuthIdentity?.agentId ?? principal?.principalId ?? 'server-agent' },
+        correlationId: crypto.randomUUID(),
+        cause: `delegation:${delegationId}`,
+      });
+
+      res.json({
+        delegation_id: delegationId,
+        revoked_count: result.count,
+        revoked_ids: result.revokedIds,
+        elapsed_ms: Math.round(result.elapsedMs * 1000) / 1000,
+        truncated: result.truncated,
+      });
+    } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
+      console.error('[DELETE /api/v1/delegations/:delegationId] Error:', err);
+      res.status(500).json({ error: 'Failed to revoke delegation' });
     }
   });
 

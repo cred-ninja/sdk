@@ -2,7 +2,29 @@
 
 ## [Unreleased]
 
-Nothing yet.
+### Cascading revocation (`@credninja/vault`, `@credninja/server`)
+
+- Every delegation the server issues is recorded with its parent delegation
+  (new SQLite table `vault_delegations`, created on startup; existing
+  databases need no migration step). File vaults keep the records in process
+  memory, like their brokered handles.
+- New `DELETE /api/v1/delegations/:delegationId` revokes a delegation and,
+  transitively, every delegation derived from it, and answers
+  `{ revoked_count, revoked_ids, elapsed_ms, truncated }`. Agent revocation
+  (`DELETE /admin/agents/:agentId`, `POST /api/v1/agents/:agentId/revoke-all`)
+  now cascades the same way to every delegation issued to the agent's DID.
+- `POST /api/v1/use` and `POST /api/v1/subdelegate` refuse a revoked
+  delegation with `401 {"error":"delegation_revoked"}`, including a `use`
+  request already in flight that has not yet gone upstream.
+- One `revoke` audit event per revoked delegation, naming the revoked
+  ancestor (`revokedAncestorId`) as the root cause.
+- A sub-delegated handle no longer outlives its parent receipt.
+- Vault: `CredVault.recordDelegation()`, `getDelegation()`,
+  `revokeDelegations()`, `revokeAgentCascade()`, `writeAuditEvents()`;
+  `DelegationRevokedError`; `collectDelegationSubtree()`;
+  `validateSubDelegation()` takes optional `parent.expiresAt` and
+  `requestedExpiresAt` and throws `expiry_escalation_denied` for a child that
+  would outlive its parent.
 
 ## [2.0.0] - prepared 2026-10-13, not yet published to npm
 
