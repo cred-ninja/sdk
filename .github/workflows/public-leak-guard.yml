@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # "edited" re-runs the PR text check when a title or body changes.
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: leak-guard-${{ github.ref }}
@@ -37,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          deny='(^|/)(\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
+          deny='(^|/)(reports/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
 
           if grep -nE "$deny" /tmp/tracked-files.txt; then
             echo "::error::Denylisted private artifact path detected in public repository."
@@ -68,3 +70,76 @@ jobs:
           done < /tmp/tracked-files.txt
 
           exit "$fail"
+
+      # Standards registers (thread positions, pending replies, sweep reports)
+      # are built from private mail and live in cred-ninja/standards-private.
+      # These markers are what that content looks like: Gmail message, thread
+      # and draft ids, off-list replies, and register stances.
+      - name: Block private correspondence markers in public files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          private='Gmail (draft|drafts|thread|message|messages|id|ids|evidence|checked|delay|HOLD)\b|[Pp]rivate Gmail\b|Gmail r-?[0-9]{10,}|Gmail[^|)]{0,40}\b[0-9a-f]{16}\b|\b[Oo]ff-list\b|\b[Pp]rivately\b|Stance: (SPEAK|WATCH|DROP)\b|\b[Ss]peak[- ]by\b'
+          fail=0
+
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+
+            case "$path" in
+              .github/workflows/*|package-lock.json|pnpm-lock.yaml|yarn.lock|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico|*.pdf|*.woff|*.woff2)
+                continue
+                ;;
+            esac
+
+            if [[ -f "$path" ]] && grep -nE "$private" "$path"; then
+              echo "::error file=$path::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
+              fail=1
+            fi
+          done < /tmp/tracked-files.txt
+
+          exit "$fail"
+
+      - name: Block private correspondence markers in PR text and commits
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          private='Gmail (draft|drafts|thread|message|messages|id|ids|evidence|checked|delay|HOLD)\b|[Pp]rivate Gmail\b|Gmail r-?[0-9]{10,}|Gmail[^|)]{0,40}\b[0-9a-f]{16}\b|\b[Oo]ff-list\b|\b[Pp]rivately\b|Stance: (SPEAK|WATCH|DROP)\b|\b[Ss]peak[- ]by\b|(^|[[:space:]/])reports/'
+          fail=0
+
+          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -nE "$private"; then
+            echo "::error::Private correspondence marker found in the PR title or body."
+            fail=1
+          fi
+
+          if git log --format='%H%n%B' "$BASE_SHA..$HEAD_SHA" | grep -nE "$private"; then
+            echo "::error::Private correspondence marker found in a commit message on this PR."
+            fail=1
+          fi
+
+          exit "$fail"
+
+      # Every published package has a "files" allowlist, so reports/ cannot ship
+      # today. This keeps it that way if an allowlist is widened or removed.
+      - name: Block reports from npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm pack --dry-run --json --workspaces --ignore-scripts > /tmp/pack.json
+          if node -e '
+            const pkgs = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"));
+            const bad = pkgs.flatMap((p) => p.files.map((f) => `${p.name}: ${f.path}`)).filter((f) => /(^|\/|: )reports\//.test(f));
+            bad.forEach((f) => console.log(f));
+            process.exit(bad.length ? 0 : 1);
+          '; then
+            echo "::error::A published package would include reports/."
+            exit 1
+          fi
