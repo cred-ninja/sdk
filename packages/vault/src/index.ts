@@ -3,6 +3,10 @@
  *
  * AES-256-GCM encryption with PBKDF2-SHA256 key derivation.
  * Works offline. No cloud required.
+ *
+ * The delegation attenuation code (scopes, constraint ceilings, chain
+ * verification, strict JSON) lives in @credninja/attenuation, which has no
+ * native dependencies; it is re-exported here unchanged.
  */
 
 export { CredVault, createVault } from './vault.js';
@@ -12,9 +16,9 @@ export { RotationEngine } from './rotation.js';
 export type { RotationResult as RotationEngineResult, RefreshAdapter as RotationRefreshAdapter } from './rotation.js';
 export { PermissionStore } from './permissions.js';
 export type { CreatePermissionInput } from './permissions.js';
-export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope, classifyScope } from './delegation-chain.js';
-export type { ScopeClass } from './delegation-chain.js';
-export { verifyDelegationChain } from './chain-verify.js';
+export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredBy, isValidScope, classifyScope } from '@credninja/attenuation';
+export type { ScopeClass } from '@credninja/attenuation';
+export { verifyDelegationChain } from '@credninja/attenuation';
 export {
   parseConstraints,
   constraintsSubsume,
@@ -27,7 +31,7 @@ export {
   DELEGATION_CONSTRAINT_TYPES,
   CUMULATIVE_CONSTRAINT_TYPES,
   CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
-} from './constraints.js';
+} from '@credninja/attenuation';
 export type {
   DelegationConstraint,
   DelegationConstraintType,
@@ -45,8 +49,8 @@ export type {
   ConstraintSubsumptionOptions,
   ConstraintParseResult,
   ConstraintSubsumptionResult,
-} from './constraints.js';
-export type { DelegationChainHop, ChainVerifyReason, ChainVerifyResult, VerifyDelegationChainOptions } from './chain-verify.js';
+} from '@credninja/attenuation';
+export type { DelegationChainHop, ChainVerifyReason, ChainVerifyResult, VerifyDelegationChainOptions } from '@credninja/attenuation';
 
 export { encrypt, decrypt, encryptWithKey, decryptWithKey, deriveKey, generateSalt, maskToken } from './crypto.js';
 
@@ -82,8 +86,8 @@ export type {
   RotationState,
   RotationFailureAction,
 } from './types.js';
-export { parseStrictJson, StrictJsonError } from './strict-json.js';
-export type { StrictJsonErrorCode } from './strict-json.js';
+export { parseStrictJson, StrictJsonError } from '@credninja/attenuation';
+export type { StrictJsonErrorCode } from '@credninja/attenuation';
 
 // Cred Link Phase 1 storage (LinkStore on SQLite, LinkSecretStore over CredVault).
 export {

@@ -80,6 +80,9 @@ jobs:
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
 
+      - name: Build @credninja/attenuation
+        run: npm run build --workspace=packages/attenuation
+
       - name: Build @credninja/link
         run: npm run build --workspace=packages/link
 
@@ -103,6 +106,9 @@ jobs:
 
       - name: Test @credninja/protocol
         run: npm test --workspace=packages/protocol
+
+      - name: Test @credninja/attenuation
+        run: npm test --workspace=packages/attenuation
 
       - name: Test @credninja/link
         run: npm test --workspace=packages/link
@@ -148,6 +154,9 @@ jobs:
 
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
+
+      - name: Build @credninja/attenuation
+        run: npm run build --workspace=packages/attenuation
 
       - name: Build @credninja/link
         run: npm run build --workspace=packages/link
