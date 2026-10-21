@@ -39,6 +39,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@credninja/attenuation": "^2.0.0",
     "@credninja/guard": "^2.0.0",
     "@credninja/oauth": "^2.0.0",
     "@credninja/protocol": "^2.0.0",

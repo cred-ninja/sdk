@@ -261,6 +261,23 @@ describe('verifyDelegationReceipt()', () => {
     expect(result).toBe(true);
   });
 
+  it('verifies a draft-02 receipt by act.sub, with the principal in sub', async () => {
+    const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
+    const credPublicKeyHex = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }).slice(-32)).toString('hex');
+    const signed = (claims: Record<string, unknown>) => {
+      const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', kid: 'k1', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ iss: 'did:web:cred.ninja', iat: Math.floor(Date.now() / 1000), ...claims })).toString('base64url');
+      const signature = sign(null, Buffer.from(`${header}.${payload}`, 'utf8'), privateKey).toString('base64url');
+      return `${header}.${payload}.${signature}`;
+    };
+    const opts = { expectedDid: agentDid, credPublicKey: credPublicKeyHex };
+    expect(await verifyDelegationReceipt(signed({ sub: 'user_1', client_id: agentDid, act: { sub: agentDid } }), opts)).toBe(true);
+    // client_id and act.sub must agree.
+    expect(await verifyDelegationReceipt(signed({ sub: 'user_1', client_id: agentDid, act: { sub: 'did:key:z6MkOther' } }), opts)).toBe(false);
+    // The principal in sub is never read as the agent.
+    expect(await verifyDelegationReceipt(signed({ sub: agentDid, client_id: 'did:key:z6MkOther', act: { sub: 'did:key:z6MkOther' } }), opts)).toBe(false);
+  });
+
   it('returns false for a receipt with an expired exp claim', async () => {
     const { publicKey, privateKey } = await generateKeyPairAsync('ed25519');
     const spki = publicKey.export({ type: 'spki', format: 'der' });

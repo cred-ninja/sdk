@@ -30,7 +30,19 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError } from '@credninja/vault';
-import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint } from '@credninja/vault';
+import type { AgentRecord, UpdatePermissionInput, AuditEvent, DelegationConstraint, CumulativeLedger } from '@credninja/vault';
+import { SqliteCumulativeLedger, DEFAULT_RUNNING_COUNT_KEYS } from '@credninja/vault';
+import {
+  receiptActorClaims,
+  readReceiptActor,
+  didKeyConfirmation,
+  signCompactJws,
+  mintAgentDelegationToken,
+  verifyAgentDelegationChain,
+  AgentDelegationMintError,
+} from '@credninja/attenuation';
+import { createReceiptKeys, checkReceiptSignature, type ReceiptKeys } from './receipt-signing.js';
+import { createDelegationGrantStore, createJtiReplayCache, verifyActorToken, DELEGATION_GRANT_TOKEN_TYPE, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE } from './delegation-grants.js';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
 import { OAuthClient, createAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
@@ -155,6 +167,7 @@ const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_DELEGATION_TTL_SECONDS = 900;
 const DEFAULT_RECEIPT_TTL_SECONDS = 3600;
+const DEFAULT_DELEGATION_GRANT_TTL_SECONDS = 60;
 const RECEIPT_CLOCK_SKEW_SECONDS = 60;
 const MAX_BROKER_RESPONSE_BYTES = 32_768;
 const ED25519_PUBLIC_KEY_BYTES = 32;
@@ -307,6 +320,13 @@ export function createServer(config: ServerConfig) {
   const pendingConnect = new Map<string, PendingConnectRequest>();
   const CONNECT_REQUEST_TTL_MS = 10 * 60 * 1000;
   const brokeredDelegations = new Map<string, BrokeredDelegation>();
+  // Single writer of cumulative-constraint running totals (cumulative-ledger.ts in vault).
+  const cumulativeLedger: CumulativeLedger = new SqliteCumulativeLedger(
+    config.cumulativeLedgerPath ? { path: config.cumulativeLedgerPath } : {},
+  );
+  // Sub-Delegation Exchange: single-use grants and the actor-token replay cache.
+  const delegationGrants = createDelegationGrantStore();
+  const actorTokenJtiSeen = createJtiReplayCache();
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
@@ -1474,9 +1494,17 @@ export function createServer(config: ServerConfig) {
     });
   }
 
-  function getReceiptPublicKey() {
-    const publicKey = createPublicKey(getReceiptSigningKey());
-    return publicKey;
+  let receiptKeys: ReceiptKeys | undefined;
+  /** Signer, accepted algorithms and key resolver for receipts. See receipt-signing.ts. */
+  function getReceiptKeys(): ReceiptKeys {
+    receiptKeys ??= createReceiptKeys({
+      derivedKey: getReceiptSigningKey(),
+      ...(config.receiptSigner ? { signer: config.receiptSigner } : {}),
+      ...(config.receiptSigningKeyPem ? { signingKeyPem: config.receiptSigningKeyPem } : {}),
+      ...(config.receiptVerificationKeys ? { verificationKeys: config.receiptVerificationKeys } : {}),
+      ...(config.receiptAcceptedAlgs ? { acceptedAlgs: config.receiptAcceptedAlgs } : {}),
+    });
+    return receiptKeys;
   }
 
   function getReceiptTtlSeconds(): number {
@@ -1521,23 +1549,37 @@ export function createServer(config: ServerConfig) {
      * the receipt it was derived from (monotonic expiry down the chain).
      */
     expiresAtSecondsCeiling?: number;
+    /**
+     * Set when the hop also issued a token under the Chain-Verifiable
+     * Profile: the receipt records that token's jti and how the delegated
+     * scopes map onto its scope strings.
+     */
+    chainProfile?: { format: 'agent_delegation'; jti: string; scopeMapping: 'identity' };
   }): string {
-    const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const nowSeconds = Math.floor(Date.now() / 1000);
     const aud = getReceiptAudience();
     const ttlExp = nowSeconds + getReceiptTtlSeconds();
     const exp = typeof input.expiresAtSecondsCeiling === 'number'
       ? Math.min(ttlExp, input.expiresAtSecondsCeiling)
       : ttlExp;
-    const payload = Buffer.from(JSON.stringify({
+    // Who the receipt names. draft-02 layout (the default), per
+    // draft-sweeney-wimse-credential-delegation-02 "Delegation Token Format"
+    // and draft-ietf-wimse-aims Section 10.3: the principal in `sub`, the
+    // acting agent in `client_id` and `act.sub`, the prior agents in nested
+    // `act` (attribution only), the delegation id as `jti`, and `cnf` bound
+    // to the agent's did:key. The legacy layout keeps the agent in `sub`.
+    // readReceiptActor() reads both.
+    const cnf = didKeyConfirmation(input.agentDid);
+    const actor = (config.receiptClaimLayout ?? 'draft-02') === 'draft-02'
+      ? {
+          ...receiptActorClaims({ principal: input.userId, agentDid: input.agentDid, priorActors: input.lineage }),
+          jti: input.delegationId,
+          ...(cnf ? { cnf } : {}),
+        }
+      : { sub: input.agentDid, client_id: input.agentDid };
+    const payload = {
       iss: 'did:key:local-cred',
-      sub: input.agentDid,
-      // Acting-agent identifier, per draft-ietf-wimse-aims-00 section 10.3
-      // (agent in `client_id`, principal in `sub`). `sub` here still names
-      // the agent for wire compatibility; moving the delegating principal
-      // into `sub` is a breaking change reserved for the next protocol
-      // version. See docs/protocol-conformance.md.
-      client_id: input.agentDid,
+      ...actor,
       iat: nowSeconds,
       exp,
       ...(aud ? { aud } : {}),
@@ -1552,14 +1594,13 @@ export function createServer(config: ServerConfig) {
       ...(input.parentReceiptHash ? { parentReceiptHash: input.parentReceiptHash } : {}),
       ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
-    })).toString('base64url');
-
-    const signatureInput = Buffer.from(`${header}.${payload}`, 'utf8');
-    const signature = sign(null, signatureInput, getReceiptSigningKey()).toString('base64url');
-    return `${header}.${payload}.${signature}`;
+      ...(input.chainProfile ? { chain_profile: { format: input.chainProfile.format, jti: input.chainProfile.jti, scope_mapping: input.chainProfile.scopeMapping } } : {}),
+    };
+    return signCompactJws(payload, getReceiptKeys().signer, { typ: 'JWT' });
   }
 
   function parseAndVerifyReceipt(receipt: string): {
+    /** The acting agent's DID (`act.sub`, or `sub` on a legacy receipt). */
     sub: string;
     service: string;
     scopes: string[];
@@ -1581,13 +1622,11 @@ export function createServer(config: ServerConfig) {
       throw new Error('Invalid receipt format');
     }
 
-    const [headerB64, payloadB64, signatureB64] = parts;
+    const payloadB64 = parts[1];
 
-    // Verify signature
-    const signatureInput = Buffer.from(`${headerB64}.${payloadB64}`, 'utf8');
-    const signatureBuffer = Buffer.from(signatureB64, 'base64url');
-    const valid = verify(null, signatureInput, getReceiptPublicKey(), signatureBuffer);
-    if (!valid) {
+    // Verify signature: header alg on the accepted list and equal to the
+    // algorithm of the key its kid names (receipt-signing.ts).
+    if (checkReceiptSignature(receipt, getReceiptKeys()) !== null) {
       throw new Error('Invalid receipt signature');
     }
 
@@ -1609,6 +1648,10 @@ export function createServer(config: ServerConfig) {
     }
     if (!payload.delegationId) {
       throw new Error('Receipt is missing delegationId');
+    }
+    const actor = readReceiptActor(payload);
+    if (!actor.ok) {
+      throw new Error(`Receipt actor claims are malformed: ${actor.message}`);
     }
 
     // Constraint ceilings fail closed (asor-01 section 4.2): a receipt
@@ -1636,10 +1679,11 @@ export function createServer(config: ServerConfig) {
     }
 
     return {
-      sub: payload.sub,
+      // The acting agent: act.sub on draft-02 receipts, sub on legacy ones.
+      sub: actor.agentDid,
       service: payload.service,
       scopes: payload.scopes ?? [],
-      userId: payload.userId ?? 'default',
+      userId: actor.principal,
       appClientId: payload.appClientId ?? 'local',
       delegationId: payload.delegationId,
       chainDepth: payload.chainDepth ?? 0,
@@ -1669,6 +1713,112 @@ export function createServer(config: ServerConfig) {
     if (typeof parent.exp === 'number') return parent.exp;
     if (typeof parent.iat === 'number') return parent.iat + getReceiptTtlSeconds();
     return undefined;
+  }
+
+  // ── Chain-Verifiable Profile ──────────────────────────────────────────────
+  // draft-sweeney-wimse-credential-delegation-02 "Chain-Verifiable Profile":
+  // on request (`token_profile: "agent_delegation"`), a hop also yields a
+  // token in the draft-asor-wimse-agent-delegation-chain-02 Delegation Chain
+  // format, unchanged, that a party holding only the chain can verify. The
+  // receipt records its jti (the delegation id) and that the delegated
+  // scope strings are used as the token's scopes as they are.
+
+  type ChainProfileRequest =
+    | { ok: true; wanted: false }
+    | { ok: true; wanted: true; audience: string | string[]; delMaxDepth?: number }
+    | { ok: false; body: Record<string, unknown> };
+
+  function chainProfileRequest(body: Record<string, unknown> | undefined, agentDid: unknown): ChainProfileRequest {
+    const profile = body?.token_profile;
+    if (profile === undefined) return { ok: true, wanted: false };
+    if (profile !== 'agent_delegation') {
+      return { ok: false, body: { error: 'invalid_request', message: "token_profile must be 'agent_delegation'" } };
+    }
+    if (typeof agentDid !== 'string' || !didKeyConfirmation(agentDid)) {
+      return { ok: false, body: { error: 'invalid_request', message: 'token_profile agent_delegation needs agent_did to be an Ed25519 or P-256 did:key, so the token can carry cnf' } };
+    }
+    const audience = body?.audience ?? getReceiptAudience() ?? config.redirectBaseUri;
+    const audienceOk = typeof audience === 'string' ? audience !== ''
+      : Array.isArray(audience) && audience.length > 0 && audience.every((a) => typeof a === 'string' && a !== '');
+    if (!audienceOk) {
+      return { ok: false, body: { error: 'invalid_request', message: 'audience must be a string or a non-empty array of strings' } };
+    }
+    const maxDepth = body?.max_depth;
+    if (maxDepth !== undefined && (!Number.isSafeInteger(maxDepth) || (maxDepth as number) < 0)) {
+      return { ok: false, body: { error: 'invalid_request', message: 'max_depth must be a non-negative integer' } };
+    }
+    return {
+      ok: true,
+      wanted: true,
+      audience: audience as string | string[],
+      ...(maxDepth !== undefined ? { delMaxDepth: (maxDepth as number) + 1 } : {}),
+    };
+  }
+
+  /** Default leaf depth bound for a root token: the draft's RECOMMENDED chain depth of 5. */
+  const DEFAULT_CHAIN_PROFILE_MAX_DEPTH = 5;
+
+  function mintChainProfileToken(input: {
+    receipt: string;
+    agentDid: string;
+    userId: string;
+    scopes: string[];
+    constraints: DelegationConstraint[];
+    delegationId: string;
+    audience: string | string[];
+    delMaxDepth?: number;
+    /** The verified parent token, for a child. */
+    parentToken?: string;
+  }): { ok: true; token: string } | { ok: false; body: Record<string, unknown> } {
+    const receiptPayload = JSON.parse(Buffer.from(input.receipt.split('.')[1]!, 'base64url').toString('utf8')) as { iat: number; exp: number };
+    const cnf = didKeyConfirmation(input.agentDid);
+    if (!cnf) return { ok: false, body: { error: 'invalid_request', message: 'agent_did is not a did:key' } };
+    try {
+      const token = mintAgentDelegationToken({
+        signer: getReceiptKeys().signer,
+        iss: config.redirectBaseUri,
+        sub: input.userId,
+        clientId: input.agentDid,
+        aud: input.audience,
+        cnf,
+        jti: input.delegationId,
+        iat: receiptPayload.iat,
+        exp: receiptPayload.exp,
+        scopes: input.scopes,
+        constraints: input.constraints,
+        ...(input.parentToken ? { parent: input.parentToken } : {}),
+        ...(input.delMaxDepth !== undefined
+          ? { delMaxDepth: input.delMaxDepth }
+          : input.parentToken ? {} : { delMaxDepth: DEFAULT_CHAIN_PROFILE_MAX_DEPTH + 1 }),
+      });
+      return { ok: true, token };
+    } catch (err) {
+      if (err instanceof AgentDelegationMintError) {
+        return { ok: false, body: { error: 'chain_profile_unavailable', reason: err.reason, message: `This delegation cannot be expressed as an agent_delegation token: ${err.message}` } };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Verify a presented agent_delegation chain (root first) that ends in the
+   * token for `parent`, under this server's own keys, before a child token
+   * is minted from it.
+   */
+  function verifyParentChainProfile(chain: unknown, parent: { delegationId: string; sub: string; userId: string }):
+    { ok: true; parentToken: string } | { ok: false; body: Record<string, unknown> } {
+    if (!Array.isArray(chain) || chain.length === 0 || chain.some((t) => typeof t !== 'string')) {
+      return { ok: false, body: { error: 'invalid_request', message: 'agent_delegation_chain must be the parent\'s agent_delegation token chain, root first' } };
+    }
+    const keys = getReceiptKeys();
+    const verified = verifyAgentDelegationChain(chain, { acceptedAlgs: keys.acceptedAlgs, resolveKey: keys.resolveKey });
+    if (!verified.ok) {
+      return { ok: false, body: { error: 'invalid_parent_chain', reason: verified.reason, hop: verified.hop, message: verified.message } };
+    }
+    if (verified.leaf.claims.jti !== parent.delegationId || verified.actingAgent !== parent.sub || verified.principal !== parent.userId) {
+      return { ok: false, body: { error: 'invalid_parent_chain', message: 'agent_delegation_chain does not end in the token issued with parent_receipt' } };
+    }
+    return { ok: true, parentToken: chain[chain.length - 1] as string };
   }
 
   function extractTrustedReceiptClaims(req: Request): string[] | undefined {
@@ -2863,6 +3013,23 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (timeout.unref) timeout.unref();
   }
 
+  /** Audit a /api/v1/use refusal under a cumulative constraint. */
+  function denyCumulative(delegationId: string, delegation: BrokeredDelegation, error: string, keys: string[]): void {
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
+      action: 'deny',
+      // service/userId, like every other deny event, so the owning user's
+      // /api/v1/audit and audit stream can see it.
+      resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: error,
+      metadata: { delegationId, constraints: keys },
+    });
+  }
+
   function getBrokeredDelegation(id: string): BrokeredDelegation | null {
     const delegation = brokeredDelegations.get(id);
     if (!delegation) return null;
@@ -2887,7 +3054,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     parentDelegationId?: string;
     guard?: Record<string, unknown>;
     constraints?: DelegationConstraint[];
+    agentDelegationToken?: string;
   }): Record<string, unknown> {
+    // Every handle and every receipt-bearing delegation is registered with
+    // the cumulative ledger, with its parent, so a descendant's max_subtree
+    // debit can walk up through it even when this hop itself carries no
+    // cumulative bound.
+    if (input.receipt || input.tokenFormat === 'handle') {
+      cumulativeLedger.register({
+        id: input.delegationId,
+        ...(input.parentDelegationId ? { parentId: input.parentDelegationId } : {}),
+        constraints: input.constraints ?? [],
+      });
+    }
     if (input.tokenFormat === 'handle') {
       storeBrokeredDelegation({
         delegationId: input.delegationId,
@@ -2913,6 +3092,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.chainDepth !== undefined ? { chain_depth: input.chainDepth } : {}),
       ...(input.parentDelegationId ? { parent_delegation_id: input.parentDelegationId } : {}),
       ...(input.guard ? { guard: input.guard } : {}),
+      ...(input.agentDelegationToken ? { agent_delegation_token: input.agentDelegationToken } : {}),
     };
   }
 
@@ -3239,33 +3419,39 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
-      // Cumulative constraints (max_lifetime, max_subtree) are checked only
-      // where the running total is held, and an enforcement point that holds
-      // none MUST deny (draft-asor-wimse-agent-delegation-chain-02 section 6,
-      // step 8). Cred has no running-total store yet, so every action under
-      // such a delegation is refused here, before any upstream call. This is
-      // fail-closed by design, not a ceiling being exceeded.
-      const unenforceable = cumulativeConstraints(delegation.constraints ?? []);
-      if (unenforceable.length > 0) {
-        writeAuditEventIfSupported({
-          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-          timestamp: new Date(),
-          actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
-          action: 'deny',
-          // service/userId, like every other deny event, so the owning
-          // user's /api/v1/audit and audit stream can see it.
-          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
-          outcome: 'denied',
-          correlationId: crypto.randomUUID(),
-          errorMessage: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
-          metadata: { delegationId, constraints: unenforceable.map((c) => c.key) },
-        });
-        res.status(403).json({
-          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
-          message: 'This delegation carries a cumulative constraint and no running total is held for it; the action is denied',
-          constraints: unenforceable.map((c) => c.key),
-        });
-        return;
+      // Cumulative constraints (max_lifetime, max_subtree) are checked where
+      // the running total is held (draft-asor-wimse-agent-delegation-chain-02
+      // section 6, step 8). This server is that single writer: the totals
+      // live in cumulativeLedger and are debited atomically, together with
+      // every ancestor's max_subtree, right before the upstream call. A
+      // running-count key (max_calls) is metered here at one per call; any
+      // other cumulative key needs the quantity of this exercise in
+      // `quantities`, and an exercise that omits it is denied.
+      const cumulative = cumulativeConstraints(delegation.constraints ?? []);
+      const cumulativeQuantities: Record<string, number> = {};
+      if (cumulative.length > 0) {
+        const declared = (req.body as { quantities?: unknown }).quantities;
+        const missing: string[] = [];
+        for (const key of new Set(cumulative.map((c) => c.key))) {
+          if (DEFAULT_RUNNING_COUNT_KEYS.includes(key)) {
+            cumulativeQuantities[key] = 1;
+            continue;
+          }
+          const value = declared && typeof declared === 'object' && !Array.isArray(declared)
+            ? (declared as Record<string, unknown>)[key]
+            : undefined;
+          if (typeof value === 'number' && Number.isFinite(value) && value >= 0) cumulativeQuantities[key] = value;
+          else missing.push(key);
+        }
+        if (missing.length > 0) {
+          denyCumulative(delegationId, delegation, 'cumulative_quantity_required', missing);
+          res.status(403).json({
+            error: 'cumulative_quantity_required',
+            message: 'This delegation carries a cumulative constraint; the exercise must declare its quantity in `quantities`',
+            constraints: missing,
+          });
+          return;
+        }
       }
       // Link handles: re-run the Link check (revoked, narrowed or
       // needs_reauth connections are refused at once) before anything else.
@@ -3302,6 +3488,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         const loaded = await linkService!.loadUseToken(req, res, linkAccess, delegation.link.agentId);
         if (loaded === null) return;
         upstreamToken = loaded;
+      }
+
+      if (cumulative.length > 0) {
+        const debit = cumulativeLedger.debit(delegationId, cumulativeQuantities);
+        if (!debit.ok) {
+          const error = debit.reason === 'exceeded' ? 'cumulative_constraint_exceeded' : CUMULATIVE_CONSTRAINT_UNENFORCEABLE;
+          denyCumulative(delegationId, delegation, error, debit.key ? [debit.key] : cumulative.map((c) => c.key));
+          res.status(403).json({ error, message: debit.message, ...(debit.key ? { constraint: debit.key, type: debit.type } : {}) });
+          return;
+        }
       }
 
       const hasBody = body !== undefined;
@@ -3421,6 +3617,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'service is required' });
         return;
       }
+      const chainProfile = chainProfileRequest(req.body, agentDid);
+      if (!chainProfile.ok) {
+        res.status(400).json(chainProfile.body);
+        return;
+      }
 
       const rootConstraints = parseConstraints(requestedConstraintsRaw);
       if (!rootConstraints.ok) {
@@ -3443,8 +3644,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       // A raw provider token leaves the server, so nothing can hold it to a
       // running total. Under a cumulative constraint only a brokered handle
-      // is issued, and /api/v1/use then fails closed on it (asor-02
-      // section 6, step 8). Checked before any vault lookup.
+      // is issued, and /api/v1/use debits the running total on each
+      // exercise (asor-02 section 6, step 8). Checked before any vault lookup.
       if (tokenFormatFromBody(req) === 'raw' && cumulativeConstraints(rootConstraints.constraints).length > 0) {
         res.status(400).json({
           error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
@@ -3588,8 +3789,27 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             chainDepth: 0,
             receiptClaims: extractTrustedReceiptClaims(req),
             constraints: rootConstraints.constraints,
+            ...(chainProfile.wanted ? { chainProfile: { format: 'agent_delegation' as const, jti: delegationId, scopeMapping: 'identity' as const } } : {}),
           })
         : undefined;
+      let agentDelegationToken: string | undefined;
+      if (chainProfile.wanted && receipt && agentDid) {
+        const minted = mintChainProfileToken({
+          receipt,
+          agentDid,
+          userId,
+          scopes: grantedScopes,
+          constraints: rootConstraints.constraints,
+          delegationId,
+          audience: chainProfile.audience,
+          delMaxDepth: chainProfile.delMaxDepth,
+        });
+        if (!minted.ok) {
+          res.status(400).json(minted.body);
+          return;
+        }
+        agentDelegationToken = minted.token;
+      }
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -3627,6 +3847,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         delegationId,
         receipt,
         constraints: rootConstraints.constraints,
+        ...(agentDelegationToken ? { agentDelegationToken } : {}),
       }));
     } catch (err) {
       if (sendReservedUserIdError(res, err)) return;
@@ -4186,7 +4407,21 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         scopes: requestedScopes,
         constraints: requestedConstraintsRaw,
         ancestor_receipts: ancestorReceipts,
+        exchange,
+        agent_delegation_chain: parentAgentDelegationChain,
       } = req.body as {
+        /**
+         * "grant": run the Sub-Delegation Exchange instead of issuing the
+         * child here. The response carries a single-use delegation grant
+         * the receiving agent redeems at POST /api/v1/token.
+         */
+        exchange?: string;
+        /**
+         * With token_profile "agent_delegation": the parent's
+         * agent_delegation token chain, root first, so the child token can
+         * commit to its parent.
+         */
+        agent_delegation_chain?: unknown;
         parent_receipt?: string;
         agent_did?: string;
         service?: string;
@@ -4241,6 +4476,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           error: 'brokered_format_unsupported',
           message: `Sub-delegation requires a brokered handle for '${service}', which has no brokered-use path.`,
         });
+        return;
+      }
+      if (exchange !== undefined && exchange !== 'grant') {
+        res.status(400).json({ error: 'invalid_request', message: "exchange must be 'grant'" });
+        return;
+      }
+      const chainProfile = chainProfileRequest(req.body, agentDid);
+      if (!chainProfile.ok) {
+        res.status(400).json(chainProfile.body);
         return;
       }
 
@@ -4305,7 +4549,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
         if (ancestorReceipts.length > 0) {
-          const chain = verifyReceiptChain([...ancestorReceipts, parentReceipt], getReceiptPublicKey(), {
+          const chain = verifyReceiptChain([...ancestorReceipts, parentReceipt], getReceiptKeys(), {
             clockSkewSeconds: RECEIPT_CLOCK_SKEW_SECONDS,
           });
           if (!chain.ok) {
@@ -4573,6 +4817,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      let parentChainToken: string | undefined;
+      if (chainProfile.wanted) {
+        const parentChain = verifyParentChainProfile(parentAgentDelegationChain, parent);
+        if (!parentChain.ok) {
+          res.status(400).json(parentChain.body);
+          return;
+        }
+        parentChainToken = parentChain.parentToken;
+      }
+
       // ── Issue child receipt ──────────────────────────────────────────────
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -4592,7 +4846,82 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         receiptClaims: parent.receiptClaims,
         lineage: ancestorDids,
         constraints: validation.grantedConstraints,
+        ...(chainProfile.wanted ? { chainProfile: { format: 'agent_delegation' as const, jti: delegationId, scopeMapping: 'identity' as const } } : {}),
       });
+      let agentDelegationToken: string | undefined;
+      if (chainProfile.wanted) {
+        const minted = mintChainProfileToken({
+          receipt,
+          agentDid,
+          userId,
+          scopes: validation.grantedScopes,
+          constraints: validation.grantedConstraints,
+          delegationId,
+          audience: chainProfile.audience,
+          delMaxDepth: chainProfile.delMaxDepth,
+          parentToken: parentChainToken,
+        });
+        if (!minted.ok) {
+          res.status(400).json(minted.body);
+          return;
+        }
+        agentDelegationToken = minted.token;
+      }
+
+      // ── Sub-Delegation Exchange, step 1: authorization ───────────────────
+      // The checks above are the hop's checks; the child is issued only when
+      // the agent it names redeems the grant at POST /api/v1/token.
+      if (exchange === 'grant') {
+        const ttlSeconds = config.delegationGrantTtlSeconds ?? DEFAULT_DELEGATION_GRANT_TTL_SECONDS;
+        const expiresAt = Math.min(
+          Date.now() + ttlSeconds * 1000,
+          parentExpiryBound !== undefined ? parentExpiryBound * 1000 : Number.POSITIVE_INFINITY,
+        );
+        const grant = delegationGrants.issue({
+          agentDid,
+          delegatorDid: parent.sub,
+          service,
+          userId,
+          appClientId,
+          scopes: validation.grantedScopes,
+          constraints: validation.grantedConstraints,
+          delegationId,
+          parentDelegationId: validation.parentDelegationId,
+          chainDepth: validation.chainDepth,
+          receipt,
+          lineage: ancestorDids,
+          ...(agentDelegationToken ? { agentDelegationToken } : {}),
+          expiresAt,
+        });
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: parent.sub },
+          action: 'delegate',
+          resource: { type: 'token', id: delegationId },
+          outcome: 'success',
+          scopesRequested: requestedScopes,
+          scopesGranted: validation.grantedScopes,
+          delegationChain: [
+            { delegatorId: parent.sub, delegateeId: agentDid, scopes: validation.grantedScopes },
+          ],
+          correlationId,
+          metadata: { stage: 'delegation_grant', receivingAgent: agentDid },
+        });
+        res.json({
+          delegation_grant: grant,
+          grant_type: TOKEN_EXCHANGE_GRANT_TYPE,
+          subject_token_type: DELEGATION_GRANT_TOKEN_TYPE,
+          expires_in: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000)),
+          agent_did: agentDid,
+          delegation_id: delegationId,
+          receipt,
+          chain_depth: validation.chainDepth,
+          parent_delegation_id: validation.parentDelegationId,
+          scopes: validation.grantedScopes,
+        });
+        return;
+      }
 
       // ── Audit event ──────────────────────────────────────────────────────
 
@@ -4643,6 +4972,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           chainDepth: validation.chainDepth,
           parentDelegationId: validation.parentDelegationId,
           constraints: validation.grantedConstraints,
+          ...(agentDelegationToken ? { agentDelegationToken } : {}),
         }),
         // Always present: sub-delegation is broker-only at every depth, so
         // this both confirms the format and flags any downgrade from a
@@ -4654,6 +4984,139 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (sendReservedUserIdError(res, err)) return;
       console.error('[POST /api/v1/subdelegate] Error:', err);
       res.status(500).json({ error: 'Sub-delegation failed' });
+    }
+  });
+
+  /**
+   * POST /api/v1/token — Sub-Delegation Exchange, step 2: issuance (RFC 8693)
+   *
+   * The receiving agent redeems the single-use grant from
+   * `POST /api/v1/subdelegate` with `exchange: "grant"`:
+   *
+   *   grant_type          urn:ietf:params:oauth:grant-type:token-exchange
+   *   subject_token       the delegation grant
+   *   subject_token_type  urn:credninja:params:oauth:token-type:delegation-grant
+   *   actor_token         an RFC 7523 JWT signed with the receiving agent's
+   *                       did:key: iss = sub = that DID, aud = this endpoint's
+   *                       URL, exp at most iat + 300, a fresh jti
+   *   actor_token_type    urn:ietf:params:oauth:token-type:jwt
+   *
+   * The server checks the actor token names the DID the grant names, then
+   * consumes the grant (a second redemption is `invalid_grant`), re-checks
+   * the status of every agent in the chain, and issues the child as a
+   * brokered handle with the receipt signed at authorization.
+   *
+   * Auth: Bearer cred_at_<token> (the deployment's agent auth), plus the
+   * actor token above as proof of the receiving agent's key.
+   */
+  app.post('/api/v1/token', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+    const correlationId = crypto.randomUUID();
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (body.grant_type !== TOKEN_EXCHANGE_GRANT_TYPE) {
+        res.status(400).json({ error: 'unsupported_grant_type' });
+        return;
+      }
+      if (body.subject_token_type !== DELEGATION_GRANT_TOKEN_TYPE || typeof body.subject_token !== 'string') {
+        res.status(400).json({ error: 'invalid_request', error_description: `subject_token must be a delegation grant (${DELEGATION_GRANT_TOKEN_TYPE})` });
+        return;
+      }
+      if (body.actor_token_type !== JWT_TOKEN_TYPE || typeof body.actor_token !== 'string') {
+        res.status(400).json({ error: 'invalid_request', error_description: `actor_token must be a JWT (${JWT_TOKEN_TYPE}) signed by the receiving agent` });
+        return;
+      }
+      const pending = delegationGrants.peek(body.subject_token);
+      if (!pending) {
+        res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation grant is unknown, expired, or already redeemed' });
+        return;
+      }
+      const tokenEndpoint = `${config.redirectBaseUri.replace(/\/+$/, '')}/api/v1/token`;
+      const actor = verifyActorToken(body.actor_token, pending.agentDid, tokenEndpoint, actorTokenJtiSeen);
+      if (!actor.ok) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: pending.agentDid },
+          action: 'deny',
+          resource: { type: 'token', id: `${pending.service}/${pending.userId}` },
+          outcome: 'denied',
+          errorMessage: 'actor_token_rejected',
+          correlationId,
+        });
+        res.status(401).json({ error: 'invalid_client', error_description: actor.message });
+        return;
+      }
+      // A custom agentRequestVerifier that binds this caller to a user may
+      // only redeem that user's grants (as on every legacy route).
+      const boundUserId = ((req as any).agentPrincipal as RequestAgentPrincipal | undefined)?.userId;
+      if (boundUserId !== undefined && boundUserId !== pending.userId) {
+        res.status(403).json({ error: 'user_id_mismatch' });
+        return;
+      }
+      // Single use: consumed only once the redeemer is shown to be the agent it names.
+      const grant = delegationGrants.redeem(body.subject_token);
+      if (!grant) {
+        res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation grant is unknown, expired, or already redeemed' });
+        return;
+      }
+
+      for (const did of [...grant.lineage, grant.agentDid]) {
+        const record = vault.getAgentByDid ? await vault.getAgentByDid(did) : null;
+        if (record?.status === 'revoked' || record?.status === 'suspended') {
+          res.status(403).json({ error: did === grant.agentDid ? `agent_${record.status}` : `ancestor_agent_${record.status}`, message: `Agent ${did} has been ${record.status}` });
+          return;
+        }
+      }
+
+      const vaultEntry = await getVaultEntry(grant.service, grant.userId);
+      if ('status' in vaultEntry) {
+        res.status(vaultEntry.status).json(vaultEntry.body);
+        return;
+      }
+      const entry = vaultEntry.entry;
+      const expiresIn = entry.expiresAt
+        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
+        : DEFAULT_DELEGATION_TTL_SECONDS;
+
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: grant.agentDid },
+        action: 'delegate',
+        resource: { type: 'token', id: grant.delegationId },
+        outcome: 'success',
+        scopesGranted: grant.scopes,
+        delegationChain: [
+          { delegatorId: grant.delegatorDid, delegateeId: grant.agentDid, scopes: grant.scopes },
+        ],
+        correlationId,
+        metadata: { stage: 'token_exchange', actorTokenJti: actor.jti },
+      });
+
+      res.json({
+        ...buildDelegationResponse({
+          tokenFormat: 'handle',
+          accessToken: entry.accessToken,
+          expiresIn,
+          service: grant.service,
+          userId: grant.userId,
+          scopes: grant.scopes,
+          delegationId: grant.delegationId,
+          receipt: grant.receipt,
+          chainDepth: grant.chainDepth,
+          parentDelegationId: grant.parentDelegationId,
+          constraints: grant.constraints,
+          ...(grant.agentDelegationToken ? { agentDelegationToken: grant.agentDelegationToken } : {}),
+        }),
+        // RFC 8693 Section 2.2.1: the issued token is the brokered handle.
+        access_token: grant.delegationId,
+        issued_token_type: 'urn:credninja:params:oauth:token-type:delegation-handle',
+        token_format_enforced: 'brokered',
+      });
+    } catch (err) {
+      if (sendReservedUserIdError(res, err)) return;
+      console.error('[POST /api/v1/token] Error:', err);
+      res.status(500).json({ error: 'server_error' });
     }
   });
 

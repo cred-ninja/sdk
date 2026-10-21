@@ -9,6 +9,7 @@ import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
+import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -76,6 +77,37 @@ export interface ServerConfig {
   // Delegation receipt audience (`aud` claim). Defaults to redirectBaseUri
   // when unset.
   receiptAudience?: string;
+
+  // Receipt signing. Default: an Ed25519 (EdDSA) key derived from the vault
+  // passphrase, as before. `receiptSigner` takes any signer (an HSM or KMS
+  // adapter, for instance); `receiptSigningKeyPem` (env
+  // RECEIPT_SIGNING_KEY_PEM) takes a PKCS#8 Ed25519 or P-256 private key,
+  // giving EdDSA or ES256. The header always carries `kid`.
+  receiptSigner?: JwsSigner;
+  receiptSigningKeyPem?: string;
+  // Further keys receipts may verify under (for example the key a rotation
+  // replaced), matched by `kid`.
+  receiptVerificationKeys?: JwsVerificationKey[];
+  // The verifier's accepted algorithms (env RECEIPT_ACCEPTED_ALGS, comma
+  // separated). Defaults to EdDSA and ES256. A receipt whose header alg is
+  // not on the list, or differs from its key's algorithm, is rejected.
+  receiptAcceptedAlgs?: string[];
+  // Claim layout of newly minted receipts (env RECEIPT_CLAIM_LAYOUT).
+  // 'draft-02' (the default): the principal in `sub`, the agent in
+  // `client_id` and `act.sub`, prior agents in nested `act`, plus `jti` and
+  // `cnf`. 'legacy': the agent in `sub`, for verifiers that key on it.
+  // Receipts in either layout are always accepted.
+  receiptClaimLayout?: 'draft-02' | 'legacy';
+
+  // SQLite file for the running totals of cumulative constraints (env
+  // CUMULATIVE_LEDGER_PATH). Unset keeps them in memory for the life of the
+  // process; a delegation whose ancestors the ledger does not hold is
+  // refused at exercise, so a restart fails closed rather than resetting a
+  // budget.
+  cumulativeLedgerPath?: string;
+
+  // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
+  delegationGrantTtlSeconds?: number;
 
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
@@ -200,6 +232,15 @@ export function loadConfig(): ServerConfig {
     }
   }
   const receiptAudience = process.env.RECEIPT_AUDIENCE || undefined;
+  const receiptSigningKeyPem = process.env.RECEIPT_SIGNING_KEY_PEM || undefined;
+  const receiptAcceptedAlgs = process.env.RECEIPT_ACCEPTED_ALGS
+    ? process.env.RECEIPT_ACCEPTED_ALGS.split(',').map((a) => a.trim()).filter(Boolean)
+    : undefined;
+  const receiptClaimLayoutRaw = process.env.RECEIPT_CLAIM_LAYOUT || undefined;
+  if (receiptClaimLayoutRaw !== undefined && receiptClaimLayoutRaw !== 'draft-02' && receiptClaimLayoutRaw !== 'legacy') {
+    throw new Error('RECEIPT_CLAIM_LAYOUT must be one of: draft-02, legacy');
+  }
+  const cumulativeLedgerPath = process.env.CUMULATIVE_LEDGER_PATH || undefined;
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -247,6 +288,10 @@ export function loadConfig(): ServerConfig {
     singleUserMode,
     receiptTtlSeconds,
     receiptAudience,
+    ...(receiptSigningKeyPem ? { receiptSigningKeyPem } : {}),
+    ...(receiptAcceptedAlgs ? { receiptAcceptedAlgs } : {}),
+    ...(receiptClaimLayoutRaw ? { receiptClaimLayout: receiptClaimLayoutRaw as 'draft-02' | 'legacy' } : {}),
+    ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

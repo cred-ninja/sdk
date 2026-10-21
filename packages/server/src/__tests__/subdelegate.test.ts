@@ -1176,7 +1176,11 @@ describe('POST /api/v1/subdelegate', () => {
     expect(parts).toHaveLength(3);
 
     const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    expect(payload.sub).toBe('did:key:z6MkChild');
+    // draft-02 layout: principal in sub, current agent in client_id and
+    // act.sub, the delegating agent in nested act.
+    expect(payload.sub).toBe('default');
+    expect(payload.client_id).toBe('did:key:z6MkChild');
+    expect(payload.act).toEqual({ sub: 'did:key:z6MkChild', act: { sub: 'did:key:z6MkParent' } });
     expect(payload.service).toBe('google');
     expect(payload.scopes).toEqual(['openid']);
     expect(payload.chainDepth).toBe(1);
@@ -1430,7 +1434,7 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.body.error).toBe('invalid_constraints');
   });
 
-  it('a sub-delegated handle under an inherited cumulative bound is denied at /api/v1/use', async () => {
+  it('a sub-delegated handle whose parent the cumulative ledger does not hold is denied at /api/v1/use', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
     const res = await request(app)
       .post('/api/v1/subdelegate')
@@ -1444,7 +1448,9 @@ describe('POST /api/v1/subdelegate', () => {
     const useRes = await request(app)
       .post('/api/v1/use')
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({ delegation_id: res.body.delegation_id, url: 'https://www.googleapis.com/oauth2/v3/userinfo', method: 'GET' });
+      .send({ delegation_id: res.body.delegation_id, url: 'https://www.googleapis.com/oauth2/v3/userinfo', method: 'GET', quantities: { max_spend: 1 } });
+    // The parent receipt was minted outside this server process, so its
+    // subtree total is unknown here: refused, never reset.
     expect(useRes.status).toBe(403);
     expect(useRes.body.error).toBe('cumulative_constraint_unenforceable');
     expect(fetchSpy).not.toHaveBeenCalled();

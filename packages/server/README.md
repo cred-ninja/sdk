@@ -58,7 +58,8 @@ npm run dev
 | GET | `/connect/:provider/callback` | None | OAuth callback |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
-| POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle |
+| POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle. Under a cumulative constraint the call is debited against the running totals first (see below) |
+| POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
@@ -101,6 +102,46 @@ npm run dev
 > lineage and degrade to a parent-only check for that hop until they age out under
 > `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
 > `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
+
+> **Delegation receipts (draft-sweeney-wimse-credential-delegation-02).** Receipts are
+> compact JWS behind a signer interface: EdDSA by default (the passphrase-derived Ed25519 key,
+> as before), ES256 when `RECEIPT_SIGNING_KEY_PEM` holds a P-256 key, or any `receiptSigner`
+> passed to `createServer`. The header carries `kid`. The server verifies with its own
+> accepted-algorithm list (`RECEIPT_ACCEPTED_ALGS`); a receipt whose `alg` is off the list or
+> differs from its key's algorithm is rejected. New receipts use the -02 claim layout: the
+> principal in `sub`, the acting agent in `client_id` and `act.sub`, ancestors as nested `act`,
+> the delegation id as `jti`, and `cnf.jkt` bound to the agent's did:key. Receipts in the old
+> layout (agent in `sub`) are still accepted; `RECEIPT_CLAIM_LAYOUT=legacy` keeps minting them
+> for verifiers that key on `sub`.
+
+> **Cumulative constraints.** `max_lifetime` and `max_subtree` are enforced by this server as
+> the single writer of their running totals. `/api/v1/use` debits, in one SQLite transaction, the
+> delegation's own `max_lifetime` and every `max_subtree` held by it or an ancestor, right before
+> the upstream call. `max_calls` is metered at one per call; any other cumulative key needs the
+> exercise's quantity in `quantities` (`{"max_spend": 12}`), and a call without it is refused with
+> `403 cumulative_quantity_required`. Past a bound: `403 cumulative_constraint_exceeded`. A
+> delegation whose ancestors the ledger does not hold (for example after a restart with the
+> in-memory default) is refused with `403 cumulative_constraint_unenforceable`, never given a
+> fresh budget. Set `CUMULATIVE_LEDGER_PATH` to keep the totals across restarts.
+
+> **Sub-Delegation Exchange.** With `"exchange": "grant"`, `/api/v1/subdelegate` runs every hop
+> check and signs the child receipt, but issues no handle: it returns a single-use
+> `delegation_grant` (60 seconds by default) bound to the receiving agent's DID. The receiving
+> agent redeems it at `POST /api/v1/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+> the grant as `subject_token` (`subject_token_type=urn:credninja:params:oauth:token-type:delegation-grant`),
+> and as `actor_token` an RFC 7523 JWT it signed with its own did:key (`iss` = `sub` = its DID,
+> `aud` = `<REDIRECT_BASE_URI>/api/v1/token`, `exp` at most `iat` + 300, a fresh `jti`). A second
+> redemption is `invalid_grant`; an actor token for another DID is `401 invalid_client` and leaves
+> the grant redeemable by the right agent.
+
+> **Chain-Verifiable Profile.** `"token_profile": "agent_delegation"` on `/api/v1/delegate` or
+> `/api/v1/subdelegate` (optional `audience`, and `max_depth` on a root) also returns
+> `agent_delegation_token`, a token in the draft-asor-wimse-agent-delegation-chain-02 format,
+> unchanged, signed with the receipt key, that a party holding only the chain verifies with
+> `verifyAgentDelegationChain()` from `@credninja/attenuation`. A child needs the parent's chain,
+> root first, as `agent_delegation_chain`. The agent must be an Ed25519 or P-256 did:key so the
+> token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
+> (`chain_profile`).
 
 ## User ids
 
@@ -447,6 +488,10 @@ All configuration via environment variables (or `.env` file):
 | `SINGLE_USER_MODE` | No | `true`: legacy requests without `user_id` act on the shared user `default`. `false` (default): they are refused with `400 user_id_required`. See [User ids](#user-ids) |
 | `RECEIPT_TTL_SECONDS` | No | TTL (seconds) for the `exp` claim on delegation receipts, and the max age for legacy receipts minted without one (default: `3600`) |
 | `RECEIPT_AUDIENCE` | No | Audience (`aud` claim) for delegation receipts (default: `REDIRECT_BASE_URI`) |
+| `RECEIPT_SIGNING_KEY_PEM` | No | PKCS#8 Ed25519 (EdDSA) or P-256 (ES256) private key for receipts (default: Ed25519 key derived from `VAULT_PASSPHRASE`) |
+| `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
+| `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
+| `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |

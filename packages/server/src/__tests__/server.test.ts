@@ -1156,8 +1156,9 @@ describe('@credninja/server', () => {
     });
 
     // ── draft-asor-wimse-agent-delegation-chain-02 cumulative constraints ──
-    // max_lifetime / max_subtree are checked only where the running total is
-    // held; Cred holds none yet, so /api/v1/use must deny (section 6, step 8).
+    // max_lifetime / max_subtree are checked where the running total is held
+    // (section 6, step 8). The server holds it: /api/v1/use debits the
+    // cumulative ledger atomically before the upstream call.
 
     async function delegateHandle(constraints: unknown, extra: Record<string, unknown> = {}, config: Partial<ServerConfig> = {}) {
       const { app, vault } = createServer(makeTestConfig(config));
@@ -1184,7 +1185,7 @@ describe('@credninja/server', () => {
       return { app, res };
     }
 
-    async function useHandle(app: Parameters<typeof request>[0], delegationId: string) {
+    async function useHandle(app: Parameters<typeof request>[0], delegationId: string, quantities?: Record<string, unknown>) {
       return request(app)
         .post('/api/v1/use')
         .set('Authorization', `Bearer ${TEST_TOKEN}`)
@@ -1192,24 +1193,68 @@ describe('@credninja/server', () => {
           delegation_id: delegationId,
           url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
           method: 'GET',
+          ...(quantities ? { quantities } : {}),
         });
     }
 
-    it.each([
-      ['max_lifetime', [{ key: 'max_calls', max_lifetime: 50 }]],
-      ['max_subtree', [{ key: 'max_spend', max_subtree: 1000 }]],
-      ['a cumulative bound beside per-action ones', [{ key: 'max_rows', max: 100 }, { key: 'max_rows', max_lifetime: 5000 }]],
-    ])('denies every brokered use under %s, before any upstream call', async (_name, constraints) => {
-      const { app, res } = await delegateHandle(constraints);
-      expect(res.status).toBe(200);
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+    function mockUpstream() {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const useRes = await useHandle(app, res.body.delegation_id);
+    }
+
+    it('meters max_calls under max_lifetime at one per call and refuses past the bound', async () => {
+      const { app, res } = await delegateHandle([{ key: 'max_calls', max_lifetime: 2 }]);
+      expect(res.status).toBe(200);
+      const fetchSpy = mockUpstream();
+      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
+      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
+      const third = await useHandle(app, res.body.delegation_id);
+      expect(third.status).toBe(403);
+      expect(third.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_calls', type: 'max_lifetime' });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      fetchSpy.mockRestore();
+    });
+
+    it('debits a declared quantity under max_subtree and refuses one that would overspend', async () => {
+      const { app, res } = await delegateHandle([{ key: 'max_spend', max_subtree: 1000 }]);
+      expect(res.status).toBe(200);
+      const fetchSpy = mockUpstream();
+      expect((await useHandle(app, res.body.delegation_id, { max_spend: 600 })).status).toBe(200);
+      const over = await useHandle(app, res.body.delegation_id, { max_spend: 500 });
+      expect(over.status).toBe(403);
+      expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_spend', type: 'max_subtree' });
+      expect((await useHandle(app, res.body.delegation_id, { max_spend: 400 })).status).toBe(200);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      fetchSpy.mockRestore();
+    });
+
+    it.each([
+      ['max_subtree', [{ key: 'max_spend', max_subtree: 1000 }], undefined],
+      ['a cumulative bound beside per-action ones', [{ key: 'max_rows', max: 100 }, { key: 'max_rows', max_lifetime: 5000 }], undefined],
+      ['a quantity that is not a number', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: '5' }],
+      ['a negative quantity', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: -1 }],
+    ])('denies a use under %s that declares no valid quantity, before any upstream call', async (_name, constraints, quantities) => {
+      const { app, res } = await delegateHandle(constraints);
+      expect(res.status).toBe(200);
+      const fetchSpy = mockUpstream();
+      const useRes = await useHandle(app, res.body.delegation_id, quantities);
       expect(useRes.status).toBe(403);
-      expect(useRes.body.error).toBe('cumulative_constraint_unenforceable');
+      expect(useRes.body.error).toBe('cumulative_quantity_required');
       expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('does not debit when the URL check refuses the call', async () => {
+      const { app, res } = await delegateHandle([{ key: 'max_calls', max_lifetime: 1 }]);
+      const fetchSpy = mockUpstream();
+      const refused = await request(app)
+        .post('/api/v1/use')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ delegation_id: res.body.delegation_id, url: 'https://evil.example.com/x', method: 'GET' });
+      expect(refused.status).toBe(400);
+      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
       fetchSpy.mockRestore();
     });
 
@@ -1228,7 +1273,7 @@ describe('@credninja/server', () => {
 
     it("records the cumulative deny where the owning user's audit log can see it", async () => {
       const { app, res } = await delegateHandle(
-        [{ key: 'max_calls', max_lifetime: 50 }],
+        [{ key: 'max_spend', max_subtree: 50 }],
         {},
         { vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH },
       );
@@ -1243,7 +1288,7 @@ describe('@credninja/server', () => {
         .set('Authorization', `Bearer ${TEST_TOKEN}`);
       expect(audit.status).toBe(200);
       expect(audit.body.entries.some((e: any) =>
-        e.action === 'deny' && e.metadata?.errorMessage === 'cumulative_constraint_unenforceable')).toBe(true);
+        e.action === 'deny' && e.metadata?.errorMessage === 'cumulative_quantity_required')).toBe(true);
     });
 
     it('refuses a raw token under a cumulative constraint before looking up credentials', async () => {
@@ -2396,8 +2441,15 @@ describe('@credninja/server', () => {
       expect(res.body.receipt).toBeTypeOf('string');
 
       const [headerB64, payloadB64, signatureB64] = res.body.receipt.split('.');
+      const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8'));
+      expect(header).toMatchObject({ alg: 'EdDSA', typ: 'JWT' });
+      expect(header.kid).toBeTypeOf('string');
       const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
-      expect(payload.sub).toBe('did:key:z6MkReceiptAgent');
+      // draft-02 layout: the principal in sub, the agent in client_id and act.sub.
+      expect(payload.sub).toBe('default');
+      expect(payload.client_id).toBe('did:key:z6MkReceiptAgent');
+      expect(payload.act).toEqual({ sub: 'did:key:z6MkReceiptAgent' });
+      expect(payload.jti).toBe(payload.delegationId);
       expect(payload.appClientId).toBe('app_123');
       expect(payload.scopes).toEqual(['calendar.readonly']);
 
