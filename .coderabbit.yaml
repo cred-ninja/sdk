@@ -18,3 +18,43 @@ reviews:
   pre_merge_checks:
     docstrings:
       mode: "off"
+  # Point the review at the security-critical code. The scope rules below are
+  # distilled from docs/solutions/conformance/scope-subsumption-review-checklist.md;
+  # update that file first and keep this block in sync with it.
+  path_instructions:
+    - path: "packages/vault/src/**"
+      instructions: |
+        This is the delegation, crypto, and audit core. Review for security first.
+        - Delegation chains (delegation-chain.ts, chain-verify.ts): a child grant must
+          never widen scope, lifetime, or constraints relative to its parent. Flag any
+          path that skips validateSubDelegation or compares scopes without the shared
+          helpers.
+        - Scope subsumption: a granted wildcard may cover a concrete request; a
+          requested wildcard must never be covered by a concrete grant. Check the dot
+          boundary (`crm.*` must not cover `crm`, `crm.`, or `crmx.read`). A malformed
+          scope matches only itself, exactly.
+        - Crypto and signatures (crypto.ts, rotation.ts): flag non-constant-time
+          comparison of secrets or MACs, verification that can be skipped or
+          short-circuited, and key material written to logs or errors.
+        - Parsing (strict-json.ts): flag anything that loosens strict parsing of
+          signed or receipt payloads.
+        - Audit (audit.ts): grants, delegations, actions, and revocations must all
+          still be logged; flag removed or conditional audit writes.
+        - Ask for tests on each malformed shape, one-directional coverage, and
+          dot-boundary negatives when scope comparison changes. If a change alters
+          which of no_scopes_granted or scope_escalation_denied fires first, ask for a
+          test that pins the order.
+    - path: "packages/server/src/**"
+      instructions: |
+        This is the HTTP and MCP surface over the vault. Review for security first.
+        - Every per-agent scopeCeiling check in server.ts (request check, stored-consent
+          filter, sub-delegation cap) must use the same shared helpers. Flag a ceiling
+          comparison that bypasses them.
+        - resolveGrantedScopes is exact-match on purpose (provider scopes are
+          provider-defined). Flag a change that makes wildcard grants storable without
+          revisiting that.
+        - Receipts and nonces (receipt-chain.ts, nonce-store.ts): flag replay windows,
+          missing signature verification, and verification that runs after the
+          receipt's contents are already trusted.
+        - Ask for server-level tests over HTTP through every ceiling call site, not only
+          vault unit tests.
