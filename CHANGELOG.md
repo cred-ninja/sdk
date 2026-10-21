@@ -2,7 +2,21 @@
 
 ## [Unreleased]
 
-Nothing yet.
+### Added (`@credninja/guard`)
+
+- `classificationCeilingPolicy`: denies resources classified above the
+  agent's ceiling over an ordered list of levels, with an optional
+  `noWriteDown` check on source and destination levels. Fails closed on
+  unknown levels and unknown agents. DENY results carry a typed `code`
+  (`classification_exceeded`, `write_down_blocked`,
+  `classification_unknown`, `classification_missing`, `ceiling_unknown`).
+- `amountLimitPolicy`: caps monetary amounts (integer minor units) per
+  request and per rolling period, in one currency, with per-agent
+  overrides. Period totals live in an injectable `AmountLimitStore`
+  (`InMemoryAmountLimitStore` by default) and count only allowed amounts.
+  DENY codes: `amount_exceeds_per_request`, `amount_exceeds_period`,
+  `amount_missing`, `amount_invalid`, `currency_mismatch`,
+  `amount_store_error`.
 
 ## [2.0.0] - prepared 2026-10-13, not yet published to npm
 

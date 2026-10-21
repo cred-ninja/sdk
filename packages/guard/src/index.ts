@@ -47,6 +47,13 @@ export type {
   MaxTtlPolicyConfig,
   WebBotAuthPolicyConfig,
   ReceiptClaimsPolicyConfig,
+  ClassificationCeilingPolicyConfig,
+  ClassificationCeilingDenyCode,
+  AmountLimitPolicyConfig,
+  AmountLimitDenyCode,
+  AmountLimits,
+  AmountLimitStore,
+  AmountLimitConsumeResult,
   GuardLinkContext,
 } from './types.js';
 
@@ -64,8 +71,18 @@ export {
   maxTtlPolicy,
   webBotAuthPolicy,
   receiptClaimsPolicy,
+  ClassificationCeilingPolicy,
+  classificationCeilingPolicy,
+  AmountLimitPolicy,
+  amountLimitPolicy,
+  InMemoryAmountLimitStore,
 } from './policies/index.js';
-export type { MaxTtlPolicyResult, RateLimitPolicyResult } from './policies/index.js';
+export type {
+  MaxTtlPolicyResult,
+  RateLimitPolicyResult,
+  ClassificationCeilingPolicyResult,
+  AmountLimitPolicyResult,
+} from './policies/index.js';
 
 // Cred Link policy
 export { createLinkHooks, LINK_CHECK_ERROR_CODE, clientGrantPolicy, CLIENT_GRANT_POLICY_NAME } from './link/index.js';

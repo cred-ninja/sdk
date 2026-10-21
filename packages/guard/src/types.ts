@@ -234,3 +234,131 @@ export interface ReceiptClaimsPolicyConfig {
   /** Optional per-provider claim requirements */
   perProvider?: Record<string, string[]>;
 }
+
+/** Typed DENY codes set by classificationCeilingPolicy */
+export type ClassificationCeilingDenyCode =
+  /** A requested level is above the agent's ceiling */
+  | 'classification_exceeded'
+  /** noWriteDown is on and data would move from a higher level to a lower one */
+  | 'write_down_blocked'
+  /** A level is present but not in `levels`, or could not be read */
+  | 'classification_unknown'
+  /** No level is present and `onMissing` is 'deny', or a flow names only one side */
+  | 'classification_missing'
+  /** The agent has no ceiling, or its ceiling is not in `levels` */
+  | 'ceiling_unknown';
+
+/**
+ * Deny access to resources classified above the agent's ceiling.
+ * Fails closed: unknown levels, unknown agents and resolver errors are DENY.
+ */
+export interface ClassificationCeilingPolicyConfig {
+  /**
+   * Ordered classification levels, lowest first (for example
+   * `['public', 'internal', 'confidential', 'restricted']` or
+   * `['U', 'CUI', 'S', 'TS']`). Matching is exact and case-sensitive.
+   */
+  levels: string[];
+  /**
+   * Agent ceilings keyed by `agentDid` or `agentTokenHash`. When both
+   * identifiers have an entry, the lower ceiling applies.
+   */
+  agentCeilings?: Record<string, string>;
+  /**
+   * Resolve the agent's ceiling. Takes precedence over `agentCeilings`.
+   * Return undefined for an unknown agent (DENY).
+   */
+  resolveAgentCeiling?: (ctx: GuardContext) => string | undefined;
+  /** Read the requested resource's level. Default: `ctx.metadata.classification`. */
+  resolveResourceLevel?: (ctx: GuardContext) => unknown;
+  /** What to do when no classification is present. Default: 'deny'. */
+  onMissing?: 'deny' | 'skip';
+  /**
+   * Deny moving data from a higher level to a lower one. When set, the
+   * source and destination levels are also checked against the ceiling,
+   * and a flow that names only one side is denied. Default: false.
+   */
+  noWriteDown?: boolean;
+  /**
+   * Read the data flow levels (used only with `noWriteDown`). Default:
+   * `ctx.metadata.sourceClassification` and `ctx.metadata.destinationClassification`.
+   */
+  resolveFlow?: (ctx: GuardContext) => { source?: unknown; destination?: unknown } | undefined;
+}
+
+/** Typed DENY codes set by amountLimitPolicy */
+export type AmountLimitDenyCode =
+  /** The amount is above the per-request maximum */
+  | 'amount_exceeds_per_request'
+  /** The amount would take the agent's rolling period total above the maximum */
+  | 'amount_exceeds_period'
+  /** No amount is present and `onMissing` is 'deny' */
+  | 'amount_missing'
+  /** The amount is not a non-negative safe integer */
+  | 'amount_invalid'
+  /** The currency is missing or differs from the configured currency */
+  | 'currency_mismatch'
+  /** The aggregate store failed, so the request is denied (fail closed) */
+  | 'amount_store_error';
+
+/** Amount limits in integer minor units. Unset per-agent fields fall back to the policy defaults. */
+export interface AmountLimits {
+  /** Max amount per request */
+  maxPerRequest?: number;
+  /** Max total of allowed amounts per rolling period */
+  maxPerPeriod?: number;
+}
+
+/**
+ * Limit the monetary amounts an agent may act on.
+ *
+ * Amounts are integer minor units of `currency` (1050 is USD 10.50, and
+ * 1050 is JPY 1050). Decimal, negative and non-numeric amounts are denied.
+ * At least one of `maxPerRequest` and `maxPerPeriod` is required.
+ */
+export interface AmountLimitPolicyConfig extends AmountLimits {
+  /** ISO 4217 currency code the limits are expressed in (compared case-insensitively) */
+  currency: string;
+  /** Rolling period for `maxPerPeriod` in milliseconds. Default: 86_400_000 (24 hours). */
+  periodMs?: number;
+  /**
+   * Per-agent overrides keyed by `agentTokenHash` or `agentDid`. When both
+   * identifiers have an entry, the lower value of each limit applies.
+   */
+  perAgent?: Record<string, AmountLimits>;
+  /** Read the amount and currency. Default: `ctx.metadata.amount` and `ctx.metadata.currency`. */
+  resolveAmount?: (ctx: GuardContext) => { amount?: unknown; currency?: unknown } | undefined;
+  /** What to do when no amount is present. Default: 'deny'. */
+  onMissing?: 'deny' | 'skip';
+  /** Rolling period totals. Default: an in-memory store that resets on restart. */
+  store?: AmountLimitStore;
+}
+
+/**
+ * Storage for rolling period totals. Implement this to back amountLimitPolicy
+ * with a persistent or shared store (for example Redis).
+ */
+export interface AmountLimitStore {
+  /**
+   * Record `amount` at time `at` for `key` only when the total of entries
+   * recorded after `since`, plus `amount`, is at most `max`. Must be atomic
+   * per key so concurrent requests cannot both pass the check.
+   */
+  consume(
+    key: string,
+    amount: number,
+    at: number,
+    since: number,
+    max: number,
+  ): AmountLimitConsumeResult | Promise<AmountLimitConsumeResult>;
+  /** Total of entries recorded for `key` after `since` */
+  total(key: string, since: number): number | Promise<number>;
+}
+
+/** Result of AmountLimitStore.consume */
+export interface AmountLimitConsumeResult {
+  /** True when the amount was recorded */
+  recorded: boolean;
+  /** Period total after the call (includes the amount only when recorded) */
+  total: number;
+}
