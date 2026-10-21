@@ -90,3 +90,6 @@ export type {
   ParsedAgentDelegationDetail,
   UnknownConstraint,
 } from './agent-delegation.js';
+export { publicKeyFromDidKey, didKeyConfirmation } from './did-key.js';
+export { receiptActorClaims, readReceiptActor } from './receipt-claims.js';
+export type { ActorClaim, ReceiptActorClaims, ReceiptActorResult } from './receipt-claims.js';

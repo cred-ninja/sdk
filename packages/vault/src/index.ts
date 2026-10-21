@@ -111,3 +111,7 @@ export type {
   CreateLinkStorageOptions,
   LinkStorage,
 } from './link/index.js';
+
+// Running totals for cumulative constraints (max_lifetime, max_subtree).
+export { SqliteCumulativeLedger } from './cumulative-ledger.js';
+export type { CumulativeLedger, CumulativeLedgerRegistration, CumulativeDebitResult, SqliteCumulativeLedgerOptions } from './cumulative-ledger.js';
