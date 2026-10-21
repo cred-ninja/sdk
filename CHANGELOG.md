@@ -2,7 +2,29 @@
 
 ## [Unreleased]
 
-Nothing yet.
+### Added: human approval outcome in Guard (`@credninja/guard`)
+
+- New policy decision `REQUIRE_APPROVAL` with typed code `approval_required`.
+  It refuses the request (`allowed: false`, fail closed) until a valid
+  approval is presented; any `DENY` still wins. `GuardDecision` gains
+  `approvalRequired` (policy, reason, approver hint, request digest,
+  optional expiry), and `deniedBy` points at the approval result when it is
+  the only blocker, so callers that read `deniedBy.code` see
+  `approval_required`.
+- New built-in `approvalRequiredPolicy`, configured by a `when` predicate or
+  `match` rules (provider, HTTP method, metadata such as a classification or
+  `newPayee: true`). Approvals arrive as `GuardContext.approval` and are
+  accepted only when bound to the request digest (`computeApprovalDigest`),
+  unexpired, accepted by the `verifyApproval` callback (none configured
+  means refused) and, with `forbidSelfApproval`, not given by the agent's
+  sponsor.
+- Express middleware answers `403 { error: 'approval_required', code,
+  approval }` and the MCP wrapper returns a matching `structuredContent`.
+  New options `onApprovalRequired` and `extractApproval`; a custom `onDeny`
+  without `onApprovalRequired` still handles every refusal.
+- Audit events record `REQUIRE_APPROVAL` per policy plus `approvalRequired`
+  and `approvedBy` when present. `onDecision` now also receives the final
+  `GuardDecision` as a third argument.
 
 ## [2.0.0] - prepared 2026-10-13, not yet published to npm
 

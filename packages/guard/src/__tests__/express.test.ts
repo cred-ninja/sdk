@@ -4,6 +4,7 @@ import { createExpressMiddleware } from '../middleware/express.js';
 import type { Request, Response, NextFunction } from 'express';
 import type { CredPolicy } from '../types.js';
 import { receiptClaimsPolicy } from '../policies/receipt-claims.js';
+import { approvalRequiredPolicy } from '../policies/approval-required.js';
 
 // Import middleware module to register prototype method
 import '../middleware/express.js';
@@ -424,6 +425,119 @@ describe('Express Middleware', () => {
       await middleware(req, res, next);
 
       expect(onDeny).toHaveBeenCalledWith(req, res, expect.any(Object));
+    });
+  });
+
+  describe('approval required', () => {
+    function makeApprovalGuard(verifyApproval?: () => boolean): CredGuard {
+      return new CredGuard({
+        policies: [approvalRequiredPolicy({
+          match: [{ methods: ['POST'], metadata: { newPayee: true } }],
+          approver: { role: 'finance-approver' },
+          reason: 'Payment to a new payee',
+          verifyApproval,
+        })],
+      });
+    }
+
+    function approvalRequest(approval?: unknown): Request {
+      return mockRequest({
+        body: {
+          scopes: ['payments.write'],
+          targetUrl: 'https://api.example.com/v1/transfers',
+          targetMethod: 'POST',
+          metadata: { newPayee: true },
+          ...(approval !== undefined ? { approval } : {}),
+        },
+      });
+    }
+
+    it('returns 403 approval_required with the approval details', async () => {
+      const middleware = createExpressMiddleware(makeApprovalGuard());
+      const res = mockResponse();
+      const next = vi.fn();
+
+      await middleware(approvalRequest(), res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res._status).toBe(403);
+      expect(res._json.error).toBe('approval_required');
+      expect(res._json.code).toBe('approval_required');
+      expect(res._json.policy).toBe('approval-required');
+      expect(res._json.approval).toMatchObject({
+        code: 'approval_required',
+        reason: 'Payment to a new payee',
+        approver: { role: 'finance-approver' },
+        requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    });
+
+    it('calls next() once a verified approval for the digest is presented', async () => {
+      const middleware = createExpressMiddleware(makeApprovalGuard(() => true));
+      const first = mockResponse();
+      await middleware(approvalRequest(), first, vi.fn());
+
+      const res = mockResponse();
+      const next = vi.fn();
+      await middleware(approvalRequest({
+        approverId: 'user_alice',
+        requestDigest: first._json.approval.requestDigest,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        signature: 'EXAMPLE_SIGNATURE',
+      }), res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(res._status).toBe(200);
+    });
+
+    it('keeps a generic 403 for DENY', async () => {
+      const guard = new CredGuard({
+        policies: [
+          approvalRequiredPolicy({ match: [{ methods: ['POST'] }] }),
+          makeDenyPolicy('blocked'),
+        ],
+      });
+      const middleware = createExpressMiddleware(guard);
+      const res = mockResponse();
+
+      await middleware(approvalRequest(), res, vi.fn());
+
+      expect(res._status).toBe(403);
+      expect(res._json.error).toBe('Request denied by policy');
+      expect(res._json.policy).toBe('deny-all');
+    });
+
+    it('uses onApprovalRequired when given', async () => {
+      const onApprovalRequired = vi.fn();
+      const onDeny = vi.fn();
+      const middleware = createExpressMiddleware(makeApprovalGuard(), { onApprovalRequired, onDeny });
+
+      await middleware(approvalRequest(), mockResponse(), vi.fn());
+
+      expect(onApprovalRequired).toHaveBeenCalled();
+      expect(onDeny).not.toHaveBeenCalled();
+    });
+
+    it('routes to a custom onDeny when no onApprovalRequired is given', async () => {
+      const onDeny = vi.fn();
+      const middleware = createExpressMiddleware(makeApprovalGuard(), { onDeny });
+
+      await middleware(approvalRequest(), mockResponse(), vi.fn());
+
+      expect(onDeny).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ deniedBy: expect.objectContaining({ code: 'approval_required' }) }),
+      );
+    });
+
+    it('drops a malformed approval from the context', async () => {
+      const middleware = createExpressMiddleware(makeApprovalGuard(() => true));
+      const req = approvalRequest({ approverId: 'user_alice' });
+
+      await middleware(req, mockResponse(), vi.fn());
+
+      expect((req as any).guardContext.approval).toBeUndefined();
     });
   });
 

@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { CredGuard } from '../guard.js';
 import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
+import { APPROVAL_REQUIRED_CODE, toGuardApproval } from '../policies/approval-required.js';
 
 /** MCP tool result structure */
 export interface CallToolResult {
@@ -35,6 +36,8 @@ export interface CredToolInput {
   targetMethod?: string;
   delegationId?: string;
   metadata?: Record<string, unknown>;
+  /** A human approval presented on retry (see approvalRequiredPolicy). Untrusted until verified. */
+  approval?: unknown;
   [key: string]: unknown;
 }
 
@@ -50,6 +53,13 @@ export interface McpWrapperOptions {
     input: CredToolInput,
     ctx: McpToolContext,
   ) => GuardLinkContext | undefined | Promise<GuardLinkContext | undefined>;
+
+  /**
+   * Read the human approval presented with the call, if any. Values that are
+   * not a well-formed GuardApproval are dropped; the policy verifies the rest.
+   * Default: `input.approval`.
+   */
+  extractApproval?: (input: CredToolInput, ctx: McpToolContext) => unknown;
 
   /**
    * Called when guard allows the request.
@@ -72,6 +82,19 @@ export interface McpWrapperOptions {
     decision: GuardDecision,
     guardCtx: GuardContext
   ) => CallToolResult;
+
+  /**
+   * Called when the call is refused only because it needs human approval
+   * (`decision.approvalRequired` is set; any DENY goes to onDeny instead).
+   * Default: a custom onDeny when one is given, else an error result whose
+   * structuredContent is `{ error: 'approval_required', code, approval, ... }`.
+   */
+  onApprovalRequired?: (
+    input: CredToolInput,
+    ctx: McpToolContext,
+    decision: GuardDecision,
+    guardCtx: GuardContext
+  ) => CallToolResult;
 }
 
 /**
@@ -82,7 +105,10 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
   handler: (input: TInput, ctx: McpToolContext) => Promise<CallToolResult>,
   options: McpWrapperOptions = {}
 ): (input: TInput, ctx: McpToolContext) => Promise<CallToolResult> {
-  const { onDeny = defaultOnDeny, resolveLinkContext } = options;
+  const { onDeny = defaultOnDeny, resolveLinkContext, extractApproval = defaultExtractApproval } = options;
+  // A custom onDeny keeps handling every refusal unless onApprovalRequired is given.
+  const onApprovalRequired = options.onApprovalRequired
+    ?? (options.onDeny ? options.onDeny : defaultOnApprovalRequired);
 
   return async (input: TInput, ctx: McpToolContext): Promise<CallToolResult> => {
     try {
@@ -97,6 +123,7 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
       }
 
       const link = resolveLinkContext ? await resolveLinkContext(input, ctx) : undefined;
+      const approval = toGuardApproval(extractApproval(input, ctx));
 
       // Build guard context
       const guardCtx: GuardContext = {
@@ -116,6 +143,7 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
         signatureAgent: getStringMetadata(input.metadata, 'signatureAgent'),
         receiptClaims: getStringArrayMetadata(input.metadata, 'receiptClaims'),
         ...(link ? { link } : {}),
+        ...(approval ? { approval } : {}),
       };
 
       // Evaluate policies
@@ -127,6 +155,9 @@ export function wrapMcpToolHandler<TInput extends CredToolInput>(
       (ctx as any).guardDecision = decision;
 
       if (!decision.allowed) {
+        if (decision.approvalRequired) {
+          return onApprovalRequired(input, ctx, decision, guardCtx);
+        }
         return onDeny(input, ctx, decision, guardCtx);
       }
 
@@ -178,6 +209,35 @@ function defaultOnDeny(
       code,
       policy: decision.deniedBy?.policy,
       reason: decision.deniedBy?.reason,
+    },
+    isError: true,
+  };
+}
+
+function defaultExtractApproval(input: CredToolInput, _ctx: McpToolContext): unknown {
+  return input.approval;
+}
+
+function defaultOnApprovalRequired(
+  _input: CredToolInput,
+  _ctx: McpToolContext,
+  decision: GuardDecision,
+  _guardCtx: GuardContext
+): CallToolResult {
+  const approval = decision.approvalRequired;
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Approval required by policy: ${approval?.policy}. Reason: ${approval?.reason}. Code: ${APPROVAL_REQUIRED_CODE}`,
+      },
+    ],
+    structuredContent: {
+      error: APPROVAL_REQUIRED_CODE,
+      code: APPROVAL_REQUIRED_CODE,
+      policy: approval?.policy,
+      reason: approval?.reason,
+      approval,
     },
     isError: true,
   };

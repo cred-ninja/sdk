@@ -167,7 +167,7 @@ describe('CredGuard', () => {
       const ctx = makeContext();
       await guard.evaluate(ctx);
 
-      expect(onDecision).toHaveBeenCalledWith(ctx, expect.any(Array));
+      expect(onDecision).toHaveBeenCalledWith(ctx, expect.any(Array), expect.objectContaining({ allowed: true }));
     });
   });
 

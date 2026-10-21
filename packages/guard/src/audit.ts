@@ -11,8 +11,11 @@ import type { GuardContext, GuardDecision, GuardAuditEvent } from './types.js';
  * Compatible with the existing Ed25519 audit receipt chain.
  */
 export function buildAuditEvent(ctx: GuardContext, decision: GuardDecision): GuardAuditEvent {
-  // `code` and `link` are spread in only when present, so events for calls
-  // that involve neither keep exactly their previous shape.
+  // `code`, `link` and the approval fields are spread in only when present,
+  // so events for calls that involve none of them keep exactly their
+  // previous shape.
+  const approvedBy = decision.results.flatMap((result) =>
+    result.decision === 'ALLOW' && typeof result.approvedBy === 'string' ? [result.approvedBy] : []);
   return {
     type: 'guard.decision',
     timestamp: ctx.timestamp,
@@ -27,6 +30,8 @@ export function buildAuditEvent(ctx: GuardContext, decision: GuardDecision): Gua
       durationMs: result.durationMs ?? 0,
     })),
     ...(typeof decision.deniedBy?.code === 'string' ? { code: decision.deniedBy.code } : {}),
+    ...(decision.approvalRequired ? { approvalRequired: { ...decision.approvalRequired } } : {}),
+    ...(approvedBy.length > 0 ? { approvedBy } : {}),
     ...(ctx.link ? { link: { ...ctx.link } } : {}),
     requestedScopes: ctx.requestedScopes,
     effectiveScopes: decision.effectiveScopes,

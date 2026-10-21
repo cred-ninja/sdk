@@ -9,6 +9,7 @@ import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { CredGuard } from '../guard.js';
 import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
+import { APPROVAL_REQUIRED_CODE, toGuardApproval } from '../policies/approval-required.js';
 
 /** Options for express middleware */
 export interface ExpressMiddlewareOptions {
@@ -41,6 +42,14 @@ export interface ExpressMiddlewareOptions {
   resolveLinkContext?: (req: Request) => GuardLinkContext | undefined | Promise<GuardLinkContext | undefined>;
 
   /**
+   * Read the human approval presented with the request, if any (see
+   * approvalRequiredPolicy). Values that are not a well-formed GuardApproval
+   * are dropped. The approval is untrusted input; the policy verifies it.
+   * Default: `req.body.approval`.
+   */
+  extractApproval?: (req: Request) => unknown;
+
+  /**
    * Called when guard allows the request.
    * Default: calls next().
    */
@@ -51,6 +60,14 @@ export interface ExpressMiddlewareOptions {
    * Default: sends 403 with JSON error.
    */
   onDeny?: (req: Request, res: Response, decision: GuardDecision) => void;
+
+  /**
+   * Called when the request is refused only because it needs human approval
+   * (`decision.approvalRequired` is set; any DENY goes to onDeny instead).
+   * Default: a custom onDeny when one is given, else 403 with
+   * `{ error: 'approval_required', code: 'approval_required', approval }`.
+   */
+  onApprovalRequired?: (req: Request, res: Response, decision: GuardDecision) => void;
 }
 
 /**
@@ -68,7 +85,11 @@ export function createExpressMiddleware(
     onAllow = defaultOnAllow,
     onDeny = defaultOnDeny,
     resolveLinkContext,
+    extractApproval = defaultExtractApproval,
   } = options;
+  // A custom onDeny keeps handling every refusal unless onApprovalRequired is given.
+  const onApprovalRequired = options.onApprovalRequired
+    ?? (options.onDeny ? options.onDeny : defaultOnApprovalRequired);
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -93,6 +114,7 @@ export function createExpressMiddleware(
 
       const principal = (req as any).agentPrincipal;
       const link = resolveLinkContext ? await resolveLinkContext(req) : undefined;
+      const approval = toGuardApproval(extractApproval(req));
       const ctx: GuardContext = {
         provider,
         agentTokenHash,
@@ -112,6 +134,7 @@ export function createExpressMiddleware(
         signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
         receiptClaims: resolveReceiptClaims(req.body, principal),
         ...(link ? { link } : {}),
+        ...(approval ? { approval } : {}),
       };
 
       // Evaluate policies
@@ -129,6 +152,8 @@ export function createExpressMiddleware(
           req.body.scopes = decision.effectiveScopes;
         }
         onAllow(req, res, next, decision);
+      } else if (decision.approvalRequired) {
+        onApprovalRequired(req, res, decision);
       } else {
         onDeny(req, res, decision);
       }
@@ -185,6 +210,22 @@ function defaultOnDeny(req: Request, res: Response, decision: GuardDecision): vo
     policy: decision.deniedBy?.policy,
     reason: decision.deniedBy?.reason,
     ...(typeof code === 'string' ? { code } : {}),
+    requestId: (req as any).id,
+  });
+}
+
+function defaultExtractApproval(req: Request): unknown {
+  return req.body?.approval;
+}
+
+function defaultOnApprovalRequired(req: Request, res: Response, decision: GuardDecision): void {
+  const approval = decision.approvalRequired;
+  res.status(403).json({
+    error: APPROVAL_REQUIRED_CODE,
+    code: APPROVAL_REQUIRED_CODE,
+    policy: approval?.policy,
+    reason: approval?.reason,
+    approval,
     requestId: (req as any).id,
   });
 }

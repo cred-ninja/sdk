@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { CredGuard } from '../guard.js';
 import { wrapMcpToolHandler } from '../middleware/mcp.js';
 import type { CredPolicy } from '../types.js';
+import { approvalRequiredPolicy } from '../policies/approval-required.js';
 import type { CallToolResult, McpToolContext, CredToolInput } from '../middleware/mcp.js';
 
 // Import middleware module to register prototype method
@@ -270,6 +271,101 @@ describe('MCP Tool Wrapper', () => {
 
       expect(onDeny).toHaveBeenCalled();
       expect(result.content[0].text).toBe('Custom deny message');
+    });
+  });
+
+  describe('approval required', () => {
+    function makeApprovalGuard(verifyApproval?: () => boolean): CredGuard {
+      return new CredGuard({
+        policies: [approvalRequiredPolicy({
+          match: [{ methods: ['DELETE'] }],
+          approver: { principal: 'user_bob' },
+          verifyApproval,
+        })],
+      });
+    }
+
+    const deleteInput = makeToolInput({
+      targetUrl: 'https://api.github.com/repos/example/repo',
+      targetMethod: 'DELETE',
+    });
+
+    it('returns an approval_required error result with structured details', async () => {
+      const handler = vi.fn();
+      const wrapped = wrapMcpToolHandler(makeApprovalGuard(), handler);
+
+      const result = await wrapped({ ...deleteInput }, makeContext());
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Approval required by policy: approval-required');
+      expect(result.structuredContent).toMatchObject({
+        error: 'approval_required',
+        code: 'approval_required',
+        policy: 'approval-required',
+        approval: {
+          code: 'approval_required',
+          approver: { principal: 'user_bob' },
+          requestDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      });
+    });
+
+    it('calls the handler once a verified approval is presented', async () => {
+      const handler = vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'Deleted' }] });
+      const wrapped = wrapMcpToolHandler(makeApprovalGuard(() => true), handler);
+      const first = await wrapped({ ...deleteInput }, makeContext());
+      const digest = (first.structuredContent?.approval as { requestDigest: string }).requestDigest;
+
+      const result = await wrapped({
+        ...deleteInput,
+        approval: {
+          approverId: 'user_bob',
+          requestDigest: digest,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      }, makeContext());
+
+      expect(handler).toHaveBeenCalled();
+      expect(result.content[0].text).toBe('Deleted');
+    });
+
+    it('refuses an approval for a different request', async () => {
+      const handler = vi.fn();
+      const wrapped = wrapMcpToolHandler(makeApprovalGuard(() => true), handler);
+      const first = await wrapped({ ...deleteInput }, makeContext());
+      const digest = (first.structuredContent?.approval as { requestDigest: string }).requestDigest;
+
+      const result = await wrapped({
+        ...deleteInput,
+        targetUrl: 'https://api.github.com/repos/example/other-repo',
+        approval: { approverId: 'user_bob', requestDigest: digest, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+      }, makeContext());
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.structuredContent?.code).toBe('approval_required');
+    });
+
+    it('uses onApprovalRequired when given', async () => {
+      const onApprovalRequired = vi.fn().mockReturnValue({ content: [{ type: 'text', text: 'pending' }], isError: true });
+      const wrapped = wrapMcpToolHandler(makeApprovalGuard(), vi.fn(), { onApprovalRequired });
+
+      const result = await wrapped({ ...deleteInput }, makeContext());
+
+      expect(onApprovalRequired).toHaveBeenCalled();
+      expect(result.content[0].text).toBe('pending');
+    });
+
+    it('keeps the generic denial for DENY', async () => {
+      const guard = new CredGuard({
+        policies: [approvalRequiredPolicy({ match: [{ methods: ['DELETE'] }] }), makeDenyPolicy('blocked')],
+      });
+      const wrapped = wrapMcpToolHandler(guard, vi.fn());
+
+      const result = await wrapped({ ...deleteInput }, makeContext());
+
+      expect(result.content[0].text).toContain('Request denied by policy: deny-all');
+      expect(result.structuredContent).toBeUndefined();
     });
   });
 
