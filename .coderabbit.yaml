@@ -18,32 +18,49 @@ reviews:
   pre_merge_checks:
     docstrings:
       mode: "off"
-  # Point the review at the security-critical code. The scope rules below are
-  # distilled from docs/solutions/conformance/scope-subsumption-review-checklist.md;
-  # update that file first and keep this block in sync with it.
+  # Point the review at the security-critical code. The scope-subsumption rules
+  # below are distilled from
+  # docs/solutions/conformance/scope-subsumption-review-checklist.md; update that
+  # file first and keep these bullets in sync with it. The crypto, receipt, and
+  # audit bullets are general guidance read from the current source.
   path_instructions:
     - path: "packages/vault/src/**"
       instructions: |
         This is the delegation, crypto, and audit core. Review for security first.
-        - Delegation chains (delegation-chain.ts, chain-verify.ts): a child grant must
-          never widen scope, lifetime, or constraints relative to its parent. Flag any
-          path that skips validateSubDelegation or compares scopes without the shared
-          helpers.
+        - Delegation chains: a child grant must never widen scope, lifetime, or
+          constraints relative to its parent. New sub-delegations must go through
+          validateSubDelegation (delegation-chain.ts); chain-verify.ts re-verifies
+          existing chains, including each hop's signature, and must not skip a hop.
+          Flag scope comparisons that bypass scopeCovers / scopeCoveredBy.
         - Scope subsumption: a granted wildcard may cover a concrete request; a
-          requested wildcard must never be covered by a concrete grant. Check the dot
-          boundary (`crm.*` must not cover `crm`, `crm.`, or `crmx.read`). A malformed
-          scope matches only itself, exactly.
-        - Crypto and signatures (crypto.ts, rotation.ts): flag non-constant-time
-          comparison of secrets or MACs, verification that can be skipped or
-          short-circuited, and key material written to logs or errors.
+          requested wildcard must never be covered by a concrete grant. Coverage is
+          multi-level (`crm.*` covers `crm.contacts.read`); cite the wire spec if a
+          change alters depth. Check the dot boundary (`crm.*` must not cover `crm`,
+          `crm.`, or `crmx.read`).
+        - A scope that fails validation matches only itself, exactly. It must not
+          become never-matching: legacy chains renew through the default-request path
+          (the child requests nothing, so the request defaults to the parent's own
+          grant), and a parent scope that fails self-coverage breaks that renewal.
+        - Encryption at rest (crypto.ts): AES-GCM. Flag a reused or non-random IV, a
+          decrypt that skips setAuthTag or swallows auth-tag failures, a lowered
+          PBKDF2 iteration count or key length, and key material or plaintext tokens
+          in logs or errors.
+        - Token rotation (rotation.ts): every rotation must return to idle, either by
+          promotion or through failed -> rolling_back. Flag a path that can leave a
+          rotation stuck in testing or promoting, and tokens in logs.
         - Parsing (strict-json.ts): flag anything that loosens strict parsing of
           signed or receipt payloads.
-        - Audit (audit.ts): grants, delegations, actions, and revocations must all
-          still be logged; flag removed or conditional audit writes.
-        - Ask for tests on each malformed shape, one-directional coverage, and
-          dot-boundary negatives when scope comparison changes. If a change alters
+        - Audit (audit.ts, vault.ts writeAuditEvent): backends must fail closed; flag
+          a change that makes an audit write optional or silent.
+        - When scope comparison changes, ask for tests on: each malformed shape,
+          self-match for literals, one-directional coverage, dot-boundary negatives,
+          multi-level positives, and a renewal regression through the default-request
+          path with a legacy literal scope in the parent grant. If a change alters
           which of no_scopes_granted or scope_escalation_denied fires first, ask for a
           test that pins the order.
+        - A scope-comparison change that flips a draft-asor conformance vector
+          (cred-ninja/protocol conformance/asor-delegation-chain/) is a wire-visible
+          behavior change; ask the PR to say whether the vectors were run.
     - path: "packages/server/src/**"
       instructions: |
         This is the HTTP and MCP surface over the vault. Review for security first.
@@ -55,6 +72,11 @@ reviews:
           revisiting that.
         - Receipts and nonces (receipt-chain.ts, nonce-store.ts): flag replay windows,
           missing signature verification, and verification that runs after the
-          receipt's contents are already trusted.
+          receipt's contents are already trusted. A sub-delegated receipt must not
+          outlive its parent.
+        - Audit: every grant, delegation, sub-delegation, action, and revocation route
+          calls writeAuditEventIfSupported. Flag a removed call or a new condition
+          around one. The narrow "not supported" swallow inside that helper is
+          intentional.
         - Ask for server-level tests over HTTP through every ceiling call site, not only
           vault unit tests.
