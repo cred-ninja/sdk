@@ -284,6 +284,20 @@ describe('Sub-Delegation Exchange', () => {
     expect((await exchange(second.app, third.body.delegation_grant, replayed)).status).toBe(401);
   });
 
+  it('refuses to redeem a grant whose parent was revoked after authorization', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    const res = await subdelegate(app, root.body.receipt, CHILD, { exchange: 'grant' });
+    expect(res.status).toBe(200);
+    const revoke = await request(app)
+      .delete(`/api/v1/delegations/${root.body.delegation_id}?user_id=alice`)
+      .set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(revoke.status).toBe(200);
+    const issued = await exchange(app, res.body.delegation_grant, actorToken(CHILD));
+    expect(issued.status).toBe(401);
+    expect(issued.body.error).toBe('delegation_revoked');
+  });
+
   it('rejects an unknown grant and a wrong grant_type', async () => {
     const { app } = await setup();
     expect((await exchange(app, 'nope', actorToken(CHILD))).body.error).toBe('invalid_grant');

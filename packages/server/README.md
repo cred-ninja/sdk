@@ -60,6 +60,7 @@ npm run dev
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
 | POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle. Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
+| DELETE | `/api/v1/delegations/:delegationId` | Bearer | Revoke a delegation and every delegation derived from it, see [Cascading revocation](#cascading-revocation) |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
@@ -97,8 +98,8 @@ npm run dev
 > the status of *every* ancestor agent in the delegation chain — not just the immediate parent —
 > before minting a child receipt, so revoking a grandparent (or any earlier ancestor) still blocks
 > new descendants even if the presenting parent agent is itself still active. This is enforced via
-> a signed `lineage` claim each receipt carries (extended at every hop), since there's no
-> persisted delegation-chain table to walk; receipts minted before this claim existed carry no
+> a signed `lineage` claim each receipt carries (extended at every hop), alongside the
+> delegation records [Cascading revocation](#cascading-revocation) walks; receipts minted before this claim existed carry no
 > lineage and degrade to a parent-only check for that hop until they age out under
 > `RECEIPT_TTL_SECONDS`. Delegation receipts also now carry an `exp` claim (see
 > `RECEIPT_TTL_SECONDS` below) — expired parent receipts are rejected.
@@ -150,6 +151,44 @@ npm run dev
 > root first, as `agent_delegation_chain`. The agent must be an Ed25519 or P-256 did:key so the
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
+
+## Cascading revocation
+
+Every delegation the server issues (`/api/v1/delegate`, `/api/v1/subdelegate`)
+is recorded in the vault with the id of the delegation it was derived from.
+Revoking one revokes all of its descendants:
+
+```bash
+curl -X DELETE "https://cred.example.com/api/v1/delegations/del_abc?user_id=alice" \
+  -H "Authorization: Bearer $CRED_AGENT_TOKEN"
+# {"delegation_id":"del_abc","revoked_count":3,"revoked_ids":[...],"elapsed_ms":1.9,"truncated":false}
+```
+
+- The walk is iterative and cycle-safe, bounded at 64 hops below the revoked
+  delegation (`truncated: true` if it ever stops there). On SQLite the walk
+  and every write run in one transaction: the whole subtree is revoked or
+  none of it is.
+- `POST /api/v1/use` refuses a revoked handle with
+  `401 {"error":"delegation_revoked","revoked_ancestor_id":...}`, and checks
+  again right before the upstream call, so a request already in flight is
+  refused too. `/api/v1/subdelegate` refuses a revoked parent the same way,
+  atomically with recording the child.
+- Revoking an agent (`DELETE /admin/agents/:agentId`,
+  `POST /api/v1/agents/:agentId/revoke-all`) revokes every delegation issued
+  to its DID and everything below them. These routes still answer `204`; the
+  agent's `revoke` audit event carries `revokedCount`.
+- Each revoked delegation gets its own `revoke` audit event (resource
+  `service/user`) whose metadata names `delegationId`, `parentDelegationId`,
+  `revokedAncestorId` (the root cause), `cascadeDepth` and `revocationTime`.
+- 1,111 delegations revoke in about 12 ms on SQLite (about 90 ms for the
+  whole HTTP request including the audit writes); a test holds it under 5 s.
+
+Limits: raw provider tokens already handed out cannot be recalled and live
+until they expire. Delegations issued before this release have no record, so
+a cascade does not reach them; they age out under their receipt and handle
+TTLs. Brokered handles live in process memory, so this holds within one
+server process (the draft scopes it to one Delegation Server). Revocation
+records are not garbage-collected yet.
 
 ## User ids
 

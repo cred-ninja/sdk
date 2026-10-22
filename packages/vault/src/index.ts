@@ -20,6 +20,21 @@ export { validateSubDelegation, DelegationChainError, scopeCovers, scopeCoveredB
 export type { ScopeClass } from '@credninja/attenuation';
 export { verifyDelegationChain } from '@credninja/attenuation';
 export {
+  collectDelegationSubtree,
+  MemoryDelegationStore,
+  DelegationRevokedError,
+  DEFAULT_MAX_REVOCATION_DEPTH,
+} from './delegation-revocation.js';
+export type {
+  DelegationRecord,
+  DelegationStatus,
+  RecordDelegationInput,
+  DelegationRevocationSeed,
+  DelegationRevocationOptions,
+  DelegationRevocationResult,
+  RevokedDelegation,
+} from './delegation-revocation.js';
+export {
   parseConstraints,
   constraintsSubsume,
   constraintTypeOf,
