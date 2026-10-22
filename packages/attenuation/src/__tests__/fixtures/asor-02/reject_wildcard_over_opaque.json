@@ -1,0 +1,21 @@
+{
+  "description": "Scope classes: the root grants the wildcard 'drive.*'; the child requests 'drive.Read'. The uppercase R fails literal-scope, so 'drive.Read' is an opaque scope, and a wildcard never covers an opaque scope, even one that shares its prefix. MUST be rejected: not_narrower. A verifier that compares by raw prefix accepts this chain and is wrong. Case contributed by Kieran Sweeney.",
+  "draft": "02",
+  "expect_reject_reason": "not_narrower",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiZHJpdmUuKiJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiY2xpZW50X2lkIjoib3JjaGVzdHJhdG9yIiwiY25mIjp7ImprdCI6ImpQVGV3TWl6amVHdnAwdmg5cHdJdk9VQ0hROFdDTWxNQlJOZ25RWGZkM0EifSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjozLCJleHAiOjM2MDAsImlhdCI6MCwiaXNzIjoiYXR0ZW51LWd1YXJkIiwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJhY2N0OmZpbmFuY2Utb3BzQGV4YW1wbGUuY29tIn0.UMftsefImTVG2jkfScDlkcFGm3OcQ3gn3de0kcJnFtE",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiZHJpdmUuUmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiY2xpZW50X2lkIjoid29ya2VyIiwiY25mIjp7ImprdCI6IllnclNnUGNEOHhfaThUQ2pFbmFvTTBkTTZlRXJzb0ZFdHphb1U2LXRycTgifSwiZGVsX2RlcHRoIjoxLCJleHAiOjkwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMSIsInBhcl9oYXNoIjoiNUhoeXRrbHlVWkJEU3c5REd2eXp5NERZTGZqRk1OZU4ybkRBak5vcFRxOCIsInN1YiI6ImFjY3Q6ZmluYW5jZS1vcHNAZXhhbXBsZS5jb20ifQ.8bCqqJw2x89KmWPnXMS4i8bJnFuby87k9gTVPlP9qUM"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

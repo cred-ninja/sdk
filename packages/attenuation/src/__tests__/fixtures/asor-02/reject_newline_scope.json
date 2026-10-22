@@ -1,0 +1,21 @@
+{
+  "description": "'crm.read' followed by a line feed, under a root granting 'crm.*'. A verifier whose grammar check lets a trailing newline through ($ in many regex engines) classifies it as a literal under crm.* and accepts; the ABNF admits no such byte. MUST be rejected: malformed.",
+  "draft": "02",
+  "expect_reject_reason": "malformed",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiY3JtLioiXSwidHlwZSI6ImFnZW50X2RlbGVnYXRpb24ifV0sImNsaWVudF9pZCI6Im9yY2hlc3RyYXRvciIsImNuZiI6eyJqa3QiOiJqUFRld01pemplR3ZwMHZoOXB3SXZPVUNIUThXQ01sTUJSTmduUVhmZDNBIn0sImRlbF9kZXB0aCI6MCwiZGVsX21heF9kZXB0aCI6MywiZXhwIjozNjAwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImp0aSI6ImNoYWluOm4wIiwic3ViIjoiYWNjdDpmaW5hbmNlLW9wc0BleGFtcGxlLmNvbSJ9.6XwThqTzrWUvFaSTsSwD4iiO2kV-e_M6X66zQfwzCHA",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiY3JtLnJlYWRcbiJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiY2xpZW50X2lkIjoid29ya2VyIiwiY25mIjp7ImprdCI6IllnclNnUGNEOHhfaThUQ2pFbmFvTTBkTTZlRXJzb0ZFdHphb1U2LXRycTgifSwiZGVsX2RlcHRoIjoxLCJleHAiOjkwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMSIsInBhcl9oYXNoIjoieXMwbWtDSTVKNm44QmNfSElScFg5ZlRvV1BXTnVOemRxeC1hWkFTd2JCWSIsInN1YiI6ImFjY3Q6ZmluYW5jZS1vcHNAZXhhbXBsZS5jb20ifQ.ycWRjcKxGS1VWlnFBwWXna6GOPl81FjB7hErTkZ9vec"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

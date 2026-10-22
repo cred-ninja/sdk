@@ -101,6 +101,10 @@ export interface DelegationReceiptPayload {
   exp?: number;
   /** Intended audience for the receipt (e.g. the issuing server's base URI) */
   aud?: string;
+  /** The acting agent DID (draft-02 layout; legacy receipts carry it in `sub`). */
+  client_id?: string;
+  /** Current actor, `{ sub: <agent DID> }`, with prior actors nested (draft-02 layout). */
+  act?: { sub: string; act?: unknown };
 }
 
 // ── Base58btc alphabet (Bitcoin) ─────────────────────────────────────────────
@@ -295,7 +299,18 @@ export async function verifyDelegationReceipt(
     const payload: DelegationReceiptPayload = JSON.parse(
       base64UrlDecode(payloadB64).toString('utf8'),
     );
-    if (payload.sub !== opts.expectedDid) {
+    // The acting agent: `act.sub` (which must equal `client_id`) on a
+    // receipt in the draft-02 claim layout, where `sub` names the principal;
+    // `sub` on a legacy receipt.
+    const act = (payload as { act?: unknown }).act;
+    let agentDid: unknown = payload.sub;
+    if (act !== undefined) {
+      if (typeof act !== 'object' || act === null || (act as { sub?: unknown }).sub !== payload.client_id) {
+        return false;
+      }
+      agentDid = payload.client_id;
+    }
+    if (agentDid !== opts.expectedDid) {
       return false;
     }
 

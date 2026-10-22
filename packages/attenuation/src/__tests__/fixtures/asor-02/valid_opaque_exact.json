@@ -1,0 +1,21 @@
+{
+  "description": "Scope classes: the root grants two provider-native opaque scopes, 'User.Read' and 'repo:status'; the child requests 'repo:status' byte for byte. Opaque scopes narrow by exact equality. MUST be accepted; under the -01 grammar both tokens are malformed, which is the interop gap the opaque form closes. Case contributed by Kieran Sweeney.",
+  "draft": "02",
+  "expect": "accept",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiVXNlci5SZWFkIiwicmVwbzpzdGF0dXMiXSwidHlwZSI6ImFnZW50X2RlbGVnYXRpb24ifV0sImNsaWVudF9pZCI6Im9yY2hlc3RyYXRvciIsImNuZiI6eyJqa3QiOiJqUFRld01pemplR3ZwMHZoOXB3SXZPVUNIUThXQ01sTUJSTmduUVhmZDNBIn0sImRlbF9kZXB0aCI6MCwiZGVsX21heF9kZXB0aCI6MywiZXhwIjozNjAwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImp0aSI6ImNoYWluOm4wIiwic3ViIjoiYWNjdDpmaW5hbmNlLW9wc0BleGFtcGxlLmNvbSJ9.hJz7VrHjUnMWbHVXPvXgfWthZu-SlfM7cme6LkUsviw",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicmVwbzpzdGF0dXMiXSwidHlwZSI6ImFnZW50X2RlbGVnYXRpb24ifV0sImNsaWVudF9pZCI6IndvcmtlciIsImNuZiI6eyJqa3QiOiJZZ3JTZ1BjRDh4X2k4VENqRW5hb00wZE02ZUVyc29GRXR6YW9VNi10cnE4In0sImRlbF9kZXB0aCI6MSwiZXhwIjo5MDAsImlhdCI6MCwiaXNzIjoiYXR0ZW51LWd1YXJkIiwianRpIjoiY2hhaW46bjEiLCJwYXJfaGFzaCI6IjdhSTcyZjdodERybzZncnBQektJV1RLRk5LTEZMLU45T255a3c4R29JS0kiLCJzdWIiOiJhY2N0OmZpbmFuY2Utb3BzQGV4YW1wbGUuY29tIn0.agd1ZMgI0tSh0YT6iFMuxK49KnA7X8LlAdVmPKqyr54"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "description": "'User.*' matches none of the three forms: not literal or wildcard (uppercase), not opaque (it contains '*'). An invalid scope makes the token malformed before subsumption. MUST be rejected: malformed.",
+  "draft": "02",
+  "expect_reject_reason": "malformed",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiVXNlci5SZWFkIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJjbGllbnRfaWQiOiJvcmNoZXN0cmF0b3IiLCJjbmYiOnsiamt0IjoialBUZXdNaXpqZUd2cDB2aDlwd0l2T1VDSFE4V0NNbE1CUk5nblFYZmQzQSJ9LCJkZWxfZGVwdGgiOjAsImRlbF9tYXhfZGVwdGgiOjMsImV4cCI6MzYwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6ImFjY3Q6ZmluYW5jZS1vcHNAZXhhbXBsZS5jb20ifQ.cz_u8ZmLreaZNGK_WflY3MqOn9wbSvE99N4_j1ar5vA",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsiVXNlci4qIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJjbGllbnRfaWQiOiJ3b3JrZXIiLCJjbmYiOnsiamt0IjoiWWdyU2dQY0Q4eF9pOFRDakVuYW9NMGRNNmVFcnNvRkV0emFvVTYtdHJxOCJ9LCJkZWxfZGVwdGgiOjEsImV4cCI6OTAwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImp0aSI6ImNoYWluOm4xIiwicGFyX2hhc2giOiJqZDZYekdDNVhxaVJISnJVZ0ptUGpKWU1VREdUYWwwbm1wTzVrYkdGUThVIiwic3ViIjoiYWNjdDpmaW5hbmNlLW9wc0BleGFtcGxlLmNvbSJ9.HwMlMVrXzmc807IVH190WvC6eNzXtkJAs_rsssPGuUM"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

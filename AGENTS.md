@@ -107,7 +107,8 @@ back to `default` on its own.
 | POST | `/api/v1/use` | Bearer | Brokered upstream API call via a delegation handle |
 | DELETE | `/api/v1/delegations/:delegationId` | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
-| POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt; always returns a brokered handle |
+| POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt; always returns a brokered handle, or with `exchange: "grant"` a single-use delegation grant |
+| POST | `/api/v1/token` | Bearer + actor token | RFC 8693 token exchange redeeming a delegation grant; the receiving agent proves its did:key with an RFC 7523 `actor_token` |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |
@@ -166,9 +167,10 @@ use flow, exposed under that framework's own tool-registration convention.
 | Package | Role |
 |---|---|
 | `packages/protocol` | Shared wire-protocol constants/types (version negotiation, error shapes). |
+| `packages/attenuation` | Dependency-free attenuation: scope grammar, constraint ceilings, chain verification, JWS signer interface, and the draft-asor -02 `agent_delegation` token format. Re-exported by `packages/vault`. |
 | `packages/oauth` | Provider OAuth adapters (Google, GitHub, Slack, Notion, Salesforce, ...). |
 | `packages/tofu` | Trust-on-first-use agent identity registry (Web Bot Auth keys, DIDs). |
-| `packages/vault` | Encrypted credential storage, Permission records, audit log. |
+| `packages/vault` | Encrypted credential storage, Permission records, audit log, cumulative-constraint ledger. |
 | `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express. |
 | `packages/sdk` | `Cred` client class — the shared surface both `packages/mcp` and `packages/server` build on. |
 | `packages/sdk-python` | Python port of the SDK client, used by the Python framework integrations. |

@@ -13,6 +13,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
   'packages/protocol',
+  'packages/attenuation',
   'packages/link',
   'packages/link-react',
   'packages/oauth',
@@ -144,7 +145,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
-for (const pkg of ['@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai']) {
+for (const pkg of ['@credninja/attenuation', '@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai']) {
   const mod = await import(pkg);
   if (!mod || Object.keys(mod).length === 0) throw new Error(pkg + ' ESM import exported nothing');
   const cjs = require(pkg);
@@ -261,6 +262,7 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   packageJson.dependencies = {
     '@credninja/server': `file:${tarballsByWorkspace['packages/server']}`,
     '@credninja/protocol': `file:${tarballsByWorkspace['packages/protocol']}`,
+    '@credninja/attenuation': `file:${tarballsByWorkspace['packages/attenuation']}`,
     '@credninja/oauth': `file:${tarballsByWorkspace['packages/oauth']}`,
     '@credninja/tofu': `file:${tarballsByWorkspace['packages/tofu']}`,
     '@credninja/vault': `file:${tarballsByWorkspace['packages/vault']}`,

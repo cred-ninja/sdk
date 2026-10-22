@@ -14,9 +14,25 @@
  * Signing Input only. Both bind the child to one specific parent; changing
  * Cred's convention is a wire change and belongs in an ADR, not here.
  */
-import { createHash, verify, type KeyObject } from 'node:crypto';
+import { createHash, type KeyObject } from 'node:crypto';
 import { verifyDelegationChain, parseStrictJson } from '@credninja/vault';
 import type { ChainVerifyReason, ChainVerifyResult, DelegationChainHop } from '@credninja/vault';
+import { createVerificationKey, readReceiptActor, type JwsKeyResolver } from '@credninja/attenuation';
+import { checkReceiptSignature, DEFAULT_RECEIPT_ACCEPTED_ALGS } from './receipt-signing.js';
+
+/**
+ * What a receipt verifies under: the verifier's accepted algorithms and a
+ * key resolver. A bare public key is accepted for compatibility and stands
+ * for that one key under the default list (EdDSA, ES256); a receipt still
+ * verifies only when its header alg equals the key's algorithm.
+ */
+export type ReceiptVerificationKeys = KeyObject | { acceptedAlgs: readonly string[]; resolveKey: JwsKeyResolver };
+
+function toVerificationKeys(keys: ReceiptVerificationKeys): { acceptedAlgs: readonly string[]; resolveKey: JwsKeyResolver } {
+  if ('resolveKey' in keys) return keys;
+  const key = createVerificationKey(keys);
+  return { acceptedAlgs: DEFAULT_RECEIPT_ACCEPTED_ALGS, resolveKey: () => key };
+}
 
 export type ReceiptChainReason = ChainVerifyReason | 'context_mismatch';
 
@@ -25,6 +41,7 @@ export type ReceiptChainResult =
   | { ok: false; reason: ReceiptChainReason; hop: number; message: string };
 
 export interface ParsedReceipt {
+  /** The acting agent: `act.sub` on a draft-02 receipt, `sub` on a legacy one. */
   sub: string;
   service: string;
   userId: string;
@@ -57,16 +74,11 @@ export function receiptHash(receipt: string): string {
   return createHash('sha256').update(receipt).digest('hex');
 }
 
-function decodeReceipt(receipt: string, publicKey: KeyObject): { valid: boolean; payload: Record<string, unknown> | null } {
+function decodeReceipt(receipt: string, keys: { acceptedAlgs: readonly string[]; resolveKey: JwsKeyResolver }): { valid: boolean; payload: Record<string, unknown> | null } {
   const parts = receipt.split('.');
   if (parts.length !== 3) return { valid: false, payload: null };
-  const [headerB64, payloadB64, signatureB64] = parts;
-  let valid = false;
-  try {
-    valid = verify(null, Buffer.from(`${headerB64}.${payloadB64}`, 'utf8'), publicKey, Buffer.from(signatureB64, 'base64url'));
-  } catch {
-    valid = false;
-  }
+  const payloadB64 = parts[1]!;
+  const valid = checkReceiptSignature(receipt, keys) === null;
   let payload: Record<string, unknown> | null = null;
   try {
     // Strict JSON: duplicate members and unsafe integers make the receipt
@@ -88,11 +100,15 @@ function decodeReceipt(receipt: string, publicKey: KeyObject): { valid: boolean;
  * payload can never masquerade as a parsed receipt.
  */
 export function parseReceiptPayload(payload: Record<string, unknown>): ParsedReceipt | null {
-  const { sub, service, delegationId } = payload;
-  if (typeof sub !== 'string' || typeof service !== 'string' || typeof delegationId !== 'string') return null;
-  const userId = payload.userId ?? 'default';
+  const { service, delegationId } = payload;
+  if (typeof service !== 'string' || typeof delegationId !== 'string') return null;
+  // The acting agent and the principal, in either claim layout.
+  const actor = readReceiptActor(payload);
+  if (!actor.ok) return null;
+  const sub = actor.agentDid;
+  const userId = actor.principal;
   const appClientId = payload.appClientId ?? 'local';
-  if (typeof userId !== 'string' || typeof appClientId !== 'string') return null;
+  if (typeof appClientId !== 'string') return null;
   const chainDepth = payload.chainDepth ?? 0;
   if (typeof chainDepth !== 'number') return null;
   return {
@@ -117,9 +133,10 @@ export function parseReceiptPayload(payload: Record<string, unknown>): ParsedRec
  */
 export function verifyReceiptChain(
   receipts: readonly string[],
-  publicKey: KeyObject,
+  verificationKeys: ReceiptVerificationKeys,
   options: VerifyReceiptChainOptions = {},
 ): ReceiptChainResult {
+  const keys = toVerificationKeys(verificationKeys);
   const hops: DelegationChainHop[] = [];
   const parsed: ParsedReceipt[] = [];
 
@@ -128,7 +145,7 @@ export function verifyReceiptChain(
     if (typeof receipt !== 'string' || receipt.trim() === '') {
       return { ok: false, reason: 'malformed', hop: i, message: `Receipt ${i} is not a string` };
     }
-    const { valid, payload } = decodeReceipt(receipt, publicKey);
+    const { valid, payload } = decodeReceipt(receipt, keys);
     const p = payload ? parseReceiptPayload(payload) : null;
     if (!p) {
       return { ok: false, reason: valid ? 'malformed' : 'signature_invalid', hop: i, message: `Receipt ${i} could not be parsed` };

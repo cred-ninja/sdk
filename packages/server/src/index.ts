@@ -9,7 +9,9 @@ export { createServer } from './server.js';
 export { loadConfig, resolveLinkStorePath } from './config.js';
 export type { LinkService } from './link/index.js';
 export { verifyReceiptChain, receiptHash, parseReceiptPayload } from './receipt-chain.js';
-export type { ReceiptChainResult, ReceiptChainReason, ParsedReceipt, VerifyReceiptChainOptions } from './receipt-chain.js';
+export type { ReceiptChainResult, ReceiptChainReason, ParsedReceipt, VerifyReceiptChainOptions, ReceiptVerificationKeys } from './receipt-chain.js';
+export { createReceiptKeys, DEFAULT_RECEIPT_ACCEPTED_ALGS } from './receipt-signing.js';
+export type { ReceiptKeys, ReceiptKeyOptions } from './receipt-signing.js';
 export type {
   ServerConfig,
   ProviderConfig,

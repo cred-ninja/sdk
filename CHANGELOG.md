@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added: draft-02 conformance
+
+- New package `@credninja/attenuation`, with no npm runtime dependencies: the
+  scope grammar, constraint ceilings, `validateSubDelegation`,
+  `verifyDelegationChain` and `parseStrictJson` move here from
+  `@credninja/vault`, which re-exports them unchanged. It adds RFC 8785 JCS,
+  a compact JWS signer interface (EdDSA, ES256, `kid` in the header) with a
+  verifier that holds its own accepted-algorithm list, and
+  `verifyAgentDelegationChain()` / `mintAgentDelegationToken()` for the
+  draft-asor-wimse-agent-delegation-chain-02 Delegation Chain format. The 35
+  -02 interop vectors run in CI: 35 of 35.
+- `@credninja/vault`: `SqliteCumulativeLedger`, the single writer of
+  `max_lifetime` and `max_subtree` running totals, debited atomically.
+- `@credninja/server`: receipts signed behind the signer interface
+  (`RECEIPT_SIGNING_KEY_PEM` for ES256, `RECEIPT_ACCEPTED_ALGS`); the
+  cumulative ledger on `/api/v1/use` replaces the blanket deny; the
+  Sub-Delegation Exchange (`exchange: "grant"` on `/api/v1/subdelegate`,
+  then `POST /api/v1/token`); `token_profile: "agent_delegation"` on
+  `/api/v1/delegate` and `/api/v1/subdelegate`.
+
+### Changed: receipt claim layout (`@credninja/server`, `@credninja/sdk` local mode)
+
+New receipts put the principal in `sub` and the acting agent in
+`client_id` and `act.sub`, with ancestors as nested `act`, plus `jti` and
+`cnf`. Receipts in the old layout are still accepted everywhere, and the
+SDK verifiers (TypeScript and Python) read both. A third-party verifier
+that reads the agent DID from `sub` must read `act.sub` instead, or the
+server can keep minting the old layout with `RECEIPT_CLAIM_LAYOUT=legacy`.
+Under a cumulative constraint other than `max_calls`, `/api/v1/use` now
+needs the exercise's quantity in `quantities`.
+
+Migration: read the agent DID from `act.sub` (equal to `client_id`) and
+the principal from `sub`; until every verifier does, set
+`RECEIPT_CLAIM_LAYOUT=legacy`. Known downstream consumer needing the same
+change: Cred Link, which is moving to `cred-ninja/link`.
+
 ### Cascading revocation (`@credninja/vault`, `@credninja/server`)
 
 - Every delegation the server issues is recorded with its parent delegation

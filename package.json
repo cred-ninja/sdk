@@ -6,6 +6,7 @@
   "private": true,
   "workspaces": [
     "packages/protocol",
+    "packages/attenuation",
     "packages/oauth",
     "packages/tofu",
     "packages/vault",
@@ -25,8 +26,8 @@
     "packages/link-react"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/link && npm run build --workspace=packages/link-react && npm run build --workspace=packages/oauth && npm run build --workspace=packages/tofu && npm run build --workspace=packages/vault && npm run build --workspace=packages/guard && npm run build --workspace=packages/sdk && npm run build --workspace=packages/integrations/vercel-ai && npm run build --workspace=packages/mcp && npm run build --workspace=packages/server",
-    "test": "npm run test --workspace=packages/protocol && npm run test --workspace=packages/oauth && npm run test --workspace=packages/tofu && npm run test --workspace=packages/vault && npm run test --workspace=packages/guard && npm run test --workspace=packages/sdk && npm run test --workspace=packages/mcp && npm run test --workspace=packages/server && npm run test --workspace=packages/integrations/vercel-ai && npm run test --workspace=packages/link && npm run test --workspace=packages/link-react",
+    "build": "npm run build --workspace=packages/protocol && npm run build --workspace=packages/attenuation && npm run build --workspace=packages/link && npm run build --workspace=packages/link-react && npm run build --workspace=packages/oauth && npm run build --workspace=packages/tofu && npm run build --workspace=packages/vault && npm run build --workspace=packages/guard && npm run build --workspace=packages/sdk && npm run build --workspace=packages/integrations/vercel-ai && npm run build --workspace=packages/mcp && npm run build --workspace=packages/server",
+    "test": "npm run test --workspace=packages/protocol && npm run test --workspace=packages/attenuation && npm run test --workspace=packages/oauth && npm run test --workspace=packages/tofu && npm run test --workspace=packages/vault && npm run test --workspace=packages/guard && npm run test --workspace=packages/sdk && npm run test --workspace=packages/mcp && npm run test --workspace=packages/server && npm run test --workspace=packages/integrations/vercel-ai && npm run test --workspace=packages/link && npm run test --workspace=packages/link-react",
     "test:python": "bash scripts/test-python-packages.sh",
     "lint": "eslint .",
     "release:hygiene": "node scripts/check-release-hygiene.mjs",

@@ -1077,9 +1077,18 @@ export class Cred {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const nowSeconds = Math.floor(Date.now() / 1000);
     const aud = this.getLocalReceiptAudience();
+    // draft-sweeney-wimse-credential-delegation-02 claim layout: the
+    // principal in `sub`, the acting agent in `client_id` and `act.sub`, the
+    // ancestors as nested `act`, root innermost. parseDelegationReceipt()
+    // also reads receipts minted before this layout (agent in `sub`).
+    let act: { sub: string; act?: unknown } | undefined;
+    for (const did of input.lineage ?? []) act = act ? { sub: did, act } : { sub: did };
     const payload = Buffer.from(JSON.stringify({
       iss: 'did:key:local-cred',
-      sub: input.agentDid,
+      sub: input.userId,
+      client_id: input.agentDid,
+      act: act ? { sub: input.agentDid, act } : { sub: input.agentDid },
+      jti: input.delegationId,
       iat: nowSeconds,
       exp: nowSeconds + this.getLocalReceiptTtlSeconds(),
       ...(aud ? { aud } : {}),
@@ -1173,8 +1182,21 @@ export class Cred {
         }
       }
 
+      // The acting agent: act.sub (equal to client_id) on a draft-02
+      // receipt, sub on a legacy one.
+      const act = (payload as { act?: unknown }).act;
+      let agentDid = payload.sub;
+      if (act !== undefined) {
+        const client = (payload as { client_id?: unknown }).client_id;
+        if (typeof act !== 'object' || act === null || (act as { sub?: unknown }).sub !== client || typeof client !== 'string') {
+          throw new CredError('Parent receipt actor claims are malformed', 'invalid_parent', 400);
+        }
+        agentDid = client;
+      }
+
       return {
         ...payload,
+        sub: agentDid,
         delegationId: payload.delegationId,
         receiptClaims: Array.isArray(payload.receiptClaims)
           ? payload.receiptClaims.filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0)

@@ -310,7 +310,16 @@ def verify_delegation_receipt(
 
         # Decode payload and verify DID matches
         payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
-        if payload.get("sub") != expected_did:
+        # The acting agent: act.sub (equal to client_id) on a receipt in the
+        # draft-02 claim layout, where sub names the principal; sub on a
+        # legacy receipt.
+        act = payload.get("act")
+        agent_did = payload.get("sub")
+        if act is not None:
+            if not isinstance(act, dict) or act.get("sub") != payload.get("client_id"):
+                return False
+            agent_did = payload.get("client_id")
+        if agent_did != expected_did:
             return False
 
         # Verify signature
