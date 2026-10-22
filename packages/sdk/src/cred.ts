@@ -46,6 +46,7 @@ import {
   isCredProtocolVersionSupported,
 } from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
+import { createActorToken } from './identity.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
 // No default base URL — users must explicitly set their server URL.
@@ -483,6 +484,7 @@ export class Cred {
       user_id: params.userId,
       appClientId: params.appClientId,
       agent_did: params.agentDid,
+      ...this.actorTokenFor(params),
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
@@ -518,6 +520,12 @@ export class Cred {
     };
   }
 
+  /** `actor_token` for a cloud sub-delegation, when the delegating agent's identity is given. */
+  private actorTokenFor(params: SubDelegateParams): { actor_token?: string } {
+    if (!params.delegatorIdentity) return {};
+    return { actor_token: createActorToken(params.delegatorIdentity, `${this.baseUrl}/api/v1/subdelegate`) };
+  }
+
   async subDelegateHandle(params: SubDelegateParams): Promise<SubDelegationHandleResult> {
     if (this.isLocal) {
       throw new CredError(
@@ -534,6 +542,7 @@ export class Cred {
       appClientId: params.appClientId,
       agent_did: params.agentDid,
       token_format: 'handle',
+      ...this.actorTokenFor(params),
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;

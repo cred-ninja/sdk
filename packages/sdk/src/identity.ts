@@ -5,7 +5,7 @@
  * Zero external dependencies — Node.js crypto module only.
  */
 
-import { generateKeyPair, KeyObject, verify, createPrivateKey, createPublicKey } from 'node:crypto';
+import { generateKeyPair, KeyObject, verify, sign, randomUUID, createPrivateKey, createPublicKey } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
@@ -370,6 +370,32 @@ function createIdentity(
       };
     },
   };
+}
+
+/**
+ * An RFC 7523 JWT assertion signed with the agent's own did:key: `iss` and
+ * `sub` are the agent DID, `aud` the endpoint it is presented to. The Cred
+ * server takes it as `actor_token` on `/api/v1/subdelegate` (proving the
+ * caller is the agent its parent receipt names) and on `/api/v1/token`.
+ * Valid for two minutes; the server rejects a replayed `jti`.
+ */
+export function createActorToken(identity: Pick<AgentIdentity, 'did' | 'privateKey'>, audience: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const signingInput = `${encode({ alg: 'EdDSA', typ: 'JWT' })}.${encode({
+    iss: identity.did,
+    sub: identity.did,
+    aud: audience,
+    iat: now,
+    exp: now + 120,
+    jti: randomUUID(),
+  })}`;
+  const key = createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(identity.privateKey)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  return `${signingInput}.${sign(null, Buffer.from(signingInput, 'utf8'), key).toString('base64url')}`;
 }
 
 function publicKeyToDid(publicKey: Uint8Array): string {

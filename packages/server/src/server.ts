@@ -41,6 +41,7 @@ import {
   mintAgentDelegationToken,
   verifyAgentDelegationChain,
   AgentDelegationMintError,
+  publicKeyFromDidKey,
 } from '@credninja/attenuation';
 import { createReceiptKeys, checkReceiptSignature, type ReceiptKeys } from './receipt-signing.js';
 import { createDelegationGrantStore, createJtiReplayCache, verifyActorToken, DELEGATION_GRANT_TOKEN_TYPE, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE } from './delegation-grants.js';
@@ -1534,6 +1535,9 @@ export function createServer(config: ServerConfig) {
   // first delegation.
   if (config.receiptSigner || config.receiptSigningKeyPem || config.receiptAcceptedAlgs || config.receiptVerificationKeys) {
     getReceiptKeys();
+  }
+  if (config.requireAgentIdentity === false) {
+    console.warn('[cred] DEPRECATED: CRED_REQUIRE_AGENT_IDENTITY=false lets any Bearer caller sub-delegate from a receipt it holds. Callers should send an actor_token signed by the delegating agent; this setting will be removed.');
   }
 
   function getReceiptTtlSeconds(): number {
@@ -3054,6 +3058,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
+  }
+
+  /** REDIRECT_BASE_URI without trailing slashes: the audience of actor tokens. */
+  function publicBaseUri(): string {
+    let base = config.redirectBaseUri;
+    while (base.endsWith('/')) base = base.slice(0, -1);
+    return base;
   }
 
   /** Audit a /api/v1/use refusal under a cumulative constraint. */
@@ -4713,6 +4724,43 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // ── Caller is the delegating agent ───────────────────────────────────
+      // A valid receipt is not authority by itself: the caller must prove it
+      // is the agent the receipt names (act.sub / client_id) by signing an
+      // RFC 7523 actor_token with that agent's did:key, the key the
+      // receipt's cnf binds. CRED_REQUIRE_AGENT_IDENTITY=false keeps the
+      // legacy behaviour (any Bearer caller holding the receipt) and logs a
+      // deprecation warning at startup.
+      if (config.requireAgentIdentity ?? true) {
+        const actorToken = (req.body as { actor_token?: unknown }).actor_token;
+        const denyIdentity = (status: number, error: string, message: string) => {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'token', id: `${service}/${userId}` },
+            outcome: 'denied',
+            errorMessage: error,
+            correlationId,
+          });
+          res.status(status).json({ error, message });
+        };
+        if (actorToken === undefined) {
+          denyIdentity(401, 'agent_identity_required', 'Sub-delegation needs an actor_token signed by the agent the parent receipt names');
+          return;
+        }
+        if (!publicKeyFromDidKey(parent.sub)) {
+          denyIdentity(403, 'agent_identity_unverifiable', 'The parent receipt names an agent that is not a did:key, so the caller cannot prove it is that agent');
+          return;
+        }
+        const proof = verifyActorToken(actorToken, parent.sub, `${publicBaseUri()}/api/v1/subdelegate`, actorTokenJtiSeen);
+        if (!proof.ok) {
+          denyIdentity(403, 'agent_identity_mismatch', proof.message);
+          return;
+        }
+      }
+
       // ── Context matching (service, user, app) ────────────────────────────
 
       if (parent.service !== service) {
@@ -5272,9 +5320,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation grant is unknown, expired, or already redeemed' });
         return;
       }
-      let tokenBase = config.redirectBaseUri;
-      while (tokenBase.endsWith('/')) tokenBase = tokenBase.slice(0, -1);
-      const tokenEndpoint = `${tokenBase}/api/v1/token`;
+      const tokenEndpoint = `${publicBaseUri()}/api/v1/token`;
       const actor = verifyActorToken(body.actor_token, pending.agentDid, tokenEndpoint, actorTokenJtiSeen);
       if (!actor.ok) {
         writeAuditEventIfSupported({

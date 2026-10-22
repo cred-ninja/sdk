@@ -11,7 +11,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { Cred } from '@credninja/sdk';
+import { Cred, importAgentIdentity } from '@credninja/sdk';
 import type { CredGuard } from '@credninja/guard';
 
 import { CredMcpConfig } from './config.js';
@@ -154,6 +154,10 @@ function buildServerState(config: CredMcpConfig) {
     tokenCache,
     webBotAuthSigner,
     useServerBroker: config.mode === 'cloud',
+    // Throws when the key does not belong to agentDid, so a misconfiguration fails at startup.
+    ...(config.mode === 'cloud' && config.agentPrivateKeyHex && config.agentDid
+      ? { delegatorIdentity: importAgentIdentity({ did: config.agentDid, privateKeyHex: config.agentPrivateKeyHex }) }
+      : {}),
     guard,
     ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
     ...(agentTokenHash ? { agentTokenHash } : {}),

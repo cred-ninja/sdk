@@ -12,6 +12,7 @@ export { createWebBotAuthSigner, rawPrivateKeyToPublicKeyHex } from './web-bot-a
 export {
   generateAgentIdentity,
   importAgentIdentity,
+  createActorToken,
   verifyDelegationReceipt,
   CRED_PUBLIC_KEY_HEX,
 } from './identity.js';

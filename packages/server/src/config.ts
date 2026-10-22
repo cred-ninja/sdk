@@ -108,6 +108,12 @@ export interface ServerConfig {
   // budget.
   cumulativeLedgerPath?: string;
 
+  // Require the caller of /api/v1/subdelegate to prove it is the agent the
+  // parent receipt names, with an RFC 7523 actor_token signed by that
+  // agent's did:key (env CRED_REQUIRE_AGENT_IDENTITY). Default true. false
+  // is deprecated and logs a warning at startup.
+  requireAgentIdentity?: boolean;
+
   // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
   delegationGrantTtlSeconds?: number;
 
@@ -243,6 +249,11 @@ export function loadConfig(): ServerConfig {
     throw new Error('RECEIPT_CLAIM_LAYOUT must be one of: draft-02, legacy');
   }
   const cumulativeLedgerPath = process.env.CUMULATIVE_LEDGER_PATH || undefined;
+  const requireAgentIdentityRaw = (process.env.CRED_REQUIRE_AGENT_IDENTITY ?? '').trim().toLowerCase();
+  let requireAgentIdentity: boolean | undefined;
+  if (requireAgentIdentityRaw === 'true' || requireAgentIdentityRaw === '1') requireAgentIdentity = true;
+  else if (requireAgentIdentityRaw === 'false' || requireAgentIdentityRaw === '0') requireAgentIdentity = false;
+  else if (requireAgentIdentityRaw !== '') throw new Error('CRED_REQUIRE_AGENT_IDENTITY must be true or false');
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -294,6 +305,7 @@ export function loadConfig(): ServerConfig {
     ...(receiptAcceptedAlgs ? { receiptAcceptedAlgs } : {}),
     ...(receiptClaimLayoutRaw ? { receiptClaimLayout: receiptClaimLayoutRaw as 'draft-02' | 'legacy' } : {}),
     ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
+    ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

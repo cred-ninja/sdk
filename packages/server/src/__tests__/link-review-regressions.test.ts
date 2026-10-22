@@ -525,7 +525,7 @@ describe('small hardening items (review item 8)', () => {
   });
 
   it('subdelegate turns a ReservedVaultUserIdError from the vault into a 400', async () => {
-    const hx = await harness({ linkEnabled: false });
+    const hx = await harness({ linkEnabled: false, requireAgentIdentity: false });
     const vault = hx.server.vault;
     const nowIso = new Date().toISOString();
     await vault.registerAgent!({ id: 'agt_child', did: 'did:key:z6MkChild', name: 'child', fingerprint: 'fp_child', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: nowIso, updatedAt: nowIso });

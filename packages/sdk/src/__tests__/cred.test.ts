@@ -938,3 +938,34 @@ describe('Cred local mode', () => {
       .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
   });
 });
+
+describe('subDelegate() caller identity', () => {
+  it('sends an actor_token signed by the delegating agent when its identity is given', async () => {
+    const { generateAgentIdentity } = await import('../identity.js');
+    const delegator = await generateAgentIdentity();
+    const client = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      token_type: 'Delegation', service: 'google', scopes: ['openid'], delegation_id: 'del_1', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_0',
+    }));
+    await client.subDelegate({
+      parentReceipt: 'parent', service: 'google', userId: 'u', appClientId: 'local', agentDid: 'did:key:z6MkChild', delegatorIdentity: delegator,
+    });
+    const body = JSON.parse(mockFetch.mock.calls.at(-1)![1].body);
+    const [h, p, sig] = body.actor_token.split('.');
+    const claims = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    expect(claims).toMatchObject({ iss: delegator.did, sub: delegator.did, aud: `${BASE_URL}/api/v1/subdelegate` });
+    expect(claims.exp - claims.iat).toBeLessThanOrEqual(300);
+    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(delegator.publicKey)]);
+    const { createPublicKey } = await import('node:crypto');
+    expect(verifySignature(null, Buffer.from(`${h}.${p}`), createPublicKey({ key: spki, format: 'der', type: 'spki' }), Buffer.from(sig, 'base64url'))).toBe(true);
+  });
+
+  it('sends no actor_token without one', async () => {
+    const client = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      token_type: 'Delegation', service: 'google', scopes: ['openid'], delegation_id: 'del_1', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_0',
+    }));
+    await client.subDelegate({ parentReceipt: 'parent', service: 'google', userId: 'u', appClientId: 'local', agentDid: 'did:key:z6MkChild' });
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)![1].body).actor_token).toBeUndefined();
+  });
+});

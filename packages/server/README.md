@@ -133,6 +133,16 @@ npm run dev
 > in-memory default) is refused with `403 cumulative_constraint_unenforceable`, never given a
 > fresh budget. Set `CUMULATIVE_LEDGER_PATH` to keep the totals across restarts.
 
+> **Caller identity on sub-delegation.** A valid parent receipt is not authority on its own.
+> `/api/v1/subdelegate` requires `actor_token`: an RFC 7523 JWT signed with the did:key of the agent
+> the parent receipt names (`act.sub`, whose key the receipt's `cnf` binds), with `iss` = `sub` =
+> that DID, `aud` = `<REDIRECT_BASE_URI>/api/v1/subdelegate`, `exp` at most `iat` + 300 and a fresh
+> `jti`. Missing: `401 agent_identity_required`. Signed by another key or for another DID: `403
+> agent_identity_mismatch`. Parent agent not a did:key: `403 agent_identity_unverifiable`. The SDK
+> signs it when `subDelegate()` gets `delegatorIdentity`; the MCP server when
+> `CRED_AGENT_PRIVATE_KEY_HEX` is set. `CRED_REQUIRE_AGENT_IDENTITY=false` restores the old
+> behaviour (any Bearer caller holding the receipt) and logs a deprecation warning.
+
 > **Sub-Delegation Exchange.** With `"exchange": "grant"`, `/api/v1/subdelegate` runs every hop
 > check and signs the child receipt, but issues no handle: it returns a single-use
 > `delegation_grant` (60 seconds by default) bound to the receiving agent's DID. The receiving
@@ -539,6 +549,7 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
+| `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |

@@ -44,6 +44,10 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
       },
     ],
     redirectBaseUri: 'http://localhost:3456',
+    // Fixture DIDs here are not real did:keys, so this suite exercises the
+    // deprecated legacy sub-delegation path; draft02-exchange.test.ts covers
+    // the default caller-identity check.
+    requireAgentIdentity: false,
     ...overrides,
   };
 }
