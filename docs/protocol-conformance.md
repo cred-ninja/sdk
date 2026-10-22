@@ -4,9 +4,9 @@
 > This SDK is named as the protocol's reference implementation. This document maps
 > what the SDK actually implements to the protocol's capabilities and the six RFCs
 > it profiles, and tracks the gaps. It should be reconciled with the protocol
-> repo's formal conformance section as that stabilizes. The spec was submitted as
-> [`draft-sweeney-wimse-credential-delegation-00`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
-> (2026-07-27, individual I-D, not yet adopted). Its offline companion is
+> repo's formal conformance section as that stabilizes. The spec is at
+> [`draft-sweeney-wimse-credential-delegation-01`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
+> (posted 2026-10-13; individual I-D, not yet adopted). Its offline companion is
 > `draft-asor-wimse-agent-delegation-chain`, and the WIMSE WG has since adopted
 > `draft-ietf-wimse-aims` (AI Identity Management System, formerly
 > draft-klrc-aiagent-auth), whose Section 10.3 claim conventions this document
