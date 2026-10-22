@@ -238,6 +238,15 @@ describe('caller identity on /api/v1/subdelegate', () => {
     expect((await subdelegate(app, root.body.receipt, SIBLING, { actor_token: once })).body.error).toBe('agent_identity_mismatch');
   });
 
+  it('refuses a parent receipt whose agent is not a did:key', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app, { agent_did: 'agent:no-key' });
+    expect(root.status).toBe(200);
+    const res = await subdelegate(app, root.body.receipt, CHILD);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('agent_identity_unverifiable');
+  });
+
   it('accepts the matching agent', async () => {
     const { app } = await setup();
     const root = await delegateRoot(app);
