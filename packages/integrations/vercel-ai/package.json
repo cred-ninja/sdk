@@ -50,7 +50,7 @@
     "@types/node": "^20.10.6",
     "ai": "^7.0.77",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.7",
+    "vitest": "^4.1.12",
     "zod": "^3.22.0"
   },
   "repository": {
