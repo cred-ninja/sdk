@@ -1,5 +1,12 @@
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter } from '../audit.js';
+import type {
+  DelegationRecord,
+  DelegationRevocationOptions,
+  DelegationRevocationSeed,
+  RecordDelegationInput,
+  RevokedDelegation,
+} from '../delegation-revocation.js';
 
 /**
  * StorageBackend — the interface that all vault storage backends must implement.
@@ -89,7 +96,28 @@ export interface StorageBackend {
   // ── Audit methods (optional — not all backends need these) ─────────────────
 
   writeAuditEvent?(event: AuditEvent): void | Promise<void>;
+  /** Write several events at once, in one transaction where the backend can. */
+  writeAuditEvents?(events: readonly AuditEvent[]): void | Promise<void>;
   queryAuditEvents?(filter: AuditFilter): AuditEvent[] | Promise<AuditEvent[]>;
+
+  // ── Delegation methods (optional; CredVault falls back to process memory) ─
+
+  /**
+   * Record an issued delegation. Must refuse, with DelegationRevokedError,
+   * a record whose parent is revoked, atomically with the insert. An id that
+   * already exists is kept as first written.
+   */
+  storeDelegation?(input: RecordDelegationInput, now: string): DelegationRecord | Promise<DelegationRecord>;
+  getDelegation?(id: string): DelegationRecord | null | Promise<DelegationRecord | null>;
+  /**
+   * Revoke the seeds and all their descendants, atomically where the
+   * backend can. Returns only the delegations this call revoked.
+   */
+  revokeDelegationTree?(
+    seed: DelegationRevocationSeed,
+    revokedAt: string,
+    options?: DelegationRevocationOptions,
+  ): { revoked: RevokedDelegation[]; truncated: boolean } | Promise<{ revoked: RevokedDelegation[]; truncated: boolean }>;
 
   // ── Rotation methods (optional — not all backends need these) ───────────────
 

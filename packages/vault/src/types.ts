@@ -83,6 +83,11 @@ export interface DelegationAuthority {
    * (parseConstraints). Absent or empty means the parent carries none.
    */
   constraints?: import('./constraints.js').DelegationConstraint[];
+  /**
+   * When the parent stops being valid, in Unix seconds. Absent means the
+   * caller bounds the child's expiry itself.
+   */
+  expiresAt?: number;
 }
 
 export interface DelegationValidationPermission {
@@ -110,6 +115,12 @@ export interface ValidateSubDelegationInput {
    * DEFAULT_RANK_ORDERINGS.
    */
   rankOrderings?: import('./constraints.js').RankOrderings;
+  /**
+   * Expiry requested for the child, in Unix seconds. Later than
+   * `parent.expiresAt` throws 'expiry_escalation_denied': a child can never
+   * outlive the delegation it was derived from.
+   */
+  requestedExpiresAt?: number;
   permission: DelegationValidationPermission;
 }
 

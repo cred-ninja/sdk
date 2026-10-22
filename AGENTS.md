@@ -105,6 +105,7 @@ back to `default` on its own.
 | GET | `/api/v1/connections` | Bearer | List stored connections |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke a stored connection |
 | POST | `/api/v1/use` | Bearer | Brokered upstream API call via a delegation handle |
+| DELETE | `/api/v1/delegations/:delegationId` | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
 | POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt; always returns a brokered handle |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |

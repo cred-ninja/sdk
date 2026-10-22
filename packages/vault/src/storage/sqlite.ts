@@ -2,6 +2,17 @@ import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
 import Database from 'better-sqlite3';
+import {
+  assertRecordable,
+  collectDelegationSubtree,
+  toRevoked,
+  DelegationRevokedError,
+  type DelegationRecord,
+  type DelegationRevocationOptions,
+  type DelegationRevocationSeed,
+  type RecordDelegationInput,
+  type RevokedDelegation,
+} from '../delegation-revocation.js';
 import { canonicalScopeSet, intersectScopes, scopeSetsEqual } from '@credninja/protocol';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
@@ -163,6 +174,27 @@ export class SQLiteBackend implements StorageBackend {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_rotations_connection_unique ON vault_rotations(connection_id);
       CREATE INDEX IF NOT EXISTS idx_rotations_due ON vault_rotations(next_rotation_at, state);
+    `);
+
+    // New table, so no ensureColumn: an existing database simply gains it.
+    // Delegations issued before it existed have no row and are not reached
+    // by a cascade; they age out under their receipt and handle TTLs.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_delegations (
+        id                  TEXT PRIMARY KEY,
+        parent_id           TEXT,
+        agent_did           TEXT,
+        service             TEXT NOT NULL,
+        user_id             TEXT NOT NULL,
+        chain_depth         INTEGER NOT NULL DEFAULT 0,
+        status              TEXT NOT NULL DEFAULT 'active',
+        created_at          TEXT NOT NULL,
+        expires_at          TEXT,
+        revoked_at          TEXT,
+        revoked_ancestor_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_delegations_parent ON vault_delegations(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_delegations_agent ON vault_delegations(agent_did);
     `);
   }
 
@@ -439,6 +471,114 @@ export class SQLiteBackend implements StorageBackend {
       SET status = ?, updated_at = ?, revoked_at = ?
       WHERE id = ?
     `).run(status, now, revokedAt ?? null, id);
+  }
+
+  // ── Delegation methods ──────────────────────────────────────────────────
+
+  /**
+   * Insert a delegation record. One transaction checks that neither the
+   * parent delegation nor the agent (by DID) is revoked and then inserts,
+   * so a record can never land under a parent a concurrent cascade already
+   * passed. An id that already exists is left as first written.
+   */
+  storeDelegation(input: RecordDelegationInput, now: string): DelegationRecord {
+    const db = this.ensureDb();
+    assertRecordable(input);
+
+    const insert = db.transaction((row: RecordDelegationInput): DelegationRecord => {
+      if (row.parentId) {
+        const parent = db.prepare(`
+          SELECT id, status, revoked_ancestor_id FROM vault_delegations WHERE id = ?
+        `).get(row.parentId) as { id: string; status: string; revoked_ancestor_id: string | null } | undefined;
+        if (parent?.status === 'revoked') {
+          throw new DelegationRevokedError(
+            `Parent delegation ${row.parentId} has been revoked`,
+            'delegation_revoked',
+            parent.revoked_ancestor_id ?? parent.id,
+          );
+        }
+      }
+      if (row.agentDid) {
+        const agent = db.prepare('SELECT status FROM vault_agents WHERE did = ?').get(row.agentDid) as { status: string } | undefined;
+        if (agent?.status === 'revoked') {
+          throw new DelegationRevokedError(`Agent ${row.agentDid} has been revoked`, 'agent_revoked', row.agentDid);
+        }
+      }
+      db.prepare(`
+        INSERT INTO vault_delegations (id, parent_id, agent_did, service, user_id, chain_depth, status, created_at, expires_at)
+        VALUES (@id, @parentId, @agentDid, @service, @userId, @chainDepth, 'active', @createdAt, @expiresAt)
+        ON CONFLICT (id) DO NOTHING
+      `).run({
+        id: row.id,
+        parentId: row.parentId ?? null,
+        agentDid: row.agentDid ?? null,
+        service: row.service,
+        userId: row.userId,
+        chainDepth: row.chainDepth ?? 0,
+        createdAt: now,
+        expiresAt: row.expiresAt ?? null,
+      });
+      // Present: inserted above, or already there when the id was replayed.
+      return this.getDelegation(row.id)!;
+    });
+
+    return insert.immediate(input);
+  }
+
+  getDelegation(id: string): DelegationRecord | null {
+    const db = this.ensureDb();
+    const row = db.prepare(`
+      SELECT id, parent_id, agent_did, service, user_id, chain_depth, status,
+             created_at, expires_at, revoked_at, revoked_ancestor_id
+      FROM vault_delegations
+      WHERE id = ?
+    `).get(id) as DelegationDbRow | undefined;
+    return row ? delegationFromDb(row) : null;
+  }
+
+  /**
+   * Revoke the seeds and every descendant in one IMMEDIATE transaction: the
+   * walk and the writes see one snapshot, and either every delegation in
+   * the subtree is revoked or none is.
+   */
+  revokeDelegationTree(
+    seed: DelegationRevocationSeed,
+    revokedAt: string,
+    options: DelegationRevocationOptions = {},
+  ): { revoked: RevokedDelegation[]; truncated: boolean } {
+    const db = this.ensureDb();
+    const childrenStmt = db.prepare('SELECT id FROM vault_delegations WHERE parent_id = ?').pluck();
+    const byAgentStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? ORDER BY created_at, id').pluck();
+    const rowStmt = db.prepare('SELECT id, parent_id, agent_did, service, user_id, status FROM vault_delegations WHERE id = ?');
+    const revokeStmt = db.prepare(`
+      UPDATE vault_delegations
+      SET status = 'revoked', revoked_at = ?, revoked_ancestor_id = ?
+      WHERE id = ? AND status = 'active'
+    `);
+
+    const run = db.transaction(() => {
+      const seeds = [
+        ...(seed.delegationIds ?? []),
+        ...(seed.agentDid ? byAgentStmt.all(seed.agentDid) as string[] : []),
+      ];
+      const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => childrenStmt.all(id) as string[], options);
+      const revoked: RevokedDelegation[] = [];
+      for (const node of nodes) {
+        const row = rowStmt.get(node.id) as Pick<DelegationDbRow, 'id' | 'parent_id' | 'agent_did' | 'service' | 'user_id' | 'status'> | undefined;
+        if (!row || row.status !== 'active') continue;
+        if (revokeStmt.run(revokedAt, node.rootId, node.id).changes === 0) continue;
+        revoked.push(toRevoked({
+          id: row.id,
+          parentId: row.parent_id,
+          agentDid: row.agent_did,
+          service: row.service,
+          userId: row.user_id,
+        }, node));
+      }
+      return { revoked, truncated };
+    });
+
+    return run.immediate();
   }
 
   // ── Permission methods ──────────────────────────────────────────────────
@@ -726,6 +866,14 @@ export class SQLiteBackend implements StorageBackend {
       errorMessage: event.errorMessage ?? null,
       createdAt: now,
     });
+  }
+
+  /** Write several audit events in one transaction: one commit, not one per event. */
+  writeAuditEvents(events: readonly AuditEvent[]): void {
+    const db = this.ensureDb();
+    db.transaction((batch: readonly AuditEvent[]) => {
+      for (const event of batch) this.writeAuditEvent(event);
+    })(events);
   }
 
   queryAuditEvents(filter: AuditFilter): AuditEvent[] {
@@ -1033,4 +1181,35 @@ export class SQLiteBackend implements StorageBackend {
       updatedAt: new Date(row.updated_at),
     };
   }
+}
+
+interface DelegationDbRow {
+  id: string;
+  parent_id: string | null;
+  agent_did: string | null;
+  service: string;
+  user_id: string;
+  chain_depth: number;
+  status: string;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  revoked_ancestor_id: string | null;
+}
+
+function delegationFromDb(row: DelegationDbRow): DelegationRecord {
+  return {
+    id: row.id,
+    parentId: row.parent_id,
+    agentDid: row.agent_did,
+    service: row.service,
+    userId: row.user_id,
+    chainDepth: row.chain_depth,
+    // Anything but 'active' reads as revoked: fail closed on an unknown value.
+    status: row.status === 'active' ? 'active' : 'revoked',
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    revokedAncestorId: row.revoked_ancestor_id,
+  };
 }

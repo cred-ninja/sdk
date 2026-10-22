@@ -17,7 +17,8 @@ export class DelegationChainError extends Error {
       | 'depth_exceeded'
       | 'scope_escalation_denied'
       | 'no_scopes_granted'
-      | 'constraint_escalation_denied',
+      | 'constraint_escalation_denied'
+      | 'expiry_escalation_denied',
   ) {
     super(message);
     this.name = 'DelegationChainError';
@@ -136,6 +137,14 @@ export function validateSubDelegation(
   const nextDepth = parent.chainDepth + 1;
   if (nextDepth > permission.maxDelegationDepth) {
     throw new DelegationChainError('Sub-delegation exceeds max delegation depth', 'depth_exceeded');
+  }
+
+  if (
+    input.requestedExpiresAt !== undefined
+    && parent.expiresAt !== undefined
+    && input.requestedExpiresAt > parent.expiresAt
+  ) {
+    throw new DelegationChainError('Child delegation would outlive its parent delegation', 'expiry_escalation_denied');
   }
 
   const requested = requestedScopes && requestedScopes.length > 0
