@@ -45,6 +45,7 @@ export type {
   SubDelegationHandleResult,
   GetConsentUrlParams,
   RevokeParams,
+  LocalUseParams,
   AuditEntry,
   AuditParams,
   RegisterAgentParams,

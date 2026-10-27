@@ -31,7 +31,7 @@ import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
-import type { AgentRecord, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger } from '@credninja/vault';
+import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger } from '@credninja/vault';
 import { SqliteCumulativeLedger, DEFAULT_RUNNING_COUNT_KEYS } from '@credninja/vault';
 import {
   receiptActorClaims,
@@ -117,11 +117,29 @@ interface BrokeredDelegation {
   /** DID the handle was issued to, when the request named one. */
   agentDid?: string;
   /**
+   * The authenticated caller the handle was minted for. /api/v1/use refuses
+   * any other caller, so a leaked handle id is not a bearer credential.
+   * Absent on Link handles (Link checks its own agent binding) and on
+   * /api/v1/subdelegate handles, which a parent mints for another agent.
+   */
+  holder?: HandleHolder;
+  /**
    * Set by a cascading revocation that reached this handle. /api/v1/use
    * refuses the handle from then on (and re-checks right before the
    * upstream call, so a request already in flight is refused too).
    */
   revoked?: { at: number; revokedAncestorId: string };
+}
+
+interface HandleHolder {
+  /** agentTokenHash of the minting request (hash of the principal or bearer). */
+  principalHash: string;
+  /**
+   * The Web Bot Auth key that signed the minting request: its local TOFU
+   * fingerprint, or its directory and key id when it was verified through an
+   * external directory.
+   */
+  webBotAuthKey?: string;
 }
 
 interface WebBotAuthDirectoryResponse {
@@ -175,6 +193,7 @@ interface VerifiedWebBotAuthIdentity {
 
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
+const PROVIDER_REVOKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DELEGATION_TTL_SECONDS = 900;
 const DEFAULT_RECEIPT_TTL_SECONDS = 3600;
 const DEFAULT_DELEGATION_GRANT_TTL_SECONDS = 60;
@@ -652,8 +671,14 @@ export function createServer(config: ServerConfig) {
     return new URL(connectRequestPath(input.service, id), config.redirectBaseUri).toString();
   }
 
+  /**
+   * Brokered handles are the default: the provider token stays on the
+   * server, and the handle is bound to its caller and revocable. A raw
+   * provider token leaves the server and cannot be recalled, so it is an
+   * explicit opt-in (`token_format: 'raw'`).
+   */
   function tokenFormatFromBody(req: Request): 'raw' | 'handle' {
-    return req.body?.token_format === 'handle' ? 'handle' : 'raw';
+    return req.body?.token_format === 'raw' ? 'raw' : 'handle';
   }
 
   // The Google family table and the scope matching live in google-scopes.ts,
@@ -3018,9 +3043,60 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     | { entry: Awaited<ReturnType<typeof vault.get>> extends infer T ? Exclude<T, null> : never }
     | { status: number; body: Record<string, unknown> };
 
+  /**
+   * Revoke a stored connection's grant at the provider (never throws). The
+   * refresh token is revoked where that ends the whole authorization, as
+   * Link does; otherwise the access token.
+   */
+  async function revokeAtProvider(
+    providerConfig: ProviderConfig,
+    stored: { accessToken: string; refreshToken?: string },
+  ): Promise<void> {
+    const slug = providerConfig.slug;
+    const token = slug === 'hubspot'
+      ? stored.refreshToken
+      : (slug === 'google' || slug === 'salesforce')
+        ? stored.refreshToken ?? stored.accessToken
+        : stored.accessToken;
+    if (!token) return;
+    try {
+      await Promise.race([
+        makeOAuthClient(providerConfig).revokeToken(token),
+        new Promise((_, reject) => {
+          const timer = setTimeout(() => reject(new Error('provider revocation timed out')), PROVIDER_REVOKE_TIMEOUT_MS);
+          if (timer.unref) timer.unref();
+        }),
+      ]);
+    } catch (err) {
+      console.warn('[revoke] provider revocation failed', { provider: slug, kind: err instanceof Error ? err.name : 'unknown' });
+    }
+  }
+
   async function revokeStoredProvider(slug: string, userId: string): Promise<void> {
     if (isReservedLinkVaultUserId(userId)) throw new ReservedVaultUserIdError('delete');
+    // getStored, not get: an expired access token must not hide the refresh
+    // token the provider revocation below needs.
+    const stored = await vault.getStored({ provider: slug, userId });
     await vault.delete({ provider: slug, userId });
+
+    // Handles minted from this connection hold a copy of its access token.
+    // Revoking the connection ends them too, not only at their expiry. Link
+    // handles hold no token and re-check their connection on every use.
+    let handlesRevoked = 0;
+    for (const [id, delegation] of brokeredDelegations) {
+      if (delegation.link || delegation.service !== slug || delegation.userId !== userId) continue;
+      // Mark before removing: a /api/v1/use call that already loaded this
+      // handle re-checks the mark right before its upstream call.
+      delegation.revoked = { at: Date.now(), revokedAncestorId: id };
+      brokeredDelegations.delete(id);
+      handlesRevoked += 1;
+    }
+
+    // Raw tokens already handed out can only be stopped by the provider.
+    // Best effort, in the background, so a slow provider never holds up the
+    // revocation that has already happened here.
+    const providerConfig = getProviderConfig(slug);
+    if (stored && providerConfig) void revokeAtProvider(providerConfig, stored);
 
     writeAuditEventIfSupported({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -3030,6 +3106,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       resource: { type: 'connection', id: `${slug}/${userId}` },
       outcome: 'success',
       correlationId: crypto.randomUUID(),
+      metadata: { handlesRevoked },
     });
   }
 
@@ -3043,6 +3120,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     link?: LinkHandleBinding;
     constraints?: DelegationConstraint[];
     agentDid?: string;
+    holder?: HandleHolder;
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -3055,6 +3133,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.link ? { link: input.link } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.agentDid ? { agentDid: input.agentDid } : {}),
+      ...(input.holder ? { holder: input.holder } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -3081,6 +3160,46 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       correlationId: crypto.randomUUID(),
       errorMessage: error,
       metadata: { delegationId, constraints: keys },
+    });
+  }
+
+  /**
+   * The authenticated caller of this request, as a handle binds it, or null
+   * when the request carries no caller-specific identity: a custom verifier
+   * that returned no principalId, with no Bearer token to fall back on. Such
+   * a caller cannot hold a handle, since every one of them would look alike.
+   */
+  function handleHolderFor(req: Request): HandleHolder | null {
+    const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
+    let principalHash: string | undefined;
+    if (!principal || principal.type === 'static-bearer') {
+      principalHash = (req as any).agentTokenHash;
+    } else if (principal.principalId) {
+      principalHash = hashAgentPrincipal(principal);
+    } else {
+      const bearer = extractBearerToken(req);
+      if (bearer) principalHash = hashTokenValue(bearer);
+    }
+    if (!principalHash) return null;
+    const webBotAuthKey = webBotAuthIdentity
+      ? webBotAuthIdentity.fingerprint ?? `${webBotAuthIdentity.signatureAgent}#${webBotAuthIdentity.keyId}`
+      : undefined;
+    return { principalHash, ...(webBotAuthKey ? { webBotAuthKey } : {}) };
+  }
+
+  /** Whether this request comes from the caller the handle was minted for. */
+  function isHandleHolder(req: Request, holder: HandleHolder): boolean {
+    const caller = handleHolderFor(req);
+    if (!caller || caller.principalHash !== holder.principalHash) return false;
+    return !holder.webBotAuthKey || caller.webBotAuthKey === holder.webBotAuthKey;
+  }
+
+  function refuseHolderlessHandle(res: Response): void {
+    res.status(400).json({
+      error: 'holder_identity_required',
+      message: 'A brokered handle is bound to its caller, and this request has no caller-specific identity. '
+        + 'Return a principalId from agentRequestVerifier, or request token_format "raw".',
     });
   }
 
@@ -3224,6 +3343,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     constraints?: DelegationConstraint[];
     agentDelegationToken?: string;
     agentDid?: string;
+    holder?: HandleHolder;
   }): Record<string, unknown> {
     // Every handle and every receipt-bearing delegation is registered with
     // the cumulative ledger, with its parent, so a descendant's max_subtree
@@ -3239,6 +3359,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (input.tokenFormat === 'handle') {
       storeBrokeredDelegation({
         ...(input.agentDid ? { agentDid: input.agentDid } : {}),
+        ...(input.holder ? { holder: input.holder } : {}),
         delegationId: input.delegationId,
         accessToken: input.accessToken,
         service: input.service,
@@ -3371,6 +3492,36 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       });
       return { allowed: false };
     }
+  }
+
+  /**
+   * The permission controls the server enforces on top of allowedScopes:
+   * expiry, the per-permission rate limit, and human approval. This server
+   * has no approval flow yet, so a permission that requires approval is
+   * refused rather than silently honoured without one. Returns the refusal
+   * code, or null when the permission allows the request.
+   */
+  async function permissionRefusal(permission: Permission): Promise<string | null> {
+    if (permission.expiresAt && permission.expiresAt.getTime() <= Date.now()) return 'permission_expired';
+    if (permission.requiresApproval) return 'approval_required';
+    if (permission.rateLimit && vault.checkPermissionRateLimit) {
+      const allowed = await vault.checkPermissionRateLimit(
+        permission.id,
+        permission.rateLimit.maxRequests,
+        permission.rateLimit.windowMs,
+      );
+      if (!allowed) return 'rate_limited';
+    }
+    return null;
+  }
+
+  function refusePermission(res: Response, code: string): void {
+    const messages: Record<string, string> = {
+      permission_expired: 'Permission has expired',
+      approval_required: 'This permission requires human approval, which this server does not support yet',
+      rate_limited: 'Permission rate limit exceeded',
+    };
+    res.status(code === 'rate_limited' ? 429 : 403).json({ error: code, message: messages[code] ?? code });
   }
 
   async function getPermissionIfSupported(principalId: string, service: string) {
@@ -3589,6 +3740,23 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
+      if (delegation.holder && !isHandleHolder(req, delegation.holder)) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: verifiedPrincipalId(req) ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified' },
+          action: 'deny',
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: 'delegation_holder_mismatch',
+          metadata: { delegationId },
+        });
+        // Same answer as an unknown handle: a caller that does not hold the
+        // handle learns nothing about whether it exists.
+        res.status(404).json({ error: 'Delegation handle not found or expired' });
+        return;
+      }
       const revokedBy = await delegationRevokedBy(delegationId, delegation);
       if (revokedBy !== null) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
@@ -3670,6 +3838,25 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const revokedInFlight = await delegationRevokedBy(delegationId, delegation);
       if (revokedInFlight !== null) {
         refuseRevokedDelegation(res, delegationId, revokedInFlight, delegation);
+        return;
+      }
+      // A non-Link handle holds a copy of its connection's token. The
+      // connection must still exist: this catches a revocation in another
+      // process, or one that raced this handle's issuance.
+      if (!delegation.link && !(await vault.getStored({ provider: delegation.service, userId: delegation.userId }))) {
+        brokeredDelegations.delete(delegationId);
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: delegation.agentDid ?? 'server-agent' },
+          action: 'deny',
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: 'connection_revoked',
+          metadata: { delegationId },
+        });
+        res.status(401).json({ error: 'connection_revoked', message: 'The connection behind this handle has been revoked' });
         return;
       }
 
@@ -3825,6 +4012,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_constraints', message: rootProducerViolations.join('; ') });
         return;
       }
+      // Handles are the default format, but a service with no brokered-use
+      // path could never redeem one. Such a service needs an explicit
+      // token_format "raw" rather than a silent fallback to a raw token.
+      if (tokenFormatFromBody(req) === 'handle' && !handleHolderFor(req)) {
+        refuseHolderlessHandle(res);
+        return;
+      }
+      if (tokenFormatFromBody(req) === 'handle' && !isBrokerableService(service)) {
+        res.status(400).json({
+          error: 'brokered_format_unsupported',
+          message: `'${service}' has no brokered-use path; request token_format "raw" to receive the provider token`,
+        });
+        return;
+      }
       // A raw provider token leaves the server, so nothing can hold it to a
       // running total. Under a cumulative constraint only a brokered handle
       // is issued, and /api/v1/use debits the running total on each
@@ -3932,6 +4133,22 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         principalId = resolved.principal.principalId;
         principalFingerprint = resolved.principal.fingerprint;
         const permission = await getPermissionIfSupported(principalId, service);
+        const permissionDenied = permission ? await permissionRefusal(permission) : null;
+        if (permissionDenied) {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: principalId },
+            action: 'deny',
+            resource: { type: 'permission', id: permission!.id },
+            outcome: 'denied',
+            scopesRequested: effectiveRequestedScopes,
+            correlationId,
+            errorMessage: permissionDenied,
+          });
+          refusePermission(res, permissionDenied);
+          return;
+        }
         try {
           const authorization = computeTofuAuthorization(resolved.principal, permission);
           allowedByPrincipal = authorization.allowedScopes;
@@ -4033,6 +4250,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       res.json(buildDelegationResponse({
         tokenFormat,
+        holder: handleHolderFor(req) ?? undefined,
         accessToken: entry.accessToken,
         expiresIn,
         service,
@@ -4933,6 +5151,21 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: `Agent has no permission for ${service}` });
         return;
       }
+      const permissionDenied = await permissionRefusal(permission);
+      if (permissionDenied) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'permission', id: permission.id },
+          outcome: 'denied',
+          correlationId,
+          errorMessage: permissionDenied,
+        });
+        refusePermission(res, permissionDenied);
+        return;
+      }
 
       // ── Validate delegation chain ────────────────────────────────────────
 
@@ -5302,6 +5535,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.post('/api/v1/token', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
     try {
+      if (!handleHolderFor(req)) {
+        refuseHolderlessHandle(res);
+        return;
+      }
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (body.grant_type !== TOKEN_EXCHANGE_GRANT_TYPE) {
         res.status(400).json({ error: 'unsupported_grant_type' });
@@ -5394,6 +5631,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       res.json({
         ...buildDelegationResponse({
           tokenFormat: 'handle',
+          holder: handleHolderFor(req) ?? undefined,
           accessToken: entry.accessToken,
           expiresIn,
           service: grant.service,

@@ -204,7 +204,7 @@ describe('rule 2: a principal bound to a user id', () => {
       expect({ singleUserMode, token: token.body.accessToken }).toEqual({ singleUserMode, token: 'ya29.alice' });
       const named = await agent(request(app).get('/api/token/google?user_id=alice'));
       expect(named.body.accessToken).toBe('ya29.alice');
-      const delegated = await agent(request(app).post('/api/v1/delegate').send({ service: 'google' }));
+      const delegated = await agent(request(app).post('/api/v1/delegate').send({ service: 'google', token_format: 'raw' }));
       expect(delegated.status).toBe(200);
       expect(delegated.body.user_id).toBe('alice');
       expect(delegated.body.access_token).toBe('ya29.alice');

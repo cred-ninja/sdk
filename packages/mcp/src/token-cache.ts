@@ -177,6 +177,18 @@ export class TokenCache {
     return this.entries.delete(id);
   }
 
+  /** Drop every handle for one user's connection to a service (after cred_revoke). */
+  deleteForConnection(service: string, userId: string): number {
+    let removed = 0;
+    for (const [id, entry] of this.entries) {
+      if (entry.service === service && entry.userId === userId) {
+        this.entries.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   /**
    * Validate that a URL is safe to forward for the given service.
    *

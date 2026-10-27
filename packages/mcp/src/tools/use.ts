@@ -99,6 +99,9 @@ export interface UseToolContext {
   tokenCache: TokenCache;
   cred?: Cred;
   webBotAuthSigner?: WebBotAuthSigner;
+  /** True in cloud mode, where every cached entry is a server handle. */
+  useServerBroker?: boolean;
+  agentDid?: string;
 }
 
 export async function handleUse(
@@ -166,7 +169,25 @@ export async function handleUse(
     };
   }
 
-  // ── 4. Build and execute the upstream request ──────────────────────────────
+  // ── 4. Local mode: re-check the connection and audit the exercise ─────────
+  // The cached token outlives a revocation made by another process sharing
+  // the vault, so the connection is checked on every call, not only at
+  // cred_delegate time.
+  if (context.cred && context.useServerBroker === false) {
+    try {
+      await context.cred.authorizeLocalUse({
+        service: entry.service,
+        userId: entry.userId,
+        accessToken: entry.accessToken,
+        ...(context.agentDid ? { agentId: context.agentDid } : {}),
+      });
+    } catch (err) {
+      context.tokenCache.delete(input.delegation_id);
+      return toolErrorResult(err, 'Local use was refused');
+    }
+  }
+
+  // ── 5. Build and execute the upstream request ──────────────────────────────
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${entry.accessToken}`,
     'Accept': 'application/json',
@@ -245,7 +266,7 @@ export async function handleUse(
     };
   }
 
-  // ── 5. Read and truncate response ──────────────────────────────────────────
+  // ── 6. Read and truncate response ──────────────────────────────────────────
   const contentType = response.headers.get('content-type') ?? '';
   const raw = await response.text();
   const truncated = raw.length > MAX_RESPONSE_BYTES;
