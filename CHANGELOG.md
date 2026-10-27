@@ -35,10 +35,13 @@
   request was signed). `/api/v1/use` from any other caller answers `404`,
   the same as an unknown handle, and writes a `delegation_holder_mismatch`
   deny event. Before, any caller holding the deployment's Bearer token and a
-  handle id could use it.
+  handle id could use it. A custom verifier caller with no `principalId`
+  and no Bearer token answers `400 holder_identity_required` for a handle.
 - Revoking a connection ends every live handle minted from it, instead of
   leaving them usable until their TTL (up to 900 s), and revokes the grant
-  at the provider in the background.
+  at the provider in the background. `/api/v1/use` answers
+  `401 connection_revoked` when the connection behind a non-Link handle is
+  gone, including after a revocation in another process.
 - Permission `expiresAt`, `rateLimit` and `requiresApproval` are enforced on
   `/api/v1/delegate` (TOFU principals) and `/api/v1/subdelegate`.
   The server has no approval flow yet, so `requiresApproval: true` answers
@@ -48,7 +51,8 @@
 ### Fixed: local mode revocation in `cred_use` (`@credninja/mcp`, `@credninja/sdk`)
 
 - `cred_use` in local mode checks that the connection still exists before
-  each call, through the new `Cred.authorizeLocalUse()`, and writes an
+  each call, and still holds the cached token, through the new
+  `Cred.authorizeLocalUse()`, and writes an
   `access` (or `deny`) audit event. A connection revoked by any process
   sharing the vault stops the call.
 - `cred_revoke` drops the cached handles for the revoked connection.

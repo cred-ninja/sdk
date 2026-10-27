@@ -166,6 +166,12 @@ export interface RevokeParams {
 export interface LocalUseParams {
   service: string;
   userId: string;
+  /**
+   * The cached access token about to be used. When given, the current vault
+   * entry must still hold this token, so a cached token from a connection
+   * that was revoked and reconnected is refused.
+   */
+  accessToken?: string;
   /** Agent making the call, for the audit trail. */
   agentId?: string;
 }

@@ -178,6 +178,7 @@ export async function handleUse(
       await context.cred.authorizeLocalUse({
         service: entry.service,
         userId: entry.userId,
+        accessToken: entry.accessToken,
         ...(context.agentDid ? { agentId: context.agentDid } : {}),
       });
     } catch (err) {

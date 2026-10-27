@@ -140,6 +140,71 @@ describe('brokered handle hardening', () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
+  it('refuses a handle whose connection was removed outside this process', async () => {
+    const { app, vault } = await serverWithGoogle();
+    const minted = await mintHandle(app, 'alpha');
+    const fetchSpy = mockUpstream();
+
+    // Another process sharing the vault deletes the connection directly.
+    await vault.delete({ provider: 'google', userId: 'default' });
+
+    const res = await useHandle(app, 'alpha', minted.body.delegation_id);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('connection_revoked');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('revokes with the refresh token even when the stored access token has expired', async () => {
+    const { app, vault } = createServer(makeConfig());
+    await vault.init();
+    await vault.store({
+      provider: 'google',
+      userId: 'default',
+      accessToken: 'ya29.expired',
+      refreshToken: '1//still-valid-refresh',
+      expiresAt: new Date(Date.now() - 60_000),
+      scopes: ['calendar.readonly'],
+    });
+    const fetchSpy = mockUpstream();
+
+    const revoked = await request(app)
+      .delete('/api/v1/connections/google?user_id=default')
+      .set('X-Test-Agent', 'alpha');
+    expect(revoked.status).toBe(204);
+
+    await vi.waitFor(() => {
+      const revokeCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('oauth2.googleapis.com/revoke'));
+      expect(revokeCall).toBeDefined();
+      expect(decodeURIComponent(`${String(revokeCall![0])} ${String(revokeCall![1]?.body ?? '')}`)).toContain('1//still-valid-refresh');
+    });
+  });
+
+  it('refuses a handle to a custom-verifier caller with no caller-specific identity', async () => {
+    const { app, vault } = createServer(makeConfig({
+      agentRequestVerifier: () => ({ ok: true, principal: { type: 'external-runtime' } }),
+    }));
+    await vault.init();
+    await vault.store({
+      provider: 'google',
+      userId: 'default',
+      accessToken: 'ya29.anon',
+      expiresAt: new Date(Date.now() + 3600 * 1000),
+      scopes: ['calendar.readonly'],
+    });
+
+    const handle = await request(app)
+      .post('/api/v1/delegate')
+      .send({ service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    expect(handle.status).toBe(400);
+    expect(handle.body.error).toBe('holder_identity_required');
+
+    const raw = await request(app)
+      .post('/api/v1/delegate')
+      .send({ service: 'google', user_id: 'default', scopes: ['calendar.readonly'], token_format: 'raw' });
+    expect(raw.status).toBe(200);
+    expect(raw.body.access_token).toBe('ya29.anon');
+  });
+
   it('refuses a sub-delegation whose permission requires human approval', async () => {
     const { app, vault } = await serverWithGoogle();
     await vault.createPermission({

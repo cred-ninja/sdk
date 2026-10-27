@@ -107,6 +107,12 @@ interface VaultModule {
   };
 }
 
+/** Constant-time comparison of two secrets, by their SHA-256 digests. */
+function sameSecret(a: string, b: string): boolean {
+  const digest = (value: string) => crypto.createHash('sha256').update(value).digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
+}
+
 interface VaultInstance {
   init(): Promise<void>;
   get(input: {
@@ -1418,7 +1424,9 @@ export class Cred {
     }
     const vault = await this.ensureVault();
     const entries = await vault.list({ userId: params.userId });
-    const connected = entries.some((entry) => entry.provider === params.service);
+    const entry = entries.find((candidate) => candidate.provider === params.service);
+    const connected = entry !== undefined
+      && (params.accessToken === undefined || sameSecret(entry.accessToken, params.accessToken));
     this.writeAuditEvent({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),

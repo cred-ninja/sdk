@@ -187,12 +187,17 @@ curl -X DELETE "https://cred.example.com/api/v1/delegations/del_abc?user_id=alic
   caller that minted it: the same agent principal (custom verifier
   principal or Bearer token) and, when the minting request was signed, the
   same Web Bot Auth key. Any other caller gets the same `404` as an unknown
-  handle. Handles from `/api/v1/subdelegate` are minted by the parent for
+  handle. A custom verifier caller with no `principalId` and no Bearer token
+  has no caller-specific identity, so it gets
+  `400 holder_identity_required` unless it requests `token_format: "raw"`. Handles from `/api/v1/subdelegate` are minted by the parent for
   another agent and are not bound this way.
 - Revoking a connection (`DELETE /api/v1/connections/:provider`,
   `DELETE /api/token/:provider`, `DELETE /connect/:provider`) ends every live
   handle minted from it and revokes the grant at the provider in the
-  background, best effort.
+  background, best effort. `/api/v1/use` also checks, right before the
+  upstream call, that the connection behind a non-Link handle still exists,
+  so a revocation in another process or one that raced the handle's
+  issuance answers `401 connection_revoked`.
 - Revoking an agent (`DELETE /admin/agents/:agentId`,
   `POST /api/v1/agents/:agentId/revoke-all`) revokes every delegation issued
   to its DID and everything below them. These routes still answer `204`; the

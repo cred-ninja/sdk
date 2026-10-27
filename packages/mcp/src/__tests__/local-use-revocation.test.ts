@@ -46,6 +46,7 @@ describe('local mode cred_use revocation and audit', () => {
     expect(authorizeLocalUse).toHaveBeenCalledWith({
       service: 'google',
       userId: 'default',
+      accessToken: 'ya29.local-token',
       agentId: 'did:key:agent',
     });
     expect(mockFetch).toHaveBeenCalledTimes(1);
