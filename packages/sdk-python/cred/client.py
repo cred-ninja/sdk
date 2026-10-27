@@ -205,6 +205,8 @@ class Cred(_CredBase):
         body: dict[str, Any] = {
             "service": service,
             "user_id": user_id,
+            # delegate() returns the provider token; the server's default is a handle.
+            "token_format": "raw",
         }
         if app_client_id:
             body["appClientId"] = app_client_id
@@ -344,6 +346,8 @@ class AsyncCred(_CredBase):
         body: dict[str, Any] = {
             "service": service,
             "user_id": user_id,
+            # delegate() returns the provider token; the server's default is a handle.
+            "token_format": "raw",
         }
         if app_client_id:
             body["appClientId"] = app_client_id

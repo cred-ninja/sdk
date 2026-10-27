@@ -1077,6 +1077,7 @@ describe('@credninja/server', () => {
           user_id: 'default',
           appClientId: 'app_123',
           scopes: ['calendar.readonly'],
+          token_format: 'raw',
         });
 
       expect(res.status).toBe(200);
@@ -1769,6 +1770,7 @@ describe('@credninja/server', () => {
           user_id: 'user-2',
           appClientId: 'app_123',
           scopes: ['calendar.readonly'],
+          token_format: 'raw',
         });
 
       expect(res.status).toBe(200);

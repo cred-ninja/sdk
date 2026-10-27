@@ -28,6 +28,7 @@ import {
   RotatedWebBotAuthIdentity,
   GetConsentUrlParams,
   RevokeParams,
+  LocalUseParams,
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
@@ -429,6 +430,7 @@ export class Cred {
       tofu_fingerprint: params.fingerprint,
       tofu_payload: payloadBytes.toString('base64'),
       tofu_signature: signature.toString('base64'),
+      token_format: 'raw',
     };
     if (sortedScopes) {
       body.scopes = sortedScopes;
@@ -1250,6 +1252,8 @@ export class Cred {
       service: params.service,
       user_id: params.userId,
       appClientId: params.appClientId,
+      // delegate() returns the provider token; the server's default is a handle.
+      token_format: 'raw',
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
@@ -1402,6 +1406,34 @@ export class Cred {
    * Cloud mode: Calls the Cred API.
    * Local mode: Deletes from the local vault.
    */
+  /**
+   * Local mode: confirm the connection behind a cached token still exists and
+   * record the exercise, before the caller uses the token. A connection
+   * revoked by any process sharing the vault stops the call here. Throws
+   * `connection_revoked` when it is gone.
+   */
+  async authorizeLocalUse(params: LocalUseParams): Promise<void> {
+    if (!this.isLocal) {
+      throw new CredError('authorizeLocalUse() is only supported in local mode', 'not_supported', 0);
+    }
+    const vault = await this.ensureVault();
+    const entries = await vault.list({ userId: params.userId });
+    const connected = entries.some((entry) => entry.provider === params.service);
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentId ?? 'local-agent' },
+      action: connected ? 'access' : 'deny',
+      resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+      outcome: connected ? 'success' : 'denied',
+      correlationId: crypto.randomUUID(),
+      ...(connected ? {} : { errorMessage: 'connection_revoked' }),
+    });
+    if (!connected) {
+      throw new CredError(`The ${params.service} connection has been revoked`, 'connection_revoked', 401);
+    }
+  }
+
   async revoke(params: RevokeParams): Promise<void> {
     if (this.isLocal) {
       const vault = await this.ensureVault();
