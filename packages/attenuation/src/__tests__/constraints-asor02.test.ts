@@ -99,7 +99,7 @@ describe('-02 closed constraint objects', () => {
   it('still rejects no type and two types', () => {
     expect(parseConstraints([{ key: 'x' }]).ok).toBe(false);
     expect(parseConstraints([{ key: 'x', max: 1, max_lifetime: 1 }]).ok).toBe(false);
-    expect(parseConstraints([{ key: 'quota', units: 5 }]).ok).toBe(false);
+    expect(parseConstraints([{ key: 'quota', units: 5, other_units: 2 }]).ok).toBe(false);
   });
 });
 

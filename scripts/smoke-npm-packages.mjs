@@ -128,6 +128,49 @@ async function stopChild(child) {
   }
 }
 
+async function runCloudOnlySdkSmoke(tarballsByWorkspace) {
+  // Run before the full consumer install: no ancestor node_modules may supply
+  // an optional vault peer or conceal an undeclared attenuation dependency.
+  const cloudDir = join(tmp, 'cloud-only');
+  mkdirSync(cloudDir, { recursive: true });
+  writeFileSync(join(cloudDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  run('npm', ['install', '--omit=optional', '--no-audit', '--no-fund',
+    ...['packages/protocol', 'packages/attenuation', 'packages/sdk'].map((workspace) => tarballsByWorkspace[workspace]),
+  ], { cwd: cloudDir });
+  const smokeFile = join(cloudDir, 'smoke.mjs');
+  writeFileSync(smokeFile, `
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+for (const peer of ['@credninja/vault', '@credninja/oauth']) {
+  assert.throws(() => require.resolve(peer), { code: 'MODULE_NOT_FOUND' });
+}
+const sdkPackage = require('./node_modules/@credninja/sdk/package.json');
+assert.equal(sdkPackage.dependencies['@credninja/attenuation'], '^2.0.0');
+for (const { Cred } of [await import('@credninja/sdk'), require('@credninja/sdk')]) {
+  const cred = new Cred({ agentToken: 'cred_at_cloud_fixture', baseUrl: 'https://cred.example.com' });
+  let requests = 0;
+  let sent;
+  globalThis.fetch = async (_url, init) => {
+    requests++;
+    sent = JSON.parse(init.body);
+    return new Response(JSON.stringify({ token_type: 'Delegation', service: 'github', scopes: ['repo'], delegation_id: 'fixture' }));
+  };
+  for (const method of ['delegate', 'delegateHandle', 'subDelegate', 'subDelegateHandle', 'tofuDelegate']) {
+    const params = { service: 'github', userId: 'owner', appClientId: 'local', agentDid: 'did:key:child', parentReceipt: 'fixture', fingerprint: 'fixture', privateKeyBytes: new Uint8Array(32).fill(1) };
+    const before = requests;
+    await assert.rejects(cred[method]({ ...params, constraints: [{ key: 'x', future: { mandatory: undefined } }] }), { code: 'invalid_constraints' });
+    assert.equal(requests, before);
+    const constraints = [{ key: 'x', future: { nested: [true, null, 1] } }];
+    await cred[method]({ ...params, constraints });
+    assert.deepEqual(sent.constraints, constraints);
+  }
+}
+console.log('cloud-only ESM/CJS SDK constraint validation smoke ok (no vault/oauth)');
+`);
+  run('node', [smokeFile], { cwd: cloudDir });
+}
+
 async function runFreshInstallSmoke(tarballsByWorkspace) {
   const consumerDir = join(tmp, 'consumer');
   run('npm', ['init', '-y'], { cwd: tmp, stdio: 'pipe' });
@@ -303,6 +346,7 @@ try {
   const tarballsByWorkspace = Object.fromEntries(
     workspaces.map((workspace) => [workspace, packWorkspace(workspace)]),
   );
+  await runCloudOnlySdkSmoke(tarballsByWorkspace);
   await runFreshInstallSmoke(tarballsByWorkspace);
   await runCreateCredAppSmoke(tarballsByWorkspace);
 } finally {

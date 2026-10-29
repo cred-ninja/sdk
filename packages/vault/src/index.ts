@@ -38,6 +38,8 @@ export {
   parseConstraints,
   constraintsSubsume,
   constraintTypeOf,
+  unknownConstraints,
+  UNKNOWN_CONSTRAINT,
   unresolvableRankLabels,
   cumulativeConstraints,
   producerConstraintViolations,
@@ -50,6 +52,9 @@ export {
 export type {
   DelegationConstraint,
   DelegationConstraintType,
+  KnownDelegationConstraint,
+  KnownDelegationConstraintType,
+  OpaqueConstraint,
   MaxConstraint,
   MinConstraint,
   OneOfConstraint,

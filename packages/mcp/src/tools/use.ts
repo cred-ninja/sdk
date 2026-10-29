@@ -13,7 +13,7 @@
  */
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Cred } from '@credninja/sdk';
+import { Cred, CredError } from '@credninja/sdk';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
 import { summarizeGuardDecision } from '../guard-wiring.js';
@@ -117,6 +117,24 @@ export async function handleUse(
     };
   }
 
+  if (!entry.brokered && entry.constraints !== undefined) {
+    try {
+      // Vault is an optional peer: cloud handles rely on the server's
+      // authoritative constraint list. Never ignore a local list.
+      const { parseConstraints, unknownConstraints } = await import('@credninja/vault');
+      const parsed = parseConstraints(entry.constraints);
+      if (!parsed.ok) throw new CredError(parsed.message, 'invalid_constraints', 400);
+      if (unknownConstraints(parsed.constraints).length > 0) {
+        throw new CredError('This delegation carries an unimplemented constraint type', 'unknown_constraint', 403);
+      }
+      if (parsed.constraints.length > 0) {
+        throw new CredError('Local mode cannot enforce delegation constraints', 'unsupported_constraint', 403);
+      }
+    } catch (err) {
+      return toolErrorResult(err, 'Constraint evaluation failed');
+    }
+  }
+
   if (entry.brokered) {
     if (!context.cred) {
       return {
@@ -179,6 +197,7 @@ export async function handleUse(
         service: entry.service,
         userId: entry.userId,
         accessToken: entry.accessToken,
+        ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
         ...(context.agentDid ? { agentId: context.agentDid } : {}),
       });
     } catch (err) {

@@ -35,6 +35,11 @@ export const DELEGATE_TOOL_DEFINITION = {
         items: { type: 'string' },
         description: 'OAuth scopes to request',
       },
+      constraints: {
+        type: 'array',
+        items: { type: 'object' },
+        description: 'Constraint wire objects. Unknown types are preserved but cannot be exercised.',
+      },
     },
     required: ['user_id', 'service'],
   },
@@ -44,6 +49,7 @@ export interface DelegateToolInput {
   user_id: string;
   service: string;
   scopes?: string[];
+  constraints?: unknown[];
 }
 
 export interface DelegateToolContext {
@@ -65,6 +71,7 @@ export async function handleDelegate(
       appClientId: context.appClientId,
       scopes: input.scopes,
       agentDid: context.agentDid,
+      ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
     };
     const result = context.useServerBroker
       ? await context.cred.delegateHandle(request)
@@ -78,6 +85,7 @@ export async function handleDelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,
@@ -85,6 +93,7 @@ export async function handleDelegate(
         }
       : {
           accessToken: (result as Awaited<ReturnType<Cred['delegate']>>).accessToken,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,

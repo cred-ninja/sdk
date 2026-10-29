@@ -42,6 +42,8 @@ import {
   verifyAgentDelegationChain,
   AgentDelegationMintError,
   publicKeyFromDidKey,
+  unknownConstraints,
+  UNKNOWN_CONSTRAINT,
 } from '@credninja/attenuation';
 import { createReceiptKeys, checkReceiptSignature, type ReceiptKeys } from './receipt-signing.js';
 import { createDelegationGrantStore, createJtiReplayCache, verifyActorToken, DELEGATION_GRANT_TOKEN_TYPE, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE } from './delegation-grants.js';
@@ -307,7 +309,24 @@ export function createServer(config: ServerConfig) {
   assertLinkConfig(config);
 
   const app = express();
-  app.use(express.json());
+  const invalidConstraintJson = new WeakSet<object>();
+  app.use(express.json({
+    verify(req, _res, buffer) {
+      if (req.method !== 'POST' || !/^\/api\/v1\/(?:delegate|subdelegate)\/?(?:\?|$)/i.test(req.url ?? '')) return;
+      // JSON.parse is only for selecting constraint-bearing requests. Validate
+      // the original bytes before duplicate members or unsafe numbers disappear.
+      // Retain only a boolean, never the raw payload or parser error text.
+      try {
+        const text = buffer.toString('utf8');
+        const body: unknown = JSON.parse(text);
+        if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'constraints')) {
+          parseStrictJson(text);
+        }
+      } catch {
+        invalidConstraintJson.add(req);
+      }
+    },
+  }));
   app.use(express.urlencoded({ extended: false }));
 
   // Advertise the selected wire-protocol version on every response. During the
@@ -3762,6 +3781,23 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
         return;
       }
+      // Opaque restrictions survive delegation, but cannot authorize use.
+      // Deny before token loading, accounting, or any upstream request.
+      if (unknownConstraints(delegation.constraints ?? []).length > 0) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: delegation.agentDid ?? 'unverified' },
+          action: 'deny',
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: UNKNOWN_CONSTRAINT,
+          metadata: { delegationId },
+        });
+        res.status(403).json({ error: UNKNOWN_CONSTRAINT, message: 'This delegation carries an unimplemented constraint type' });
+        return;
+      }
       // Cumulative constraints (max_lifetime, max_subtree) are checked where
       // the running total is held (draft-asor-wimse-agent-delegation-chain-02
       // section 6, step 8). This server is that single writer: the totals
@@ -3993,9 +4029,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      if (invalidConstraintJson.has(req)) {
+        res.status(400).json({ error: 'invalid_constraints', message: 'Constraint-bearing requests must use strict JSON' });
+        return;
+      }
       const rootConstraints = parseConstraints(requestedConstraintsRaw);
       if (!rootConstraints.ok) {
         res.status(400).json({ error: 'invalid_constraints', message: rootConstraints.message });
+        return;
+      }
+      if (tokenFormatFromBody(req) === 'raw' && unknownConstraints(rootConstraints.constraints).length > 0) {
+        res.status(403).json({ error: UNKNOWN_CONSTRAINT, message: 'A raw token cannot enforce an unimplemented constraint type' });
         return;
       }
       // A rank label with no registered ordering would parse, be minted, and
@@ -4910,6 +4954,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      if (invalidConstraintJson.has(req)) {
+        res.status(400).json({ error: 'invalid_constraints', message: 'Constraint-bearing requests must use strict JSON' });
+        return;
+      }
       const childConstraints = parseConstraints(requestedConstraintsRaw);
       if (!childConstraints.ok) {
         res.status(400).json({ error: 'invalid_constraints', message: childConstraints.message });

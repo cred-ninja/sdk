@@ -255,6 +255,62 @@ describe('caller identity on /api/v1/subdelegate', () => {
   });
 });
 
+describe('opaque constraints across delegation paths', () => {
+  const opaque = [{ key: 'destination', future: { z: [1, 2], a: { nested: true } } }];
+
+  it('inherits unknown constraints through native receipts and refuses exercise without upstream calls', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app, { constraints: opaque });
+    expect(root.status).toBe(200);
+    const child = await subdelegate(app, root.body.receipt, CHILD);
+    expect(child.status).toBe(200);
+    expect(decode(child.body.receipt, 1).constraints).toEqual(opaque);
+    expect(child.body.access_token).toBeUndefined();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    try {
+      expect((await use(app, child.body.delegation_id)).body.error).toBe('unknown_constraint');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { fetch.mockRestore(); }
+  });
+
+  it('allows child-only unknown constraints and JCS-equivalent inheritance, but not changed or dropped ones', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app);
+    const addition = await subdelegate(app, root.body.receipt, CHILD, { constraints: opaque });
+    expect(addition.status).toBe(200);
+    expect(decode(addition.body.receipt, 1).constraints).toEqual(opaque);
+    const constrained = await delegateRoot(app, { constraints: opaque });
+    const same = await subdelegate(app, constrained.body.receipt, CHILD, { constraints: [{ future: { a: { nested: true }, z: [1, 2] }, key: 'destination' }] });
+    expect(same.status).toBe(200);
+    for (const constraints of [[], [{ key: 'destination', future: { a: { nested: true }, z: [2, 1] } }]]) {
+      const changed = await subdelegate(app, constrained.body.receipt, CHILD, { constraints });
+      expect(changed.status).toBe(403);
+      expect(changed.body.code).toBe('constraint_escalation_denied');
+    }
+  });
+
+  it('retains unknown constraints through the Asor profile and single-use grant exchange', async () => {
+    const { app } = await setup();
+    const root = await delegateRoot(app, { token_profile: 'agent_delegation', constraints: opaque });
+    expect(root.status).toBe(200);
+    const grant = await subdelegate(app, root.body.receipt, CHILD, { token_profile: 'agent_delegation', agent_delegation_chain: [root.body.agent_delegation_token], exchange: 'grant' });
+    expect(grant.status).toBe(200);
+    const issued = await exchange(app, grant.body.delegation_grant, actorToken(CHILD));
+    expect(issued.status).toBe(200);
+    expect(issued.body.issued_token_type).toBe('urn:credninja:params:oauth:token-type:delegation-handle');
+    expect(decode(issued.body.receipt, 1).constraints).toEqual(opaque);
+    const verified = verifyAgentDelegationChain([root.body.agent_delegation_token, issued.body.agent_delegation_token], { acceptedAlgs: ['EdDSA'], resolveKey: staticKeyResolver([createVerificationKey(derivedReceiptKey())]) });
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) throw new Error(verified.message);
+    expect(verified.leaf.constraints).toEqual(opaque);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    try {
+      expect((await use(app, issued.body.delegation_id)).body.error).toBe('unknown_constraint');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { fetch.mockRestore(); }
+  });
+});
+
 describe('cumulative ledger across hops', () => {
   it('debits every ancestor max_subtree, so siblings share the root budget', async () => {
     const { app } = await setup();

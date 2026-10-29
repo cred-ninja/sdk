@@ -8,6 +8,7 @@ import { verify as verifySignature, createPublicKey, createPrivateKey, sign, gen
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
 import { CredGuard, rateLimitPolicy, scopeFilterPolicy, receiptClaimsPolicy, urlAllowlistPolicy } from '@credninja/guard';
+import { SqliteCumulativeLedger } from '@credninja/vault';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -1204,6 +1205,40 @@ describe('@credninja/server', () => {
         headers: { 'content-type': 'application/json' },
       }));
     }
+
+    it('preserves opaque constraints on a handle but denies use before ledger debit or upstream', async () => {
+      const constraints = [{ key: 'destination', future: { z: [1, 2], a: true } }, { key: 'max_calls', max_lifetime: 1 }];
+      const { app, res } = await delegateHandle(constraints, { agent_did: 'did:key:opaque-test' });
+      expect(res.status).toBe(200);
+      expect(res.body.access_token).toBeUndefined();
+      expect(JSON.parse(Buffer.from(res.body.receipt.split('.')[1], 'base64url').toString()).constraints).toEqual(constraints);
+      const fetchSpy = mockUpstream();
+      const debitSpy = vi.spyOn(SqliteCumulativeLedger.prototype, 'debit');
+      try {
+        const useRes = await useHandle(app, res.body.delegation_id);
+        expect(useRes.status).toBe(403);
+        expect(useRes.body.error).toBe('unknown_constraint');
+        expect(debitSpy).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        debitSpy.mockRestore();
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('denies raw-token issuance with an unknown constraint before loading credentials', async () => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+      const getSpy = vi.spyOn(vault, 'get');
+      const res = await request(app).post('/api/v1/delegate')
+        .set('Authorization', `Bearer ${TEST_TOKEN}`)
+        .send({ service: 'google', user_id: 'opaque-raw', token_format: 'raw', constraints: [{ key: 'x', future: true }] });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('unknown_constraint');
+      expect(res.body.access_token).toBeUndefined();
+      expect(getSpy).not.toHaveBeenCalled();
+      getSpy.mockRestore();
+    });
 
     it('meters max_calls under max_lifetime at one per call and refuses past the bound', async () => {
       const { app, res } = await delegateHandle([{ key: 'max_calls', max_lifetime: 2 }]);

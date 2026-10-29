@@ -1,7 +1,7 @@
 /**
  * Cred SDK — Main client class
  *
- * Cloud mode: Uses fetch (Node 18+ built-in). Zero runtime dependencies.
+ * Cloud mode: Uses fetch (Node 18+) and dependency-free Cred protocol/attenuation packages.
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
@@ -38,6 +38,7 @@ import {
   UpdatePermissionParams,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
+import { parseConstraints, unknownConstraints } from '@credninja/attenuation';
 import {
   CRED_PROTOCOL_SUPPORTED_VERSIONS,
   CRED_PROTOCOL_VERSION,
@@ -376,6 +377,7 @@ export class Cred {
    * connected the service yet (cloud mode only).
    */
   async delegate(params: DelegateParams): Promise<DelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       return this.delegateLocal(params);
     }
@@ -388,6 +390,7 @@ export class Cred {
    * through the Cred server.
    */
   async delegateHandle(params: DelegateParams): Promise<DelegationHandleResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'delegateHandle() is only supported with a Cred server. Local mode has no broker process.',
@@ -399,6 +402,7 @@ export class Cred {
   }
 
   async tofuDelegate(params: TofuDelegateParams): Promise<DelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'tofuDelegate() is not supported in local mode. TOFU proof verification is server-side only.',
@@ -441,6 +445,7 @@ export class Cred {
     if (sortedScopes) {
       body.scopes = sortedScopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
 
     const data = await this.post<{
       access_token: string;
@@ -482,6 +487,7 @@ export class Cred {
    * of that check.
    */
   async subDelegate(params: SubDelegateParams): Promise<SubDelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       return this.subDelegateLocal(params);
     }
@@ -497,6 +503,7 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
 
     const data = await this.post<{
       access_token: string;
@@ -535,6 +542,7 @@ export class Cred {
   }
 
   async subDelegateHandle(params: SubDelegateParams): Promise<SubDelegationHandleResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'subDelegateHandle() is only supported with a Cred server. Local mode has no broker process.',
@@ -555,6 +563,7 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
 
     const data = await this.post<{
       token_type: 'Delegation';
@@ -602,7 +611,24 @@ export class Cred {
     });
   }
 
+  private validateConstraints(value: unknown) {
+    const parsed = parseConstraints(value);
+    if (!parsed.ok) throw new CredError(parsed.message, 'invalid_constraints', 400);
+    return value === undefined ? undefined : parsed.constraints;
+  }
+
+  private async assertLocalConstraintsEnforceable(value: unknown): Promise<void> {
+    const constraints = this.validateConstraints(value) ?? [];
+    if (unknownConstraints(constraints).length > 0) {
+      throw new CredError('An unimplemented constraint cannot authorize token export or use', 'unknown_constraint', 403);
+    }
+    if (constraints.length > 0) {
+      throw new CredError('Local mode cannot enforce delegation constraints', 'unsupported_constraint', 403);
+    }
+  }
+
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
+    await this.assertLocalConstraintsEnforceable(params.constraints);
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
     let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
@@ -904,7 +930,11 @@ export class Cred {
       );
     }
 
-    const parent = this.parseDelegationReceipt(params.parentReceipt);
+    const parent = await this.parseDelegationReceipt(params.parentReceipt);
+    // Local delegation returns a raw token, not a brokered handle. Checking
+    // the parent as well as the request prevents dropping an opaque ceiling.
+    await this.assertLocalConstraintsEnforceable(parent.constraints);
+    await this.assertLocalConstraintsEnforceable(params.constraints);
     if (parent.service !== params.service) {
       throw new CredError('Parent receipt service does not match request', 'service_mismatch', 403);
     }
@@ -1129,7 +1159,7 @@ export class Cred {
     return `${header}.${payload}.${signature}`;
   }
 
-  private parseDelegationReceipt(receipt: string): {
+  private async parseDelegationReceipt(receipt: string): Promise<{
     sub: string;
     service: string;
     scopes: string[];
@@ -1138,9 +1168,10 @@ export class Cred {
     delegationId: string;
     chainDepth?: number;
     receiptClaims: string[];
+    constraints?: unknown[];
     /** Ancestor DIDs above `sub`, oldest (root) first. See createLocalDelegationReceipt(). */
     lineage: string[];
-  } {
+  }> {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
       throw new CredError('Invalid parent receipt format', 'invalid_parent', 400);
@@ -1156,10 +1187,18 @@ export class Cred {
         delegationId?: string;
         chainDepth?: number;
         receiptClaims?: string[];
+        constraints?: unknown[];
         iat?: number;
         exp?: number;
         lineage?: string[];
       };
+
+      if (payload.constraints !== undefined) {
+        const { parseStrictJson } = await import('@credninja/vault');
+        // Reject duplicate members and unsafe numbers before interpreting
+        // any constraint, including nested opaque values.
+        parseStrictJson(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      }
 
       const publicKey = this.getLocalReceiptPublicKeyHex();
       const publicKeyObject = createPublicKey({
@@ -1264,6 +1303,7 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
     if (params.agentDid) {
       body.agent_did = params.agentDid;
     }
@@ -1307,6 +1347,7 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
     if (params.agentDid) {
       body.agent_did = params.agentDid;
     }
@@ -1422,6 +1463,7 @@ export class Cred {
     if (!this.isLocal) {
       throw new CredError('authorizeLocalUse() is only supported in local mode', 'not_supported', 0);
     }
+    await this.assertLocalConstraintsEnforceable(params.constraints);
     const vault = await this.ensureVault();
     const entries = await vault.list({ userId: params.userId });
     const entry = entries.find((candidate) => candidate.provider === params.service);
