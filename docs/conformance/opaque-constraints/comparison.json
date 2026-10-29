@@ -1,0 +1,53 @@
+{
+  "asor01": {
+    "count": 20,
+    "before": {
+      "pass": 20,
+      "fail": 0,
+      "gap": 0,
+      "masked": 0
+    },
+    "after": {
+      "pass": 20,
+      "fail": 0,
+      "gap": 0,
+      "masked": 0
+    },
+    "changed": []
+  },
+  "asor02": {
+    "count": 35,
+    "before": {
+      "pass": 20,
+      "fail": 5,
+      "gap": 10,
+      "masked": 0
+    },
+    "after": {
+      "pass": 21,
+      "fail": 4,
+      "gap": 10,
+      "masked": 0
+    },
+    "changed": [
+      {
+        "vector": "valid_unknown_constraint_identical.json",
+        "before": {
+          "vector": "valid_unknown_constraint_identical.json",
+          "expect": "accept",
+          "cred": "reject:malformed",
+          "result": "FAIL",
+          "note": "hop 1: Hop 1 constraints are malformed: constraints[5] ('quota') is not a known constraint type"
+        },
+        "after": {
+          "vector": "valid_unknown_constraint_identical.json",
+          "expect": "accept",
+          "cred": "accept",
+          "result": "PASS",
+          "note": ""
+        }
+      }
+    ]
+  },
+  "regressions": []
+}

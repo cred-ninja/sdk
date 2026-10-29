@@ -1,0 +1,256 @@
+{
+  "source": "packages/vault/src/index.ts",
+  "node": "v22.23.4",
+  "vectors": "vectors-02",
+  "rows": [
+    {
+      "vector": "valid_unknown_constraint_identical.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_range_min_max.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_opaque_exact.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_chain.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_audience_array.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted, but aud as an array naming the verifier (step 8) is not represented in Cred, so the accept tests nothing"
+    },
+    {
+      "vector": "reject_alg_not_accepted.json",
+      "expect": "signature_invalid",
+      "cred": "reject:signature_invalid",
+      "result": "PASS",
+      "note": "hop 0: Hop 0 signature did not verify"
+    },
+    {
+      "vector": "reject_altered_sub_and_par_hash.json",
+      "expect": "par_hash_mismatch",
+      "cred": "reject:parent_hash_mismatch",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 commits to a different parent than the one presented"
+    },
+    {
+      "vector": "reject_aud_empty_array.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 3, aud shape is not represented in Cred"
+    },
+    {
+      "vector": "reject_aud_null.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 3, aud shape is not represented in Cred"
+    },
+    {
+      "vector": "reject_audience_mismatch.json",
+      "expect": "audience_mismatch",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; step 8, leaf audience is not represented in Cred"
+    },
+    {
+      "vector": "reject_child_exp_exceeds_parent.json",
+      "expect": "expired",
+      "cred": "reject:exp_not_monotonic",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 expires at 910, after its parent at 900"
+    },
+    {
+      "vector": "reject_child_raises_del_max_depth.json",
+      "expect": "not_narrower",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 4.3 rule 5, per hop is not represented in Cred"
+    },
+    {
+      "vector": "reject_cnf_without_confirmation.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 3, cnf shape is not represented in Cred"
+    },
+    {
+      "vector": "reject_constraint_extra_member.json",
+      "expect": "malformed",
+      "cred": "reject:malformed",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraints are malformed: constraints[2] ('max_rows') max carries undefined member 'note'"
+    },
+    {
+      "vector": "reject_cross_type_lifetime_for_max.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraint 'max_rows': Child restates 'max_rows' as max_lifetime but not as max; no inference is made across types"
+    },
+    {
+      "vector": "reject_detail_extra_member.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 4, closed detail is not represented in Cred"
+    },
+    {
+      "vector": "reject_duplicate_key_type.json",
+      "expect": "malformed",
+      "cred": "reject:malformed",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraints are malformed: constraints has duplicate (key, type) ('max_rows', max)"
+    },
+    {
+      "vector": "reject_max_lifetime_widened.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraint 'max_calls': Child loosens 'max_calls': max_lifetime 10 to 1000"
+    },
+    {
+      "vector": "reject_max_subtree_widened.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraint 'max_spend': Child loosens 'max_spend': max_subtree 400 to 5000"
+    },
+    {
+      "vector": "reject_missing_client_id.json",
+      "expect": "malformed",
+      "cred": "reject:malformed",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 is missing required fields"
+    },
+    {
+      "vector": "reject_missing_cnf.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 3, cnf required is not represented in Cred"
+    },
+    {
+      "vector": "reject_mixed_case_wildcard.json",
+      "expect": "malformed",
+      "cred": "reject:not_narrower",
+      "result": "FAIL",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: User.*"
+    },
+    {
+      "vector": "reject_newline_scope.json",
+      "expect": "malformed",
+      "cred": "reject:not_narrower",
+      "result": "FAIL",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: crm.read\n"
+    },
+    {
+      "vector": "reject_opaque_case_folded.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: user.read"
+    },
+    {
+      "vector": "reject_opaque_over_wildcard.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: drive.*"
+    },
+    {
+      "vector": "reject_principal_altered.json",
+      "expect": "principal_altered",
+      "cred": "reject:user_mismatch",
+      "result": "PASS",
+      "note": "hop 1: validateSubDelegation: Child delegation user must match parent delegation"
+    },
+    {
+      "vector": "reject_rank_order_mismatch.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraint 'egress': Rank order for 'egress' differs from the parent's"
+    },
+    {
+      "vector": "reject_rank_outside_order.json",
+      "expect": "malformed",
+      "cred": "reject:malformed",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraints are malformed: constraints[0] ('egress') rank label 'everywhere' is not in its order"
+    },
+    {
+      "vector": "reject_rank_without_order.json",
+      "expect": "malformed",
+      "cred": "reject:not_narrower",
+      "result": "FAIL",
+      "note": "hop 2: Hop 2 constraint 'egress': Rank order for 'egress' differs from the parent's"
+    },
+    {
+      "vector": "reject_reissued_parent.json",
+      "expect": "par_hash_mismatch",
+      "cred": "reject:parent_hash_mismatch",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 commits to a different parent than the one presented"
+    },
+    {
+      "vector": "reject_root_without_principal.json",
+      "expect": "malformed",
+      "cred": "reject:user_mismatch",
+      "result": "FAIL",
+      "note": "hop 1: validateSubDelegation: Child delegation user must match parent delegation"
+    },
+    {
+      "vector": "reject_second_detail.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 4, exactly one detail is not represented in Cred"
+    },
+    {
+      "vector": "reject_unknown_detail_type.json",
+      "expect": "malformed",
+      "cred": "accept",
+      "result": "GAP",
+      "note": "accepted; Section 4.4, unknown detail type is not represented in Cred"
+    },
+    {
+      "vector": "reject_unsafe_integer.json",
+      "expect": "malformed",
+      "cred": "reject:unsafe_integer",
+      "result": "PASS",
+      "note": "hop 0: payload rejected by the strict decoder (integer 9007199254740992 is outside the binary64 exact range at offset 253)"
+    },
+    {
+      "vector": "reject_wildcard_over_opaque.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: drive.Read"
+    }
+  ],
+  "pass": 21,
+  "fail": 4,
+  "gap": 10,
+  "masked": 0
+}

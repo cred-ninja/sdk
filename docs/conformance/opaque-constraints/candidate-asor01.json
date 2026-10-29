@@ -1,0 +1,151 @@
+{
+  "source": "packages/vault/src/index.ts",
+  "node": "v22.23.4",
+  "vectors": "vectors",
+  "rows": [
+    {
+      "vector": "valid_jcs_utf16_key_order.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_jcs_unmarked_header.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_jcs_non_ascii.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_jcs_integral_float.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_jcs_exponent_form.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_jcs_big_integer.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "valid_chain.json",
+      "expect": "accept",
+      "cred": "accept",
+      "result": "PASS",
+      "note": ""
+    },
+    {
+      "vector": "reject_bad_signature.json",
+      "expect": "signature_invalid",
+      "cred": "reject:signature_invalid",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 signature did not verify"
+    },
+    {
+      "vector": "reject_bare_wildcard.json",
+      "expect": "malformed",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "declared malformed; Cred rejects via scope subsumption instead (a bare '*' fails isValidScope and so matches only itself, never a parent's scopes) -- same outcome, different reason bucket by design"
+    },
+    {
+      "vector": "reject_depth_exceeded.json",
+      "expect": "depth_invalid",
+      "cred": "reject:depth_invalid",
+      "result": "PASS",
+      "note": "hop 2: Chain depth 2 exceeds maximum 1"
+    },
+    {
+      "vector": "reject_duplicate_member.json",
+      "expect": "duplicate_member",
+      "cred": "reject:duplicate_member",
+      "result": "PASS",
+      "note": "hop 0: payload rejected by the strict decoder (duplicate member name \"del_depth\" at offset 132)"
+    },
+    {
+      "vector": "reject_exceeded_ceiling.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 constraint 'max_rows': Child loosens 'max_rows': max 5000 to 10000000"
+    },
+    {
+      "vector": "reject_non_finite.json",
+      "expect": "non_finite",
+      "cred": "reject:payload_undecodable",
+      "result": "PASS",
+      "note": "hop 0: payload rejected by the strict decoder (unexpected character \"N\" at offset 145)"
+    },
+    {
+      "vector": "reject_nonmonotonic_exp.json",
+      "expect": "expired",
+      "cred": "reject:exp_not_monotonic",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 expires at 100300, after its parent at 900"
+    },
+    {
+      "vector": "reject_nonterminal_wildcard.json",
+      "expect": "malformed",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "declared malformed; Cred rejects via scope subsumption instead ('crm.*.read' fails isValidScope and so matches only itself) -- same outcome, different reason bucket by design"
+    },
+    {
+      "vector": "reject_spliced_parent.json",
+      "expect": "par_hash_mismatch",
+      "cred": "reject:parent_hash_mismatch",
+      "result": "PASS",
+      "note": "hop 1: Hop 1 commits to a different parent than the one presented"
+    },
+    {
+      "vector": "reject_unsafe_integer.json",
+      "expect": "malformed",
+      "cred": "reject:unsafe_integer",
+      "result": "PASS",
+      "note": "hop 0: payload rejected by the strict decoder (integer 9007199254740992 is outside the binary64 exact range at offset 145)"
+    },
+    {
+      "vector": "reject_widened_scope.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 holds scopes its parent does not cover: pay.transfer"
+    },
+    {
+      "vector": "reject_wildcard_boundary.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 1: Hop 1 holds scopes its parent does not cover: crmx.read"
+    },
+    {
+      "vector": "reject_wildcard_widening.json",
+      "expect": "not_narrower",
+      "cred": "reject:not_narrower",
+      "result": "PASS",
+      "note": "hop 2: Hop 2 holds scopes its parent does not cover: crm.*"
+    }
+  ],
+  "pass": 20,
+  "fail": 0,
+  "gap": 0,
+  "masked": 0
+}
