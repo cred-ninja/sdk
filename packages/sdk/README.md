@@ -40,6 +40,15 @@ try {
 
 ## Quick Start: Local / Standalone Mode
 
+Local SDK delegation and local MCP use do **not** enforce receipt constraints.
+They reject every nonempty constraint list before credential export or upstream
+dispatch, including restrictions inherited from a parent receipt. Known types
+return `unsupported_constraint`, unknown types return `unknown_constraint`, and
+malformed lists return `invalid_constraints`. An omitted or empty list remains
+unrestricted. This includes `max_lifetime` and `max_subtree`: local mode has no
+cumulative accounting. Use the hosted broker for its supported enforcement;
+this does not imply that it enforces every known per-action constraint type.
+
 No Cred account needed. Use `@credninja/oauth` and `@credninja/vault` directly:
 
 ```typescript
@@ -292,7 +301,12 @@ try {
 ## Requirements
 
 - Node.js 18+ (uses built-in `fetch`)
-- Zero runtime dependencies
+- Runtime dependencies: the dependency-free `@credninja/protocol` and
+  `@credninja/attenuation` packages. Cloud-only installs do not need the optional
+  `@credninja/vault` or `@credninja/oauth` peers.
+- All cloud delegation methods validate and detach constraints before transport
+  or signing. Values JSON would silently drop or coerce (such as nested
+  `undefined`) are rejected with `invalid_constraints`, not signed after alteration.
 
 ## Standalone First
 

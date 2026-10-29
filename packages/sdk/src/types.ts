@@ -131,6 +131,8 @@ export interface DelegateParams {
   agentDid?: string;
   /** Optional trusted claims embedded into a local delegation receipt. */
   receiptClaims?: string[];
+  /** Wire constraint objects. Unknown types cannot authorize raw-token issuance. */
+  constraints?: unknown[];
 }
 
 export interface TofuDelegateParams {
@@ -146,6 +148,8 @@ export interface TofuDelegateParams {
   appClientId?: string;
   /** Requested scopes. Empty = all consented scopes. */
   scopes?: string[];
+  /** Constraint wire objects, forwarded to the issuing server unchanged. */
+  constraints?: unknown[];
 }
 
 export interface GetConsentUrlParams {
@@ -174,6 +178,8 @@ export interface LocalUseParams {
   accessToken?: string;
   /** Agent making the call, for the audit trail. */
   agentId?: string;
+  /** Constraints carried by the cached delegation being exercised. */
+  constraints?: unknown[];
 }
 
 export interface AuditEntry {

@@ -45,6 +45,7 @@
     "@credninja/vault": "^2.0.0"
   },
   "dependencies": {
+    "@credninja/attenuation": "^2.0.0",
     "@credninja/protocol": "^2.0.0"
   },
   "peerDependenciesMeta": {

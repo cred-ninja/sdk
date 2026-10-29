@@ -49,6 +49,7 @@ import {
   constraintTypeOf,
   DELEGATION_CONSTRAINT_TYPES,
   type DelegationConstraint,
+  type OpaqueConstraint,
 } from './constraints.js';
 import {
   base64urlDecode,
@@ -110,7 +111,9 @@ export interface VerifiedAgentDelegationToken {
   header: Record<string, unknown>;
   claims: AgentDelegationClaims;
   scopes: string[];
+  /** Complete wire list, including opaque types; verification is not exercise authorization. */
   constraints: DelegationConstraint[];
+  /** Compatibility projection of the opaque entries also present in `constraints`. */
   unknownConstraints: UnknownConstraint[];
   /** base64url SHA-256 over this token's JWS Signing Input: what a child's `par_hash` commits to. */
   commitment: string;
@@ -225,32 +228,12 @@ export function parseAgentDelegationDetail(details: unknown): ParsedAgentDelegat
   const raw = d.constraints ?? [];
   if (!Array.isArray(raw)) return { ok: false, message: 'constraints must be an array' };
 
-  const known: unknown[] = [];
-  const unknownConstraints: UnknownConstraint[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < raw.length; i++) {
-    const c: unknown = raw[i];
-    if (!isObject(c)) return { ok: false, message: `constraints[${i}] is not an object` };
-    const members = Object.keys(c).filter((k) => k !== 'key');
-    const typed = members.filter((m) => KNOWN_TYPES.has(m));
-    if (typed.length === 0 && members.length === 1) {
-      const key = c.key;
-      if (typeof key !== 'string' || key.trim() === '') return { ok: false, message: `constraints[${i}] has no key` };
-      const type = members[0]!;
-      const id = `${type}\u0000${key}`;
-      if (seen.has(id)) return { ok: false, message: `constraints has duplicate (key, type) ('${key}', ${type})` };
-      seen.add(id);
-      unknownConstraints.push({ key, type, value: c[type] });
-      continue;
-    }
-    known.push(c);
-  }
-  const parsed = parseConstraints(known);
+  const parsed = parseConstraints(raw);
   if (!parsed.ok) return { ok: false, message: parsed.message };
+  const unknownConstraints: UnknownConstraint[] = [];
   for (const c of parsed.constraints) {
-    const id = `${constraintTypeOf(c)}\u0000${c.key}`;
-    if (seen.has(id)) return { ok: false, message: `constraints has duplicate (key, type) ('${c.key}', ${constraintTypeOf(c)})` };
-    seen.add(id);
+    const type = constraintTypeOf(c);
+    if (!KNOWN_TYPES.has(type)) unknownConstraints.push({ key: c.key, type, value: (c as OpaqueConstraint)[type] });
     if ('rank' in c && typeof c.rank === 'string' && !c.order) {
       return { ok: false, message: `constraint '${c.key}' rank label '${c.rank}' carries no order` };
     }
@@ -334,17 +317,6 @@ export function agentDelegationCommitment(token: string): string {
   return createHash('sha256').update(`${h}.${p}`, 'ascii').digest('base64url');
 }
 
-function unknownSubsumes(parent: readonly UnknownConstraint[], child: readonly UnknownConstraint[]): string | null {
-  for (const p of parent) {
-    const c = child.find((x) => x.key === p.key && x.type === p.type);
-    if (!c) return `child omits parent constraint '${p.key}' (${p.type})`;
-    if (canonicalJson(c.value) !== canonicalJson(p.value)) {
-      return `constraint '${p.key}' has type ${p.type}, which this verifier does not implement; it subsumes only an identical constraint`;
-    }
-  }
-  return null;
-}
-
 /**
  * Section 6 of draft-asor-wimse-agent-delegation-chain-02 over a root-first
  * chain `[DT_0, ..., DT_n]`, steps 1 to 5 and the audience half of step 8.
@@ -426,8 +398,7 @@ export function verifyAgentDelegationChain(
     if (widened.length > 0) return fail('not_narrower', i, `token[${i}] holds scopes its parent does not cover: ${widened.join(', ')}`);
     const check = constraintsSubsume(parent.constraints, child.constraints);
     if (!check.ok) return fail('not_narrower', i, `token[${i}] constraint '${check.key}': ${check.message}`);
-    const unknown = unknownSubsumes(parent.unknownConstraints, child.unknownConstraints);
-    if (unknown) return fail('not_narrower', i, `token[${i}] ${unknown}`);
+
     const own = child.claims.del_max_depth;
     if (own !== undefined) {
       if (own > depthBound) return fail('not_narrower', i, `token[${i}] del_max_depth ${own} exceeds its parent's max depth ${depthBound}`);
@@ -542,8 +513,7 @@ export function mintAgentDelegationToken(input: MintAgentDelegationTokenInput): 
     if (widened.length > 0) throw new AgentDelegationMintError(`scopes not covered by the parent: ${widened.join(', ')}`, 'not_narrower');
     const check = constraintsSubsume(parent.constraints, detail.constraints);
     if (!check.ok) throw new AgentDelegationMintError(check.message, 'not_narrower');
-    const unknown = unknownSubsumes(parent.unknownConstraints, detail.unknownConstraints);
-    if (unknown) throw new AgentDelegationMintError(unknown, 'not_narrower');
+
     if (input.exp > parent.claims.exp) throw new AgentDelegationMintError('a child cannot expire after its parent', 'expired');
     const known = [input.chainDepthBound, parent.claims.del_max_depth].filter((b): b is number => typeof b === 'number');
     const bound = known.length > 0 ? Math.min(...known) : undefined;

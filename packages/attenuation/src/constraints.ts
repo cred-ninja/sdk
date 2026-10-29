@@ -26,12 +26,15 @@
  * cumulative bound with it; see producerConstraintViolations.
  *
  * Fail-closed rules (-02 section 4.2): an entry that is not exactly one
- * known type with a well-formed value, that carries a member its type does
+ * type with a well-formed value, that carries a member its type does
  * not define, or that repeats a (key, type) pair already in the list makes
  * the whole list malformed, and a malformed list makes its token invalid
  * before any subsumption is evaluated. Two entries with the same key and
  * different types (a `min` and a `max` forming a range) are allowed and are
  * evaluated independently.
+ * An unknown type with a strict JSON/JCS value is preserved as an opaque
+ * wire object, not treated as malformed or absent. It never authorizes an
+ * exercise: callers must deny with `unknown_constraint`.
  *
  * Subsumption (child within parent, -02 section 4.3 rules 2 and 3): every
  * constraint (key, type) in the parent MUST appear in the child under the
@@ -44,6 +47,8 @@
  * the parent. A constraint absent from the child means the child is
  * unbounded on that dimension and therefore not narrower. The child MAY add
  * constraints the parent does not carry.
+ * An unknown parent type is covered only by a same-key, same-type child
+ * whose whole-constraint RFC 8785 JCS serialization is byte-identical.
  *
  * Rank labels. -02 puts the ordering on the wire: a label `rank` carries an
  * `order` array, least to most permissive, of two or more distinct strings,
@@ -59,6 +64,8 @@
  * Everything here is wire-format independent, like the rest of this package:
  * callers hand in plain parsed values.
  */
+import { canonicalJson } from './jcs.js';
+import { parseStrictJson } from './strict-json.js';
 
 export interface MaxConstraint {
   key: string;
@@ -111,7 +118,13 @@ export interface MaxSubtreeConstraint {
   max_subtree: number;
 }
 
-export type DelegationConstraint =
+/** A closed wire object with an unimplemented type; its value stays opaque. */
+export interface OpaqueConstraint {
+  key: string;
+  [type: string]: unknown;
+}
+
+export type KnownDelegationConstraint =
   | MaxConstraint
   | MinConstraint
   | OneOfConstraint
@@ -121,11 +134,15 @@ export type DelegationConstraint =
   | MaxLifetimeConstraint
   | MaxSubtreeConstraint;
 
-export type DelegationConstraintType =
+export type DelegationConstraint = KnownDelegationConstraint | OpaqueConstraint;
+
+export type KnownDelegationConstraintType =
   | 'max' | 'min' | 'one_of' | 'not_one_of' | 'prefix' | 'rank' | 'max_lifetime' | 'max_subtree';
 
+export type DelegationConstraintType = KnownDelegationConstraintType | (string & {});
+
 /** The registered constraint types: the asor-01 section 10 six, then the two -02 adds. */
-export const DELEGATION_CONSTRAINT_TYPES: readonly DelegationConstraintType[] =
+export const DELEGATION_CONSTRAINT_TYPES: readonly KnownDelegationConstraintType[] =
   ['max', 'min', 'one_of', 'not_one_of', 'prefix', 'rank', 'max_lifetime', 'max_subtree'];
 
 /**
@@ -138,7 +155,7 @@ export const CUMULATIVE_CONSTRAINT_TYPES: readonly DelegationConstraintType[] = 
  * Members a constraint object may carry besides `key` and its type member.
  * The object is closed (-02 section 4.2): anything else is malformed.
  */
-const EXTRA_MEMBERS: Readonly<Record<DelegationConstraintType, readonly string[]>> = Object.freeze({
+const EXTRA_MEMBERS: Readonly<Record<KnownDelegationConstraintType, readonly string[]>> = Object.freeze({
   max: [], min: [], one_of: [], not_one_of: [], prefix: [], rank: ['order'], max_lifetime: [], max_subtree: [],
 });
 
@@ -177,7 +194,30 @@ export type ConstraintParseResult =
   | { ok: false; message: string };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+    && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+}
+
+/** Do not let JSON serialization silently discard or coerce opaque data. */
+function isJsonValue(value: unknown, depth = 0): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+  if (depth >= 256 || (!Array.isArray(value) && !isPlainObject(value))) return false;
+  const keys = Reflect.ownKeys(value);
+  if (Array.isArray(value)) {
+    // JCS maps arrays; inherited overrides must never alter the signed value.
+    if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+    if (keys.length !== value.length + 1) return false;
+    for (let i = 0; i < value.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(value, i)) return false;
+    }
+  }
+  return keys.every((key) => {
+    if (Array.isArray(value) && key === 'length') return true;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+    return typeof key === 'string' && descriptor.enumerable === true && 'value' in descriptor
+      && isJsonValue(descriptor.value, depth + 1);
+  });
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -221,8 +261,9 @@ function parseSet(value: unknown): { ok: true; members: ConstraintSetMember[] } 
 /**
  * Parse an untyped `constraints` value (e.g. straight out of a receipt
  * payload) into a validated list. Fail-closed: any entry that is not exactly
- * one known constraint type with a non-empty key and a well-formed value, or
- * any duplicate key, rejects the whole list. `undefined` parses to an empty
+ * one constraint type with a non-empty key and a well-formed value, or
+ * any duplicate (key, type), rejects the whole list. Unknown types retain
+ * their wire shape and strict JSON values. `undefined` parses to an empty
  * list (no ceilings), matching legacy receipts minted before this claim
  * existed.
  *
@@ -251,12 +292,26 @@ export function parseConstraints(value: unknown): ConstraintParseResult {
     }
 
     const members = Object.keys(entry).filter((k) => k !== 'key');
-    const typeMembers = members.filter((k): k is DelegationConstraintType =>
+    const typeMembers = members.filter((k): k is KnownDelegationConstraintType =>
       (DELEGATION_CONSTRAINT_TYPES as readonly string[]).includes(k));
+    if (typeMembers.length === 0 && members.length === 1) {
+      const type = members[0]!;
+      const id = JSON.stringify([key, type]);
+      if (seen.has(id)) return { ok: false, message: `constraints has duplicate (key, type) ('${key}', ${type})` };
+      seen.add(id);
+      if (!isJsonValue(entry)) return { ok: false, message: `constraints[${i}] ('${key}') is not a strict JSON value` };
+      try {
+        // JCS rejects lone surrogates; strict parsing retains prototype-named
+        // keys and gives the caller a detached, JSON-only copy.
+        out.push(parseStrictJson(canonicalJson(entry)) as OpaqueConstraint);
+      } catch {
+        return { ok: false, message: `constraints[${i}] ('${key}') has no strict JSON/JCS representation` };
+      }
+      continue;
+    }
     if (typeMembers.length !== 1) {
-      // No type, or more than one type: an entry this implementation does
-      // not understand. Fail closed (-02 section 4.2).
-      return { ok: false, message: `constraints[${i}] ('${key}') is not a known constraint type` };
+      // No type, or multiple type/metadata members: malformed, not opaque.
+      return { ok: false, message: `constraints[${i}] ('${key}') must carry exactly one constraint type` };
     }
     const type = typeMembers[0]!;
     const extra = members.filter((k) => k !== type && !EXTRA_MEMBERS[type].includes(k));
@@ -266,7 +321,7 @@ export function parseConstraints(value: unknown): ConstraintParseResult {
     }
     // Uniqueness is per (key, type), not per key (-02 section 4.2): a min and
     // a max on one key form a range; two maxes on one key are malformed.
-    const id = `${type}\u0000${key}`;
+    const id = JSON.stringify([key, type]);
     if (seen.has(id)) {
       return { ok: false, message: `constraints has duplicate (key, type) ('${key}', ${type})` };
     }
@@ -360,16 +415,21 @@ function parseOrder(value: unknown): { ok: true; members: string[] } | { ok: fal
   return { ok: true, members: [...(value as string[])] };
 }
 
+/** Return the own type member of a validated constraint, never a guessed rank. */
 export function constraintTypeOf(c: DelegationConstraint): DelegationConstraintType {
-  if ('max_lifetime' in c) return 'max_lifetime';
-  if ('max_subtree' in c) return 'max_subtree';
-  if ('max' in c) return 'max';
-  if ('min' in c) return 'min';
-  if ('one_of' in c) return 'one_of';
-  if ('not_one_of' in c) return 'not_one_of';
-  if ('prefix' in c) return 'prefix';
-  return 'rank';
+  const members = Object.keys(c).filter((k) => k !== 'key');
+  if (Object.prototype.hasOwnProperty.call(c, 'rank')) return 'rank';
+  if (members.length !== 1) throw new TypeError('Constraint must have exactly one type member');
+  return members[0]!;
 }
+
+/** Unimplemented types can be propagated, but never authorize an exercise. */
+export function unknownConstraints(constraints: readonly DelegationConstraint[]): OpaqueConstraint[] {
+  return constraints.filter((c): c is OpaqueConstraint =>
+    !(DELEGATION_CONSTRAINT_TYPES as readonly string[]).includes(constraintTypeOf(c)));
+}
+
+export const UNKNOWN_CONSTRAINT = 'unknown_constraint';
 
 export type ConstraintSubsumptionResult =
   | { ok: true }
@@ -443,12 +503,12 @@ export function constraintsSubsume(
   options: ConstraintSubsumptionOptions = {},
 ): ConstraintSubsumptionResult {
   const orderings = mergeOrderings(options);
-  const childById = new Map(child.map((c) => [`${constraintTypeOf(c)}\u0000${c.key}`, c]));
+  const childById = new Map(child.map((c) => [JSON.stringify([c.key, constraintTypeOf(c)]), c]));
   const childTypesByKey = new Map<string, DelegationConstraintType[]>();
   for (const c of child) childTypesByKey.set(c.key, [...(childTypesByKey.get(c.key) ?? []), constraintTypeOf(c)]);
   for (const p of parent) {
     const pt = constraintTypeOf(p);
-    const c = childById.get(`${pt}\u0000${p.key}`);
+    const c = childById.get(JSON.stringify([p.key, pt]));
     if (!c) {
       const others = childTypesByKey.get(p.key);
       if (others && others.length > 0) {
@@ -527,6 +587,10 @@ export function constraintsSubsume(
         if (cres.value > pres.value) return loosened(`rank ${String(pr.rank)} to ${String(cr.rank)}`);
         break;
       }
+      default:
+        if (canonicalJson(p) !== canonicalJson(c)) {
+          return loosened(`unknown type '${pt}' requires an identical RFC 8785 JCS constraint`);
+        }
     }
   }
   return { ok: true };
@@ -534,8 +598,8 @@ export function constraintsSubsume(
 
 /** The numeric value of a max, max_lifetime or max_subtree constraint. */
 function boundOf(c: DelegationConstraint): number {
-  if ('max_lifetime' in c) return c.max_lifetime;
-  if ('max_subtree' in c) return c.max_subtree;
+  if ('max_lifetime' in c) return (c as MaxLifetimeConstraint).max_lifetime;
+  if ('max_subtree' in c) return (c as MaxSubtreeConstraint).max_subtree;
   return (c as MaxConstraint).max;
 }
 

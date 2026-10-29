@@ -14,8 +14,8 @@ describe('parseConstraints', () => {
     if (r.ok) expect(r.constraints).toHaveLength(2);
   });
 
-  it('fails closed on unknown entry shapes', () => {
-    expect(parseConstraints([{ key: 'x', regex: '^a' }]).ok).toBe(false);
+  it('fails closed on malformed entry shapes', () => {
+    expect(parseConstraints([{ key: 'x', regex: '^a', note: 'extra' }]).ok).toBe(false);
     expect(parseConstraints([{ key: 'x', max: 3, min: 1 }]).ok).toBe(false);
     expect(parseConstraints([{ key: 'x', max: 3, rank: 1 }]).ok).toBe(false);
     expect(parseConstraints([{ key: 'x', max: 3, extra: true }]).ok).toBe(false);
@@ -153,7 +153,7 @@ describe('verifyDelegationChain constraints', () => {
 
   it('rejects malformed constraints before evaluating subsumption', () => {
     const r = verifyDelegationChain([
-      hop(0, { constraints: [{ key: 'x', regex: '^a' }] }),
+      hop(0, { constraints: [{ key: 'x', regex: '^a', note: 'extra' }] }),
       hop(1),
     ], { requireParentHash: false });
     expect(r.ok).toBe(false);

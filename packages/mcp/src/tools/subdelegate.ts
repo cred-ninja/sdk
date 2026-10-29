@@ -42,6 +42,11 @@ export const SUBDELEGATE_TOOL_DEFINITION = {
         items: { type: 'string' },
         description: 'Optional subset of the parent receipt scopes.',
       },
+      constraints: {
+        type: 'array',
+        items: { type: 'object' },
+        description: 'Optional child constraint list; omitted constraints inherit from the parent.',
+      },
     },
     required: ['parent_receipt', 'agent_did', 'user_id', 'service'],
   },
@@ -53,6 +58,7 @@ export interface SubdelegateToolInput {
   user_id: string;
   service: string;
   scopes?: string[];
+  constraints?: unknown[];
 }
 
 export interface SubdelegateToolContext {
@@ -76,6 +82,7 @@ export async function handleSubdelegate(
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
+      ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
       ...(context.delegatorIdentity ? { delegatorIdentity: context.delegatorIdentity } : {}),
     };
     const result = context.useServerBroker
@@ -88,6 +95,7 @@ export async function handleSubdelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,
@@ -95,6 +103,7 @@ export async function handleSubdelegate(
         }
       : {
           accessToken: (result as Awaited<ReturnType<Cred['subDelegate']>>).accessToken,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,

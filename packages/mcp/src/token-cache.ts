@@ -27,6 +27,7 @@ export interface TokenEntry {
   service: string;
   userId: string;
   scopes?: string[];
+  constraints?: unknown[];
   brokered?: boolean;
   expiresAt: number; // Unix ms
 }
@@ -150,7 +151,7 @@ export class TokenCache {
   /** Store a token and return a delegation handle */
   store(entry: TokenEntry): string {
     const id = `del_${crypto.randomBytes(10).toString('hex')}`;
-    this.entries.set(id, { ...entry });
+    this.entries.set(id, { ...entry, ...(entry.constraints !== undefined ? { constraints: structuredClone(entry.constraints) } : {}) });
 
     const ttl = entry.expiresAt - Date.now();
     if (ttl > 0) {
@@ -169,7 +170,7 @@ export class TokenCache {
       this.entries.delete(id);
       return undefined;
     }
-    return { ...entry };
+    return { ...entry, ...(entry.constraints !== undefined ? { constraints: structuredClone(entry.constraints) } : {}) };
   }
 
   /** Revoke a handle early (e.g. after cred_revoke) */

@@ -4,6 +4,7 @@ import {
   AgentDelegationMintError,
   agentDelegationCommitment,
   mintAgentDelegationToken,
+  parseAgentDelegationDetail,
   verifyAgentDelegationChain,
 } from '../agent-delegation.js';
 import {
@@ -155,6 +156,31 @@ describe('mintAgentDelegationToken / verifyAgentDelegationChain', () => {
     const forged = signCompactJws(p, signer, { typ: 'at+jwt', c14n: 'JCS' });
     expect(verifyAgentDelegationChain([t0, forged], { acceptedAlgs: ['EdDSA'], resolveKey, now: 1500 }))
       .toMatchObject({ ok: false, reason: 'not_narrower', hop: 1 });
+  });
+
+  it('retains opaque constraints in verified Asor lists and inherits them on omission', () => {
+    const constraints = [{ key: 'destination', future: { z: [1, 2], a: { c: true, b: null } } }];
+    const t0 = root(undefined, { constraints });
+    const t1 = child(t0);
+    const result = verifyAgentDelegationChain([t0, t1], {
+      acceptedAlgs: ['EdDSA'], resolveKey: staticKeyResolver([createVerificationKey(ed.publicKey)]), now: 1500,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+    expect(result.leaf.constraints).toEqual(constraints);
+    expect(result.leaf.unknownConstraints).toEqual([{ key: 'destination', type: 'future', value: constraints[0]!.future }]);
+    expect(payload(t1).authorization_details[0].constraints).toEqual(constraints);
+    expect(() => child(t0, undefined, { constraints: [{ future: { a: { b: null, c: true }, z: [1, 2] }, key: 'destination' }] })).not.toThrow();
+    expect(() => child(t0, undefined, { constraints: [] })).toThrow(AgentDelegationMintError);
+  });
+
+  it('validates Asor opaque values and distinguishes NUL-containing tuple members', () => {
+    const detail = (constraints: unknown[]) => parseAgentDelegationDetail([{ type: 'agent_delegation', scopes: ['crm.read'], constraints }]);
+    expect(detail([{ key: 'x', future: { nested: undefined } }]).ok).toBe(false);
+    expect(detail([{ key: 'b\u0000c', a: 1 }, { key: 'c', ['a\u0000b']: 2 }]).ok).toBe(true);
+    expect(detail([{ key: 'x', future: 1 }, { key: 'x', future: 2 }]).ok).toBe(false);
+    expect(detail([{ key: 'x', max: 'bad' }]).ok).toBe(false);
+    expect(detail([{ key: 'x', rank: 'legacy' }]).ok).toBe(false);
   });
 
   it('enforces a tighter del_max_depth carried by a child', () => {

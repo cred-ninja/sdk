@@ -38,6 +38,8 @@ export {
   parseConstraints,
   constraintsSubsume,
   constraintTypeOf,
+  unknownConstraints,
+  UNKNOWN_CONSTRAINT,
   unresolvableRankLabels,
   cumulativeConstraints,
   producerConstraintViolations,
@@ -50,6 +52,9 @@ export {
 export type {
   DelegationConstraint,
   DelegationConstraintType,
+  KnownDelegationConstraint,
+  KnownDelegationConstraintType,
+  OpaqueConstraint,
   MaxConstraint,
   MinConstraint,
   OneOfConstraint,
@@ -130,3 +135,21 @@ export type {
 // Running totals for cumulative constraints (max_lifetime, max_subtree).
 export { SqliteCumulativeLedger } from './cumulative-ledger.js';
 export type { CumulativeLedger, CumulativeLedgerRegistration, CumulativeDebitResult, SqliteCumulativeLedgerOptions } from './cumulative-ledger.js';
+
+// Opt-in admission library only; existing HTTP/SDK/MCP paths are unchanged.
+export { DurableBudgetStore, BudgetAdmissionError, prepareBudgetOperation, executeBudgetedOperation } from './durable-budget-admission.js';
+export type {
+  DurableBudgetStoreOptions,
+  BudgetConnectionRegistration,
+  BudgetGrantRegistration,
+  BudgetTokenRegistration,
+  BudgetAuthenticatedContext,
+  BudgetRequestState,
+  BudgetRequest,
+  BudgetOutcome,
+  BudgetAccount,
+  BudgetDispatchFence,
+  BudgetOperationInput,
+  PreparedBudgetOperation,
+  FrozenBudgetOperation,
+} from './durable-budget-admission.js';
