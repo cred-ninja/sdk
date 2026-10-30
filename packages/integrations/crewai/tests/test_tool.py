@@ -331,6 +331,23 @@ class TestRun:
             use_tool._run(delegation_id="del_noid", url="https://www.googleapis.com/x")
         mock_cred.use.assert_not_called()
 
+    def test_cred_use_tool_enforces_user_id(self, mock_cred):
+        identity = generate_agent_identity()
+        _remember_delegation_token(
+            "del_bob", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id="bob",
+        )
+        mock_cred.use.return_value = BrokeredUseResult(
+            status=200, ok=True, content_type="application/json", body={},
+        )
+        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+            alice = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="alice")
+            bob = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="bob")
+        with pytest.raises(ValueError, match="different server, agent or user"):
+            alice._run(delegation_id="del_bob", url="https://www.googleapis.com/x")
+        mock_cred.use.assert_not_called()
+        assert json.loads(bob._run(delegation_id="del_bob", url="https://www.googleapis.com/x"))["ok"] is True
+
     def test_cred_use_tool_rejects_unknown_or_expired_delegation(self, mock_cred):
         with patch("cred_crewai.tool.Cred", return_value=mock_cred):
             use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=generate_agent_identity())

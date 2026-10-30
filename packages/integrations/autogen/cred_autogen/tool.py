@@ -66,7 +66,13 @@ def _lookup_delegation_token(
     agent_did: str,
     user_id: Optional[str] = None,
 ) -> str:
-    """Return the token only to a tool configured for the same server, agent and user."""
+    """Return the token only to a tool configured for the same server, agent and user.
+
+    User rule (fail closed when both are set): if the use tool was configured with a
+    ``user_id`` it must equal the user the delegation was remembered for, otherwise
+    ``ValueError``. A use tool with no ``user_id`` skips the user check so single-user
+    setups keep working; processes serving several users must pass ``user_id``.
+    """
     entry = _DELEGATION_TOKENS.get(delegation_id)
     if entry is None or entry[1] <= time.time():
         _DELEGATION_TOKENS.pop(delegation_id, None)
@@ -209,8 +215,13 @@ def cred_use_tool(
     base_url: str,
     *,
     agent_identity: Optional[DpopSigningIdentity] = None,
+    user_id: Optional[str] = None,
 ) -> FunctionTool:
-    """Create an AutoGen FunctionTool for brokered upstream API calls."""
+    """Create an AutoGen FunctionTool for brokered upstream API calls.
+
+    user_id: when set, only delegations issued for this user can be used. Pass it
+    in any process that serves more than one user.
+    """
     cred = Cred(agent_token=agent_token, base_url=base_url)
 
     def use(
@@ -228,6 +239,7 @@ def cred_use_tool(
             )
         token = _lookup_delegation_token(
             delegation_id, base_url=base_url, agent_did=_agent_did(agent_identity),
+            user_id=user_id,
         )
         result = cred.use(
             token,

@@ -66,7 +66,13 @@ def _lookup_delegation_token(
     agent_did: str,
     user_id: Optional[str] = None,
 ) -> str:
-    """Return the token only to a tool configured for the same server, agent and user."""
+    """Return the token only to a tool configured for the same server, agent and user.
+
+    User rule (fail closed when both are set): if the use tool was configured with a
+    ``user_id`` it must equal the user the delegation was remembered for, otherwise
+    ``ValueError``. A use tool with no ``user_id`` skips the user check so single-user
+    setups keep working; processes serving several users must pass ``user_id``.
+    """
     entry = _DELEGATION_TOKENS.get(delegation_id)
     if entry is None or entry[1] <= time.time():
         _DELEGATION_TOKENS.pop(delegation_id, None)
@@ -248,6 +254,7 @@ class CredUseTool(BaseTool):
     _base_url: str = ""
     # The agent's DPoP signing identity; never part of the tool's input or output.
     _agent_identity: Any = None
+    _use_user_id: Optional[str] = None
 
     def __init__(
         self,
@@ -255,10 +262,14 @@ class CredUseTool(BaseTool):
         base_url: str,
         *,
         agent_identity: Optional[DpopSigningIdentity] = None,
+        user_id: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         """
         Args:
+            user_id: The user this tool acts for. When set, only delegations issued
+                for this user can be used. Pass it in any process that serves
+                more than one user.
             agent_identity: The agent's own identity (an ``AgentIdentity`` from
                 ``cred``). Brokered handles are bound to this key: the Cred server
                 requires a DPoP proof by it to issue a handle and to use one. The
@@ -268,6 +279,7 @@ class CredUseTool(BaseTool):
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
         self._base_url = base_url
         self._agent_identity = agent_identity
+        self._use_user_id = user_id
 
     def _run(
         self,
@@ -285,6 +297,7 @@ class CredUseTool(BaseTool):
             )
         token = _lookup_delegation_token(
             delegation_id, base_url=self._base_url, agent_did=_agent_did(self._agent_identity),
+            user_id=self._use_user_id,
         )
         result = self._cred.use(
             token,
