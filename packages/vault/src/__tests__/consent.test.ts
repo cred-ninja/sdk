@@ -56,6 +56,30 @@ describe.each(['sqlite', 'file'] as const)('consent records (%s)', (storage) => 
     expect(replay).toEqual(first);
   });
 
+  it('revokes consents by id, subject or agent, once, and never by an empty filter', async () => {
+    const { v } = await vault();
+    await v.recordConsent(input('c1'));
+    await v.recordConsent(input('c2', { agentDid: 'did:key:z6MkOther' }));
+    await v.recordConsent(input('c3', { subject: 'user-2' }));
+    expect(await v.revokeConsents({}, 'nothing')).toEqual([]);
+    expect(await v.revokeConsents({ subject: 'user-1', agentDid: 'did:key:z6MkAgent' }, 'key compromise')).toEqual(['c1']);
+    expect(await v.revokeConsents({ subject: 'user-1' }, 'again')).toEqual(['c2']);
+    expect((await v.getConsentRevocation('c1'))).toMatchObject({ consentId: 'c1', reason: 'key compromise' });
+    expect(await v.getConsentRevocation('c3')).toBeNull();
+    // The record itself is unchanged.
+    expect(await v.getConsent('c1')).toMatchObject({ approvedBy: 'admin' });
+  });
+
+  it('purges only records whose retention ended, counting from the later of grant and expiry', async () => {
+    const { v } = await vault();
+    await v.recordConsent(input('old'));
+    await v.recordConsent(input('long', { expiresAt: new Date(Date.now() + 400 * 86_400_000).toISOString() }));
+    const future = new Date(Date.now() + 60_000);
+    expect(await v.purgeConsents(future)).toBe(1);
+    expect(await v.getConsent('old')).toBeNull();
+    expect(await v.getConsent('long')).not.toBeNull();
+  });
+
   if (storage === 'sqlite') {
     it('refuses an update made directly in the database', async () => {
       const { v, path } = await vault();

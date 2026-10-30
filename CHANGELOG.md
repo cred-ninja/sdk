@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added: consent records, approvals and CIBA
+
+- `@credninja/server`: a did:key agent's Permission is now checked at
+  `/api/v1/delegate`. A Permission that requires approval names its
+  approver (`approver`: `subject`, the default, `admin`, or `both`). Such a
+  delegation is asked for at `POST /bc-authorize` (OpenID CIBA, poll mode;
+  the request is bound to the agent's DPoP key) and redeemed at
+  `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba`. The
+  subject is asked through the built-in approval page, a signed single-use
+  link posted to `CRED_APPROVAL_WEBHOOK_URL`, or through an external
+  OpenID Provider's CIBA endpoints (`CRED_CIBA_*`); admins decide at
+  `/admin/approvals`. An approved consent (`source: "ciba"`) is reused for
+  later requests it covers for `CRED_CIBA_CONSENT_TTL_SECONDS` (default one
+  day); a broader request, an expired consent or a security event
+  (`POST /admin/consents/revoke`) means asking again, and tokens under a
+  revoked consent are refused at exercise (`401 consent_revoked`).
+  Approval requests are held in process memory.
+- Consent records are kept `CONSENT_RETENTION_DAYS` (at least 90, the
+  default) after the later of grant and expiry, then purged daily; the
+  purge is recorded in the audit chain. Consent revocations are a
+  separate append-only table; records are never edited.
+- `@credninja/vault`: `Permission.approver`; `revokeConsents`,
+  `getConsentRevocation`, `findConsents`, `purgeConsents`.
+
 ### Changed: per-exercise ceilings, measured by the server
 
 - `@credninja/server`: every constraint is decided from what the server

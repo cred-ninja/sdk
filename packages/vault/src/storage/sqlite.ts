@@ -16,7 +16,7 @@ import {
   type RevokedDelegation,
 } from '../delegation-revocation.js';
 import { canonicalScopeSet, intersectScopes, scopeSetsEqual } from '@credninja/protocol';
-import type { ConsentRecord, RecordConsentInput } from '../consent.js';
+import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from '../consent.js';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
 
@@ -224,6 +224,13 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_consents_granted ON vault_consents(granted_at);
       CREATE TRIGGER IF NOT EXISTS vault_consents_immutable BEFORE UPDATE ON vault_consents
       BEGIN SELECT RAISE(ABORT, 'consent records are immutable'); END;
+      CREATE TABLE IF NOT EXISTS vault_consent_revocations (
+        consent_id TEXT PRIMARY KEY,
+        revoked_at TEXT NOT NULL,
+        reason     TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS vault_consent_revocations_immutable BEFORE UPDATE ON vault_consent_revocations
+      BEGIN SELECT RAISE(ABORT, 'consent revocations are immutable'); END;
     `);
   }
 
@@ -544,6 +551,45 @@ export class SQLiteBackend implements StorageBackend {
       expiresAt: row.expires_at,
       chainContext: JSON.parse(row.chain_context_json) as Record<string, unknown>,
     };
+  }
+
+  revokeConsents(filter: ConsentRevocationFilter, reason: string, now: string): string[] {
+    const db = this.ensureDb();
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (filter.consentIds?.length) {
+      conditions.push(`id IN (${filter.consentIds.map(() => '?').join(',')})`);
+      params.push(...filter.consentIds);
+    }
+    if (filter.subject) { conditions.push('subject = ?'); params.push(filter.subject); }
+    if (filter.agentDid) { conditions.push('agent_did = ?'); params.push(filter.agentDid); }
+    if (conditions.length === 0) return [];
+    return db.transaction((): string[] => {
+      const ids = db.prepare(`SELECT id FROM vault_consents WHERE ${conditions.join(' AND ')}
+        AND id NOT IN (SELECT consent_id FROM vault_consent_revocations)`).pluck().all(...params) as string[];
+      const insert = db.prepare('INSERT INTO vault_consent_revocations (consent_id, revoked_at, reason) VALUES (?, ?, ?)');
+      for (const id of ids) insert.run(id, now, reason);
+      return ids;
+    }).immediate();
+  }
+
+  findConsents(filter: { subject: string; agentDid: string; service: string }): ConsentRecord[] {
+    const ids = this.ensureDb().prepare('SELECT id FROM vault_consents WHERE subject = ? AND agent_did = ? AND service = ? ORDER BY granted_at DESC')
+      .pluck().all(filter.subject, filter.agentDid, filter.service) as string[];
+    return ids.map((id) => this.getConsent(id)!).filter(Boolean);
+  }
+
+  getConsentRevocation(id: string): ConsentRevocation | null {
+    const row = this.ensureDb().prepare('SELECT consent_id, revoked_at, reason FROM vault_consent_revocations WHERE consent_id = ?')
+      .get(id) as { consent_id: string; revoked_at: string; reason: string } | undefined;
+    return row ? { consentId: row.consent_id, revokedAt: row.revoked_at, reason: row.reason } : null;
+  }
+
+  purgeConsents(before: string): number {
+    const db = this.ensureDb();
+    // Retention runs from the later of grant and expiry.
+    return db.prepare(`DELETE FROM vault_consents
+      WHERE MAX(granted_at, COALESCE(expires_at, granted_at)) < ?`).run(before).changes;
   }
 
   // ── Delegation methods ──────────────────────────────────────────────────

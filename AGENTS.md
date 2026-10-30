@@ -92,6 +92,12 @@ back to `default` on its own.
 | PATCH | `/admin/permissions/:id` | Admin | Update a Permission record |
 | DELETE | `/admin/permissions/:id` | Admin | Delete a Permission record |
 | GET | `/admin/audit` | Admin | Audit events across all agents (not scoped to one user) |
+| POST | `/bc-authorize` | Bearer + DPoP | CIBA backchannel authentication request for a delegation whose Permission requires approval; returns `auth_req_id`, `expires_in`, `interval`; the agent polls `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba` and a DPoP proof by the same key |
+| GET | `/approve/:authReqId` | None (signed link) | Built-in approval page for the subject, reached by the signed link the approval webhook carries |
+| POST | `/approve/:authReqId` | None (signed link) | The subject's approve or deny decision |
+| GET | `/admin/approvals` | Admin | Pending approvals that need an admin |
+| POST | `/admin/approvals/:authReqId` | Admin | An admin's approve or deny decision |
+| POST | `/admin/consents/revoke` | Admin | Security event: revoke consents by id, subject or agent; their tokens are refused at exercise and the next request asks again |
 | GET | `/admin/audit/verify` | Admin | Recompute the tamper-evident audit chain; `200` with `entries`, `unchained` and the `head` (`seq`, `hash`) to record outside the host, or `409` naming the first broken entry (`501` on storage without the chain) |
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
@@ -109,7 +115,7 @@ back to `default` on its own.
 | DELETE | `/api/v1/delegations/:delegationId` (also `/delegation/:delegationId`) | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
 | POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; issues a Delegation Token (DPoP-bound JWT: `authorization_details` as requested (granted scopes or catalogue operations with resources) or the granted scopes, `prf`, `consent_id`, `credential_handle`) to the did:key agent that proves its key with a DPoP proof, and records the consent behind it; raw-token requests take no proof |
 | POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token`; always required; returns the child's Delegation Token, bound to the receiving agent's key, or with `exchange: "grant"` a single-use delegation grant |
-| POST | `/api/v1/token` | Bearer + actor token | RFC 8693 token exchange redeeming a delegation grant; the receiving agent proves its did:key with an RFC 7523 `actor_token` and receives its Delegation Token (`token_type` DPoP) |
+| POST | `/api/v1/token` | Bearer + actor token, or DPoP (CIBA) | RFC 8693 token exchange redeeming a delegation grant, or a CIBA poll (`grant_type=urn:openid:params:grant-type:ciba`) redeeming an approved request; the receiving agent proves its did:key with an RFC 7523 `actor_token` and receives its Delegation Token (`token_type` DPoP) |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |

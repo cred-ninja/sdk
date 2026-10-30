@@ -41,6 +41,20 @@ describe('PermissionStore', () => {
     expect(stored?.allowedScopes).toEqual(['repo']);
   });
 
+  it('stores who approves, with the subject as the default and pre-approver rows read as the subject', async () => {
+    const base = { connectionId: 'github', allowedScopes: ['repo'], delegatable: true, maxDelegationDepth: 1, createdBy: 'admin' };
+    await store.create({ ...base, agentId: 'a_default', requiresApproval: true });
+    await store.create({ ...base, agentId: 'a_admin', requiresApproval: true, approver: 'admin' });
+    await store.create({ ...base, agentId: 'a_both', requiresApproval: true, approver: 'both' });
+    await store.create({ ...base, agentId: 'a_none', requiresApproval: false, approver: 'admin' });
+    expect(await store.get('a_default', 'github')).toMatchObject({ requiresApproval: true, approver: 'subject' });
+    expect(await store.get('a_admin', 'github')).toMatchObject({ requiresApproval: true, approver: 'admin' });
+    expect(await store.get('a_both', 'github')).toMatchObject({ requiresApproval: true, approver: 'both' });
+    const none = await store.get('a_none', 'github');
+    expect(none?.requiresApproval).toBe(false);
+    expect(none?.approver).toBeUndefined();
+  });
+
   it('list returns permissions for a single agent', async () => {
     await store.create({
       agentId: 'agt_1',

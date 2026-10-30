@@ -113,6 +113,29 @@ export interface ServerConfig {
   // names, with an RFC 7523 actor_token signed by that agent's did:key.
   requireAgentIdentity?: boolean;
 
+  // Consent records (draft Section 8.2) are kept for this many days after
+  // the later of their grant and expiry, then purged (env
+  // CONSENT_RETENTION_DAYS). At least 90, the draft's minimum; default 90.
+  consentRetentionDays?: number;
+
+  // CIBA approvals (draft Section 8.1). The subject is asked through the
+  // built-in signed-link approval page, announced by a POST to this webhook
+  // (env CRED_APPROVAL_WEBHOOK_URL), or through an external OpenID
+  // Provider's CIBA endpoints when cibaProvider is set (env
+  // CRED_CIBA_BACKCHANNEL_ENDPOINT, CRED_CIBA_TOKEN_ENDPOINT,
+  // CRED_CIBA_CLIENT_ID, CRED_CIBA_CLIENT_SECRET).
+  approvalWebhookUrl?: string;
+  cibaProvider?: {
+    backchannelAuthenticationEndpoint: string;
+    tokenEndpoint: string;
+    clientId: string;
+    clientSecret: string;
+  };
+  // How long an approved consent is reused for later requests it covers
+  // before the subject is asked again (env CRED_CIBA_CONSENT_TTL_SECONDS).
+  // Default one day.
+  cibaConsentTtlSeconds?: number;
+
   // Cred Link only (env CRED_REQUIRE_DPOP), until Link agents get keys:
   // default true, no Link handle for the key-less static Bearer identity.
   // Agent delegations are always Delegation Tokens bound to the agent's
@@ -272,6 +295,20 @@ export function loadConfig(): ServerConfig {
   if (allowRawTokensRaw === 'true' || allowRawTokensRaw === '1') allowRawTokens = true;
   else if (allowRawTokensRaw === 'false' || allowRawTokensRaw === '0') allowRawTokens = false;
   else if (allowRawTokensRaw !== '') throw new Error('CRED_ALLOW_RAW_TOKENS must be true or false');
+  const retentionRaw = (process.env.CONSENT_RETENTION_DAYS ?? '').trim();
+  const consentRetentionDays = retentionRaw === '' ? undefined : Number(retentionRaw);
+  const cibaTtlRaw = (process.env.CRED_CIBA_CONSENT_TTL_SECONDS ?? '').trim();
+  const cibaConsentTtlSeconds = cibaTtlRaw === '' ? undefined : Number(cibaTtlRaw);
+  const cibaEnv = {
+    backchannelAuthenticationEndpoint: process.env.CRED_CIBA_BACKCHANNEL_ENDPOINT?.trim() ?? '',
+    tokenEndpoint: process.env.CRED_CIBA_TOKEN_ENDPOINT?.trim() ?? '',
+    clientId: process.env.CRED_CIBA_CLIENT_ID?.trim() ?? '',
+    clientSecret: process.env.CRED_CIBA_CLIENT_SECRET ?? '',
+  };
+  const cibaSet = Object.values(cibaEnv).filter((v) => v !== '').length;
+  if (cibaSet > 0 && cibaSet < 4) {
+    throw new Error('CRED_CIBA_BACKCHANNEL_ENDPOINT, CRED_CIBA_TOKEN_ENDPOINT, CRED_CIBA_CLIENT_ID and CRED_CIBA_CLIENT_SECRET must be set together');
+  }
   const requireDpopRaw = (process.env.CRED_REQUIRE_DPOP ?? '').trim().toLowerCase();
   let requireDpop: boolean | undefined;
   if (requireDpopRaw === 'true' || requireDpopRaw === '1') requireDpop = true;
@@ -330,6 +367,10 @@ export function loadConfig(): ServerConfig {
     ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
     ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
     ...(requireDpop !== undefined ? { requireDpop } : {}),
+    ...(consentRetentionDays !== undefined ? { consentRetentionDays } : {}),
+    ...(cibaConsentTtlSeconds !== undefined ? { cibaConsentTtlSeconds } : {}),
+    ...(process.env.CRED_APPROVAL_WEBHOOK_URL?.trim() ? { approvalWebhookUrl: process.env.CRED_APPROVAL_WEBHOOK_URL.trim() } : {}),
+    ...(cibaSet === 4 ? { cibaProvider: cibaEnv } : {}),
     ...(allowRawTokens !== undefined ? { allowRawTokens } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,

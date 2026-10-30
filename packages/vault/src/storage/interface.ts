@@ -1,6 +1,6 @@
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditChainVerification, AuditChainHead } from '../audit.js';
-import type { ConsentRecord, RecordConsentInput } from '../consent.js';
+import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from '../consent.js';
 import type {
   DelegationRecord,
   DelegationRevocationOptions,
@@ -116,6 +116,13 @@ export interface StorageBackend {
   /** Store a consent record once; an id that already exists is left as first written. */
   storeConsent?(input: RecordConsentInput, now: string): ConsentRecord | Promise<ConsentRecord>;
   getConsent?(id: string): ConsentRecord | null | Promise<ConsentRecord | null>;
+  /** Record a revocation for every matching consent not yet revoked; returns their ids. */
+  revokeConsents?(filter: ConsentRevocationFilter, reason: string, now: string): string[] | Promise<string[]>;
+  getConsentRevocation?(id: string): ConsentRevocation | null | Promise<ConsentRevocation | null>;
+  /** Consent records of one subject, agent and service, newest first. */
+  findConsents?(filter: { subject: string; agentDid: string; service: string }): ConsentRecord[] | Promise<ConsentRecord[]>;
+  /** Delete consent records whose retention ended before `before` (ISO); returns how many. */
+  purgeConsents?(before: string): number | Promise<number>;
   getDelegation?(id: string): DelegationRecord | null | Promise<DelegationRecord | null>;
   /**
    * Revoke the seeds and all their descendants, atomically where the
