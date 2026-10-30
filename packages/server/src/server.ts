@@ -32,7 +32,7 @@ import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
 import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant } from '@credninja/vault';
-import { SqliteCumulativeLedger, DEFAULT_RUNNING_COUNT_KEYS } from '@credninja/vault';
+import { SqliteCumulativeLedger } from '@credninja/vault';
 import {
   receiptActorClaims,
   readReceiptActor,
@@ -44,6 +44,7 @@ import {
   publicKeyFromDidKey,
   unknownConstraints,
   UNKNOWN_CONSTRAINT,
+  exerciseConstraintViolation,
   mintDelegationToken,
   verifyDelegationToken,
   delegationTokenAth,
@@ -75,7 +76,8 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
-import { capabilitiesAllow, capabilitiesSubsumed, validateCapabilities } from './capabilities.js';
+import { capabilitiesAllow, capabilitiesSubsumed, matchedPageParam, validateCapabilities } from './capabilities.js';
+import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, meterSide } from './metering.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -279,12 +281,16 @@ const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'x-method-override',
 ]);
 
-/** Query parameters some APIs read as a method override. */
-const METHOD_OVERRIDE_QUERY_PARAMS = new Set(['$httpmethod', '_method', 'x-http-method-override']);
+/**
+ * Query parameters an API may read as a method override, in any spelling:
+ * `$httpMethod`, `_HttpMethod`, `_method`, `x-http-method-override`,
+ * `method-override`, and so on.
+ */
+const METHOD_OVERRIDE_QUERY_KEY = /^[_$]?(x-?)?(http-?)?method(-?override)?$/i;
 
 function hasMethodOverrideQuery(url: string): boolean {
   try {
-    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_PARAMS.has(key.toLowerCase()));
+    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_KEY.test(key));
   } catch {
     return true;
   }
@@ -4167,39 +4173,25 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: UNKNOWN_CONSTRAINT, message: 'This delegation carries an unimplemented constraint type' });
         return;
       }
-      // Cumulative constraints (max_lifetime, max_subtree) are checked where
-      // the running total is held (draft-asor-wimse-agent-delegation-chain-02
-      // section 6, step 8). This server is that single writer: the totals
-      // live in cumulativeLedger and are debited atomically, together with
-      // every ancestor's max_subtree, right before the upstream call. A
-      // running-count key (max_calls) is metered here at one per call; any
-      // other cumulative key needs the quantity of this exercise in
-      // `quantities`, and an exercise that omits it is denied.
-      const cumulative = cumulativeConstraints(delegation.constraints ?? []);
-      const cumulativeQuantities: Record<string, number> = {};
-      if (cumulative.length > 0) {
-        const declared = (req.body as { quantities?: unknown }).quantities;
-        const missing: string[] = [];
-        for (const key of new Set(cumulative.map((c) => c.key))) {
-          if (DEFAULT_RUNNING_COUNT_KEYS.includes(key)) {
-            cumulativeQuantities[key] = 1;
-            continue;
-          }
-          const value = declared && typeof declared === 'object' && !Array.isArray(declared)
-            ? (declared as Record<string, unknown>)[key]
-            : undefined;
-          if (typeof value === 'number' && Number.isFinite(value) && value >= 0) cumulativeQuantities[key] = value;
-          else missing.push(key);
-        }
-        if (missing.length > 0) {
-          denyCumulative(delegationId, delegation, 'cumulative_quantity_required', missing);
-          res.status(403).json({
-            error: 'cumulative_quantity_required',
-            message: 'This delegation carries a cumulative constraint; the exercise must declare its quantity in `quantities`',
-            constraints: missing,
-          });
-          return;
-        }
+      // Every constraint is decided from what this server measures itself
+      // (Section 6.1, step 3): an agent never reports its own quantities. A
+      // key with no meter cannot be decided, so the exercise is denied, as
+      // under an unimplemented type. Cumulative bounds need a numeric meter.
+      const allConstraints = delegation.constraints ?? [];
+      const cumulative = cumulativeConstraints(allConstraints);
+      const perExercise = allConstraints.filter((c) => !cumulative.includes(c));
+      const unmetered = [
+        ...perExercise.filter((c) => meterSide(c.key) === null),
+        ...cumulative.filter((c) => meterSide(c.key) === null || c.key === 'method' || c.key === 'destination'),
+      ].map((c) => c.key);
+      if (unmetered.length > 0) {
+        denyCumulative(delegationId, delegation, 'unmetered_constraint', unmetered);
+        res.status(403).json({
+          error: 'unmetered_constraint',
+          message: 'This delegation carries a constraint on a quantity this server does not measure, so no exercise can be decided under it',
+          constraints: [...new Set(unmetered)],
+        });
+        return;
       }
       // Link handles: re-run the Link check (revoked, narrowed or
       // needs_reauth connections are refused at once) before anything else.
@@ -4259,6 +4251,37 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // A listing with a page-size parameter is capped up front at the
+      // tightest per-exercise bound on its item count, so the provider never
+      // returns more than the delegation allows.
+      let meteredUrl = upstreamUrl;
+      const itemCap = perExercise
+        .filter((c) => ITEM_KEYS.includes(c.key) && typeof (c as { max?: unknown }).max === 'number')
+        .reduce<number | null>((cap, c) => Math.min(cap ?? Infinity, (c as { max: number }).max), null);
+      const page = itemCap !== null && delegation.capabilities
+        ? matchedPageParam(delegation.capabilities, delegation.service, normalizedMethod, upstreamUrl)
+        : null;
+      if (page && itemCap !== null) {
+        const capped = new URL(upstreamUrl);
+        const asked = Number(capped.searchParams.get(page.param));
+        const size = Math.max(1, Math.min(page.max, itemCap, Number.isFinite(asked) && asked > 0 ? asked : Infinity));
+        capped.searchParams.set(page.param, String(size));
+        meteredUrl = capped.toString();
+      }
+      const requestMeasure = {
+        method: normalizedMethod,
+        destination: meteredUrl,
+        requestBytes: body === undefined ? 0 : Buffer.byteLength(JSON.stringify(body), 'utf8'),
+      };
+      for (const c of perExercise.filter((x) => meterSide(x.key) === 'request')) {
+        const violation = exerciseConstraintViolation(c, REQUEST_METERS[c.key]!(requestMeasure));
+        if (violation) {
+          denyCumulative(delegationId, delegation, 'ceiling_exceeded', [c.key]);
+          res.status(403).json({ error: 'ceiling_exceeded', message: violation, constraint: c.key });
+          return;
+        }
+      }
+
       let upstreamToken = delegation.accessToken;
       if (linkAccess && delegation.link) {
         const loaded = await linkService!.loadUseToken(req, res, linkAccess, delegation.link.agentId);
@@ -4293,8 +4316,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      if (cumulative.length > 0) {
-        const debit = cumulativeLedger.debit(delegationId, cumulativeQuantities);
+      const requestQuantities: Record<string, number> = {};
+      for (const c of cumulative.filter((x) => meterSide(x.key) === 'request')) {
+        requestQuantities[c.key] = REQUEST_METERS[c.key]!(requestMeasure) as number;
+      }
+      if (Object.keys(requestQuantities).length > 0) {
+        const debit = cumulativeLedger.debit(delegationId, requestQuantities);
         if (!debit.ok) {
           const error = debit.reason === 'exceeded' ? 'cumulative_constraint_exceeded' : CUMULATIVE_CONSTRAINT_UNENFORCEABLE;
           denyCumulative(delegationId, delegation, error, debit.key ? [debit.key] : cumulative.map((c) => c.key));
@@ -4312,7 +4339,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           )
         : {};
 
-      const upstream = await fetch(upstreamUrl, {
+      const upstream = await fetch(meteredUrl, {
         method: normalizedMethod,
         redirect: 'manual',
         headers: {
@@ -4330,10 +4357,45 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const truncated = raw.length > MAX_BROKER_RESPONSE_BYTES;
       const responseBody = truncated ? raw.slice(0, MAX_BROKER_RESPONSE_BYTES) : raw;
       let parsedBody: unknown = responseBody;
+      let isJson = false;
       try {
         parsedBody = JSON.parse(responseBody);
+        isJson = true;
       } catch {
         // Leave non-JSON responses as text.
+      }
+
+      // Response-side bounds are known only now. Over a limit, the response
+      // is withheld: the provider was read, the agent gets nothing.
+      const responseMeasure = { responseBytes: Buffer.byteLength(raw, 'utf8'), items: countItems(parsedBody, isJson) };
+      const withhold = (constraint: string, message: string, error = 'ceiling_exceeded') => {
+        denyCumulative(delegationId, delegation, error, [constraint]);
+        res.status(403).json({ error, message, constraint, withheld: true });
+      };
+      for (const c of perExercise.filter((x) => meterSide(x.key) === 'response')) {
+        const measured = RESPONSE_METERS[c.key]!(responseMeasure);
+        const violation = exerciseConstraintViolation(c, measured ?? undefined);
+        if (violation) {
+          withhold(c.key, measured === null ? `${c.key} cannot be measured on a non-JSON response` : violation);
+          return;
+        }
+      }
+      const responseQuantities: Record<string, number> = {};
+      for (const c of cumulative.filter((x) => meterSide(x.key) === 'response')) {
+        const measured = RESPONSE_METERS[c.key]!(responseMeasure);
+        if (measured === null) {
+          withhold(c.key, `${c.key} cannot be measured on a non-JSON response`, 'cumulative_constraint_exceeded');
+          return;
+        }
+        responseQuantities[c.key] = measured;
+      }
+      if (Object.keys(responseQuantities).length > 0) {
+        const debit = cumulativeLedger.debit(delegationId, responseQuantities);
+        if (!debit.ok) {
+          const error = debit.reason === 'exceeded' ? 'cumulative_constraint_exceeded' : CUMULATIVE_CONSTRAINT_UNENFORCEABLE;
+          withhold(debit.key ?? Object.keys(responseQuantities)[0]!, debit.message, error);
+          return;
+        }
       }
 
       writeAuditEventIfSupported({

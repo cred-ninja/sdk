@@ -126,9 +126,14 @@ npm run dev
 > **Cumulative constraints.** `max_lifetime` and `max_subtree` are enforced by this server as
 > the single writer of their running totals. `/api/v1/use` debits, in one SQLite transaction, the
 > delegation's own `max_lifetime` and every `max_subtree` held by it or an ancestor, right before
-> the upstream call. `max_calls` is metered at one per call; any other cumulative key needs the
-> exercise's quantity in `quantities` (`{"max_spend": 12}`), and a call without it is refused with
-> `403 cumulative_quantity_required`. Past a bound: `403 cumulative_constraint_exceeded`. A
+> the upstream call, or right after it for a quantity read from the response. The server measures
+> every quantity itself; an agent never declares one. Metered keys: `calls` and `max_calls` (one
+> per call), `method`, `destination` (the upstream URL), `request_bytes`, `response_bytes`, and
+> `items`, `rows`, `max_rows`, `max_results` (records in the response). A constraint on any other
+> key cannot be decided, so a call under it is refused with `403 unmetered_constraint`. Past a
+> per-call bound: `403 ceiling_exceeded`; a response over a bound is withheld (`withheld: true`).
+> A catalogue listing with a page-size parameter is capped at an item bound up front.
+> Past a cumulative bound: `403 cumulative_constraint_exceeded`. A
 > delegation whose ancestors the ledger does not hold (for example after a restart with the
 > in-memory default) is refused with `403 cumulative_constraint_unenforceable`, never given a
 > fresh budget. Set `CUMULATIVE_LEDGER_PATH` to keep the totals across restarts.
@@ -153,7 +158,7 @@ npm run dev
 > key. Every `POST /api/v1/use` sends `Authorization: DPoP <token>` and a new proof by the same
 > key with `htu` `<REDIRECT_BASE_URI>/api/v1/use`, `ath` = base64url SHA-256 of the token, and
 > `cred_req` = base64url SHA-256 of the RFC 8785 (JCS) form of the whole JSON request body
-> (`url`, `method`, `body`, `extra_headers`, `quantities`; there is no `delegation_id`). The
+> (`url`, `method`, `body`, `extra_headers`; there is no `delegation_id`). The
 > server recomputes `cred_req` from the request it received, so a proof authorizes exactly that
 > one upstream call. A missing, stale (over 120 seconds), replayed, or mismatched proof gets
 > `401 invalid_dpop_proof` with a `WWW-Authenticate: DPoP` header, before any upstream call. A

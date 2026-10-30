@@ -1265,31 +1265,44 @@ describe('@credninja/server', () => {
       fetchSpy.mockRestore();
     });
 
-    it('debits a declared quantity under max_subtree and refuses one that would overspend', async () => {
-      const { app, res, agent } = await delegateHandle([{ key: 'max_spend', max_subtree: 1000 }]);
+    it('debits the response size it measures under max_subtree and withholds the response that overspends', async () => {
+      const payload = JSON.stringify({ data: 'x'.repeat(98) }); // 110 bytes
+      const { app, res, agent } = await delegateHandle([{ key: 'response_bytes', max_subtree: 250 }]);
       expect(res.status).toBe(200);
-      const fetchSpy = mockUpstream();
-      expect((await useHandle(app, agent, res.body.access_token, { max_spend: 600 })).status).toBe(200);
-      const over = await useHandle(app, agent, res.body.access_token, { max_spend: 500 });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(payload, {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }));
+      expect((await useHandle(app, agent, res.body.access_token)).status).toBe(200);
+      expect((await useHandle(app, agent, res.body.access_token)).status).toBe(200);
+      const over = await useHandle(app, agent, res.body.access_token);
       expect(over.status).toBe(403);
-      expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_spend', type: 'max_subtree' });
-      expect((await useHandle(app, agent, res.body.access_token, { max_spend: 400 })).status).toBe(200);
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'response_bytes', withheld: true });
+      expect(JSON.stringify(over.body)).not.toContain('xxxx');
+      fetchSpy.mockRestore();
+    });
+
+    it('ignores quantities an agent declares: the server measures', async () => {
+      const { app, res, agent } = await delegateHandle([{ key: 'max_rows', max_lifetime: 1 }]);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ items: [1, 2, 3] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }));
+      const useRes = await useHandle(app, agent, res.body.access_token, { max_rows: 0 });
+      expect(useRes.status).toBe(403);
+      expect(useRes.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_rows', withheld: true });
       fetchSpy.mockRestore();
     });
 
     it.each([
-      ['max_subtree', [{ key: 'max_spend', max_subtree: 1000 }], undefined],
-      ['a cumulative bound beside per-action ones', [{ key: 'max_rows', max: 100 }, { key: 'max_rows', max_lifetime: 5000 }], undefined],
-      ['a quantity that is not a number', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: '5' }],
-      ['a negative quantity', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: -1 }],
-    ])('denies a use under %s that declares no valid quantity, before any upstream call', async (_name, constraints, quantities) => {
+      ['a cumulative bound on an unmetered key', [{ key: 'max_spend', max_subtree: 1000 }]],
+      ['a per-action bound on an unmetered key', [{ key: 'region', one_of: ['us'] }]],
+      ['an unmetered key beside metered ones', [{ key: 'max_rows', max: 100 }, { key: 'max_spend', max_lifetime: 5000 }]],
+    ])('denies a use under %s, before any upstream call', async (_name, constraints) => {
       const { app, res, agent } = await delegateHandle(constraints);
       expect(res.status).toBe(200);
       const fetchSpy = mockUpstream();
-      const useRes = await useHandle(app, agent, res.body.access_token, quantities);
+      const useRes = await useHandle(app, agent, res.body.access_token, { max_spend: 1, region: 'us' });
       expect(useRes.status).toBe(403);
-      expect(useRes.body.error).toBe('cumulative_quantity_required');
+      expect(useRes.body.error).toBe('unmetered_constraint');
       expect(fetchSpy).not.toHaveBeenCalled();
       fetchSpy.mockRestore();
     });
@@ -1303,10 +1316,10 @@ describe('@credninja/server', () => {
       fetchSpy.mockRestore();
     });
 
-    it('does not deny brokered use under per-action constraints only', async () => {
+    it('allows brokered use within per-action bounds the server measures', async () => {
       const { app, res, agent } = await delegateHandle([{ key: 'max_rows', max: 100 }, { key: 'max_rows', min: 1 }]);
       expect(res.status).toBe(200);
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [{ id: 1 }] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
@@ -1333,7 +1346,7 @@ describe('@credninja/server', () => {
         .set('Authorization', `Bearer ${TEST_TOKEN}`);
       expect(audit.status).toBe(200);
       expect(audit.body.entries.some((e: any) =>
-        e.action === 'deny' && e.metadata?.errorMessage === 'cumulative_quantity_required')).toBe(true);
+        e.action === 'deny' && e.metadata?.errorMessage === 'unmetered_constraint')).toBe(true);
     });
 
     it('refuses a raw token under a cumulative constraint before looking up credentials', async () => {

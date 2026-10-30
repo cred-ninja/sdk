@@ -109,8 +109,10 @@ describe('capabilities at exercise', () => {
     expect(viaHeader.status).toBe(200);
     const [, init] = upstream.mock.calls[0]!;
     expect(new Headers(init!.headers).get('x-http-method-override')).toBeNull();
-    const viaQuery = await exerciseAs(app, agent, token, { url: `${FILE_URL('abc')}?$httpMethod=DELETE`, method: 'GET' }, { base: BASE });
-    expect(viaQuery.status).toBe(400);
+    for (const key of ['$httpMethod', '_HttpMethod', '_method', 'X-HTTP-Method-Override', 'method']) {
+      const viaQuery = await exerciseAs(app, agent, token, { url: `${FILE_URL('abc')}?${key}=DELETE`, method: 'GET' }, { base: BASE });
+      expect(viaQuery.status).toBe(400);
+    }
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 

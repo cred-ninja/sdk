@@ -34,6 +34,8 @@ export interface CatalogueOperation {
   scopes: string[];
   /** The resource kind that narrows this operation, if it can be narrowed. */
   resource?: ResourceKind;
+  /** A listing's page-size query parameter and the provider's maximum for it. */
+  page?: { param: string; max: number };
 }
 
 const REPO: ResourceKind = { kind: 'repo', params: ['owner', 'repo'] };
@@ -49,13 +51,13 @@ export const OPERATION_CATALOGUE: readonly CatalogueOperation[] = [
   { name: 'github.user.get', provider: 'github', method: 'GET', url: `${GH}/user`, scopes: ['read:user', 'user'] },
   { name: 'github.repos.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
   { name: 'github.contents.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/contents/{path+}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'github.issues.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
+  { name: 'github.issues.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
   { name: 'github.issues.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues/{number}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
   { name: 'github.issues.create', provider: 'github', method: 'POST', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
   { name: 'github.issues.comment', provider: 'github', method: 'POST', url: `${GH}/repos/{owner}/{repo}/issues/{number}/comments`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'github.pulls.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
+  { name: 'github.pulls.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls`, scopes: GITHUB_REPO_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
   { name: 'github.pulls.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls/{number}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'drive.files.list', provider: 'google', method: 'GET', url: `${DRIVE}/files`, scopes: DRIVE_READ },
+  { name: 'drive.files.list', provider: 'google', method: 'GET', url: `${DRIVE}/files`, scopes: DRIVE_READ, page: { param: 'pageSize', max: 1000 } },
   { name: 'drive.files.get', provider: 'google', method: 'GET', url: `${DRIVE}/files/{fileId}`, scopes: DRIVE_READ, resource: FILE },
   { name: 'drive.files.export', provider: 'google', method: 'GET', url: `${DRIVE}/files/{fileId}/export`, scopes: DRIVE_READ, resource: FILE },
   { name: 'drive.files.create', provider: 'google', method: 'POST', url: `${DRIVE}/files`, scopes: DRIVE_WRITE },
@@ -240,4 +242,30 @@ export function capabilitiesSubsumed(parent: readonly CredDelegationDetail[], ch
       || (!p.resources && !catalogueOperation(op) && p.operations.some((po) => !catalogueOperation(po)) && scopeCoveredBy(p.operations, op))
       || (!p.resources && catalogueOperation(op) !== undefined && operationGranted(catalogueOperation(op)!, p.operations)))
     && (!p.resources || (c.resources !== undefined && c.resources.every((r) => p.resources!.some((pr) => sameResource(pr, r)))))));
+}
+
+/**
+ * The page-size parameter of the catalogue operation this exercise matches,
+ * if it is a listing that has one: a cap on items is then applied up front.
+ */
+export function matchedPageParam(
+  details: readonly CredDelegationDetail[],
+  provider: string,
+  method: string,
+  upstreamUrl: string,
+): { param: string; max: number } | null {
+  let url: URL;
+  try {
+    url = new URL(upstreamUrl);
+  } catch {
+    return null;
+  }
+  for (const detail of details) {
+    if (detail.provider !== provider) continue;
+    for (const name of detail.operations) {
+      const op = catalogueOperation(name);
+      if (op?.page && op.method === method && matchTemplate(op.url, url)) return op.page;
+    }
+  }
+  return null;
 }

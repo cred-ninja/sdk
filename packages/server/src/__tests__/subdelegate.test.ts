@@ -1520,13 +1520,13 @@ describe('POST /api/v1/subdelegate', () => {
       .post('/api/v1/subdelegate')
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
       .send(subdelegateBody({
-        parent_receipt: constrainedParent([{ key: 'max_spend', max_subtree: 100 }], 'del_cp_asor02_use'),
+        parent_receipt: constrainedParent([{ key: 'max_calls', max_subtree: 100 }], 'del_cp_asor02_use'),
       }));
     expect(res.status).toBe(200);
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const useRes = await exerciseAs(app, CHILD, res.body.access_token, {
-      url: 'https://www.googleapis.com/oauth2/v3/userinfo', method: 'GET', quantities: { max_spend: 1 },
+      url: 'https://www.googleapis.com/oauth2/v3/userinfo', method: 'GET',
     });
     // The parent receipt was minted outside this server process, so its
     // subtree total is unknown here: refused, never reset.

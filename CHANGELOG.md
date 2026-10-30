@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed: per-exercise ceilings, measured by the server
+
+- `@credninja/server`: every constraint is decided from what the server
+  measures; `quantities` in the `/api/v1/use` body is no longer read.
+  Metered keys: `calls`/`max_calls`, `method`, `destination`,
+  `request_bytes` (before the upstream call) and `response_bytes`,
+  `items`/`rows`/`max_rows`/`max_results` (from the response). The
+  per-exercise types `max`, `min`, `one_of`, `not_one_of`, `prefix` and
+  `rank` are now enforced at exercise (`403 ceiling_exceeded`); a response
+  over a bound is withheld (`withheld: true`) and audited, never
+  truncated; a catalogue listing with a page-size parameter
+  (`per_page`, `pageSize`) is capped at an item bound up front. A
+  constraint on a key with no meter cannot be decided, so an exercise
+  under it is refused (`403 unmetered_constraint`); it is still carried
+  and narrowed across hops. `calls` is a running count, so a per-call
+  `max` on it is refused at issuance. Method-override query parameters
+  are refused in any spelling (`$httpMethod`, `_HttpMethod`, `_method`,
+  `method`, ...).
+
 ### Added: capabilities and the operation catalogue
 
 - `@credninja/server`: `/api/v1/delegate` and `/api/v1/subdelegate` accept
