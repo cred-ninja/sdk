@@ -92,6 +92,10 @@ export interface CreateLinkServiceOptions {
   customVerifier: boolean;
   /** Stores a brokered handle bound to a Link connection (no token inside). */
   storeHandle: Parameters<typeof handleLinkDelegate>[0]['storeHandle'];
+  /** CRED_ALLOW_RAW_TOKENS (default false). */
+  allowRawTokens?: boolean;
+  /** CRED_REQUIRE_DPOP (default true): no Link handle for the key-less static Bearer identity. */
+  requireKeyedAgent?: boolean;
   /** Lifetime of Link brokered handles, seconds (default 300, capped at 900). */
   handleTtlSeconds?: number;
   makeRateLimiter: (max: number) => RequestHandler;
@@ -199,6 +203,8 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
   const delegateDeps = {
     ...enforcement,
     storeHandle: options.storeHandle,
+    allowRawTokens: options.allowRawTokens ?? false,
+    requireKeyedAgent: options.requireKeyedAgent ?? true,
     handleTtlSeconds: Math.min(Math.max(1, Math.floor(options.handleTtlSeconds ?? LINK_HANDLE_TTL_DEFAULT_SECONDS)), LINK_HANDLE_TTL_MAX_SECONDS),
   };
 

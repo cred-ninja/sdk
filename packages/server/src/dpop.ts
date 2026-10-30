@@ -12,10 +12,14 @@
  * Cred profile of RFC 9449: the deployment's Bearer credential stays in
  * `Authorization` and the handle travels in the body, so `ath` is computed
  * over the handle id (SHA-256, base64url) rather than over an
- * `Authorization: DPoP` access token.
+ * `Authorization: DPoP` access token. A proof for /api/v1/use also carries
+ * `cred_req`: base64url SHA-256 of the RFC 8785 (JCS) serialization of the
+ * whole JSON request body (handle, upstream URL, method, body, extra
+ * headers, quantities), so a proof authorizes exactly one upstream call.
  */
 import { createHash, createPublicKey, type KeyObject } from 'node:crypto';
 import {
+  canonicalJson,
   checkJwsSignature,
   createVerificationKey,
   didKeyConfirmation,
@@ -36,6 +40,18 @@ export type DpopResult = { ok: true; jkt: string; jti: string } | { ok: false; m
 /** `ath` for a handle: base64url SHA-256 of the handle id. */
 export function dpopAth(handle: string): string {
   return createHash('sha256').update(handle, 'ascii').digest('base64url');
+}
+
+/**
+ * `cred_req` for a /api/v1/use request body: base64url SHA-256 of its RFC
+ * 8785 serialization. Null when the body has no canonical JSON form.
+ */
+export function dpopRequestHash(requestBody: unknown): string | null {
+  try {
+    return createHash('sha256').update(canonicalJson(requestBody), 'utf8').digest('base64url');
+  } catch {
+    return null;
+  }
 }
 
 /** The thumbprint a handle issued to `agentDid` is bound to, or null when the DID carries no key. */
@@ -96,6 +112,8 @@ export function verifyDpopProof(
     htm: string;
     htu: string;
     ath?: string;
+    /** When set, the proof's `cred_req` must equal it (binds one request). */
+    req?: string;
     seenJti: (key: string, exp: number) => boolean;
     nowSeconds?: number;
   },
@@ -147,6 +165,9 @@ export function verifyDpopProof(
     return { ok: false, message: 'DPoP proof needs a jti of at most 256 characters' };
   }
   if (opts.ath !== undefined && claims.ath !== opts.ath) return { ok: false, message: 'DPoP proof ath does not match the handle' };
+  if (opts.req !== undefined && claims.cred_req !== opts.req) {
+    return { ok: false, message: 'DPoP proof cred_req does not match this request (URL, method, body, headers, or quantities)' };
+  }
   // Keyed by thumbprint so two agents cannot collide on a jti.
   if (opts.seenJti(`${expectedJkt}:${claims.jti}`, claims.iat + DPOP_MAX_AGE_SECONDS)) {
     return { ok: false, message: 'DPoP proof jti was already used' };

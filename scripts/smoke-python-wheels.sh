@@ -9,6 +9,14 @@ trap 'rm -rf "$TMPDIR"' EXIT
 DIST_DIR="$TMPDIR/dist"
 mkdir -p "$DIST_DIR"
 
+# The Python packages are released in lockstep (scripts/check-release-hygiene.mjs),
+# so the SDK's version names every wheel built here.
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO_ROOT/packages/sdk-python/pyproject.toml" | head -1)"
+if [ -z "$VERSION" ]; then
+  echo "could not read the version from packages/sdk-python/pyproject.toml" >&2
+  exit 1
+fi
+
 "$PYTHON_BIN" -m venv "$TMPDIR/build-venv"
 BUILD_PY="$TMPDIR/build-venv/bin/python"
 "$BUILD_PY" -m pip install --upgrade pip build twine >/dev/null
@@ -30,12 +38,12 @@ done
 VENV_PY="$TMPDIR/venv/bin/python"
 "$VENV_PY" -m pip install --upgrade pip >/dev/null
 "$VENV_PY" -m pip install --find-links "$DIST_DIR" \
-  cred-auth==1.0.0 \
-  cred-langchain==1.0.0 \
-  cred-crewai==1.0.0 \
-  cred-openai-agents==1.0.0 \
-  cred-autogen==1.0.0 \
-  cred-semantic-kernel==1.0.0 >/dev/null
+  "cred-auth==$VERSION" \
+  "cred-langchain==$VERSION" \
+  "cred-crewai==$VERSION" \
+  "cred-openai-agents==$VERSION" \
+  "cred-autogen==$VERSION" \
+  "cred-semantic-kernel==$VERSION" >/dev/null
 
 "$VENV_PY" - <<'PY'
 import cred

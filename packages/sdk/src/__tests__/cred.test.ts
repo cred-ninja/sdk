@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { canonicalJson } from '@credninja/attenuation';
 import { createHash, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
 import {
   CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
   Cred,
   CredError,
   ConsentRequiredError,
+  generateAgentIdentity,
 } from '../index';
 
 // Mock global fetch
@@ -347,6 +349,23 @@ describe('Cred.delegateHandle() and use()', () => {
       method: 'GET',
       extra_headers: { 'X-Test': '1' },
     });
+  });
+
+  it('binds the DPoP proof to exactly the body it sends, including values JSON converts', async () => {
+    const agent = await generateAgentIdentity();
+    mockFetch.mockResolvedValue(mockResponse(200, { status: 200, ok: true, contentType: 'application/json', body: {} }));
+    await cred.use({
+      delegationId: 'del_handle',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'POST',
+      body: { start: new Date('2026-11-01T10:00:00Z') as unknown as string, skip: undefined },
+      agentIdentity: agent,
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const sent = JSON.parse(init.body);
+    expect(sent.body).toEqual({ start: '2026-11-01T10:00:00.000Z' });
+    const claims = JSON.parse(Buffer.from(String(init.headers.DPoP).split('.')[1]!, 'base64url').toString('utf8'));
+    expect(claims.cred_req).toBe(createHash('sha256').update(canonicalJson(sent), 'utf8').digest('base64url'));
   });
 
   it('signs brokered server requests when Web Bot Auth is configured', async () => {

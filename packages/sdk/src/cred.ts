@@ -602,14 +602,19 @@ export class Cred {
       );
     }
 
-    return this.post<BrokeredUseResult>('/api/v1/use', {
+    // Round-trip through JSON first, so the proof hashes exactly what the
+    // server receives (a Date, say, travels as its ISO string).
+    const requestBody = JSON.parse(JSON.stringify({
       delegation_id: params.delegationId,
       url: params.url,
       method: params.method,
       ...(params.body !== undefined ? { body: params.body } : {}),
       ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
-    }, params.agentIdentity
-      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId) }
+    })) as Record<string, unknown>;
+    // The proof commits to this exact request body (cred_req), so it
+    // authorizes this one upstream call and no other.
+    return this.post<BrokeredUseResult>('/api/v1/use', requestBody, params.agentIdentity
+      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId, requestBody) }
       : undefined);
   }
 

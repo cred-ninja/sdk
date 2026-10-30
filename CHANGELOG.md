@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### BREAKING: no provider tokens, and one proof per upstream call
+
+- `@credninja/server` no longer hands provider access tokens to callers:
+  `token_format: "raw"` on `/api/v1/delegate` and `GET /api/token/:provider`
+  get `403 raw_token_disabled`, and Cred Link raw tokens (Link's
+  `400 invalid_request`) are refused even
+  for clients with `allow_raw_tokens`. A provider token is a bearer
+  credential with the connection's full scope that cannot be bound to an
+  agent key or revoked per delegation. `CRED_ALLOW_RAW_TOKENS=true` restores
+  raw tokens (deprecated, warns at startup). Local mode is unchanged.
+- Each `/api/v1/use` DPoP proof also carries `cred_req`, base64url SHA-256 of
+  the RFC 8785 (JCS) form of the whole request body (handle, URL, method,
+  body, extra headers, quantities). The server recomputes it from the
+  request it received, so a proof authorizes exactly one upstream call; a
+  proof made for one call cannot carry another. `@credninja/sdk` `use()`
+  and `cred-auth` `use()` add it.
+- Cred Link, with DPoP on, issues no handle to the key-less static Bearer
+  identity (`server-agent`); TOFU agents and verified principals keep their
+  binding.
+- Python: `cred-auth` 1.1.0 adds `agent_identity`, `create_dpop_proof()`
+  and an RFC 8785 serializer (`canonical_json()`); the LangChain, CrewAI,
+  OpenAI Agents, AutoGen and Semantic Kernel integrations move to 1.1.0 and
+  require `cred-auth>=1.1.0`.
+
 ### BREAKING: brokered handles are bound to the agent's key (DPoP, RFC 9449)
 
 A handle id plus the deployment's Bearer credential was enough to use a

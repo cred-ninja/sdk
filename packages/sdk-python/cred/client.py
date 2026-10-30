@@ -119,7 +119,9 @@ class _CredBase:
         """Body and extra headers for POST /api/v1/use.
 
         With ``agent_identity``, the request carries a DPoP proof that also
-        commits to the handle (``ath``).
+        commits to the handle (``ath``) and to this exact request body
+        (``cred_req``), so it authorizes this one upstream call. The returned
+        body is the one that must be sent, unchanged.
         """
         request_body: dict[str, Any] = {
             "delegation_id": delegation_id,
@@ -131,7 +133,11 @@ class _CredBase:
         if extra_headers:
             request_body["extra_headers"] = extra_headers
         headers = (
-            {"DPoP": create_dpop_proof(agent_identity, "POST", f"{self._base_url}/api/v1/use", delegation_id)}
+            {
+                "DPoP": create_dpop_proof(
+                    agent_identity, "POST", f"{self._base_url}/api/v1/use", delegation_id, request_body,
+                ),
+            }
             if agent_identity is not None
             else None
         )

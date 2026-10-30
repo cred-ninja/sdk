@@ -16,6 +16,7 @@ from .identity import (
     generate_agent_identity,
     verify_delegation_receipt,
 )
+from .jcs import CanonicalJsonError, canonical_json
 from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
 __all__ = [
@@ -30,6 +31,8 @@ __all__ = [
     "generate_agent_identity",
     "create_dpop_proof",
     "DpopSigningIdentity",
+    "canonical_json",
+    "CanonicalJsonError",
     "verify_delegation_receipt",
     "CRED_PUBLIC_KEY_HEX",
     "BrokeredUseResult",

@@ -58,7 +58,7 @@ export async function makeHarness(overrides: Partial<ServerConfig> = {}): Promis
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN_TOKEN,
     agentToken: AGENT_TOKEN,
-    requireDpop: false,
+    requireDpop: false, allowRawTokens: true,
     providers: PROVIDERS,
     redirectBaseUri: BASE,
     webBotAuthNonceStore: 'memory',

@@ -13,7 +13,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { createActorToken, createDpopProof, generateAgentIdentity, type AgentIdentity } from '@credninja/sdk';
-import { didKeyConfirmation } from '@credninja/attenuation';
+import { canonicalJson, didKeyConfirmation } from '@credninja/attenuation';
 import { createServer } from '../server.js';
 import { dpopAth, normalizeHtu, verifyDpopProof } from '../dpop.js';
 import type { ServerConfig } from '../config.js';
@@ -92,14 +92,27 @@ function delegateAs(app: App, agent: AgentIdentity, body: Record<string, unknown
   return delegate(app, agent.did, createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`), body);
 }
 
-function use(app: App, delegationId: string, proof?: string) {
+function useBody(delegationId: string, extra: Record<string, unknown> = {}) {
+  return { delegation_id: delegationId, url: USERINFO, method: 'GET', ...extra };
+}
+
+function use(app: App, delegationId: string, proof?: string, body: Record<string, unknown> = useBody(delegationId)) {
   const req = request(app).post('/api/v1/use').set('Authorization', `Bearer ${TEST_TOKEN}`);
   if (proof !== undefined) req.set('DPoP', proof);
-  return req.send({ delegation_id: delegationId, url: USERINFO, method: 'GET' });
+  return req.send(body);
+}
+
+/** A proof for exactly this request body, as the SDK's use() makes it. */
+function proofFor(agent: AgentIdentity, delegationId: string, body: Record<string, unknown> = useBody(delegationId)) {
+  return createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, delegationId, body);
 }
 
 function useAs(app: App, agent: AgentIdentity, delegationId: string) {
-  return use(app, delegationId, createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, delegationId));
+  return use(app, delegationId, proofFor(agent, delegationId));
+}
+
+function reqHash(body: unknown): string {
+  return crypto.createHash('sha256').update(canonicalJson(body), 'utf8').digest('base64url');
 }
 
 /** A proof with chosen header and claims, signed by `agent`'s key (for malformed cases). */
@@ -122,6 +135,7 @@ function useClaims(delegationId: string, overrides: Record<string, unknown> = {}
     iat: Math.floor(Date.now() / 1000),
     jti: crypto.randomUUID(),
     ath: crypto.createHash('sha256').update(delegationId, 'ascii').digest('base64url'),
+    cred_req: reqHash(useBody(delegationId)),
     ...overrides,
   };
 }
@@ -172,8 +186,22 @@ describe('DPoP at handle issuance (/api/v1/delegate)', () => {
     expect(res.body.message).toMatch(/not the key of/);
   });
 
-  it('leaves raw-token delegation unchanged', async () => {
+  it('hands out no provider token by default', async () => {
     const { app } = await setup();
+    const raw = await delegate(app, undefined, undefined, { token_format: 'raw' });
+    expect(raw.status).toBe(403);
+    expect(raw.body.error).toBe('raw_token_disabled');
+    expect(JSON.stringify(raw.body)).not.toContain('ya29.dpop');
+    const legacy = await request(app).get('/api/token/google').query({ user_id: 'alice' }).set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(legacy.status).toBe(403);
+    expect(legacy.body.error).toBe('raw_token_disabled');
+    expect(JSON.stringify(legacy.body)).not.toContain('ya29.dpop');
+  });
+
+  it('hands out the provider token only when CRED_ALLOW_RAW_TOKENS=true, and warns', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app } = await setup({ allowRawTokens: true });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('CRED_ALLOW_RAW_TOKENS=true'))).toBe(true);
     const res = await delegate(app, undefined, undefined, { token_format: 'raw' });
     expect(res.status).toBe(200);
     expect(res.body.access_token).toBe('ya29.dpop');
@@ -239,7 +267,7 @@ describe('DPoP at exercise (/api/v1/use)', () => {
     const { app } = await setup();
     const first = (await delegateAs(app, agent)).body.delegation_id;
     const second = (await delegateAs(app, agent)).body.delegation_id;
-    const res = await use(app, first, createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, second));
+    const res = await use(app, first, createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, second, useBody(first)));
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('invalid_dpop_proof');
   });
@@ -248,7 +276,7 @@ describe('DPoP at exercise (/api/v1/use)', () => {
     const agent = await generateAgentIdentity();
     const { app, id } = await handleFor(agent);
     mockUpstream();
-    const proof = createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, id);
+    const proof = proofFor(agent, id);
     expect((await use(app, id, proof)).status).toBe(200);
     const replay = await use(app, id, proof);
     expect(replay.status).toBe(401);
@@ -258,9 +286,29 @@ describe('DPoP at exercise (/api/v1/use)', () => {
   it('refuses a proof for another method or URL', async () => {
     const agent = await generateAgentIdentity();
     const { app, id } = await handleFor(agent);
-    expect((await use(app, id, createDpopProof(agent, 'GET', `${BASE}/api/v1/use`, id))).status).toBe(401);
-    expect((await use(app, id, createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`, id))).status).toBe(401);
-    expect((await use(app, id, createDpopProof(agent, 'POST', 'https://attacker.example/api/v1/use', id))).status).toBe(401);
+    expect((await use(app, id, createDpopProof(agent, 'GET', `${BASE}/api/v1/use`, id, useBody(id)))).status).toBe(401);
+    expect((await use(app, id, createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`, id, useBody(id)))).status).toBe(401);
+    expect((await use(app, id, createDpopProof(agent, 'POST', 'https://attacker.example/api/v1/use', id, useBody(id)))).status).toBe(401);
+  });
+
+  it('authorizes exactly the request the proof names (cred_req)', async () => {
+    const agent = await generateAgentIdentity();
+    const { app, id } = await handleFor(agent);
+    const upstream = mockUpstream();
+    const proof = proofFor(agent, id);
+    // Same handle, same key, a different upstream call: refused before any upstream request.
+    expect((await use(app, id, proof, useBody(id, { url: 'https://www.googleapis.com/oauth2/v3/tokeninfo' }))).status).toBe(401);
+    expect((await use(app, id, proofFor(agent, id), useBody(id, { method: 'DELETE' }))).status).toBe(401);
+    expect((await use(app, id, proofFor(agent, id), useBody(id, { extra_headers: { 'X-HTTP-Method-Override': 'DELETE' } }))).status).toBe(401);
+    expect((await use(app, id, proofFor(agent, id), useBody(id, { quantities: { max_calls: 0 } }))).status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+    // A proof without cred_req is refused too.
+    const { cred_req: _omit, ...unbound } = useClaims(id);
+    expect((await use(app, id, craftProof(agent, unbound))).status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+    // The proof made for this exact request works.
+    expect((await use(app, id, proofFor(agent, id))).status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
   });
 
   it('accepts a query or fragment on htu, which RFC 9449 excludes from the comparison', async () => {
@@ -287,7 +335,7 @@ describe('DPoP at exercise (/api/v1/use)', () => {
     const withPrivate = craftProof(agent, claims, {
       jwk: { ...(JSON.parse(Buffer.from(craftProof(agent, claims).split('.')[0]!, 'base64url').toString()).jwk), d: 'AAAA' },
     });
-    const tampered = createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, id).replace(/\.[^.]+$/, '.AAAA');
+    const tampered = proofFor(agent, id).replace(/\.[^.]+$/, '.AAAA');
     for (const proof of [
       craftProof(agent, claims, { typ: 'JWT' }),
       craftProof(agent, claims, { alg: 'none' }),
@@ -302,7 +350,7 @@ describe('DPoP at exercise (/api/v1/use)', () => {
   it('refuses more than one DPoP header', async () => {
     const agent = await generateAgentIdentity();
     const { app, id } = await handleFor(agent);
-    const proof = createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, id);
+    const proof = proofFor(agent, id);
     const res = await use(app, id, `${proof}, ${proof}`);
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('invalid_dpop_proof');
@@ -446,6 +494,20 @@ describe('verifyDpopProof', () => {
     }
   });
 
+  it('names a request mismatch (cred_req)', async () => {
+    const agent = await generateAgentIdentity();
+    const result = verifyDpopProof(craftProof(agent, useClaims(handle)), {
+      agentDid: agent.did,
+      htm: 'POST',
+      htu,
+      ath: dpopAth(handle),
+      req: reqHash(useBody(handle, { method: 'DELETE' })),
+      seenJti: () => false,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/cred_req/);
+  });
+
   it('does not spend a jti on a proof that fails', async () => {
     const agent = await generateAgentIdentity();
     const seen = new Set<string>();
@@ -478,5 +540,42 @@ describe('verifyDpopProof', () => {
     expect(check(did, `${input}.${signature}`).ok).toBe(true);
     const wrongAlg = `${encode({ alg: 'EdDSA', typ: 'dpop+jwt', jwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y } })}.${encode(useClaims(handle))}`;
     expect(check(did, `${wrongAlg}.${signature}`).ok).toBe(false);
+  });
+});
+
+describe('DPoP together with Web Bot Auth', () => {
+  function signWebBotAuthRequest(url: string, keyId: string, privateKey: crypto.KeyObject): Record<string, string> {
+    const created = Math.floor(Date.now() / 1000);
+    const nonce = crypto.randomBytes(12).toString('base64url');
+    const signatureAgent = `${BASE}/.well-known/http-message-signatures-directory`;
+    const params = `("@authority" "signature-agent");created=${created};expires=${created + 60};nonce="${nonce}";alg="ed25519";keyid="${keyId}";tag="web-bot-auth"`;
+    const base = [`"@authority": ${new URL(url).host}`, `"signature-agent": "${signatureAgent}"`, `"@signature-params": ${params}`].join('\n');
+    const signature = crypto.sign(null, Buffer.from(base, 'utf8'), privateKey).toString('base64');
+    return { 'Signature-Agent': `"${signatureAgent}"`, 'Signature-Input': `sig1=${params}`, Signature: `sig1=:${signature}:` };
+  }
+
+  it('hashes the /use body as the client sent it, before Web Bot Auth adds members', async () => {
+    const agent = await generateAgentIdentity();
+    const { app } = await setup({ webBotAuthMode: 'require' });
+    const wba = crypto.generateKeyPairSync('ed25519');
+    const spki = wba.publicKey.export({ type: 'spki', format: 'der' });
+    const key = await request(app).post('/api/v1/web-bot-auth/keys').set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ public_key: Buffer.from(spki.subarray(-32)).toString('base64') });
+    expect(key.status).toBe(201);
+    const minted = await request(app).post('/api/v1/delegate').set('Host', 'localhost:3456')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .set(signWebBotAuthRequest(`${BASE}/api/v1/delegate`, key.body.key_id, wba.privateKey))
+      .set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`))
+      .send({ service: 'google', user_id: 'alice', scopes: ['openid', 'email'], token_format: 'handle', agent_did: agent.did });
+    expect(minted.status).toBe(200);
+    const id = minted.body.delegation_id as string;
+    const upstream = mockUpstream();
+    const res = await request(app).post('/api/v1/use').set('Host', 'localhost:3456')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .set(signWebBotAuthRequest(`${BASE}/api/v1/use`, key.body.key_id, wba.privateKey))
+      .set('DPoP', proofFor(agent, id))
+      .send(useBody(id));
+    expect(res.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
   });
 });

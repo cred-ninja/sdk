@@ -69,7 +69,7 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
-import { DPOP_ACCEPTED_ALGS, dpopAth, dpopBindingFor, readDpopHeader, verifyDpopProof } from './dpop.js';
+import { DPOP_ACCEPTED_ALGS, dpopAth, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -317,8 +317,22 @@ export function createServer(config: ServerConfig) {
 
   const app = express();
   const invalidConstraintJson = new WeakSet<object>();
+  // cred_req of each /api/v1/use request, computed from the bytes the client
+  // sent, before any middleware adds members to req.body (Web Bot Auth adds
+  // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
+  const useRequestHashes = new WeakMap<object, string | null>();
   app.use(express.json({
     verify(req, _res, buffer) {
+      if (req.method === 'POST' && /^\/api\/v1\/use\/?(?:\?|$)/i.test(req.url ?? '')) {
+        let hash: string | null = null;
+        try {
+          hash = dpopRequestHash(JSON.parse(buffer.toString('utf8')));
+        } catch {
+          hash = null;
+        }
+        useRequestHashes.set(req, hash);
+        return;
+      }
       if (req.method !== 'POST' || !/^\/api\/v1\/(?:delegate|subdelegate)\/?(?:\?|$)/i.test(req.url ?? '')) return;
       // JSON.parse is only for selecting constraint-bearing requests. Validate
       // the original bytes before duplicate members or unsafe numbers disappear.
@@ -385,6 +399,7 @@ export function createServer(config: ServerConfig) {
   // DPoP proof replay cache, keyed by key thumbprint and jti.
   const dpopJtiSeen = createJtiReplayCache();
   const requireDpop = config.requireDpop ?? true;
+  const allowRawTokens = config.allowRawTokens ?? false;
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
@@ -410,6 +425,8 @@ export function createServer(config: ServerConfig) {
         storePath: resolveLinkStorePath(config),
         customVerifier: Boolean(config.agentRequestVerifier),
         storeHandle: (input) => storeBrokeredDelegation({ ...input, accessToken: '' }),
+        allowRawTokens: config.allowRawTokens ?? false,
+        requireKeyedAgent: config.requireDpop ?? true,
         ...(config.linkHandleTtlSeconds !== undefined ? { handleTtlSeconds: config.linkHandleTtlSeconds } : {}),
         makeRateLimiter: (max) => makeRateLimiter(max),
       })
@@ -1589,6 +1606,9 @@ export function createServer(config: ServerConfig) {
   // first delegation.
   if (config.receiptSigner || config.receiptSigningKeyPem || config.receiptAcceptedAlgs || config.receiptVerificationKeys) {
     getReceiptKeys();
+  }
+  if (allowRawTokens) {
+    console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
   }
   if (config.requireDpop === false) {
     console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false issues brokered handles that any holder of the handle id and the deployment Bearer credential can use. Agents should prove their did:key with a DPoP proof; this setting will be removed.');
@@ -3239,6 +3259,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
   }
 
+  function refuseRawToken(res: Response): void {
+    res.status(403).json({
+      error: 'raw_token_disabled',
+      message: 'This server does not hand out provider tokens. Request a brokered handle (token_format "handle") and make calls through /api/v1/use.',
+    });
+  }
+
   function refuseDpop(res: Response, status: 400 | 401, error: string, message: string): void {
     if (status === 401) {
       res.set('WWW-Authenticate', `DPoP error="${error === 'agent_key_required' ? 'invalid_request' : 'invalid_dpop_proof'}", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
@@ -3253,7 +3280,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   function checkDpop(
     req: Request,
     res: Response,
-    input: { agentDid: string | undefined; path: string; ath?: string; resource: { type: 'token' | 'connection'; id: string } },
+    input: { agentDid: string | undefined; path: string; ath?: string; req?: string; resource: { type: 'token' | 'connection'; id: string } },
   ): boolean {
     if (!input.agentDid || !dpopBindingFor(input.agentDid)) {
       refuseDpop(res, 400, 'agent_key_required', 'A brokered handle is issued only to a did:key agent (agent_did) that proves its key with a DPoP proof (RFC 9449)');
@@ -3267,6 +3294,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         htm: 'POST',
         htu: `${publicBaseUri()}${input.path}`,
         ...(input.ath !== undefined ? { ath: input.ath } : {}),
+        ...(input.req !== undefined ? { req: input.req } : {}),
         seenJti: dpopJtiSeen,
       });
     if (result.ok) return true;
@@ -3692,6 +3720,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'Missing provider parameter' });
         return;
       }
+      if (!allowRawTokens) {
+        refuseRawToken(res);
+        return;
+      }
       const userId = requestUserId(req, res, { agent: true });
       if (userId === null) return;
       const vaultEntry = await getVaultEntry(slug, userId);
@@ -3850,12 +3882,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       // A handle bound to an agent key is usable only with a DPoP proof by
-      // that key, naming this request and this handle.
+      // that key, naming this handle and this exact request: the proof's
+      // cred_req covers the whole body (URL, method, upstream body, extra
+      // headers, quantities), so it authorizes one upstream call.
       if (delegation.dpopJkt) {
+        const requestHash = useRequestHashes.get(req) ?? null;
+        if (requestHash === null) {
+          res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
+          return;
+        }
         if (!checkDpop(req, res, {
           agentDid: delegation.agentDid,
           path: '/api/v1/use',
           ath: dpopAth(delegationId),
+          req: requestHash,
           resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
         })) return;
       } else if (requireDpop && !delegation.link) {
@@ -4107,6 +4147,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       if (!service || typeof service !== 'string') {
         res.status(400).json({ error: 'service is required' });
+        return;
+      }
+      if (tokenFormatFromBody(req) === 'raw' && !allowRawTokens) {
+        refuseRawToken(res);
         return;
       }
       const chainProfile = chainProfileRequest(req.body, agentDid);

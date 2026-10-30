@@ -72,7 +72,28 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
 11. Cred Link stays off unless `LINK_ENABLED` is set, and needs the SQLite
    vault. See the Link sections of the `@credninja/server` and
    `@credninja/link` READMEs before turning it on.
-12. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+12. Outside Cred Link (whose handles are bound as in item 14), give every agent
+   that uses brokered handles a did:key identity and pass it
+   to the client: `delegateHandle({ ..., agentIdentity })` and
+   `use({ ..., agentIdentity })` in `@credninja/sdk`, `agent_identity=` in
+   `cred-auth` and its integrations, `CRED_AGENT_DID` plus
+   `CRED_AGENT_PRIVATE_KEY_HEX` for `@credninja/mcp` in cloud mode. The server
+   binds each handle to that key and requires a DPoP proof (RFC 9449) for every
+   use, and each `/api/v1/use` proof covers that exact request (`cred_req`), so
+   a proof authorizes one upstream call. The client's base URL must be the
+   same origin and path as the server's `REDIRECT_BASE_URI`. During migration,
+   `CRED_REQUIRE_DPOP=false` keeps Bearer-bound handles (deprecated).
+13. Move callers that receive provider tokens to brokered handles: the server
+   no longer returns provider access tokens (`token_format: "raw"` on
+   `/api/v1/delegate`, `GET /api/token/:provider`, and Cred Link raw tokens all
+   get refused). `delegate()` / `tofuDelegate()` against a server, which ask
+   for raw tokens, fail until callers move to `delegateHandle()` and `use()`.
+   `CRED_ALLOW_RAW_TOKENS=true` restores them (deprecated); local mode, where
+   the vault runs in the agent's own process, is unchanged.
+14. Cred Link: with DPoP on, a Link handle is issued only to an agent bound to
+   a key (a TOFU agent signing with Web Bot Auth, or a verified principal),
+   not to the shared static Bearer identity (`server-agent`).
+15. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities

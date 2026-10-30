@@ -74,11 +74,11 @@ With `agent_identity`, the handle is issued to that identity's did:key (`agent_d
 
 Broker an upstream API request through the Cred server with a delegation handle. The server enforces service URL allowlists, delegated scopes, and any configured Guard policies before forwarding.
 
-Pass the same `agent_identity` the handle was issued to; the request then carries a `DPoP` proof that also commits to the handle (`ath`).
+Pass the same `agent_identity` the handle was issued to; the request then carries a `DPoP` proof that also commits to the handle (`ath`) and to this exact request (`cred_req`: URL, method, body and extra headers).
 
-### `create_dpop_proof(identity, htm, htu, handle=None) → str`
+### `create_dpop_proof(identity, htm, htu, handle=None, request_body=None) → str`
 
-Build a DPoP proof (compact JWS, `typ: dpop+jwt`, EdDSA) for one request, signed with the agent's Ed25519 key. `htu` is the request URL without query or fragment; `handle` adds `ath`, the base64url SHA-256 of the handle id. The client methods above call this for you; make a new proof per request, since the server rejects a replayed `jti` or a proof older than two minutes.
+Build a DPoP proof (compact JWS, `typ: dpop+jwt`, EdDSA) for one request, signed with the agent's Ed25519 key. `htu` is the request URL without query or fragment; `handle` adds `ath`, the base64url SHA-256 of the handle id. `request_body` adds `cred_req`, the base64url SHA-256 of the RFC 8785 (JCS) serialization of the whole JSON body sent, so the proof authorizes that one request; `use()` sets it for you. `canonical_json(value)` exposes the JCS serializer. The client methods above call this for you; make a new proof per request, since the server rejects a replayed `jti` or a proof older than two minutes.
 
 ### `get_user_connections(user_id, app_client_id=None) → list[Connection]`
 

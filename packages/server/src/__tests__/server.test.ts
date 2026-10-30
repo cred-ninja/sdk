@@ -32,7 +32,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
-    requireDpop: false,
+    requireDpop: false, allowRawTokens: true,
     providers: [
       {
         slug: 'google',
@@ -261,7 +261,7 @@ describe('@credninja/server', () => {
     it('supports a custom request verifier without a static agent token', async () => {
       const { app, tofu } = createServer(makeTestConfig({
         agentToken: undefined,
-        requireDpop: false,
+        requireDpop: false, allowRawTokens: true,
         agentRequestVerifier: (req) => {
           if (req.get('X-Test-Agent') === 'external-agent') {
             return {
@@ -296,7 +296,7 @@ describe('@credninja/server', () => {
     it('throws when no agent auth mode is configured', () => {
       expect(() => createServer(makeTestConfig({
         agentToken: undefined,
-        requireDpop: false,
+        requireDpop: false, allowRawTokens: true,
         agentRequestVerifier: undefined,
       }))).toThrow('Either agentToken or agentRequestVerifier is required');
     });
@@ -2333,7 +2333,7 @@ describe('@credninja/server', () => {
       const config = makeTestConfig({
         requireAgentIdentity: false,
         agentToken: undefined,
-        requireDpop: false,
+        requireDpop: false, allowRawTokens: true,
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,
         providers: [

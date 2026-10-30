@@ -6,6 +6,7 @@
  */
 
 import { generateKeyPair, KeyObject, verify, sign, randomUUID, createHash, createPrivateKey, createPublicKey } from 'node:crypto';
+import { canonicalJson } from '@credninja/attenuation';
 import { promisify } from 'node:util';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
@@ -403,14 +404,18 @@ export function createActorToken(identity: Pick<AgentIdentity, 'did' | 'privateK
  * request to the Cred server. `htm` and `htu` name the method and URL
  * (without query or fragment). With `handle`, the proof also commits to that
  * delegation handle (`ath`, base64url SHA-256 of the handle id), so it cannot
- * be replayed against another handle. The server rejects a proof older than
- * two minutes or a replayed `jti`; make a new one per request.
+ * be replayed against another handle. With `requestBody`, it also commits to
+ * that exact request (`cred_req`, base64url SHA-256 of its RFC 8785 form):
+ * a /api/v1/use proof authorizes one upstream call, with this URL, method,
+ * body, headers and quantities. The server rejects a proof older than two
+ * minutes or a replayed `jti`; make a new one per request.
  */
 export function createDpopProof(
   identity: Pick<AgentIdentity, 'did' | 'privateKey'>,
   htm: string,
   htu: string,
   handle?: string,
+  requestBody?: unknown,
 ): string {
   const key = createPrivateKey({
     key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(identity.privateKey)]),
@@ -425,6 +430,7 @@ export function createDpopProof(
     iat: Math.floor(Date.now() / 1000),
     jti: randomUUID(),
     ...(handle !== undefined ? { ath: createHash('sha256').update(handle, 'ascii').digest('base64url') } : {}),
+    ...(requestBody !== undefined ? { cred_req: createHash('sha256').update(canonicalJson(requestBody), 'utf8').digest('base64url') } : {}),
   })}`;
   return `${signingInput}.${sign(null, Buffer.from(signingInput, 'utf8'), key).toString('base64url')}`;
 }
