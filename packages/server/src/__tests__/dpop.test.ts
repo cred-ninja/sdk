@@ -75,6 +75,16 @@ async function setup(overrides?: Partial<ServerConfig>, agents: AgentIdentity[] 
 
 type App = Parameters<typeof request>[0];
 
+async function setupWithVault(overrides?: Partial<ServerConfig>) {
+  const { app, vault } = createServer(makeConfig(overrides));
+  await vault.init();
+  return { app, vault };
+}
+
+function makeServer(overrides?: Partial<ServerConfig>) {
+  return createServer(makeConfig(overrides));
+}
+
 function delegate(app: App, agentDid: string | undefined, proof?: string, body: Record<string, unknown> = {}) {
   const req = request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${TEST_TOKEN}`);
   if (proof !== undefined) req.set('DPoP', proof);
@@ -577,5 +587,61 @@ describe('DPoP together with Web Bot Auth', () => {
       .send(useBody(id));
     expect(res.status).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('lifetimes (Section 10.6) and the revocation path (Section 7)', () => {
+  function claimsOf(jws: string): Record<string, number> {
+    return JSON.parse(Buffer.from(jws.split('.')[1]!, 'base64url').toString('utf8'));
+  }
+
+  it('issues receipts for 15 minutes by default, and handles no longer', async () => {
+    const agent = await generateAgentIdentity();
+    const { app } = await setup();
+    const res = await delegateAs(app, agent);
+    expect(res.status).toBe(200);
+    const receipt = claimsOf(res.body.receipt);
+    expect(receipt.exp! - receipt.iat!).toBe(900);
+    expect(res.body.expires_in).toBeLessThanOrEqual(900);
+  });
+
+  it('never lets a handle outlive the provider token it brokers', async () => {
+    const agent = await generateAgentIdentity();
+    const { app, vault } = await setupWithVault();
+    await vault.store({
+      provider: 'google',
+      userId: 'alice',
+      accessToken: 'ya29.short',
+      expiresAt: new Date(Date.now() + 120 * 1000),
+      scopes: ['openid', 'email', 'profile'],
+    });
+    const res = await delegateAs(app, agent);
+    expect(res.status).toBe(200);
+    expect(res.body.expires_in).toBeLessThanOrEqual(120);
+  });
+
+  it('refuses a configured lifetime over 1 hour', () => {
+    expect(() => makeServer({ receiptTtlSeconds: 3601 })).toThrow(/at most 3600/);
+    expect(() => makeServer({ receiptTtlSeconds: 3600 })).not.toThrow();
+  });
+
+  it('revokes at DELETE /delegation/{jti} within 1 second, and the next use is refused', async () => {
+    const agent = await generateAgentIdentity();
+    const { app } = await setup();
+    const minted = await delegateAs(app, agent);
+    const id = minted.body.delegation_id as string;
+    expect(claimsOf(minted.body.receipt).jti).toBe(id as unknown as number);
+    const started = Date.now();
+    const revoked = await request(app).delete(`/delegation/${id}`).query({ user_id: 'alice' }).set('Authorization', `Bearer ${TEST_TOKEN}`);
+    const wall = Date.now() - started;
+    expect(revoked.status).toBe(200);
+    expect(revoked.body.revoked_count).toBe(1);
+    expect(revoked.body.elapsed_ms).toBeLessThan(1000);
+    expect(wall).toBeLessThan(1000);
+    const upstream = mockUpstream();
+    const res = await useAs(app, agent, id);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('delegation_revoked');
+    expect(upstream).not.toHaveBeenCalled();
   });
 });

@@ -203,8 +203,10 @@ interface VerifiedWebBotAuthIdentity {
 const ADMIN_SESSION_COOKIE = 'cred_admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
 const PROVIDER_REVOKE_TIMEOUT_MS = 5_000;
-const DEFAULT_DELEGATION_TTL_SECONDS = 900;
-const DEFAULT_RECEIPT_TTL_SECONDS = 3600;
+// draft-sweeney-wimse-credential-delegation Section 10.6: 15 minutes by
+// default, never more than 1 hour.
+const DEFAULT_RECEIPT_TTL_SECONDS = 900;
+const MAX_RECEIPT_TTL_SECONDS = 3600;
 const DEFAULT_DELEGATION_GRANT_TTL_SECONDS = 60;
 const RECEIPT_CLOCK_SKEW_SECONDS = 60;
 const MAX_BROKER_RESPONSE_BYTES = 32_768;
@@ -1610,6 +1612,10 @@ export function createServer(config: ServerConfig) {
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
   }
+  if (config.receiptTtlSeconds !== undefined
+    && (!Number.isInteger(config.receiptTtlSeconds) || config.receiptTtlSeconds <= 0 || config.receiptTtlSeconds > MAX_RECEIPT_TTL_SECONDS)) {
+    throw new Error(`receiptTtlSeconds must be a positive integer of at most ${MAX_RECEIPT_TTL_SECONDS} (1 hour)`);
+  }
   if (config.requireDpop === false) {
     console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false issues brokered handles that any holder of the handle id and the deployment Bearer credential can use. Agents should prove their did:key with a DPoP proof; this setting will be removed.');
   }
@@ -1621,6 +1627,16 @@ export function createServer(config: ServerConfig) {
 
   function getReceiptTtlSeconds(): number {
     return config.receiptTtlSeconds ?? DEFAULT_RECEIPT_TTL_SECONDS;
+  }
+
+  /**
+   * A handle lives no longer than the provider token it brokers and no
+   * longer than a receipt (15 minutes by default, 1 hour at most).
+   */
+  function handleLifetimeSeconds(providerExpiresAt: Date | undefined | null): number {
+    const cap = getReceiptTtlSeconds();
+    if (!providerExpiresAt) return cap;
+    return Math.max(1, Math.min(cap, Math.floor((providerExpiresAt.getTime() - Date.now()) / 1000)));
   }
 
   function getReceiptAudience(): string | undefined {
@@ -4355,9 +4371,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
-      const expiresIn = entry.expiresAt
-        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_DELEGATION_TTL_SECONDS;
+      const expiresIn = handleLifetimeSeconds(entry.expiresAt);
 
       const recorded = await recordIssuedDelegation(res, {
         id: delegationId,
@@ -5527,9 +5541,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // ── Issue child receipt ──────────────────────────────────────────────
 
       // The child's handle, like its receipt, ends no later than the parent.
-      const entryExpiresIn = entry.expiresAt
-        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_DELEGATION_TTL_SECONDS;
+      const entryExpiresIn = handleLifetimeSeconds(entry.expiresAt);
       const expiresIn = parentExpiryBound !== undefined
         ? Math.max(1, Math.min(entryExpiresIn, parentExpiryBound - nowSecondsForChild))
         : entryExpiresIn;
@@ -5802,9 +5814,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const entry = vaultEntry.entry;
-      const expiresIn = entry.expiresAt
-        ? Math.max(1, Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000))
-        : DEFAULT_DELEGATION_TTL_SECONDS;
+      const expiresIn = handleLifetimeSeconds(entry.expiresAt);
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -5863,7 +5873,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * resolved user, otherwise 404. Idempotent: revoking again reports
    * revoked_count 0.
    */
-  app.delete('/api/v1/delegations/:delegationId', revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  // DELETE /delegation/{jti} is the path draft-sweeney-wimse-credential-delegation
+  // Section 7 names; the id is the receipt jti. Same handler, same checks.
+  app.delete(['/api/v1/delegations/:delegationId', '/delegation/:delegationId'], revokeRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const delegationId = routeParam(req.params.delegationId);
       if (!delegationId) {

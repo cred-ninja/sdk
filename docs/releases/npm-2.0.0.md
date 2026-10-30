@@ -93,7 +93,11 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
 14. Cred Link: with DPoP on, a Link handle is issued only to an agent bound to
    a key (a TOFU agent signing with Web Bot Auth, or a verified principal),
    not to the shared static Bearer identity (`server-agent`).
-15. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+15. Delegations are shorter-lived: receipts default to 15 minutes, and
+   `RECEIPT_TTL_SECONDS` may not exceed 3600. Callers that held handles for
+   longer must request new ones; legacy receipts without `exp` also expire
+   after this lifetime.
+16. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities

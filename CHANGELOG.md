@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed: delegation lifetimes and the draft's revocation path (`@credninja/server`)
+
+- Receipts default to 15 minutes (was 1 hour) and `RECEIPT_TTL_SECONDS`
+  above 3600 fails at startup, as Section 10.6 of
+  draft-sweeney-wimse-credential-delegation requires. A brokered handle
+  lives no longer than its receipt lifetime or the provider token it
+  brokers. Legacy receipts minted without `exp` now age out at `iat` plus
+  the same lifetime, 15 minutes by default.
+- `DELETE /delegation/:delegationId`, the path the draft names, revokes
+  exactly as `DELETE /api/v1/delegations/:delegationId` does. A test
+  measures a single revocation under 1 second, after which the handle is
+  refused.
+
 ### BREAKING: no provider tokens, and one proof per upstream call
 
 - `@credninja/server` no longer hands provider access tokens to callers:
