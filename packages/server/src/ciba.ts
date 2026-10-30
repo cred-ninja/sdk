@@ -18,8 +18,12 @@ export const CIBA_GRANT_TYPE = 'urn:openid:params:grant-type:ciba';
 export const DEFAULT_CIBA_EXPIRES_SECONDS = 300;
 /** The minimum seconds between token polls (CIBA Section 7.3 `interval`). */
 export const DEFAULT_CIBA_INTERVAL_SECONDS = 5;
-/** The most requests held at once, so a flood of asks cannot grow memory without bound. */
+/** The most live requests held at once, so a flood of asks cannot grow memory without bound. */
 export const DEFAULT_MAX_APPROVAL_REQUESTS = 10_000;
+/** The most live requests one agent, or one subject, may hold: no one fills the shared pool. */
+export const DEFAULT_MAX_APPROVAL_REQUESTS_PER_PARTY = 20;
+/** How long a finished request is kept for the agent's last poll. */
+const FINISHED_RETENTION_MS = 60_000;
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'redeemed';
 
@@ -45,6 +49,8 @@ export interface ApprovalRequest {
   /** Who has approved so far, by role. */
   approvals: { subject?: string; admin?: string };
   deniedBy?: string;
+  /** When the request was denied or redeemed. */
+  finishedAt?: number;
 }
 
 export type PollResult =
@@ -57,19 +63,35 @@ export class ApprovalStore {
   private readonly linkKey: Buffer;
 
   private readonly maxRequests: number;
+  private readonly maxPerParty: number;
 
-  constructor(linkKey: Buffer = crypto.randomBytes(32), opts: { maxRequests?: number } = {}) {
+  constructor(linkKey: Buffer = crypto.randomBytes(32), opts: { maxRequests?: number; maxPerParty?: number } = {}) {
     this.linkKey = linkKey;
     this.maxRequests = opts.maxRequests ?? DEFAULT_MAX_APPROVAL_REQUESTS;
+    this.maxPerParty = opts.maxPerParty ?? DEFAULT_MAX_APPROVAL_REQUESTS_PER_PARTY;
   }
 
-  /** Whether another request can be held now. */
-  hasCapacity(now = Date.now()): boolean {
+  /**
+   * Whether another request by this agent for this subject can be held
+   * now. Only live requests (undecided, or approved and not yet redeemed)
+   * count, overall and per agent and per subject.
+   */
+  hasCapacity(party: { agentDid: string; subject: string }, now = Date.now()): boolean {
     this.sweep(now);
-    return this.requests.size < this.maxRequests;
+    let live = 0;
+    let byAgent = 0;
+    let bySubject = 0;
+    for (const request of this.requests.values()) {
+      const status = this.get(request.authReqId, now)?.status;
+      if (status !== 'pending' && status !== 'approved') continue;
+      live += 1;
+      if (request.agentDid === party.agentDid) byAgent += 1;
+      if (request.subject === party.subject) bySubject += 1;
+    }
+    return live < this.maxRequests && byAgent < this.maxPerParty && bySubject < this.maxPerParty;
   }
 
-  create(input: Omit<ApprovalRequest, 'authReqId' | 'createdAt' | 'expiresAt' | 'intervalSeconds' | 'lastPolledAt' | 'status' | 'approvals'>, opts: {
+  create(input: Omit<ApprovalRequest, 'authReqId' | 'createdAt' | 'expiresAt' | 'intervalSeconds' | 'lastPolledAt' | 'status' | 'approvals' | 'deniedBy' | 'finishedAt'>, opts: {
     expiresInSeconds?: number;
     intervalSeconds?: number;
     now?: number;
@@ -116,6 +138,7 @@ export class ApprovalStore {
     if (decision === 'deny') {
       request.status = 'denied';
       request.deniedBy = by;
+      request.finishedAt = now;
       return request;
     }
     request.approvals[role] = by;
@@ -138,6 +161,7 @@ export class ApprovalStore {
       if (filter.agentDid !== undefined && request.agentDid !== filter.agentDid) continue;
       request.status = 'denied';
       request.deniedBy = by;
+      request.finishedAt = now;
       ended.push(request.authReqId);
     }
     return ended;
@@ -164,6 +188,7 @@ export class ApprovalStore {
       return { ok: false, error: 'authorization_pending', description: 'Waiting for approval' };
     }
     request.status = 'redeemed';
+    request.finishedAt = now;
     return { ok: true, request };
   }
 
@@ -181,8 +206,11 @@ export class ApprovalStore {
 
   private sweep(now: number): void {
     for (const [id, request] of this.requests) {
-      // Keep decided requests long enough for a last poll, then forget them.
-      if (now - request.expiresAt > 3_600_000) this.requests.delete(id);
+      const status = this.get(id, now)?.status;
+      // A live request stays; a finished one is kept briefly for the
+      // agent's last poll (its denial or expiry), then forgotten.
+      if (status === 'pending' || status === 'approved') continue;
+      if (now - Math.min(request.expiresAt, request.finishedAt ?? request.expiresAt) > FINISHED_RETENTION_MS) this.requests.delete(id);
     }
   }
 }

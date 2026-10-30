@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 import crypto, { generateKeyPairSync, sign } from 'crypto';
 import { createDpopProof } from '@credninja/sdk';
+import { CredGuard, scopeFilterPolicy } from '@credninja/guard';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
 import { newAgent, delegateAs, exerciseAs, type App, type AgentIdentity } from './token-helpers.js';
@@ -316,6 +317,18 @@ describe('review regressions', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_constraints');
     expect(hooks).toHaveLength(0);
+  });
+
+  it('applies Guard policy at /bc-authorize, as at /api/v1/delegate', async () => {
+    const agent = await newAgent();
+    const guard = new CredGuard({ policies: [scopeFilterPolicy({ allowedScopes: { google: ['openid'] } })] });
+    const { app } = await setup(agent, 'subject', { guard });
+    const hooks = mockNetwork();
+    const res = await bcAuthorize(app, agent, { scopes: ['email'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Request denied by guard policy');
+    expect(hooks).toHaveLength(0);
+    expect((await bcAuthorize(app, agent, { scopes: ['openid'] })).status).toBe(200);
   });
 
   it('ends the request with 502 when the webhook answers with an error', async () => {

@@ -6444,7 +6444,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * Section 7.1) for a delegation that needs approval. The agent proves its
    * did:key with a DPoP proof; the approval is bound to that key.
    */
-  app.post('/bc-authorize', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  // Guard policy decides here as on /api/v1/delegate: an approval never
+  // covers more than a direct delegation would be allowed.
+  const bcAuthorizeHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
+  if (guardMiddleware) bcAuthorizeHandlers.push(assignProviderFromBody, guardMiddleware);
+  app.post('/bc-authorize', ...bcAuthorizeHandlers, async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const loginHint = body.login_hint;
@@ -6452,6 +6456,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const agentDid = body.agent_did;
       if (typeof loginHint !== 'string' || !loginHint || typeof service !== 'string' || !service || typeof agentDid !== 'string') {
         res.status(400).json({ error: 'invalid_request', error_description: 'login_hint, service and agent_did are required' });
+        return;
+      }
+      if (body.connection_id !== undefined) {
+        res.status(400).json({ error: 'invalid_request', error_description: 'Cred Link connections are not approved through CIBA' });
         return;
       }
       if (body.user_id !== undefined && body.user_id !== loginHint) {
@@ -6499,7 +6507,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_binding_message', error_description: 'binding_message must be a string of at most 100 characters' });
         return;
       }
-      const requestedScopes = normalizeRequestedScopes(body.scopes);
+      const guardDecision = (req as any).guardDecision as GuardDecision | undefined;
+      const requestedScopes = guardDecision?.effectiveScopes ?? normalizeRequestedScopes(body.scopes);
       const agentCheck = await didAgentCheck(agentDid, requestedScopes);
       if (!agentCheck.ok) {
         res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });
@@ -6520,7 +6529,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(503).json({ error: 'approval_unavailable', error_description: 'No channel is configured to ask the subject (CRED_APPROVAL_WEBHOOK_URL or an external CIBA provider)' });
         return;
       }
-      if (!approvals.hasCapacity()) {
+      if (!approvals.hasCapacity({ agentDid, subject })) {
         res.status(503).json({ error: 'approval_unavailable', error_description: 'Too many approval requests are pending; try again later' });
         return;
       }

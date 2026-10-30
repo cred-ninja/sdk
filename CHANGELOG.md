@@ -31,6 +31,9 @@
   not yet redeemed. A webhook that answers with an error ends the request
   (`502`). A did:key agent's Permission is applied even when TOFU fields
   accompany the request, and its rate limit counts approval-gated requests.
+  Guard policy applies at `/bc-authorize` as at `/api/v1/delegate`. Live
+  approval requests are capped overall (10,000) and per agent and per
+  subject (20); finished ones are dropped a minute after.
 - `@credninja/vault`: updating a Permission with `requiresApproval: true`
   and no `approver` keeps the approver already set.
 - Consent records are kept `CONSENT_RETENTION_DAYS` (at least 90, the

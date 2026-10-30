@@ -40,10 +40,31 @@ describe('ApprovalStore', () => {
     expect(store.poll(unredeemed.authReqId, 'jkt_a', t0 + 61_000)).toMatchObject({ ok: false, error: 'expired_token' });
   });
 
-  it('refuses new requests past its capacity', () => {
+  it('caps live requests per agent and per subject, and frees finished ones', () => {
+    const store = new ApprovalStore(undefined, { maxPerParty: 2 });
+    const t0 = 3_000_000;
+    const a = { agentDid: base.agentDid, subject: 'alice' };
+    store.create(base, { now: t0 });
+    const second = store.create(base, { now: t0 });
+    expect(store.hasCapacity(a, t0)).toBe(false);
+    // Another agent for another subject is not held back by this one.
+    expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'bob' }, t0)).toBe(true);
+    // The same subject through another agent is.
+    expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'alice' }, t0)).toBe(false);
+    // And the same agent asking for another subject is.
+    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'bob' }, t0)).toBe(false);
+    store.decide(second.authReqId, 'subject', 'deny', 'alice', t0);
+    expect(store.hasCapacity(a, t0)).toBe(true);
+    // A denied request is kept for the last poll, then forgotten.
+    expect(store.poll(second.authReqId, 'jkt_a', t0 + 1000)).toMatchObject({ error: 'access_denied' });
+    store.hasCapacity(a, t0 + 61_000);
+    expect(store.get(second.authReqId, t0 + 61_000)).toBeNull();
+  });
+
+  it('caps live requests overall', () => {
     const store = new ApprovalStore(undefined, { maxRequests: 1 });
     store.create(base);
-    expect(store.hasCapacity()).toBe(false);
+    expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'bob' })).toBe(false);
   });
 
   it('needs both roles under approver both, and refuses a role the permission does not name', () => {
