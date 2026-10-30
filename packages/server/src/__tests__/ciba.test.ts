@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ApprovalStore, askExternalProvider, CIBA_GRANT_TYPE } from '../ciba.js';
+import { ApprovalCapacityError, ApprovalStore, askExternalProvider, CIBA_GRANT_TYPE } from '../ciba.js';
 
 const base = {
   subject: 'alice', agentDid: 'did:key:z6MkAgent', jkt: 'jkt_a', service: 'github', appClientId: 'local',
@@ -40,24 +40,29 @@ describe('ApprovalStore', () => {
     expect(store.poll(unredeemed.authReqId, 'jkt_a', t0 + 61_000)).toMatchObject({ ok: false, error: 'expired_token' });
   });
 
-  it('caps live requests per agent and per subject, and frees finished ones', () => {
-    const store = new ApprovalStore(undefined, { maxPerParty: 2 });
+  it('caps live requests per agent, per subject and per pair, and frees finished ones', () => {
+    const store = new ApprovalStore(undefined, { maxPerAgent: 3, maxPerSubject: 3, maxPerPair: 2 });
     const t0 = 3_000_000;
-    const a = { agentDid: base.agentDid, subject: 'alice' };
+    const other = 'did:key:z6MkOther';
     store.create(base, { now: t0 });
     const second = store.create(base, { now: t0 });
-    expect(store.hasCapacity(a, t0)).toBe(false);
-    // Another agent for another subject is not held back by this one.
-    expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'bob' }, t0)).toBe(true);
-    // The same subject through another agent is.
-    expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'alice' }, t0)).toBe(false);
-    // And the same agent asking for another subject is.
-    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'bob' }, t0)).toBe(false);
+    // One agent has its share of alice: it cannot ask her again...
+    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'alice' }, t0)).toBe(false);
+    expect(() => store.create(base, { now: t0 })).toThrow(ApprovalCapacityError);
+    // ...but another agent still can, and it can still ask someone else.
+    expect(store.hasCapacity({ agentDid: other, subject: 'alice' }, t0)).toBe(true);
+    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'bob' }, t0)).toBe(true);
+    store.create({ ...base, subject: 'bob' }, { now: t0 });
+    // Now the agent holds its own cap of 3, for any subject.
+    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'carol' }, t0)).toBe(false);
+    store.create({ ...base, agentDid: other }, { now: t0 });
+    // And alice holds her cap of 3, from any agent.
+    expect(store.hasCapacity({ agentDid: 'did:key:z6MkThird', subject: 'alice' }, t0)).toBe(false);
     store.decide(second.authReqId, 'subject', 'deny', 'alice', t0);
-    expect(store.hasCapacity(a, t0)).toBe(true);
+    expect(store.hasCapacity({ agentDid: base.agentDid, subject: 'alice' }, t0)).toBe(true);
     // A denied request is kept for the last poll, then forgotten.
     expect(store.poll(second.authReqId, 'jkt_a', t0 + 1000)).toMatchObject({ error: 'access_denied' });
-    store.hasCapacity(a, t0 + 61_000);
+    store.hasCapacity({ agentDid: base.agentDid, subject: 'alice' }, t0 + 61_000);
     expect(store.get(second.authReqId, t0 + 61_000)).toBeNull();
   });
 
@@ -65,6 +70,7 @@ describe('ApprovalStore', () => {
     const store = new ApprovalStore(undefined, { maxRequests: 1 });
     store.create(base);
     expect(store.hasCapacity({ agentDid: 'did:key:z6MkOther', subject: 'bob' })).toBe(false);
+    expect(() => store.create({ ...base, agentDid: 'did:key:z6MkOther', subject: 'bob' })).toThrow(ApprovalCapacityError);
   });
 
   it('needs both roles under approver both, and refuses a role the permission does not name', () => {

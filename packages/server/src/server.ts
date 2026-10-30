@@ -78,7 +78,7 @@ import {
 import { verifyReceiptChain } from './receipt-chain.js';
 import { capabilitiesAllow, capabilitiesSubsumed, matchedPageParam, validateCapabilities } from './capabilities.js';
 import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWithinPrefix, meterSide } from './metering.js';
-import { ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
+import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -3084,8 +3084,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * on the token delegation route. Guard runs after agent auth, before token
    * retrieval. Denied requests get 403 with policy details.
    */
+  // The stored scopes a request naming none would be granted, shown to
+  // Guard in its place (exposeStoredScopesToGuard).
+  const storedScopesForGuard = new WeakMap<Request, string[]>();
+  /** The scopes a request names, as the Guard middleware reads them. */
+  function scopesNamedBy(req: Request): string[] {
+    const scopes = req.body?.scopes || req.query.scopes;
+    if (Array.isArray(scopes)) return scopes;
+    if (typeof scopes === 'string') return scopes.split(',').map((scope) => scope.trim()).filter(Boolean);
+    return [];
+  }
   const guardMiddleware = config.guard
     ? createExpressMiddleware(config.guard, {
+        extractScopes: (req) => storedScopesForGuard.get(req) ?? scopesNamedBy(req),
         // Link context from verified state only (set by the Link precheck).
         resolveLinkContext: (req) => linkService?.resolveGuardLinkContext(req),
         onDeny: (_req, res, decision) => {
@@ -3104,6 +3115,32 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         },
       })
     : null;
+
+  /**
+   * A request naming no scopes asks for every stored scope. Guard decides
+   * on the scopes it is shown, so show it those: its scope policies then
+   * filter what would actually be granted. `subject` says where the user
+   * id is named; a request whose user or connection cannot be resolved here
+   * goes on unchanged and is refused by the route.
+   */
+  function exposeStoredScopesToGuard(subject: 'user_id' | 'login_hint'): express.RequestHandler {
+    return async (req, _res, next) => {
+      try {
+        const service = typeof req.params.provider === 'string' ? req.params.provider : undefined;
+        if (service && scopesNamedBy(req).length === 0 && req.body?.connection_id === undefined) {
+          const explicit = subject === 'login_hint' ? explicitUserIdValue(req.body?.login_hint) : explicitRequestUserId(req);
+          const resolved = resolveUserId(req, { explicit, agent: true });
+          if (resolved.ok && !isReservedLinkVaultUserId(resolved.userId)) {
+            const stored = await vault.getStored({ provider: service, userId: resolved.userId });
+            if (stored) storedScopesForGuard.set(req, stored.scopes ?? []);
+          }
+        }
+      } catch {
+        // Nothing shown: the route decides, and refuses if Guard allowed nothing.
+      }
+      next();
+    };
+  }
 
   const assignProviderFromBody: express.RequestHandler = (req, res, next) => {
     const service = req.body?.service;
@@ -3818,6 +3855,24 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       .filter((scope) => !permission || permission.allowedScopes.some((allowed) => scopeEquivalent(allowed, scope)));
   }
 
+  /**
+   * The scopes a request asks for once Guard has decided, or null after
+   * refusing. Guard was shown the scopes named, or for a request naming
+   * none the stored scopes it would be granted; what Guard allowed is the
+   * request. An empty request means every stored scope, so a decision that
+   * allows none is refused, never read as "everything".
+   */
+  function guardedRequestedScopes(req: Request, res: Response, requested: string[] | undefined): string[] | undefined | null {
+    const decision = (req as any).guardDecision as GuardDecision | undefined;
+    if (!decision) return requested;
+    const effective = decision.effectiveScopes ?? requested;
+    if (!effective || effective.length === 0) {
+      res.status(403).json({ error: 'invalid_scope', message: 'Guard policy allows none of the scopes this request would be granted' });
+      return null;
+    }
+    return effective;
+  }
+
   /** The roles an approver setting needs. */
   function approverRoles(approver: Permission['approver']): Array<'subject' | 'admin'> {
     return approver === 'both' ? ['subject', 'admin'] : [approver ?? 'subject'];
@@ -3864,7 +3919,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   const tokenRouteHandlers: Array<express.RequestHandler> = [tokenRateLimiter, requireAgentAuth, verifyWebBotAuth];
   if (guardMiddleware) {
-    tokenRouteHandlers.push(guardMiddleware);
+    tokenRouteHandlers.push(exposeStoredScopesToGuard('user_id'), guardMiddleware);
   }
 
   // If you add guardMiddleware to a new agent-facing route here, also add its
@@ -3899,7 +3954,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     delegateRouteHandlers.push(linkService.delegatePrecheck);
   }
   if (guardMiddleware) {
-    delegateRouteHandlers.push(assignProviderFromBody, guardMiddleware);
+    delegateRouteHandlers.push(assignProviderFromBody, exposeStoredScopesToGuard('user_id'), guardMiddleware);
   }
 
   const subdelegateRouteHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(true)];
@@ -3929,8 +3984,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // Return the delegated token — never the refresh token
       const guardDecision = (req as any).guardDecision;
-      const requestedScopes = normalizeRequestedScopes(req.query.scopes);
-      const effectiveRequestedScopes = guardDecision?.effectiveScopes ?? requestedScopes;
+      const effectiveRequestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(req.query.scopes));
+      if (effectiveRequestedScopes === null) return;
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(entry.scopes ?? [], effectiveRequestedScopes);
 
       if (widenedScopes.length > 0) {
@@ -4722,7 +4777,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const { entry } = vaultEntry;
       const guardDecision = (req as any).guardDecision as GuardDecision | undefined;
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
-      const effectiveRequestedScopes: string[] | undefined = guardDecision?.effectiveScopes ?? requestedScopes;
+      const effectiveRequestedScopes = guardedRequestedScopes(req, res, requestedScopes);
+      if (effectiveRequestedScopes === null) return;
       const tokenFormat = tokenFormatFromBody(req);
 
       let principalId: string | null = null;
@@ -6447,7 +6503,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   // Guard policy decides here as on /api/v1/delegate: an approval never
   // covers more than a direct delegation would be allowed.
   const bcAuthorizeHandlers: Array<express.RequestHandler> = [subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth];
-  if (guardMiddleware) bcAuthorizeHandlers.push(assignProviderFromBody, guardMiddleware);
+  if (guardMiddleware) bcAuthorizeHandlers.push(assignProviderFromBody, exposeStoredScopesToGuard('login_hint'), guardMiddleware);
   app.post('/bc-authorize', ...bcAuthorizeHandlers, async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -6507,8 +6563,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_binding_message', error_description: 'binding_message must be a string of at most 100 characters' });
         return;
       }
-      const guardDecision = (req as any).guardDecision as GuardDecision | undefined;
-      const requestedScopes = guardDecision?.effectiveScopes ?? normalizeRequestedScopes(body.scopes);
+      const requestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(body.scopes));
+      if (requestedScopes === null) return;
       const agentCheck = await didAgentCheck(agentDid, requestedScopes);
       if (!agentCheck.ok) {
         res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });
@@ -6555,18 +6611,25 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         }
         capabilities = checked.details;
       }
-      const request = approvals.create({
-        subject,
-        agentDid,
-        jkt,
-        service,
-        appClientId: typeof body.appClientId === 'string' ? body.appClientId : 'local',
-        scopes: grantedScopes,
-        ...(capabilities ? { capabilities } : {}),
-        constraints: constraints.constraints,
-        ...(typeof body.binding_message === 'string' ? { bindingMessage: body.binding_message } : {}),
-        approver,
-      });
+      let request: ApprovalRequest;
+      try {
+        request = approvals.create({
+          subject,
+          agentDid,
+          jkt,
+          service,
+          appClientId: typeof body.appClientId === 'string' ? body.appClientId : 'local',
+          scopes: grantedScopes,
+          ...(capabilities ? { capabilities } : {}),
+          constraints: constraints.constraints,
+          ...(typeof body.binding_message === 'string' ? { bindingMessage: body.binding_message } : {}),
+          approver,
+        });
+      } catch (err) {
+        if (!(err instanceof ApprovalCapacityError)) throw err;
+        res.status(503).json({ error: 'approval_unavailable', error_description: 'Too many approval requests are pending; try again later' });
+        return;
+      }
       if (approver !== 'admin') {
         try {
           await askSubject(request);

@@ -32,8 +32,14 @@
   (`502`). A did:key agent's Permission is applied even when TOFU fields
   accompany the request, and its rate limit counts approval-gated requests.
   Guard policy applies at `/bc-authorize` as at `/api/v1/delegate`. Live
-  approval requests are capped overall (10,000) and per agent and per
-  subject (20); finished ones are dropped a minute after.
+  approval requests are capped overall (10,000), per agent (20), per
+  subject (50) and per agent for one subject (5); the cap is checked as the
+  request is stored. Finished requests are dropped a minute after.
+- `@credninja/server`: under a Guard, a request naming no scopes (meaning
+  every stored scope) now shows Guard the stored scopes, on
+  `/api/v1/delegate`, `/bc-authorize` and `GET /api/token/:provider`, so
+  scope policies decide on what would be granted; a decision that allows
+  no scope is refused (`403 invalid_scope`), never read as "everything".
 - `@credninja/vault`: updating a Permission with `requiresApproval: true`
   and no `approver` keeps the approver already set.
 - Consent records are kept `CONSENT_RETENTION_DAYS` (at least 90, the

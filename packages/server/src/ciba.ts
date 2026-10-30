@@ -20,8 +20,20 @@ export const DEFAULT_CIBA_EXPIRES_SECONDS = 300;
 export const DEFAULT_CIBA_INTERVAL_SECONDS = 5;
 /** The most live requests held at once, so a flood of asks cannot grow memory without bound. */
 export const DEFAULT_MAX_APPROVAL_REQUESTS = 10_000;
-/** The most live requests one agent, or one subject, may hold: no one fills the shared pool. */
-export const DEFAULT_MAX_APPROVAL_REQUESTS_PER_PARTY = 20;
+/** The most live requests one agent may hold, across subjects. */
+export const DEFAULT_MAX_APPROVAL_REQUESTS_PER_AGENT = 20;
+/** The most live requests waiting on one subject, across agents. */
+export const DEFAULT_MAX_APPROVAL_REQUESTS_PER_SUBJECT = 50;
+/** The most live requests one agent may hold for one subject: its share of that subject's quota. */
+export const DEFAULT_MAX_APPROVAL_REQUESTS_PER_PAIR = 5;
+
+/** Thrown by ApprovalStore.create when a cap is reached. */
+export class ApprovalCapacityError extends Error {
+  constructor() {
+    super('Too many approval requests are pending');
+    this.name = 'ApprovalCapacityError';
+  }
+}
 /** How long a finished request is kept for the agent's last poll. */
 const FINISHED_RETENTION_MS = 60_000;
 
@@ -62,33 +74,47 @@ export class ApprovalStore {
   private readonly requests = new Map<string, ApprovalRequest>();
   private readonly linkKey: Buffer;
 
-  private readonly maxRequests: number;
-  private readonly maxPerParty: number;
+  private readonly caps: { total: number; perAgent: number; perSubject: number; perPair: number };
 
-  constructor(linkKey: Buffer = crypto.randomBytes(32), opts: { maxRequests?: number; maxPerParty?: number } = {}) {
+  constructor(linkKey: Buffer = crypto.randomBytes(32), opts: {
+    maxRequests?: number;
+    maxPerAgent?: number;
+    maxPerSubject?: number;
+    maxPerPair?: number;
+  } = {}) {
     this.linkKey = linkKey;
-    this.maxRequests = opts.maxRequests ?? DEFAULT_MAX_APPROVAL_REQUESTS;
-    this.maxPerParty = opts.maxPerParty ?? DEFAULT_MAX_APPROVAL_REQUESTS_PER_PARTY;
+    this.caps = {
+      total: opts.maxRequests ?? DEFAULT_MAX_APPROVAL_REQUESTS,
+      perAgent: opts.maxPerAgent ?? DEFAULT_MAX_APPROVAL_REQUESTS_PER_AGENT,
+      perSubject: opts.maxPerSubject ?? DEFAULT_MAX_APPROVAL_REQUESTS_PER_SUBJECT,
+      perPair: opts.maxPerPair ?? DEFAULT_MAX_APPROVAL_REQUESTS_PER_PAIR,
+    };
   }
 
   /**
    * Whether another request by this agent for this subject can be held
    * now. Only live requests (undecided, or approved and not yet redeemed)
-   * count, overall and per agent and per subject.
+   * count: overall, per agent, per subject, and per agent for one subject,
+   * so no single agent can use up a subject's quota.
    */
   hasCapacity(party: { agentDid: string; subject: string }, now = Date.now()): boolean {
     this.sweep(now);
     let live = 0;
     let byAgent = 0;
     let bySubject = 0;
+    let byPair = 0;
     for (const request of this.requests.values()) {
       const status = this.get(request.authReqId, now)?.status;
       if (status !== 'pending' && status !== 'approved') continue;
       live += 1;
-      if (request.agentDid === party.agentDid) byAgent += 1;
-      if (request.subject === party.subject) bySubject += 1;
+      const sameAgent = request.agentDid === party.agentDid;
+      const sameSubject = request.subject === party.subject;
+      if (sameAgent) byAgent += 1;
+      if (sameSubject) bySubject += 1;
+      if (sameAgent && sameSubject) byPair += 1;
     }
-    return live < this.maxRequests && byAgent < this.maxPerParty && bySubject < this.maxPerParty;
+    return live < this.caps.total && byAgent < this.caps.perAgent
+      && bySubject < this.caps.perSubject && byPair < this.caps.perPair;
   }
 
   create(input: Omit<ApprovalRequest, 'authReqId' | 'createdAt' | 'expiresAt' | 'intervalSeconds' | 'lastPolledAt' | 'status' | 'approvals' | 'deniedBy' | 'finishedAt'>, opts: {
@@ -97,7 +123,9 @@ export class ApprovalStore {
     now?: number;
   } = {}): ApprovalRequest {
     const now = opts.now ?? Date.now();
-    this.sweep(now);
+    // Checked and taken in one synchronous step, so concurrent asks cannot
+    // all pass a check made before an await.
+    if (!this.hasCapacity({ agentDid: input.agentDid, subject: input.subject }, now)) throw new ApprovalCapacityError();
     const request: ApprovalRequest = {
       ...input,
       authReqId: `ar_${crypto.randomBytes(24).toString('base64url')}`,

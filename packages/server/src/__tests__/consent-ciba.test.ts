@@ -329,6 +329,16 @@ describe('review regressions', () => {
     expect(res.body.error).toBe('Request denied by guard policy');
     expect(hooks).toHaveLength(0);
     expect((await bcAuthorize(app, agent, { scopes: ['openid'] })).status).toBe(200);
+    // Naming no scopes means every stored scope, 'email' included: Guard
+    // is shown those and refuses, rather than seeing nothing and passing.
+    const asked = hooks.length;
+    const unnamed = await bcAuthorize(app, agent, { scopes: undefined });
+    expect(unnamed.status).toBe(403);
+    expect(unnamed.body.policy).toBe('scope-filter');
+    const direct = await delegateAs(app, agent, { service: 'google', user_id: 'alice' }, { bearer: TOKEN, base: BASE });
+    expect(direct.status).toBe(403);
+    expect(direct.body.policy).toBe('scope-filter');
+    expect(hooks).toHaveLength(asked);
   });
 
   it('ends the request with 502 when the webhook answers with an error', async () => {
