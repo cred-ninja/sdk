@@ -61,6 +61,11 @@ export interface CumulativeLedger {
   has(id: string): boolean;
   /** Atomically check and debit `quantities` (key to amount) under delegation `id`. */
   debit(id: string, quantities: Readonly<Record<string, number>>): CumulativeDebitResult;
+  /**
+   * Give back a debit whose exercise never reached its upstream: each row a
+   * successful debit moved, by the amount moved, never below zero.
+   */
+  refund(debited: ReadonlyArray<{ tokenId: string; key: string; type: 'max_lifetime' | 'max_subtree' }>, quantities: Readonly<Record<string, number>>): void;
   /** Current totals for one delegation, for audit and tests. */
   totals(id: string): Array<{ key: string; type: 'max_lifetime' | 'max_subtree'; total: number; bound: number }>;
   close(): void;
@@ -170,6 +175,16 @@ export class SqliteCumulativeLedger implements CumulativeLedger {
         ok: true,
         debited: touched.map((r) => ({ tokenId: r.token_id, key: r.key, type: r.type, total: r.total, bound: r.bound })),
       };
+    }).immediate();
+  }
+
+  refund(debited: ReadonlyArray<{ tokenId: string; key: string; type: 'max_lifetime' | 'max_subtree' }>, quantities: Readonly<Record<string, number>>): void {
+    const update = this.db.prepare('UPDATE cumulative_bounds SET total = MAX(0, total - ?) WHERE token_id = ? AND key = ? AND type = ?');
+    this.db.transaction(() => {
+      for (const row of debited) {
+        const amount = quantities[row.key];
+        if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) update.run(amount, row.tokenId, row.key, row.type);
+      }
     }).immediate();
   }
 

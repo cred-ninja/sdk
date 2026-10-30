@@ -11,8 +11,15 @@
   `items`/`rows`/`max_rows`/`max_results` (from the response). The
   per-exercise types `max`, `min`, `one_of`, `not_one_of`, `prefix` and
   `rank` are now enforced at exercise (`403 ceiling_exceeded`); a response
-  over a bound is withheld (`withheld: true`) and audited, never
-  truncated; a catalogue listing with a page-size parameter
+  over a bound is withheld (`withheld: true`, with the `upstream_status`
+  of the call that ran, so a completed write is not retried) and audited
+  with its measurement, never truncated; records are counted on the whole
+  response body, in every array reachable through objects whatever the
+  provider names it, not inside the records; a response whose records
+  cannot be counted is withheld (`unmeasurable_response`); a request-side
+  debit is given back when the upstream cannot be reached; a
+  `destination` prefix holds only at a URL boundary; methods compare in
+  upper case; a catalogue listing with a page-size parameter
   (`per_page`, `pageSize`) is capped at an item bound up front. A
   constraint on a key with no meter cannot be decided, so an exercise
   under it is refused (`403 unmetered_constraint`); it is still carried

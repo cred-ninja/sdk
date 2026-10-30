@@ -56,22 +56,43 @@ export function meterSide(key: string): MeterSide | null {
   return null;
 }
 
-/** Array members a provider wraps a listing in. */
-const LIST_MEMBERS = ['items', 'files', 'data', 'results', 'records', 'values', 'value', 'workflow_runs', 'repositories'];
+/**
+ * Records in a parsed response, without trusting a provider's member
+ * names: the total length of every array reachable through objects alone
+ * (a top-level array, `files`, `messages`, GraphQL `data.x.nodes`, and so
+ * on), not counting arrays inside the records themselves. A JSON value with
+ * no such array is one resource. An empty body is no records; any other
+ * body that is not JSON cannot be measured (null).
+ */
+export function countItems(parsed: unknown, isJson: boolean, empty = false): number | null {
+  if (empty) return 0;
+  if (!isJson) return null;
+  let total = 0;
+  let found = false;
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 32) return;
+    if (Array.isArray(value)) {
+      found = true;
+      total += value.length;
+      return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      for (const member of Object.values(value)) visit(member, depth + 1);
+    }
+  };
+  visit(parsed, 0);
+  return found ? total : 1;
+}
 
 /**
- * Records in a parsed response: an array's length, the length of the one
- * listing member a wrapped list carries, else 1 for any other JSON value
- * (one resource). Null for a body that is not JSON.
+ * Whether `value` is within a destination prefix at a URL boundary: the
+ * prefix ends in '/', '?' or '#', or is followed in `value` by one of them
+ * or by nothing. Stricter than the generic string prefix, so a narrowing
+ * that held stays narrowing: `files/abc` admits `files/abc?x` and
+ * `files/abc/export`, never `files/abcXYZ`.
  */
-export function countItems(parsed: unknown, isJson: boolean): number | null {
-  if (!isJson) return null;
-  if (Array.isArray(parsed)) return parsed.length;
-  if (typeof parsed === 'object' && parsed !== null) {
-    const lists = LIST_MEMBERS.filter((member) => Array.isArray((parsed as Record<string, unknown>)[member]));
-    if (lists.length === 1) return ((parsed as Record<string, unknown>)[lists[0]!] as unknown[]).length;
-    // More than one listing member: the largest, so a cap is never undercounted.
-    if (lists.length > 1) return Math.max(...lists.map((m) => ((parsed as Record<string, unknown>)[m] as unknown[]).length));
-  }
-  return 1;
+export function destinationWithinPrefix(value: string, prefix: string): boolean {
+  if (!value.startsWith(prefix)) return false;
+  if (value.length === prefix.length || /[/?#]$/.test(prefix)) return true;
+  return '/?#'.includes(value[prefix.length]!);
 }

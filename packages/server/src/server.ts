@@ -77,7 +77,7 @@ import {
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
 import { capabilitiesAllow, capabilitiesSubsumed, matchedPageParam, validateCapabilities } from './capabilities.js';
-import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, meterSide } from './metering.js';
+import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWithinPrefix, meterSide } from './metering.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -286,11 +286,12 @@ const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
  * `$httpMethod`, `_HttpMethod`, `_method`, `x-http-method-override`,
  * `method-override`, and so on.
  */
-const METHOD_OVERRIDE_QUERY_KEY = /^[_$]?(x-?)?(http-?)?method(-?override)?$/i;
+const METHOD_OVERRIDE_QUERY_KEY = /^(x)?(http)?method(override)?$/i;
 
 function hasMethodOverrideQuery(url: string): boolean {
   try {
-    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_KEY.test(key));
+    // Separators in any combination: x_http_method, x.http.method, $httpMethod.
+    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_KEY.test(key.replace(/[-_$.\s]/g, '')));
   } catch {
     return true;
   }
@@ -4270,11 +4271,25 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const requestMeasure = {
         method: normalizedMethod,
-        destination: meteredUrl,
-        requestBytes: body === undefined ? 0 : Buffer.byteLength(JSON.stringify(body), 'utf8'),
+        // The URL as asked for: the page cap only rewrites the query.
+        destination: upstreamUrl,
+        // Everything the call carries upstream: body, query and forwarded headers.
+        requestBytes: (body === undefined ? 0 : Buffer.byteLength(JSON.stringify(body), 'utf8'))
+          + Buffer.byteLength(new URL(meteredUrl).search, 'utf8')
+          + Object.entries(extraHeaders && typeof extraHeaders === 'object' ? extraHeaders : {})
+            .filter(([key, value]) => isForwardableBrokerHeader(key, value))
+            .reduce((n, [key, value]) => n + Buffer.byteLength(`${key}: ${String(value)}`, 'utf8'), 0),
       };
       for (const c of perExercise.filter((x) => meterSide(x.key) === 'request')) {
-        const violation = exerciseConstraintViolation(c, REQUEST_METERS[c.key]!(requestMeasure));
+        const measured = REQUEST_METERS[c.key]!(requestMeasure);
+        // HTTP methods compare in upper case, whatever case the bound names them in.
+        const constraint = c.key === 'method'
+          ? Object.fromEntries(Object.entries(c).map(([k, v]) => [k, Array.isArray(v) ? v.map((m) => (typeof m === 'string' ? m.toUpperCase() : m)) : v])) as typeof c
+          : c;
+        // A destination prefix holds at a URL boundary, not mid-segment.
+        const violation = c.key === 'destination' && typeof (c as { prefix?: unknown }).prefix === 'string'
+          ? (destinationWithinPrefix(String(measured), (c as { prefix: string }).prefix) ? null : 'destination is outside the allowed prefix')
+          : exerciseConstraintViolation(constraint, measured);
         if (violation) {
           denyCumulative(delegationId, delegation, 'ceiling_exceeded', [c.key]);
           res.status(403).json({ error: 'ceiling_exceeded', message: violation, constraint: c.key });
@@ -4320,8 +4335,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       for (const c of cumulative.filter((x) => meterSide(x.key) === 'request')) {
         requestQuantities[c.key] = REQUEST_METERS[c.key]!(requestMeasure) as number;
       }
+      let requestDebit: Extract<ReturnType<CumulativeLedger['debit']>, { ok: true }> | null = null;
       if (Object.keys(requestQuantities).length > 0) {
         const debit = cumulativeLedger.debit(delegationId, requestQuantities);
+        if (debit.ok) requestDebit = debit;
         if (!debit.ok) {
           const error = debit.reason === 'exceeded' ? 'cumulative_constraint_exceeded' : CUMULATIVE_CONSTRAINT_UNENFORCEABLE;
           denyCumulative(delegationId, delegation, error, debit.key ? [debit.key] : cumulative.map((c) => c.key));
@@ -4339,7 +4356,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           )
         : {};
 
-      const upstream = await fetch(meteredUrl, {
+      // A call that never reaches its upstream gives its request-side debit back.
+      const refundRequestDebit = () => {
+        if (requestDebit) cumulativeLedger.refund(requestDebit.debited, requestQuantities);
+        requestDebit = null;
+      };
+      let upstream: globalThis.Response;
+      try {
+        upstream = await fetch(meteredUrl, {
         method: normalizedMethod,
         redirect: 'manual',
         headers: {
@@ -4350,33 +4374,66 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           ...sanitizedExtraHeaders,
         },
         body: hasBody ? JSON.stringify(body) : undefined,
-      });
+        });
+      } catch (err) {
+        refundRequestDebit();
+        throw err;
+      }
 
       const contentType = upstream.headers.get('content-type') ?? '';
       const raw = await upstream.text();
       const truncated = raw.length > MAX_BROKER_RESPONSE_BYTES;
       const responseBody = truncated ? raw.slice(0, MAX_BROKER_RESPONSE_BYTES) : raw;
       let parsedBody: unknown = responseBody;
-      let isJson = false;
       try {
         parsedBody = JSON.parse(responseBody);
-        isJson = true;
       } catch {
         // Leave non-JSON responses as text.
       }
 
-      // Response-side bounds are known only now. Over a limit, the response
-      // is withheld: the provider was read, the agent gets nothing.
-      const responseMeasure = { responseBytes: Buffer.byteLength(raw, 'utf8'), items: countItems(parsedBody, isJson) };
-      const withhold = (constraint: string, message: string, error = 'ceiling_exceeded') => {
-        denyCumulative(delegationId, delegation, error, [constraint]);
-        res.status(403).json({ error, message, constraint, withheld: true });
+      // Response-side bounds are known only now, measured on the whole body
+      // (not the part returned). Over a limit, the response is withheld.
+      let fullParsed: unknown;
+      let isJson = false;
+      try {
+        fullParsed = JSON.parse(raw);
+        isJson = true;
+      } catch {
+        // Not JSON: record counts cannot be measured.
+      }
+      const responseMeasure = {
+        responseBytes: Buffer.byteLength(raw, 'utf8'),
+        items: countItems(fullParsed, isJson, raw.trim() === ''),
+      };
+      const withhold = (constraint: string, detail: string, error = 'ceiling_exceeded') => {
+        // The call ran upstream (a write is done): audit it as performed and
+        // tell the agent its status, so it does not retry a completed write.
+        // The measurement stays in the audit log, not the response.
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: delegation.agentDid ?? delegation.link?.agentId ?? 'server-agent' },
+          action: 'access',
+          resource: { type: 'connection', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: error,
+          metadata: { delegationId, withheld: true, constraint, detail, method: normalizedMethod, upstreamStatus: upstream.status },
+        });
+        res.status(403).json({
+          error,
+          message: 'The call ran upstream, but its response exceeds a ceiling of this delegation and was withheld',
+          constraint,
+          withheld: true,
+          upstream_status: upstream.status,
+        });
       };
       for (const c of perExercise.filter((x) => meterSide(x.key) === 'response')) {
         const measured = RESPONSE_METERS[c.key]!(responseMeasure);
         const violation = exerciseConstraintViolation(c, measured ?? undefined);
         if (violation) {
-          withhold(c.key, measured === null ? `${c.key} cannot be measured on a non-JSON response` : violation);
+          if (measured === null) withhold(c.key, `${c.key} cannot be measured on a non-JSON response`, 'unmeasurable_response');
+          else withhold(c.key, violation);
           return;
         }
       }
@@ -4384,7 +4441,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       for (const c of cumulative.filter((x) => meterSide(x.key) === 'response')) {
         const measured = RESPONSE_METERS[c.key]!(responseMeasure);
         if (measured === null) {
-          withhold(c.key, `${c.key} cannot be measured on a non-JSON response`, 'cumulative_constraint_exceeded');
+          withhold(c.key, `${c.key} cannot be measured on a non-JSON response`, 'unmeasurable_response');
           return;
         }
         responseQuantities[c.key] = measured;

@@ -68,7 +68,67 @@ describe('request-side ceilings', () => {
   });
 });
 
+describe('request-side details', () => {
+  it('compares methods in upper case, whatever case the bound uses', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const minted = await delegate(app, agent, [{ key: 'method', not_one_of: ['delete'] }]);
+    const upstream = upstreamReturning(1);
+    const res = await exerciseAs(app, agent, minted.body.access_token, { url: `${FILES}/abc`, method: 'DELETE' }, { base: BASE });
+    expect(res.status).toBe(403);
+    expect(res.body.constraint).toBe('method');
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('refuses method overrides in any separator spelling', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const minted = await delegate(app, agent, []);
+    upstreamReturning(1);
+    for (const key of ['x_http_method_override', 'http_method', 'method.override', 'X-Method-Override']) {
+      const res = await exerciseAs(app, agent, minted.body.access_token, { url: `${FILES}/abc?${key}=DELETE`, method: 'GET' }, { base: BASE });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('gives back a request-side debit when the upstream cannot be reached', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const minted = await delegate(app, agent, [{ key: 'max_calls', max_lifetime: 1 }]);
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    expect((await exerciseAs(app, agent, minted.body.access_token, { url: `${FILES}/abc`, method: 'GET' }, { base: BASE })).status).toBe(502);
+    vi.restoreAllMocks();
+    upstreamReturning(1);
+    expect((await exerciseAs(app, agent, minted.body.access_token, { url: `${FILES}/abc`, method: 'GET' }, { base: BASE })).status).toBe(200);
+  });
+});
+
 describe('response-side ceilings', () => {
+  it('tells the agent a withheld write ran, and audits it as performed', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const minted = await delegate(app, agent, [{ key: 'max_rows', max: 0 }]);
+    upstreamReturning(1);
+    const res = await exerciseAs(app, agent, minted.body.access_token, { url: FILES, method: 'POST', body: { name: 'x' } }, { base: BASE });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ withheld: true, upstream_status: 200 });
+    // The measurement is not an oracle: it stays in the audit log.
+    expect(JSON.stringify(res.body)).not.toMatch(/\b1 exceeds\b/);
+  });
+
+  it('measures a listing larger than the returned part on the whole body', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const minted = await delegate(app, agent, [{ key: 'max_rows', max: 5000 }]);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ files: Array.from({ length: 2000 }, (_, i) => ({ id: `file-${i}`, name: 'x'.repeat(20) })) }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const res = await exerciseAs(app, agent, minted.body.access_token, { url: FILES, method: 'GET' }, { base: BASE });
+    expect(res.status).toBe(200);
+    expect(res.body.truncated).toBe(true);
+  });
+
   it('withholds a response with more records than the bound, after the read', async () => {
     const agent = await newAgent();
     const app = await setup();
