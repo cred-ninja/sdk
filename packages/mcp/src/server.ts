@@ -393,4 +393,7 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
   await server.connect(transport);
   const modeLabel = config.mode === 'local' ? 'local vault' : 'cloud API';
   console.error(`Cred MCP server started in ${modeLabel} mode (tokens never enter LLM context)`);
+  if (config.mode === 'cloud' && !(config.agentDid && config.agentPrivateKeyHex)) {
+    console.error('[cred] Warning: CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX are not both set. Cred servers bind brokered handles to the agent\'s key by default (DPoP), so cred_delegate and cred_use will be refused until both are set, unless the server runs with CRED_REQUIRE_DPOP=false.');
+  }
 }

@@ -32,19 +32,25 @@ except ConsentRequiredError as e:
     print(f"Redirect user to: {e.consent_url}")
 ```
 
-For brokered server-side use:
+For brokered server-side use, issue the handle to the agent's own did:key. The handle is bound to that key: every request that uses it carries a DPoP proof (RFC 9449) signed by the agent, so a handle id copied out of a log is useless without the agent's private key. (This holds while the server requires DPoP, its default; a server run with `CRED_REQUIRE_DPOP=false` issues legacy Bearer-bound handles.)
 
 ```python
+from cred import AgentIdentity, generate_agent_identity
+
+identity = generate_agent_identity()  # persist with identity.export(); reload with AgentIdentity.from_export()
+
 handle = cred.delegate_handle(
     service="google",
     user_id="user_123",
     app_client_id="my_app_client_id",
     scopes=["calendar.readonly"],
+    agent_identity=identity,
 )
 
 events = cred.use(
     delegation_id=handle.delegation_id,
     url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    agent_identity=identity,
 )
 ```
 
@@ -58,13 +64,21 @@ Get a delegated access token for a service on behalf of a user.
 
 Raises `ConsentRequiredError` (with `.consent_url`) if the user hasn't connected the service.
 
-### `delegate_handle(service, user_id, app_client_id, scopes=None) → DelegationHandleResult`
+### `delegate_handle(service, user_id, app_client_id, scopes=None, agent_did=None, agent_identity=None) → DelegationHandleResult`
 
 Get a brokered delegation handle for a service. The provider access token stays on the Cred server.
 
-### `use(delegation_id, url, method="GET", body=None, extra_headers=None) → BrokeredUseResult`
+With `agent_identity`, the handle is issued to that identity's did:key (`agent_did` is set from it; passing a different `agent_did` raises `CredError`) and the request carries a `DPoP` proof of the key. A server that requires DPoP (the default) issues handles only this way.
+
+### `use(delegation_id, url, method="GET", body=None, extra_headers=None, agent_identity=None) → BrokeredUseResult`
 
 Broker an upstream API request through the Cred server with a delegation handle. The server enforces service URL allowlists, delegated scopes, and any configured Guard policies before forwarding.
+
+Pass the same `agent_identity` the handle was issued to; the request then carries a `DPoP` proof that also commits to the handle (`ath`).
+
+### `create_dpop_proof(identity, htm, htu, handle=None) → str`
+
+Build a DPoP proof (compact JWS, `typ: dpop+jwt`, EdDSA) for one request, signed with the agent's Ed25519 key. `htu` is the request URL without query or fragment; `handle` adds `ath`, the base64url SHA-256 of the handle id. The client methods above call this for you; make a new proof per request, since the server rejects a replayed `jti` or a proof older than two minutes.
 
 ### `get_user_connections(user_id, app_client_id=None) → list[Connection]`
 

@@ -228,6 +228,7 @@ describe('Agent identity for Link checks (decision 6)', () => {
   it('uses the verified principal of a custom verifier; another agent cannot use the handle', async () => {
     const { app } = await harness({
       agentToken: undefined,
+      requireDpop: false,
       agentRequestVerifier: (req) => {
         const id = req.get('x-test-agent');
         return id ? { ok: true, principal: { type: 'test', principalId: id } } : { ok: false };
@@ -502,6 +503,7 @@ describe('Configuration and pre-existing gap fixes', () => {
       tofuPath: '/tmp/never-created-tofu.json',
       adminToken: ADMIN_TOKEN,
       agentToken: AGENT_TOKEN,
+      requireDpop: false,
       providers: [],
       redirectBaseUri: 'http://localhost:3456',
       linkEnabled: true,

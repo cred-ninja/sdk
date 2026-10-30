@@ -12,13 +12,21 @@ from __future__ import annotations
 
 import time
 import json
-from typing import Any, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from cred import Cred
 from cred.exceptions import ConsentRequiredError  # re-export for convenience
+
+if TYPE_CHECKING:
+    from cred import DpopSigningIdentity
+
+
+def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
+    """``agent_identity=`` for the SDK call, only when one is configured."""
+    return {"agent_identity": agent_identity} if agent_identity is not None else {}
 
 
 class _CredToolInput(BaseModel):
@@ -52,6 +60,8 @@ class CredTool(BaseTool):
             service="google",
             app_client_id="my_app",
             scopes=["calendar.readonly"],
+            token_format="handle",
+            agent_identity=identity,  # an AgentIdentity; never shown to the model
         )
 
         # Use with CrewAI
@@ -71,6 +81,8 @@ class CredTool(BaseTool):
     _app_client_id: str = ""
     _scopes: list[str] = []
     _token_format: str = "raw"
+    # The agent's DPoP signing identity; never part of the tool's input or output.
+    _agent_identity: Any = None
     _cached_token: str | None = None
     _cache_expires_at: float = 0.0
 
@@ -83,8 +95,17 @@ class CredTool(BaseTool):
         base_url: str,
         scopes: Optional[list[str]] = None,
         token_format: str = "raw",
+        *,
+        agent_identity: Optional[DpopSigningIdentity] = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Args:
+            agent_identity: The agent's own identity (an ``AgentIdentity`` from
+                ``cred``). Brokered handles are bound to this key: the Cred server
+                requires a DPoP proof by it to issue a handle and to use one. The
+                key stays in your process; it is never sent to the model or the server.
+        """
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
         super().__init__(**kwargs)
@@ -94,6 +115,7 @@ class CredTool(BaseTool):
         self._app_client_id = app_client_id
         self._scopes = scopes or []
         self._token_format = token_format
+        self._agent_identity = agent_identity
         # Set dynamic name and description after init
         self.name = f"cred_{service.replace('-', '_')}_delegate"
         if token_format == "handle":
@@ -121,6 +143,7 @@ class CredTool(BaseTool):
                 user_id=self._user_id,
                 app_client_id=self._app_client_id,
                 scopes=self._scopes if self._scopes else None,
+                **_identity_kwargs(self._agent_identity),
             )
             output = {
                 "token_type": result.token_type,
@@ -156,15 +179,27 @@ class CredUseTool(BaseTool):
     args_schema: Type[BaseModel] = _CredUseInput
 
     _cred: Any = None
+    # The agent's DPoP signing identity; never part of the tool's input or output.
+    _agent_identity: Any = None
 
     def __init__(
         self,
         agent_token: str,
         base_url: str,
+        *,
+        agent_identity: Optional[DpopSigningIdentity] = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Args:
+            agent_identity: The agent's own identity (an ``AgentIdentity`` from
+                ``cred``). Brokered handles are bound to this key: the Cred server
+                requires a DPoP proof by it to issue a handle and to use one. The
+                key stays in your process; it is never sent to the model or the server.
+        """
         super().__init__(**kwargs)
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._agent_identity = agent_identity
 
     def _run(
         self,
@@ -181,6 +216,7 @@ class CredUseTool(BaseTool):
             method=method,
             body=body,
             extra_headers=extra_headers,
+            **_identity_kwargs(self._agent_identity),
         )
         return json.dumps({
             "status": result.status,

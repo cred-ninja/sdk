@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### BREAKING: brokered handles are bound to the agent's key (DPoP, RFC 9449)
+
+A handle id plus the deployment's Bearer credential was enough to use a
+brokered handle. Now, by default (`CRED_REQUIRE_DPOP=true`):
+
+- `@credninja/server` issues a handle only to a did:key agent (`agent_did`;
+  otherwise `400 agent_key_required`) and binds it to that key (`cnf.jkt`
+  in the response, the same thumbprint the receipt's `cnf` carries).
+  `/api/v1/delegate` needs a `DPoP` proof by the key; every `/api/v1/use`
+  needs a fresh proof naming the request (`htm`, `htu`) and the handle
+  (`ath`). Missing, stale, replayed or mismatched proofs get
+  `401 invalid_dpop_proof` before any upstream call.
+- Sub-delegated handles, from `/api/v1/subdelegate` or `/api/v1/token`,
+  are bound to the receiving agent's key, which must be a did:key. The
+  delegating agent that relays one cannot use it.
+- `@credninja/sdk`: `delegateHandle()` and `use()` take `agentIdentity`
+  and sign the proofs; `createDpopProof()` is exported.
+- `@credninja/mcp`: cloud mode needs `CRED_AGENT_PRIVATE_KEY_HEX` for
+  `cred_delegate` and `cred_use`.
+- `@credninja/vercel-ai`: `credDelegateTool` and `credUseTool` take
+  `agentIdentity`.
+- While DPoP is on, `/api/v1/subdelegate` always requires the delegating
+  agent's `actor_token`; `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored
+  (with a warning), so a leaked receipt cannot mint a handle bound to
+  another key.
+- The SDK's base URL must be the same origin and path as the server's
+  `REDIRECT_BASE_URI` (`htu` is compared by scheme, host, port and path).
+- The `CRED_REQUIRE_AGENT_IDENTITY=false` migration step above applies only
+  with `CRED_REQUIRE_DPOP=false`.
+- Python: `cred-auth` `delegate_handle()` and `use()` take `agent_identity`
+  (`create_dpop_proof()` is exported), and the LangChain, CrewAI, OpenAI
+  Agents, AutoGen and Semantic Kernel integrations take `agent_identity`.
+- `CRED_REQUIRE_DPOP=false` keeps the old Bearer-bound handles and logs a
+  deprecation warning. Raw-token delegation and Cred Link handles are
+  unchanged.
+
 ### Changed: Node 26 (`@credninja/server`, CI, Docker)
 
 - Development, CI and the server image move to Node 26 (LTS since

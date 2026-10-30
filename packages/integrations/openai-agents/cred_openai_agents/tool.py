@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from agents import FunctionTool, RunContextWrapper
 
 from cred import Cred
+
+if TYPE_CHECKING:
+    from cred import DpopSigningIdentity
+
+
+def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
+    """``agent_identity=`` for the SDK call, only when one is configured."""
+    return {"agent_identity": agent_identity} if agent_identity is not None else {}
 from cred.exceptions import ConsentRequiredError
 
 # JSON schema for the tool's input parameters
@@ -52,6 +60,8 @@ def cred_delegate_tool(
     app_client_id: str,
     base_url: str,
     token_format: str = "raw",
+    *,
+    agent_identity: Optional[DpopSigningIdentity] = None,
 ) -> FunctionTool:
     """Create an OpenAI Agents SDK FunctionTool for credential delegation.
 
@@ -63,6 +73,12 @@ def cred_delegate_tool(
         user_id:        The user whose credentials to delegate.
         app_client_id:  The Cred app client ID to delegate for.
         base_url:       Override the API base URL.
+        token_format:   ``"raw"`` (access token) or ``"handle"`` (brokered handle).
+        agent_identity: The agent's own identity (an ``AgentIdentity`` from
+                        ``cred``). Brokered handles are bound to this key: the
+                        Cred server requires a DPoP proof by it to issue a
+                        handle and to use one. The key stays in your process;
+                        it is never sent to the model or the server.
 
     Returns:
         A ``FunctionTool`` ready to pass to ``Agent(tools=[...])``.
@@ -81,6 +97,9 @@ def cred_delegate_tool(
             agent_token=os.environ["CRED_AGENT_TOKEN"],
             user_id="user_123",
             app_client_id="my_app",
+            base_url=os.environ["CRED_BASE_URL"],
+            token_format="handle",
+            agent_identity=identity,  # an AgentIdentity; never shown to the model
         )
         agent = Agent(name="assistant", tools=[tool])
     """
@@ -105,6 +124,7 @@ def cred_delegate_tool(
                 user_id=user_id,
                 app_client_id=app_client_id,
                 scopes=scopes,
+                **_identity_kwargs(agent_identity),
             )
             return json.dumps({
                 "token_type": result.token_type,
@@ -174,6 +194,8 @@ _USE_PARAMS_SCHEMA: dict[str, Any] = {
 def cred_use_tool(
     agent_token: str,
     base_url: str,
+    *,
+    agent_identity: Optional[DpopSigningIdentity] = None,
 ) -> FunctionTool:
     """Create an OpenAI Agents SDK FunctionTool for brokered upstream API calls."""
     cred = Cred(agent_token=agent_token, base_url=base_url)
@@ -190,6 +212,7 @@ def cred_use_tool(
             method=args["method"],
             body=args.get("body"),
             extra_headers=args.get("extra_headers"),
+            **_identity_kwargs(agent_identity),
         )
 
         return json.dumps({

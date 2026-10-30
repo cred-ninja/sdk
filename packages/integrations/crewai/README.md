@@ -12,8 +12,14 @@ pip install cred-crewai
 
 ```python
 import os
-from cred_crewai import CredTool
+from cred_crewai import CredTool, CredUseTool
 from crewai import Agent
+from cred import AgentIdentity
+
+# The agent's own did:key identity, created once with cred.generate_agent_identity()
+# and persisted with identity.export(); load_agent_identity() stands for your own
+# secret store lookup returning that dict.
+identity = AgentIdentity.from_export(load_agent_identity())
 
 # Create a pre-configured tool for Google Calendar
 google_tool = CredTool(
@@ -24,13 +30,19 @@ google_tool = CredTool(
     app_client_id="my_app_client_id",
     scopes=["calendar.readonly"],
     token_format="handle",
+    agent_identity=identity,
+)
+use_tool = CredUseTool(
+    agent_token=os.environ["CRED_AGENT_TOKEN"],
+    base_url=os.environ["CRED_BASE_URL"],
+    agent_identity=identity,
 )
 
 # Use with CrewAI agent
 agent = Agent(
     role="Calendar Manager",
     goal="Manage user's calendar",
-    tools=[google_tool],
+    tools=[google_tool, use_tool],
 )
 ```
 
@@ -46,6 +58,8 @@ agent = Agent(
 - Best for specialized agents (e.g., a "Calendar Manager" agent only needs Google tokens)
 
 Set `token_format="handle"` to return a brokered delegation handle instead of a provider access token. Pair it with `CredUseTool` when the agent needs to call service APIs through Cred.
+
+`agent_identity` binds brokered handles to the agent's own key: the Cred server (which requires DPoP by default) issues and accepts a handle only with a DPoP proof signed by it. The key stays in your process; it is never sent to the model or the server, and it is not a tool argument.
 
 One `CredTool` per service per agent = clearer intent, smaller decision space for the LLM.
 

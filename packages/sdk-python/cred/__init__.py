@@ -11,6 +11,8 @@ from .exceptions import (
 from .identity import (
     AgentIdentity,
     CRED_PUBLIC_KEY_HEX,
+    DpopSigningIdentity,
+    create_dpop_proof,
     generate_agent_identity,
     verify_delegation_receipt,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "RateLimitException",
     "AgentIdentity",
     "generate_agent_identity",
+    "create_dpop_proof",
+    "DpopSigningIdentity",
     "verify_delegation_receipt",
     "CRED_PUBLIC_KEY_HEX",
     "BrokeredUseResult",

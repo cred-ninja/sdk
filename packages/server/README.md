@@ -56,9 +56,9 @@ npm run dev
 | GET | `/connect/:provider` | Admin | Start OAuth flow (browser): `?request=<id>` from a connect request; see [User ids](#user-ids) |
 | POST | `/connect/:provider/start` | Admin | JSON `{ user_id, scopes }`: mint a single-use connect request, answers `{ url }` |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
-| POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint. Returns a brokered handle unless the request sends `"token_format": "raw"`. A service with no brokered-use path needs `raw` explicitly (`400 brokered_format_unsupported` otherwise) |
+| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint. A handle is issued to the did:key in `agent_did`, which proves its key with a `DPoP` proof (see DPoP-bound handles below). Returns a brokered handle unless the request sends `"token_format": "raw"`. A service with no brokered-use path needs `raw` explicitly (`400 brokered_format_unsupported` otherwise) |
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
-| POST | `/api/v1/use` | Bearer | Broker an upstream API call with a delegation handle. Under a cumulative constraint the call is debited against the running totals first (see below) |
+| POST | `/api/v1/use` | Bearer + DPoP | Broker an upstream API call with a delegation handle, with a `DPoP` proof by the key the handle is bound to. Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
 | DELETE | `/api/v1/delegations/:delegationId` | Bearer | Revoke a delegation and every delegation derived from it, see [Cascading revocation](#cascading-revocation) |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
@@ -140,8 +140,33 @@ npm run dev
 > `jti`. Missing: `401 agent_identity_required`. Signed by another key or for another DID: `403
 > agent_identity_mismatch`. Parent agent not a did:key: `403 agent_identity_unverifiable`. The SDK
 > signs it when `subDelegate()` gets `delegatorIdentity`; the MCP server when
-> `CRED_AGENT_PRIVATE_KEY_HEX` is set. `CRED_REQUIRE_AGENT_IDENTITY=false` restores the old
-> behaviour (any Bearer caller holding the receipt) and logs a deprecation warning.
+> `CRED_AGENT_PRIVATE_KEY_HEX` is set. With `CRED_REQUIRE_DPOP=false`,
+> `CRED_REQUIRE_AGENT_IDENTITY=false` restores the old behaviour (any Bearer caller holding the
+> receipt) and logs a deprecation warning; while DPoP is on (the default) it has no effect.
+
+> **DPoP-bound handles (RFC 9449).** By default (`CRED_REQUIRE_DPOP=true`) every brokered handle
+> is bound to the key of the did:key agent it is issued to, and the handle id plus the deployment
+> Bearer credential are no longer enough to use it. `POST /api/v1/delegate` with a handle format
+> needs `agent_did` (a did:key; otherwise `400 agent_key_required`) and a `DPoP` header: a JWS with
+> `typ` `dpop+jwt`, `alg` `EdDSA` or `ES256`, the agent's public `jwk` in the header, and claims
+> `htm` `POST`, `htu` `<REDIRECT_BASE_URI>/api/v1/delegate`, `iat` and a fresh `jti`. The response
+> carries `cnf.jkt`, the RFC 7638 thumbprint of that key. Every `POST /api/v1/use` needs a new
+> proof by the same key with `htu` `<REDIRECT_BASE_URI>/api/v1/use` and `ath` = base64url
+> SHA-256 of the `delegation_id`. A missing, stale (over 120 seconds), replayed, or mismatched
+> proof gets `401 invalid_dpop_proof` with a `WWW-Authenticate: DPoP` header, before any upstream
+> call. Sub-delegated handles (`/api/v1/subdelegate`, and `/api/v1/token` after a grant) are bound
+> to the receiving agent's key, so the delegating agent that relays a handle cannot use it; the
+> receiving agent must be a did:key. The SDK signs proofs when `delegateHandle()` and `use()` get
+> `agentIdentity`; the MCP server when `CRED_AGENT_PRIVATE_KEY_HEX` is set. Raw-token delegation
+> (`"token_format": "raw"`) is unchanged and returns a provider bearer token. Cred Link handles keep
+> their own binding. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
+> (case-insensitive scheme and host, default port ignored), so the client's base URL must be the
+> same origin and path as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different, and so are
+> `http` and `https` or two ports. At `/api/v1/use`
+> the response does not say why a proof failed; the audit log does. While DPoP is on,
+> `/api/v1/subdelegate` always requires the delegating agent's `actor_token`, whatever
+> `CRED_REQUIRE_AGENT_IDENTITY` says, so a leaked receipt cannot mint a handle bound to another
+> key. `CRED_REQUIRE_DPOP=false` restores the Bearer-bound handles and logs a deprecation warning.
 
 > **Sub-Delegation Exchange.** With `"exchange": "grant"`, `/api/v1/subdelegate` runs every hop
 > check and signs the child receipt, but issues no handle: it returns a single-use
@@ -564,7 +589,8 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
-| `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup |
+| `CRED_REQUIRE_DPOP` | No | `true` (default): brokered handles are issued only to did:key agents and bound to their keys; `/api/v1/delegate` and `/api/v1/use` require a DPoP proof (RFC 9449) by that key. `false`: deprecated Bearer-bound handles, logs a warning at startup |
+| `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup; takes effect only with `CRED_REQUIRE_DPOP=false` |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |

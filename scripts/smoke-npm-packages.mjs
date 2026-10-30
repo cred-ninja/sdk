@@ -183,6 +183,7 @@ async function runFreshInstallSmoke(tarballsByWorkspace) {
   writeFileSync(smokeFile, `
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import net from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -195,10 +196,20 @@ for (const pkg of ['@credninja/attenuation', '@credninja/oauth', '@credninja/tof
   if (!cjs || Object.keys(cjs).length === 0) throw new Error(pkg + ' CJS require exported nothing');
 }
 
-const { Cred } = await import('@credninja/sdk');
+const { Cred, generateAgentIdentity } = await import('@credninja/sdk');
 const { createServer } = await import('@credninja/server');
 const { createCredMcpServer } = await import('@credninja/mcp');
 const dataDir = mkdtempSync(join(tmpdir(), 'cred-installed-server.'));
+// DPoP proofs name the server URL (htu), which must equal REDIRECT_BASE_URI,
+// so the server listens on the port its configuration names.
+const port = await new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once('error', reject);
+  probe.listen(0, '127.0.0.1', () => {
+    const free = probe.address().port;
+    probe.close(() => resolve(free));
+  });
+});
 const config = {
   port: 0,
   host: '127.0.0.1',
@@ -215,7 +226,7 @@ const config = {
     clientSecret: 'test-google-client-secret',
     defaultScopes: ['openid', 'email', 'profile'],
   }],
-  redirectBaseUri: 'http://127.0.0.1:3456',
+  redirectBaseUri: 'http://127.0.0.1:' + port,
 };
 const { app, vault, tofu } = createServer(config);
 await vault.init();
@@ -228,9 +239,8 @@ await vault.store({
   scopes: ['calendar.readonly'],
 });
 const server = await new Promise((resolve) => {
-  const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+  const listener = app.listen(port, '127.0.0.1', () => resolve(listener));
 });
-const port = server.address().port;
 try {
   const health = await fetch('http://127.0.0.1:' + port + '/health').then((res) => res.json());
   if (health.status !== 'ok') throw new Error('bad installed server health: ' + JSON.stringify(health));
@@ -255,18 +265,31 @@ try {
     const connections = await cred.getUserConnections('sdk-user');
     assert.equal(connections.length, 1);
     assert.equal(connections[0].slug, 'google');
+    // Brokered handles are bound to the agent's key (DPoP): issued only to an
+    // agent that proves it, and usable only with a fresh proof by it.
+    const agent = await generateAgentIdentity();
     const handle = await cred.delegateHandle({
       service: 'google',
       userId: 'sdk-user',
       appClientId: 'app_smoke',
       scopes: ['calendar.readonly'],
+      agentIdentity: agent,
     });
     assert.equal(handle.tokenType, 'Delegation');
     assert.ok(!('accessToken' in handle));
+    await assert.rejects(
+      cred.use({
+        delegationId: handle.delegationId,
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        method: 'GET',
+      }),
+      (err) => err.code === 'invalid_dpop_proof',
+    );
     const used = await cred.use({
       delegationId: handle.delegationId,
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
+      agentIdentity: agent,
     });
     assert.equal(used.ok, true);
     assert.deepEqual(used.body, { items: [{ id: 'evt_smoke' }] });

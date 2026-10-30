@@ -13,6 +13,7 @@ export {
   generateAgentIdentity,
   importAgentIdentity,
   createActorToken,
+  createDpopProof,
   verifyDelegationReceipt,
   CRED_PUBLIC_KEY_HEX,
 } from './identity.js';
@@ -35,6 +36,7 @@ export type {
   DelegationResult,
   DelegationHandleResult,
   BrokeredUseParams,
+  DpopSigningIdentity,
   BrokeredUseResult,
   DelegationChainLink,
   Connection,

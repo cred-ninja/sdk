@@ -69,6 +69,7 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
+import { DPOP_ACCEPTED_ALGS, dpopAth, dpopBindingFor, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,12 @@ interface BrokeredDelegation {
   link?: LinkHandleBinding;
   /** DID the handle was issued to, when the request named one. */
   agentDid?: string;
+  /**
+   * RFC 7638 thumbprint of `agentDid`'s key when it is a did:key. Every
+   * /api/v1/use of the handle must carry a DPoP proof (RFC 9449) by that
+   * key, so the handle id alone is not a bearer credential.
+   */
+  dpopJkt?: string;
   /**
    * The authenticated caller the handle was minted for. /api/v1/use refuses
    * any other caller, so a leaked handle id is not a bearer credential.
@@ -375,6 +382,9 @@ export function createServer(config: ServerConfig) {
   // Sub-Delegation Exchange: single-use grants and the actor-token replay cache.
   const delegationGrants = createDelegationGrantStore();
   const actorTokenJtiSeen = createJtiReplayCache();
+  // DPoP proof replay cache, keyed by key thumbprint and jti.
+  const dpopJtiSeen = createJtiReplayCache();
+  const requireDpop = config.requireDpop ?? true;
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
@@ -1580,7 +1590,12 @@ export function createServer(config: ServerConfig) {
   if (config.receiptSigner || config.receiptSigningKeyPem || config.receiptAcceptedAlgs || config.receiptVerificationKeys) {
     getReceiptKeys();
   }
-  if (config.requireAgentIdentity === false) {
+  if (config.requireDpop === false) {
+    console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false issues brokered handles that any holder of the handle id and the deployment Bearer credential can use. Agents should prove their did:key with a DPoP proof; this setting will be removed.');
+  }
+  if (config.requireAgentIdentity === false && (config.requireDpop ?? true)) {
+    console.warn('[cred] CRED_REQUIRE_AGENT_IDENTITY=false is ignored while CRED_REQUIRE_DPOP is on: /api/v1/subdelegate always requires the delegating agent\'s actor_token, so a leaked receipt cannot mint a handle bound to another key.');
+  } else if (config.requireAgentIdentity === false) {
     console.warn('[cred] DEPRECATED: CRED_REQUIRE_AGENT_IDENTITY=false lets any Bearer caller sub-delegate from a receipt it holds. Callers should send an actor_token signed by the delegating agent; this setting will be removed.');
   }
 
@@ -3139,6 +3154,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     link?: LinkHandleBinding;
     constraints?: DelegationConstraint[];
     agentDid?: string;
+    dpopJkt?: string;
     holder?: HandleHolder;
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
@@ -3152,6 +3168,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.link ? { link: input.link } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.agentDid ? { agentDid: input.agentDid } : {}),
+      ...(input.dpopJkt ? { dpopJkt: input.dpopJkt } : {}),
       ...(input.holder ? { holder: input.holder } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
@@ -3220,6 +3237,57 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       message: 'A brokered handle is bound to its caller, and this request has no caller-specific identity. '
         + 'Return a principalId from agentRequestVerifier, or request token_format "raw".',
     });
+  }
+
+  function refuseDpop(res: Response, status: 400 | 401, error: string, message: string): void {
+    if (status === 401) {
+      res.set('WWW-Authenticate', `DPoP error="${error === 'agent_key_required' ? 'invalid_request' : 'invalid_dpop_proof'}", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
+    }
+    res.status(status).json({ error, message });
+  }
+
+  /**
+   * Check the DPoP proof on a request, for the agent named by `agentDid`.
+   * Answers the request and returns false on failure.
+   */
+  function checkDpop(
+    req: Request,
+    res: Response,
+    input: { agentDid: string | undefined; path: string; ath?: string; resource: { type: 'token' | 'connection'; id: string } },
+  ): boolean {
+    if (!input.agentDid || !dpopBindingFor(input.agentDid)) {
+      refuseDpop(res, 400, 'agent_key_required', 'A brokered handle is issued only to a did:key agent (agent_did) that proves its key with a DPoP proof (RFC 9449)');
+      return false;
+    }
+    const header = readDpopHeader(req.headers.dpop);
+    const result = header === 'multiple'
+      ? { ok: false as const, message: 'exactly one DPoP header is allowed' }
+      : verifyDpopProof(header, {
+        agentDid: input.agentDid,
+        htm: 'POST',
+        htu: `${publicBaseUri()}${input.path}`,
+        ...(input.ath !== undefined ? { ath: input.ath } : {}),
+        seenJti: dpopJtiSeen,
+      });
+    if (result.ok) return true;
+    // The audit log is readable by any Bearer caller for the user, so at
+    // /api/v1/use it does not name the agent the handle is bound to either.
+    const reason = input.path === '/api/v1/use' ? result.message.split(input.agentDid).join('the bound agent') : result.message;
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: input.agentDid },
+      action: 'deny',
+      resource: input.resource,
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: 'invalid_dpop_proof',
+      metadata: { path: input.path, reason },
+    });
+    // At /api/v1/use the reason stays in the audit log: it would tell a
+    // caller which agent a handle it does not hold is bound to.
+    refuseDpop(res, 401, 'invalid_dpop_proof', input.path === '/api/v1/use' ? 'DPoP proof is missing or invalid for this handle' : result.message);
+    return false;
   }
 
   function getBrokeredDelegation(id: string): BrokeredDelegation | null {
@@ -3375,9 +3443,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         constraints: input.constraints ?? [],
       });
     }
+    // CRED_REQUIRE_DPOP=false keeps the legacy, Bearer-bound handles.
+    const dpopJkt = input.tokenFormat === 'handle' && requireDpop ? dpopBindingFor(input.agentDid) : null;
     if (input.tokenFormat === 'handle') {
       storeBrokeredDelegation({
         ...(input.agentDid ? { agentDid: input.agentDid } : {}),
+        ...(dpopJkt ? { dpopJkt } : {}),
         ...(input.holder ? { holder: input.holder } : {}),
         delegationId: input.delegationId,
         accessToken: input.accessToken,
@@ -3393,6 +3464,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.tokenFormat === 'raw'
         ? { access_token: input.accessToken, token_type: input.tokenType ?? 'Bearer' }
         : { token_type: 'Delegation' }),
+      // The key a handle is bound to: every /api/v1/use needs a DPoP proof by it.
+      ...(dpopJkt ? { cnf: { jkt: dpopJkt } } : {}),
       expires_in: input.expiresIn,
       service: input.service,
       user_id: input.userId,
@@ -3776,6 +3849,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
+      // A handle bound to an agent key is usable only with a DPoP proof by
+      // that key, naming this request and this handle.
+      if (delegation.dpopJkt) {
+        if (!checkDpop(req, res, {
+          agentDid: delegation.agentDid,
+          path: '/api/v1/use',
+          ath: dpopAth(delegationId),
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+        })) return;
+      } else if (requireDpop && !delegation.link) {
+        refuseDpop(res, 401, 'invalid_dpop_proof', 'This handle is not bound to an agent key; request a new handle for a did:key agent');
+        return;
+      }
       const revokedBy = await delegationRevokedBy(delegationId, delegation);
       if (revokedBy !== null) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
@@ -4084,6 +4170,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       const userId = requestUserId(req, res, { agent: true, source: 'body' });
       if (userId === null) return;
+      // The handle is bound to the key of the agent it names. The agent
+      // proves it holds that key before the handle exists, so a request
+      // cannot bind a handle to a key it does not hold.
+      if (tokenFormatFromBody(req) === 'handle' && requireDpop
+        && !checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: `${service}/${userId}` } })) {
+        return;
+      }
       const requestedScopes = normalizeRequestedScopes(scopes);
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
@@ -4933,6 +5026,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'agent_did is required' });
         return;
       }
+      // The child handle is bound to the receiving agent's key, which only a
+      // did:key carries. That agent proves the key each time it uses the handle.
+      if (requireDpop && !dpopBindingFor(agentDid)) {
+        refuseDpop(res, 400, 'agent_key_required', 'A sub-delegated handle is issued only to a did:key agent; its key binds the handle');
+        return;
+      }
       if (!service || typeof service !== 'string') {
         res.status(400).json({ error: 'service is required' });
         return;
@@ -4996,8 +5095,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // RFC 7523 actor_token with that agent's did:key, the key the
       // receipt's cnf binds. CRED_REQUIRE_AGENT_IDENTITY=false keeps the
       // legacy behaviour (any Bearer caller holding the receipt) and logs a
-      // deprecation warning at startup.
-      if (config.requireAgentIdentity ?? true) {
+      // deprecation warning at startup. Under DPoP-bound handles the check
+      // always runs: without it, a leaked receipt plus the Bearer credential
+      // could mint a child handle bound to a key the caller chose.
+      if ((config.requireAgentIdentity ?? true) || requireDpop) {
         const actorToken = (req.body as { actor_token?: unknown }).actor_token;
         const denyIdentity = (status: number, error: string, message: string) => {
           writeAuditEventIfSupported({

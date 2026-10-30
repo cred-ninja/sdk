@@ -15,6 +15,7 @@ from .exceptions import (
     RateLimitException,
     ScopeCeilingException,
 )
+from .identity import DpopSigningIdentity, create_dpop_proof
 from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
 _LOCALHOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -69,6 +70,72 @@ class _CredBase:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+    def _delegate_handle_request(
+        self,
+        service: str,
+        user_id: str,
+        app_client_id: Optional[str],
+        scopes: Optional[list[str]],
+        agent_did: Optional[str],
+        agent_identity: Optional[DpopSigningIdentity],
+    ) -> tuple[dict[str, Any], Optional[dict[str, str]]]:
+        """Body and extra headers for POST /api/v1/delegate with a handle.
+
+        With ``agent_identity``, the handle is issued to (and bound to the key
+        of) that identity's did:key, and the request carries a DPoP proof of
+        possession of it.
+        """
+        if agent_identity is not None and agent_did and agent_did != agent_identity.did:
+            raise CredError("agent_did and agent_identity.did name different agents", "invalid_config", 0)
+        body: dict[str, Any] = {
+            "service": service,
+            "user_id": user_id,
+            "token_format": "handle",
+        }
+        if app_client_id:
+            body["appClientId"] = app_client_id
+        if scopes:
+            body["scopes"] = scopes
+        resolved_did = agent_identity.did if agent_identity is not None else agent_did
+        if resolved_did:
+            body["agent_did"] = resolved_did
+        headers = (
+            {"DPoP": create_dpop_proof(agent_identity, "POST", f"{self._base_url}/api/v1/delegate")}
+            if agent_identity is not None
+            else None
+        )
+        return body, headers
+
+    def _use_request(
+        self,
+        delegation_id: str,
+        url: str,
+        method: str,
+        body: Optional[dict[str, Any]],
+        extra_headers: Optional[dict[str, str]],
+        agent_identity: Optional[DpopSigningIdentity],
+    ) -> tuple[dict[str, Any], Optional[dict[str, str]]]:
+        """Body and extra headers for POST /api/v1/use.
+
+        With ``agent_identity``, the request carries a DPoP proof that also
+        commits to the handle (``ath``).
+        """
+        request_body: dict[str, Any] = {
+            "delegation_id": delegation_id,
+            "url": url,
+            "method": method,
+        }
+        if body is not None:
+            request_body["body"] = body
+        if extra_headers:
+            request_body["extra_headers"] = extra_headers
+        headers = (
+            {"DPoP": create_dpop_proof(agent_identity, "POST", f"{self._base_url}/api/v1/use", delegation_id)}
+            if agent_identity is not None
+            else None
+        )
+        return request_body, headers
 
     @staticmethod
     def _build_delegation_result(data: dict[str, Any]) -> DelegationResult:
@@ -225,20 +292,19 @@ class Cred(_CredBase):
         app_client_id: Optional[str] = None,
         scopes: Optional[list[str]] = None,
         agent_did: Optional[str] = None,
+        agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> DelegationHandleResult:
-        body: dict[str, Any] = {
-            "service": service,
-            "user_id": user_id,
-            "token_format": "handle",
-        }
-        if app_client_id:
-            body["appClientId"] = app_client_id
-        if scopes:
-            body["scopes"] = scopes
-        if agent_did:
-            body["agent_did"] = agent_did
+        """Get a brokered delegation handle; the provider token stays on the server.
 
-        data = self._request_json("POST", "/api/v1/delegate", body)
+        Pass ``agent_identity`` (an :class:`AgentIdentity`) to have the handle
+        issued to that agent's did:key and bound to its key: the request
+        carries a DPoP proof (RFC 9449), and every :meth:`use` of the handle
+        must then pass the same identity.
+        """
+        body, headers = self._delegate_handle_request(
+            service, user_id, app_client_id, scopes, agent_did, agent_identity,
+        )
+        data = self._request_json("POST", "/api/v1/delegate", body, headers)
         return self._build_delegation_handle_result(data)
 
     def use(
@@ -248,18 +314,17 @@ class Cred(_CredBase):
         method: str = "GET",
         body: Optional[dict[str, Any]] = None,
         extra_headers: Optional[dict[str, str]] = None,
+        agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> BrokeredUseResult:
-        request_body: dict[str, Any] = {
-            "delegation_id": delegation_id,
-            "url": url,
-            "method": method,
-        }
-        if body is not None:
-            request_body["body"] = body
-        if extra_headers:
-            request_body["extra_headers"] = extra_headers
+        """Broker an upstream request through the Cred server with a handle.
 
-        data = self._request_json("POST", "/api/v1/use", request_body)
+        Pass the ``agent_identity`` the handle was issued to; the request then
+        carries a DPoP proof bound to the handle.
+        """
+        request_body, headers = self._use_request(
+            delegation_id, url, method, body, extra_headers, agent_identity,
+        )
+        data = self._request_json("POST", "/api/v1/use", request_body, headers)
         return self._build_brokered_use_result(data)
 
     def list_connections(
@@ -298,8 +363,14 @@ class Cred(_CredBase):
     def revoke_agent(self, agent_id: str) -> None:
         self._request_no_content("POST", f"/api/v1/agents/{agent_id}/revoke-all", {})
 
-    def _request_json(self, method: str, path: str, body: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        response = self._client.request(method, path, json=body)
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        response = self._client.request(method, path, json=body, headers=headers)
         payload = self._handle_response(response)
         if not isinstance(payload, dict):
             raise CredError("Expected JSON object response", "invalid_response", response.status_code)
@@ -366,20 +437,19 @@ class AsyncCred(_CredBase):
         app_client_id: Optional[str] = None,
         scopes: Optional[list[str]] = None,
         agent_did: Optional[str] = None,
+        agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> DelegationHandleResult:
-        body: dict[str, Any] = {
-            "service": service,
-            "user_id": user_id,
-            "token_format": "handle",
-        }
-        if app_client_id:
-            body["appClientId"] = app_client_id
-        if scopes:
-            body["scopes"] = scopes
-        if agent_did:
-            body["agent_did"] = agent_did
+        """Get a brokered delegation handle; the provider token stays on the server.
 
-        data = await self._request_json("POST", "/api/v1/delegate", body)
+        Pass ``agent_identity`` (an :class:`AgentIdentity`) to have the handle
+        issued to that agent's did:key and bound to its key: the request
+        carries a DPoP proof (RFC 9449), and every :meth:`use` of the handle
+        must then pass the same identity.
+        """
+        body, headers = self._delegate_handle_request(
+            service, user_id, app_client_id, scopes, agent_did, agent_identity,
+        )
+        data = await self._request_json("POST", "/api/v1/delegate", body, headers)
         return self._build_delegation_handle_result(data)
 
     async def use(
@@ -389,18 +459,17 @@ class AsyncCred(_CredBase):
         method: str = "GET",
         body: Optional[dict[str, Any]] = None,
         extra_headers: Optional[dict[str, str]] = None,
+        agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> BrokeredUseResult:
-        request_body: dict[str, Any] = {
-            "delegation_id": delegation_id,
-            "url": url,
-            "method": method,
-        }
-        if body is not None:
-            request_body["body"] = body
-        if extra_headers:
-            request_body["extra_headers"] = extra_headers
+        """Broker an upstream request through the Cred server with a handle.
 
-        data = await self._request_json("POST", "/api/v1/use", request_body)
+        Pass the ``agent_identity`` the handle was issued to; the request then
+        carries a DPoP proof bound to the handle.
+        """
+        request_body, headers = self._use_request(
+            delegation_id, url, method, body, extra_headers, agent_identity,
+        )
+        data = await self._request_json("POST", "/api/v1/use", request_body, headers)
         return self._build_brokered_use_result(data)
 
     async def list_connections(
@@ -439,8 +508,14 @@ class AsyncCred(_CredBase):
     async def revoke_agent(self, agent_id: str) -> None:
         await self._request_no_content("POST", f"/api/v1/agents/{agent_id}/revoke-all", {})
 
-    async def _request_json(self, method: str, path: str, body: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        response = await self._client.request(method, path, json=body)
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict[str, Any]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        response = await self._client.request(method, path, json=body, headers=headers)
         payload = self._handle_response(response)
         if not isinstance(payload, dict):
             raise CredError("Expected JSON object response", "invalid_response", response.status_code)

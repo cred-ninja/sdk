@@ -14,6 +14,12 @@ pip install cred-openai-agents
 import os
 from cred_openai_agents import cred_delegate_tool, cred_use_tool
 from agents import Agent
+from cred import AgentIdentity
+
+# The agent's own did:key identity, created once with cred.generate_agent_identity()
+# and persisted with identity.export(); load_agent_identity() stands for your own
+# secret store lookup returning that dict.
+identity = AgentIdentity.from_export(load_agent_identity())
 
 tool = cred_delegate_tool(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
@@ -21,6 +27,7 @@ tool = cred_delegate_tool(
     user_id="user_123",
     app_client_id="my_app_client_id",
     token_format="handle",
+    agent_identity=identity,
 )
 
 agent = Agent(
@@ -28,6 +35,7 @@ agent = Agent(
     tools=[tool, cred_use_tool(
         agent_token=os.environ["CRED_AGENT_TOKEN"],
         base_url=os.environ["CRED_BASE_URL"],
+        agent_identity=identity,
     )],
 )
 ```
@@ -44,6 +52,8 @@ The `cred_delegate` tool matches the Cred MCP tool spec:
 `user_id` and `app_client_id` are pre-configured at factory time, not agent-controlled.
 
 By default, `cred_delegate_tool` returns a legacy access token for backwards compatibility. Set `token_format="handle"` to return a brokered delegation handle, then use `cred_use_tool` to make allowed service API calls without exposing provider access tokens.
+
+`agent_identity` binds brokered handles to the agent's own key: the Cred server (which requires DPoP by default) issues and accepts a handle only with a DPoP proof signed by it. The key stays in your process; it is never sent to the model or the server, and it is not a tool argument.
 
 ## Handling Consent
 

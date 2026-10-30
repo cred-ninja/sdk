@@ -114,6 +114,14 @@ export interface ServerConfig {
   // is deprecated and logs a warning at startup.
   requireAgentIdentity?: boolean;
 
+  // Bind every brokered handle to the key of the agent it is issued to
+  // (env CRED_REQUIRE_DPOP). Default true: a handle is issued only to a
+  // did:key agent, /api/v1/delegate needs a DPoP proof (RFC 9449) by that
+  // key, and /api/v1/use needs one naming the handle. false is deprecated,
+  // logs a warning at startup, and leaves handles bound to the caller's
+  // Bearer credential only. Cred Link handles keep their own binding.
+  requireDpop?: boolean;
+
   // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
   delegationGrantTtlSeconds?: number;
 
@@ -254,6 +262,11 @@ export function loadConfig(): ServerConfig {
   if (requireAgentIdentityRaw === 'true' || requireAgentIdentityRaw === '1') requireAgentIdentity = true;
   else if (requireAgentIdentityRaw === 'false' || requireAgentIdentityRaw === '0') requireAgentIdentity = false;
   else if (requireAgentIdentityRaw !== '') throw new Error('CRED_REQUIRE_AGENT_IDENTITY must be true or false');
+  const requireDpopRaw = (process.env.CRED_REQUIRE_DPOP ?? '').trim().toLowerCase();
+  let requireDpop: boolean | undefined;
+  if (requireDpopRaw === 'true' || requireDpopRaw === '1') requireDpop = true;
+  else if (requireDpopRaw === 'false' || requireDpopRaw === '0') requireDpop = false;
+  else if (requireDpopRaw !== '') throw new Error('CRED_REQUIRE_DPOP must be true or false');
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -306,6 +319,7 @@ export function loadConfig(): ServerConfig {
     ...(receiptClaimLayoutRaw ? { receiptClaimLayout: receiptClaimLayoutRaw as 'draft-02' | 'legacy' } : {}),
     ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
     ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
+    ...(requireDpop !== undefined ? { requireDpop } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

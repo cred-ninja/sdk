@@ -121,6 +121,37 @@ const result = await cred.delegate({
 
 Throws `ConsentRequiredError` with `.consentUrl` if the user hasn't connected the service.
 
+### `cred.delegateHandle(params)` and `cred.use(params)`
+
+Brokered delegation: the provider token stays on the Cred server, and the agent gets a handle it
+can use only with its own key. The server binds the handle to the agent's did:key and, by
+default, requires a DPoP proof (RFC 9449) by that key to issue the handle and on every call. The
+SDK signs the proofs when you pass `agentIdentity`; the private key never leaves your process.
+
+```typescript
+import { importAgentIdentity } from '@credninja/sdk';
+
+const agent = importAgentIdentity({ did: savedDid, privateKeyHex: savedKeyHex });
+
+const handle = await cred.delegateHandle({
+  userId: 'user_123',
+  appClientId: 'app_xxx',
+  service: 'google',
+  scopes: ['calendar.readonly'],
+  agentIdentity: agent,          // the handle is bound to this key
+});
+
+const res = await cred.use({
+  delegationId: handle.delegationId,
+  url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+  method: 'GET',
+  agentIdentity: agent,          // signs a fresh DPoP proof for this call
+});
+```
+
+The handle id alone, even together with the deployment's agent token, cannot make a call. A handle
+sub-delegated to another agent is bound to that agent's key, not yours.
+
 ### `cred.getConsentUrl(params)`
 
 Get the URL to send a user to for connecting a service.
