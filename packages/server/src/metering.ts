@@ -58,30 +58,39 @@ export function meterSide(key: string): MeterSide | null {
 
 /**
  * Records in a parsed response, without trusting a provider's member
- * names: the total length of every array reachable through objects alone
- * (a top-level array, `files`, `messages`, GraphQL `data.x.nodes`, and so
- * on), not counting arrays inside the records themselves. A JSON value with
- * no such array is one resource. An empty body is no records; any other
- * body that is not JSON cannot be measured (null).
+ * names, failing closed: the larger of the total length of every array
+ * reachable through objects alone (a top-level array, `files`, `messages`,
+ * GraphQL `data.x.nodes`) and the longest array anywhere, so a listing
+ * wrapped inside a record (`[{ records: [...] }]`) is still counted. A JSON
+ * value with no array is one resource; an empty body is no records; a body
+ * that is not JSON, or nested past the depth limit, cannot be measured.
  */
 export function countItems(parsed: unknown, isJson: boolean, empty = false): number | null {
   if (empty) return 0;
   if (!isJson) return null;
-  let total = 0;
+  let reachable = 0;
+  let longest = 0;
   let found = false;
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > 32) return;
+  let tooDeep = false;
+  const visit = (value: unknown, depth: number, throughObjects: boolean): void => {
+    if (depth > 64) {
+      tooDeep = true;
+      return;
+    }
     if (Array.isArray(value)) {
       found = true;
-      total += value.length;
+      if (throughObjects) reachable += value.length;
+      longest = Math.max(longest, value.length);
+      for (const element of value) visit(element, depth + 1, false);
       return;
     }
     if (typeof value === 'object' && value !== null) {
-      for (const member of Object.values(value)) visit(member, depth + 1);
+      for (const member of Object.values(value)) visit(member, depth + 1, throughObjects);
     }
   };
-  visit(parsed, 0);
-  return found ? total : 1;
+  visit(parsed, 0, true);
+  if (tooDeep) return null;
+  return found ? Math.max(reachable, longest) : 1;
 }
 
 /**

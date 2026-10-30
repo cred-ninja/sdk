@@ -6024,6 +6024,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // the parent's prf with the new receipt. A parent issued without a
       // token (a receipt-only root) starts the list at its own receipt.
       const parentGrant = (await vault.getDelegation(parent.delegationId))?.grant;
+      // This server holds a destination prefix to a URL boundary at exercise,
+      // so a child's must sit at such a boundary under its parent's too: a
+      // parent's `files/a` never grants `files/abc`.
+      const destinationPrefix = (list: readonly DelegationConstraint[]) => list
+        .filter((c) => c.key === 'destination' && typeof (c as { prefix?: unknown }).prefix === 'string')
+        .map((c) => (c as { prefix: string }).prefix);
+      const parentDestinations = destinationPrefix(parent.constraints ?? []);
+      const childDestinations = destinationPrefix(validation.grantedConstraints ?? []);
+      if (parentDestinations.some((p) => childDestinations.some((c) => !destinationWithinPrefix(c, p)))) {
+        res.status(403).json({ error: 'constraint_escalation_denied', message: 'A destination prefix must narrow its parent\'s at a URL boundary' });
+        return;
+      }
       // The child's capabilities must be within the parent's (Section 5.2):
       // what it asks for, or by default its granted scopes as operations.
       const parentCapabilities = (parentGrant?.authorizationDetails as CredDelegationDetail[] | undefined)

@@ -11,8 +11,17 @@ describe('countItems', () => {
     expect(countItems({ changes: [1], newStartPageToken: 't' }, true)).toBe(1); // Drive changes
   });
 
-  it('does not count arrays inside the records themselves', () => {
-    expect(countItems([{ labels: [1, 2, 3] }, { labels: [4] }], true)).toBe(2);
+  it('counts a listing wrapped inside a record, failing closed on nested lists', () => {
+    expect(countItems([{ records: Array.from({ length: 50 }, (_, i) => i) }], true)).toBe(50);
+    // Records' own small arrays can only raise the count, never lower it.
+    expect(countItems([{ labels: [1, 2, 3] }, { labels: [4] }], true)).toBe(3);
+    expect(countItems(Array.from({ length: 10 }, () => ({ labels: [1] })), true)).toBe(10);
+  });
+
+  it('cannot measure a structure nested past the depth limit', () => {
+    let deep: unknown = [1, 2];
+    for (let i = 0; i < 80; i++) deep = { next: deep };
+    expect(countItems(deep, true)).toBeNull();
   });
 
   it('counts a resource with no arrays as one, an empty body as none, and cannot measure text', () => {

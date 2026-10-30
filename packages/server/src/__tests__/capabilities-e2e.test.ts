@@ -144,6 +144,20 @@ describe('capabilities across sub-delegation', () => {
     expect((await exerciseAs(app, child, sub.body.access_token, { url: FILE_URL('xyz'), method: 'GET' }, { base: BASE })).status).toBe(403);
   });
 
+  it('refuses a destination prefix that only extends its parent\'s mid-segment', async () => {
+    const [root, child] = [await newAgent(), await newAgent()];
+    const app = await setup([child]);
+    const parent = await delegateAs(app, root, {
+      service: 'google', user_id: 'alice', scopes: [DRIVE], constraints: [{ key: 'destination', prefix: FILE_URL('a') }],
+    }, { bearer: TOKEN, base: BASE });
+    expect(parent.status).toBe(200);
+    const wider = await subdelegate(app, parent.body.receipt, root, child, { constraints: [{ key: 'destination', prefix: FILE_URL('abc') }] });
+    expect(wider.status).toBe(403);
+    expect(wider.body.error).toBe('constraint_escalation_denied');
+    const narrower = await subdelegate(app, parent.body.receipt, root, child, { constraints: [{ key: 'destination', prefix: `${FILE_URL('a')}/export` }] });
+    expect(narrower.status).toBe(200);
+  });
+
   it('refuses a child that asks for more than its parent', async () => {
     const [root, child] = [await newAgent(), await newAgent()];
     const app = await setup([child]);
