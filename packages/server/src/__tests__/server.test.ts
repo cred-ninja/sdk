@@ -193,7 +193,7 @@ describe('@credninja/server', () => {
   afterAll(() => {
     // Cleanup test vault files
     for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH, TEST_SQLITE_NONCE_PATH]) {
-      for (const suffix of ['', '.salt']) {
+      for (const suffix of ['', '.salt', '.check']) {
         const p = base + suffix;
         if (fs.existsSync(p)) fs.unlinkSync(p);
       }
@@ -3150,7 +3150,7 @@ describe('@credninja/server', () => {
       } finally {
         // Clean up
         const fs = await import('fs');
-        for (const suffix of ['', '.salt']) {
+        for (const suffix of ['', '.salt', '.check']) {
           const p = isolatedPath + suffix;
           if (fs.existsSync(p)) fs.unlinkSync(p);
         }

@@ -10,14 +10,42 @@
   reports the first missing, edited or reordered entry; `auditChainHead()`
   returns the newest entry to record outside the host, which is what shows
   a truncated tail. Rows written before this release stay unchained and are
-  counted as such. An audit write fails (and with it the operation) if the
-  vault has not been initialized. Exported: `auditChainHash`,
-  `AUDIT_CHAIN_GENESIS`, `AuditChainHead`, `AuditChainVerification`.
+  counted as such; their number is bound into the first chained entry, so
+  an unchained row added later, or a chained row stripped of its chain
+  columns, is reported as a break at entry 1. An audit write fails (and
+  with it the operation) if the vault has not been initialized. The hash
+  covers every column listed in `AUDIT_CHAIN_FIELDS`; a field added to
+  `AuditRow` without being listed fails to compile. Exported:
+  `auditChainHash`, `auditChainGenesis`, `AUDIT_CHAIN_GENESIS`,
+  `AUDIT_CHAIN_FIELDS`, `AuditChainHead`, `AuditChainVerification`.
+- `@credninja/vault`: `CredVault.init()` refuses a passphrase other than the
+  one the vault was created with, before any read or write, instead of
+  failing later at decryption (and, until now, extending the audit chain
+  under the wrong key). The check value is an HMAC of the derived key in
+  `<path>.check`, next to `<path>.salt`, written mode 0600 and only if
+  absent, so processes creating a vault at once agree on one salt and one
+  check value. It holds no key material, but with the salt it allows
+  offline passphrase guessing, as the vault file does. A vault created
+  before this release gets one on its first init; if that init used a
+  mistaken passphrase, remove the file and start again. Removing the salt
+  starts a new vault and a new check value.
+- **Breaking** for code that uses `SQLiteBackend` directly: `writeAuditEvent`
+  throws until `setAuditChainKey()` has been called (`CredVault.init()` does
+  this). Custom `StorageBackend` implementations need no change; without the
+  optional `verifyAuditChain` the verify route answers `501`. The exported
+  `SQLiteAuditBackend` writes unchained rows: do not point it at a vault
+  database, where verification reports its rows as tampering.
 - `@credninja/server`: `GET /admin/audit/verify` (admin token) runs the
   check. Receipts now carry the Delegation Server's identifier
   (`REDIRECT_BASE_URI`) in `iss` instead of the fixed `did:key:local-cred`,
-  and a parent receipt naming any other issuer is refused; receipts still
-  carrying the old value are accepted until they expire.
+  and a parent receipt naming any other issuer is refused. The old value is
+  accepted only on a receipt issued (`iat`) before the server process
+  started, so the allowance ends one receipt lifetime after the upgrade.
+- `@credninja/sdk` local mode: receipts name their signer, the did:key of
+  the local receipt signing key, in `iss`, and a parent receipt naming any
+  other issuer is refused (`invalid_parent`). The old `did:key:local-cred`
+  is accepted only on a receipt issued before the `Cred` instance was
+  created.
 
 ### Changed: delegation lifetimes and the draft's revocation path (`@credninja/server`)
 

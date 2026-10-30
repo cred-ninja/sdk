@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createPrivateKey, scryptSync, sign } from 'node:crypto';
+import { createPrivateKey, createPublicKey, scryptSync, sign } from 'node:crypto';
 import { CredVault } from '@credninja/vault';
 import { Cred } from '../index.js';
+import { didKeyForPublicKey } from '../identity.js';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -25,9 +26,9 @@ async function local() {
 
 function receipt(constraints: unknown[], duplicateMember = false) {
   const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
-  const text = JSON.stringify({ sub: 'did:key:parent', service: 'github', userId: 'user-test', appClientId: 'local', delegationId: 'del_parent', scopes: ['repo'], chainDepth: 0, iat: Math.floor(Date.now() / 1000), constraints });
-  const payload = Buffer.from(duplicateMember ? text.replace('"nested":1', '"nested":1,"nested":2') : text).toString('base64url');
   const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), scryptSync('test-opaque', 'cred:local-receipt:v1', 32)]), format: 'der', type: 'pkcs8' });
+  const text = JSON.stringify({ iss: didKeyForPublicKey(createPublicKey(privateKey)), sub: 'did:key:parent', service: 'github', userId: 'user-test', appClientId: 'local', delegationId: 'del_parent', scopes: ['repo'], chainDepth: 0, iat: Math.floor(Date.now() / 1000), constraints });
+  const payload = Buffer.from(duplicateMember ? text.replace('"nested":1', '"nested":1,"nested":2') : text).toString('base64url');
   return `${header}.${payload}.${sign(null, Buffer.from(`${header}.${payload}`), privateKey).toString('base64url')}`;
 }
 

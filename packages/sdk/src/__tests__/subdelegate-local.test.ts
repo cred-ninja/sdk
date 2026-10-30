@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import crypto, { createPrivateKey, sign } from 'node:crypto';
+import crypto, { createPrivateKey, createPublicKey, sign } from 'node:crypto';
+import { publicKeyFromDidKey } from '@credninja/attenuation';
 import { Cred, verifyDelegationReceipt } from '../index';
 
 const mockVault = {
@@ -403,6 +404,67 @@ describe('Cred.subDelegate() local mode — receipt expiry enforcement', () => {
     });
 
     expect(child.scopes).toEqual(['repo']);
+  });
+});
+
+describe('Cred local mode — receipt issuer', () => {
+  function grantChild() {
+    mockVault.getPermission = vi.fn().mockResolvedValue({
+      id: 'perm_child', allowedScopes: ['repo'], requiresApproval: false, delegatable: true,
+      maxDelegationDepth: 2, createdAt: new Date(), createdBy: 'admin',
+    });
+    mockVault.get.mockResolvedValue({
+      provider: 'github', userId: 'user-1', accessToken: 'token', scopes: ['repo'],
+      createdAt: new Date(), updatedAt: new Date(), expiresAt: new Date(Date.now() + 3600_000),
+    });
+  }
+
+  function parentClaims(overrides: Record<string, unknown>) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    return {
+      sub: 'did:key:z6MkParent', iat: nowSeconds - 5, exp: nowSeconds + 300, service: 'github', scopes: ['repo'],
+      userId: 'user-1', appClientId: 'local', delegationId: 'local_github_user-1', chainDepth: 0, ...overrides,
+    };
+  }
+
+  function subDelegateFrom(cred: Cred, parentReceipt: string) {
+    return cred.subDelegate({
+      parentReceipt, service: 'github', userId: 'user-1', appClientId: 'local', agentDid: 'did:key:z6MkChild', scopes: ['repo'],
+    });
+  }
+
+  it('names the did:key of its receipt signing key as the issuer', async () => {
+    const cred = makeLocalCred();
+    grantChild();
+    const child = await subDelegateFrom(cred, forgeReceipt(TEST_VAULT_PASSPHRASE, parentClaims({ iss: 'did:key:local-cred', iat: Math.floor(Date.now() / 1000) - 60 })));
+    const iss = decodeReceiptPayload(child.receipt!).iss as string;
+    expect(iss).toMatch(/^did:key:z6Mk/);
+    const issuerKey = publicKeyFromDidKey(iss);
+    const signingKey = createPublicKey(getTestLocalReceiptSigningKey(TEST_VAULT_PASSPHRASE));
+    expect(issuerKey!.export({ format: 'jwk' })).toEqual(signingKey.export({ format: 'jwk' }));
+
+    // A receipt it issued is accepted as a parent.
+    const grandchild = await cred.subDelegate({
+      parentReceipt: child.receipt!, service: 'github', userId: 'user-1', appClientId: 'local', agentDid: 'did:key:z6MkGrandchild', scopes: ['repo'],
+    });
+    expect(grandchild.scopes).toEqual(['repo']);
+  });
+
+  it('refuses a correctly signed parent receipt that names another issuer', async () => {
+    const cred = makeLocalCred();
+    grantChild();
+    await expect(subDelegateFrom(cred, forgeReceipt(TEST_VAULT_PASSPHRASE, parentClaims({ iss: 'https://other-ds.example' }))))
+      .rejects.toMatchObject({ code: 'invalid_parent' });
+  });
+
+  it('accepts the legacy issuer only on a receipt issued before this instance was created', async () => {
+    const cred = makeLocalCred();
+    grantChild();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    await expect(subDelegateFrom(cred, forgeReceipt(TEST_VAULT_PASSPHRASE, parentClaims({ iss: 'did:key:local-cred', iat: nowSeconds + 5 }))))
+      .rejects.toMatchObject({ code: 'invalid_parent' });
+    await expect(subDelegateFrom(cred, forgeReceipt(TEST_VAULT_PASSPHRASE, parentClaims({ iss: 'did:key:local-cred', iat: undefined }))))
+      .rejects.toMatchObject({ code: 'invalid_parent' });
   });
 });
 

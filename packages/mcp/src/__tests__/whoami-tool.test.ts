@@ -16,7 +16,7 @@ import { syntheticProvider } from '../guard-wiring.js';
 const TEST_VAULT_PATH = path.join(import.meta.dirname ?? __dirname, '../../.test-whoami-vault.json');
 
 function cleanupVaultFiles() {
-  for (const suffix of ['', '.salt']) {
+  for (const suffix of ['', '.salt', '.check']) {
     const p = TEST_VAULT_PATH + suffix;
     if (fs.existsSync(p)) fs.unlinkSync(p);
   }

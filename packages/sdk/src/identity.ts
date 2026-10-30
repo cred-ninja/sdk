@@ -435,6 +435,11 @@ export function createDpopProof(
   return `${signingInput}.${sign(null, Buffer.from(signingInput, 'utf8'), key).toString('base64url')}`;
 }
 
+/** The did:key naming an Ed25519 public key. */
+export function didKeyForPublicKey(publicKey: KeyObject): string {
+  return publicKeyToDid(extractRawPublicKey(publicKey));
+}
+
 function publicKeyToDid(publicKey: Uint8Array): string {
   // Prepend multicodec prefix and encode as base58btc
   const prefixed = new Uint8Array(ED25519_MULTICODEC_PREFIX.length + publicKey.length);

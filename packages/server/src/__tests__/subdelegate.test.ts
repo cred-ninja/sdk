@@ -60,7 +60,7 @@ function getTestSigningKey() {
 function createTestReceipt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
   const payloadB64 = Buffer.from(JSON.stringify({
-    iss: 'did:key:local-cred',
+    iss: makeTestConfig().redirectBaseUri,
     iat: Math.floor(Date.now() / 1000),
     ...payload,
   })).toString('base64url');
@@ -96,7 +96,7 @@ function createBadSignatureReceipt(payload: Record<string, unknown>): string {
 describe('POST /api/v1/subdelegate', () => {
   afterAll(() => {
     for (const base of [TEST_VAULT_PATH, TEST_TOFU_PATH]) {
-      for (const suffix of ['', '.salt']) {
+      for (const suffix of ['', '.salt', '.check']) {
         const p = base + suffix;
         if (fs.existsSync(p)) fs.unlinkSync(p);
       }
@@ -433,6 +433,28 @@ describe('POST /api/v1/subdelegate', () => {
       .send({ parent_receipt: foreign, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', appClientId: 'local', scopes: ['openid'] });
     expect(res.status).toBe(403);
     expect(JSON.stringify(res.body)).toMatch(/not issued by this Delegation Server/);
+  });
+
+  it('accepts the legacy issuer only on a receipt issued before the server started', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const now = Math.floor(Date.now() / 1000);
+    const claims = {
+      iss: 'did:key:local-cred', sub: 'did:key:z6MkParent', service: 'google', scopes: ['openid'],
+      userId: 'default', appClientId: 'local', chainDepth: 0, exp: now + 300,
+    };
+    const send = (receipt: string) => request(app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ parent_receipt: receipt, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', appClientId: 'local', scopes: ['openid'] });
+
+    const before = await send(createTestReceipt({ ...claims, delegationId: 'del_legacy_before', iat: now - 600 }));
+    expect(before.status).toBe(200);
+
+    const after = await send(createTestReceipt({ ...claims, delegationId: 'del_legacy_after', iat: now + 5 }));
+    expect(after.status).toBe(403);
+    expect(JSON.stringify(after.body)).toMatch(/not issued by this Delegation Server/);
+
+    // iat: undefined drops the claim from the serialized payload.
+    const undated = await send(createTestReceipt({ ...claims, delegationId: 'del_legacy_undated', iat: undefined }));
+    expect(undated.status).toBe(403);
   });
 
   it('attenuates scopes to the intersection of parent and permission', async () => {

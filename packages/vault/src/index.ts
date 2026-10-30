@@ -10,7 +10,7 @@
  */
 
 export { CredVault, createVault } from './vault.js';
-export { SQLiteAuditBackend, NoopAuditBackend, hmacAuditField, auditChainHash, AUDIT_CHAIN_GENESIS } from './audit.js';
+export { SQLiteAuditBackend, NoopAuditBackend, hmacAuditField, auditChainHash, auditChainGenesis, AUDIT_CHAIN_GENESIS, AUDIT_CHAIN_FIELDS } from './audit.js';
 export type { AuditChainHead, AuditChainVerification } from './audit.js';
 export type { AuditEvent, AuditActor, AuditResource, AuditBackend, AuditFilter } from './audit.js';
 export { RotationEngine } from './rotation.js';

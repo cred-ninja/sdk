@@ -48,7 +48,7 @@ import {
   isCredProtocolVersionSupported,
 } from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
-import { createActorToken, createDpopProof } from './identity.js';
+import { createActorToken, createDpopProof, didKeyForPublicKey } from './identity.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
 // No default base URL — users must explicitly set their server URL.
@@ -59,6 +59,10 @@ import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:cr
 // (packages/server/src/server.ts).
 const DEFAULT_LOCAL_RECEIPT_TTL_SECONDS = 3600;
 const LOCAL_RECEIPT_CLOCK_SKEW_SECONDS = 60;
+// The fixed issuer local receipts carried before they named their signing
+// key. Accepted only on a receipt issued before this Cred instance was
+// created, so the allowance ends one receipt lifetime after an upgrade.
+const LEGACY_LOCAL_RECEIPT_ISSUER = 'did:key:local-cred';
 
 /**
  * Type helpers for dynamic imports (avoids requiring these at module load).
@@ -245,6 +249,8 @@ export class Cred {
   private vault?: VaultInstance;
   private vaultInitPromise?: Promise<void>;
   private readonly isLocal: boolean;
+  private readonly createdAtSeconds = Math.floor(Date.now() / 1000);
+  private localReceiptIssuer: string | undefined;
 
   // ── Audit fields ────────────────────────────────────────────────────────────
   private auditHmacSecret?: Buffer;
@@ -1138,7 +1144,7 @@ export class Cred {
     let act: { sub: string; act?: unknown } | undefined;
     for (const did of input.lineage ?? []) act = act ? { sub: did, act } : { sub: did };
     const payload = Buffer.from(JSON.stringify({
-      iss: 'did:key:local-cred',
+      iss: this.getLocalReceiptIssuer(),
       sub: input.userId,
       client_id: input.agentDid,
       act: act ? { sub: input.agentDid, act } : { sub: input.agentDid },
@@ -1225,6 +1231,12 @@ export class Cred {
       if (!valid) {
         throw new CredError('Invalid parent receipt signature', 'invalid_parent', 403);
       }
+      const iss = (payload as { iss?: unknown }).iss;
+      const legacyIssuer = iss === LEGACY_LOCAL_RECEIPT_ISSUER
+        && typeof payload.iat === 'number' && payload.iat <= this.createdAtSeconds;
+      if (iss !== this.getLocalReceiptIssuer() && !legacyIssuer) {
+        throw new CredError('Parent receipt was not issued by this local signer', 'invalid_parent', 403);
+      }
       if (!payload.delegationId) {
         throw new CredError('Parent receipt is missing delegationId', 'invalid_parent', 400);
       }
@@ -1288,6 +1300,12 @@ export class Cred {
       format: 'der',
       type: 'pkcs8',
     });
+  }
+
+  /** The did:key of the local receipt signing key: the `iss` of every local receipt. */
+  private getLocalReceiptIssuer(): string {
+    this.localReceiptIssuer ??= didKeyForPublicKey(createPublicKey(this.getLocalReceiptSigningKey()));
+    return this.localReceiptIssuer;
   }
 
   private getLocalReceiptPublicKeyHex(): string {
