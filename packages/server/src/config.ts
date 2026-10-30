@@ -136,12 +136,6 @@ export interface ServerConfig {
   // Default one day.
   cibaConsentTtlSeconds?: number;
 
-  // Cred Link only (env CRED_REQUIRE_DPOP), until Link agents get keys:
-  // default true, no Link handle for the key-less static Bearer identity.
-  // Agent delegations are always Delegation Tokens bound to the agent's
-  // key, whatever this says. false is deprecated and logs a warning.
-  requireDpop?: boolean;
-
   // Hand a provider's access token to the caller (token_format "raw" on
   // /api/v1/delegate, and GET /api/token/:provider) (env
   // CRED_ALLOW_RAW_TOKENS). Default false: a provider token is a bearer
@@ -309,11 +303,11 @@ export function loadConfig(): ServerConfig {
   if (cibaSet > 0 && cibaSet < 4) {
     throw new Error('CRED_CIBA_BACKCHANNEL_ENDPOINT, CRED_CIBA_TOKEN_ENDPOINT, CRED_CIBA_CLIENT_ID and CRED_CIBA_CLIENT_SECRET must be set together');
   }
-  const requireDpopRaw = (process.env.CRED_REQUIRE_DPOP ?? '').trim().toLowerCase();
-  let requireDpop: boolean | undefined;
-  if (requireDpopRaw === 'true' || requireDpopRaw === '1') requireDpop = true;
-  else if (requireDpopRaw === 'false' || requireDpopRaw === '0') requireDpop = false;
-  else if (requireDpopRaw !== '') throw new Error('CRED_REQUIRE_DPOP must be true or false');
+  // Removed: every delegation, Cred Link's included, is a DPoP-bound
+  // Delegation Token. Setting it changes nothing; say so once.
+  if ((process.env.CRED_REQUIRE_DPOP ?? '').trim() !== '') {
+    console.warn('[cred] CRED_REQUIRE_DPOP is ignored: every delegation, Cred Link\'s included, is a Delegation Token bound to the agent\'s key (DPoP). Remove the setting.');
+  }
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -366,7 +360,6 @@ export function loadConfig(): ServerConfig {
     ...(receiptClaimLayoutRaw ? { receiptClaimLayout: receiptClaimLayoutRaw as 'draft-02' | 'legacy' } : {}),
     ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
     ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
-    ...(requireDpop !== undefined ? { requireDpop } : {}),
     ...(consentRetentionDays !== undefined ? { consentRetentionDays } : {}),
     ...(cibaConsentTtlSeconds !== undefined ? { cibaConsentTtlSeconds } : {}),
     ...(process.env.CRED_APPROVAL_WEBHOOK_URL?.trim() ? { approvalWebhookUrl: process.env.CRED_APPROVAL_WEBHOOK_URL.trim() } : {}),

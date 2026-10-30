@@ -167,14 +167,14 @@ npm run dev
 > receiving agent's key, so the delegating agent that relays one cannot use it; the receiving
 > agent must be a did:key. The SDK signs proofs when `delegateHandle()` and `use()` get
 > `agentIdentity`; the MCP server when `CRED_AGENT_DID` and `CRED_AGENT_PRIVATE_KEY_HEX` are set.
-> Raw-token delegation is off by default (`CRED_ALLOW_RAW_TOKENS`). Cred Link handles keep their
-> own binding. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
+> Raw-token delegation is off by default (`CRED_ALLOW_RAW_TOKENS`). Cred Link delegations are
+> Delegation Tokens too, bound to the agent's key and to the Link grant. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
 > (case-insensitive scheme and host, default port ignored), so the client's base URL must be the
 > same origin and path as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different, and so
 > are `http` and `https` or two ports. At `/api/v1/use` the response does not say why a proof
 > failed; the audit log does. `/api/v1/subdelegate` always requires the delegating agent's
 > `actor_token`, so a leaked receipt cannot mint a token bound to another key.
-> `CRED_REQUIRE_DPOP=false` now affects Cred Link only; `CRED_REQUIRE_AGENT_IDENTITY=false` is
+> `CRED_REQUIRE_DPOP` is removed (ignored, with a warning); `CRED_REQUIRE_AGENT_IDENTITY=false` is
 > ignored.
 
 > **Sub-Delegation Exchange.** With `"exchange": "grant"`, `/api/v1/subdelegate` runs every hop
@@ -228,7 +228,7 @@ curl -X DELETE "https://cred.example.com/api/v1/delegations/del_abc?user_id=alic
   `DELETE /api/token/:provider`, `DELETE /connect/:provider`) revokes every
   delegation issued from it and revokes the grant at the provider in the
   background, best effort. `/api/v1/use` also checks, right before the
-  upstream call, that the connection behind a non-Link handle still exists,
+  upstream call, that the connection behind a non-Link delegation still exists,
   so a revocation in another process or one that raced the handle's
   issuance answers `401 connection_revoked`.
 - Revoking an agent (`DELETE /admin/agents/:agentId`,
@@ -598,7 +598,7 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
 | `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
-| `CRED_REQUIRE_DPOP` | No | Affects Cred Link only (until Link agents get keys): `true` (default) issues no Link handle to the key-less static Bearer identity. Agent delegations are always DPoP-bound and ignore this setting |
+| `CRED_REQUIRE_DPOP` | No | Removed: ignored, with a warning at startup. Every delegation, Cred Link's included, is a DPoP-bound Delegation Token, and a Link token is never issued to the shared static Bearer identity |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | Ignored and deprecated: `/api/v1/subdelegate` always requires an `actor_token` proving the caller is the agent the parent receipt names |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |

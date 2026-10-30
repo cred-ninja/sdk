@@ -48,7 +48,7 @@ import { newId, nowIso, requestId, sendLinkError } from './util.js';
 /** The fixed agent id of the static-bearer deployment. */
 export const STATIC_BEARER_AGENT_ID = 'server-agent';
 
-/** Brokered handles for Link connections carry no token, only this binding. */
+/** What a Delegation Token for a Link connection is bound to, recorded with its grant. */
 export interface LinkHandleBinding {
   connectionId: string;
   clientId: string;
@@ -254,31 +254,37 @@ export function linkDelegateState(req: Request): LinkDelegateState | undefined {
 }
 
 export interface LinkDelegateHandlerDeps extends LinkEnforcementDeps {
-  storeHandle: (input: {
+  /**
+   * The agent's did:key, proven by a DPoP proof on this request, or null
+   * once the refusal is sent. Checked before anything is recorded.
+   */
+  checkAgentKey: (req: Request, res: Response, resourceId: string) => string | null;
+  /**
+   * Record the delegation and send its Delegation Token, bound to
+   * `agentDid`'s key and to `link`; `extra` joins the response.
+   */
+  issueToken: (req: Request, res: Response, input: {
     delegationId: string;
+    agentDid: string;
     service: string;
     userId: string;
+    appClientId: string;
     scopes: string[];
     expiresIn: number;
     link: LinkHandleBinding;
-  }) => void;
+    extra: Record<string, unknown>;
+  }) => Promise<void>;
   handleTtlSeconds: number;
   /** CRED_ALLOW_RAW_TOKENS: a raw provider token needs this and the client's allow_raw_tokens. */
   allowRawTokens: boolean;
-  /**
-   * CRED_REQUIRE_DPOP: a handle is issued only to an agent identity bound to
-   * a key (a TOFU agent, which signs each /api/v1/use with Web Bot Auth, or
-   * a custom verifier principal), never to the key-less static Bearer
-   * identity, whose handle would be usable by anyone holding the Bearer.
-   */
-  requireKeyedAgent: boolean;
 }
 
 /**
  * The Link branch of POST /api/v1/delegate. Delegates exactly the
  * effective scopes (narrowed further by Guard when one ran), defaults to a
- * brokered handle, and issues a raw provider token only when the client
- * allows it and the provider's tokens expire and refresh.
+ * Delegation Token bound to the agent's did:key, and issues a raw provider
+ * token only when the client allows it and the provider's tokens expire
+ * and refresh.
  */
 export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Request, res: Response, state: LinkDelegateState): Promise<void> {
   const { ctx } = deps;
@@ -303,11 +309,22 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     sendLinkError(req, res, 400, 'invalid_request', { message: 'This server does not hand out provider tokens (CRED_ALLOW_RAW_TOKENS is off); request a handle' });
     return;
   }
-  if (format === 'handle' && deps.requireKeyedAgent && state.agentId === STATIC_BEARER_AGENT_ID) {
+  // The token binds the agent's key, but which Link agent it acts for comes
+  // from the caller's identity: the shared static Bearer names no one, so
+  // anyone holding it could bind a token to a key of their own.
+  const principal = (req as { agentPrincipal?: RequestAgentPrincipal }).agentPrincipal;
+  if (format === 'handle' && state.agentId === STATIC_BEARER_AGENT_ID && principal?.type === 'static-bearer') {
     sendLinkError(req, res, 400, 'invalid_request', {
-      message: 'A Link handle is issued only to an agent bound to a key (a TOFU agent signing with Web Bot Auth, or a verified principal), not to the shared Bearer identity',
+      message: 'A Link Delegation Token is issued only to an identified agent (a TOFU agent signing with Web Bot Auth, or a verified principal), not to the shared Bearer identity',
     });
     return;
+  }
+  // The Delegation Token is bound to the agent's key (DPoP): the agent's
+  // Bearer alone cannot exercise it.
+  let agentDid: string | null = null;
+  if (format === 'handle') {
+    agentDid = deps.checkAgentKey(req, res, `${connection.provider}/${linkVaultUserId(connection.id)}`);
+    if (agentDid === null) return;
   }
 
   const loaded = await ctx.tokens.load(connection);
@@ -373,7 +390,7 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     return;
   }
 
-  // Audit first (fail closed): no handle exists without its record.
+  // Audit first (fail closed): no token exists without its record.
   ctx.vault.writeAuditEvent({
     id: newId(LINK_ID_PREFIXES.auditEvent),
     timestamp: new Date(),
@@ -386,10 +403,12 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     correlationId: requestId(req, res),
     metadata: { connection_id: connection.id, grant_id: grant.id, grant_version: grant.version, client_id: connection.client_id },
   });
-  deps.storeHandle({
+  await deps.issueToken(req, res, {
     delegationId,
+    agentDid: agentDid!,
     service: connection.provider,
     userId: linkVaultUserId(connection.id),
+    appClientId: connection.client_id,
     scopes,
     expiresIn: deps.handleTtlSeconds,
     link: {
@@ -399,17 +418,7 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
       grantVersion: grant.version,
       agentId: state.agentId,
     },
-  });
-  res.setHeader('Cache-Control', 'no-store');
-  res.json({
-    token_type: 'Delegation',
-    expires_in: deps.handleTtlSeconds,
-    service: connection.provider,
-    connection_id: connection.id,
-    grant_id: grant.id,
-    grant_version: grant.version,
-    scopes,
-    delegation_id: delegationId,
+    extra: { connection_id: connection.id, grant_id: grant.id, grant_version: grant.version },
   });
 }
 
@@ -444,10 +453,19 @@ export async function authorizeLinkUse(
   req: Request,
   res: Response,
   handle: { service: string; scopes: string[]; link: LinkHandleBinding },
+  /**
+   * True only once the caller presented the delegation's Delegation Token
+   * and proved its key (DPoP): the token then names the Link agent it was
+   * issued to. Otherwise the caller's own identity must be that agent.
+   */
+  tokenVerified: boolean,
 ): Promise<Extract<LinkAccessResult, { ok: true }> | null> {
   requestId(req, res);
-  const identity = await resolveLinkAgentId(deps, req);
-  const agentId = identity.ok ? identity.agentId : null;
+  let agentId: string | null = handle.link.agentId;
+  if (!tokenVerified) {
+    const identity = await resolveLinkAgentId(deps, req);
+    agentId = identity.ok ? identity.agentId : null;
+  }
   if (!agentId || agentId !== handle.link.agentId) {
     sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS.permission_required, 'permission_required');
     return null;
@@ -502,7 +520,7 @@ export async function loadLinkUseToken(
   return null;
 }
 
-/** Salesforce Link handles are pinned to the connection's own instance host. */
+/** Salesforce Link delegations are pinned to the connection's own instance host. */
 export function linkUpstreamAllowed(connection: Connection, upstreamUrl: string): boolean {
   if (connection.provider !== 'salesforce') return true;
   try {

@@ -111,7 +111,7 @@ back to `default` on its own.
 | GET | `/api/v1/providers` | Bearer | List configured provider slugs |
 | GET | `/api/v1/connections` | Bearer | List stored connections |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke a stored connection |
-| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`). Cred Link handles still use Bearer + `delegation_id` |
+| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`), Cred Link delegations included |
 | DELETE | `/api/v1/delegations/:delegationId` (also `/delegation/:delegationId`) | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
 | POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; issues a Delegation Token (DPoP-bound JWT: `authorization_details` as requested (granted scopes or catalogue operations with resources) or the granted scopes, `prf`, `consent_id`, `credential_handle`) to the did:key agent that proves its key with a DPoP proof, and records the consent behind it; raw-token requests take no proof |
 | POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token`; always required; returns the child's Delegation Token, bound to the receiving agent's key, or with `exchange: "grant"` a single-use delegation grant |

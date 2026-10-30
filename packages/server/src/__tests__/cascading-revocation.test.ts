@@ -37,7 +37,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: path.join(tmpDir, 'tofu.sqlite'),
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
-    requireDpop: false,
+   
     providers: [
       {
         slug: 'google',

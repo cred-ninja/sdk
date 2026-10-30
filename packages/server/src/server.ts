@@ -447,9 +447,9 @@ export function createServer(config: ServerConfig) {
         redirectBaseUri: config.redirectBaseUri,
         storePath: resolveLinkStorePath(config),
         customVerifier: Boolean(config.agentRequestVerifier),
-        storeHandle: (input) => storeBrokeredDelegation({ ...input, accessToken: '' }),
+        checkAgentKey: (req, res, resourceId) => checkLinkAgentKey(req, res, resourceId),
+        issueToken: (req, res, input) => issueLinkDelegationToken(req, res, input),
         allowRawTokens: config.allowRawTokens ?? false,
-        requireKeyedAgent: config.requireDpop ?? true,
         ...(config.linkHandleTtlSeconds !== undefined ? { handleTtlSeconds: config.linkHandleTtlSeconds } : {}),
         makeRateLimiter: (max) => makeRateLimiter(max),
       })
@@ -1636,9 +1636,6 @@ export function createServer(config: ServerConfig) {
   if (config.receiptTtlSeconds !== undefined
     && (!Number.isInteger(config.receiptTtlSeconds) || config.receiptTtlSeconds <= 0 || config.receiptTtlSeconds > MAX_RECEIPT_TTL_SECONDS)) {
     throw new Error(`receiptTtlSeconds must be a positive integer of at most ${MAX_RECEIPT_TTL_SECONDS} (1 hour)`);
-  }
-  if (config.requireDpop === false) {
-    console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false now only lets Cred Link issue handles to its key-less static Bearer identity. Agent delegations are always DPoP-bound Delegation Tokens. This setting will be removed.');
   }
   const consentRetentionDays = config.consentRetentionDays ?? 90;
   if (!Number.isInteger(consentRetentionDays) || consentRetentionDays < 90) {
@@ -3553,6 +3550,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     grant?: DelegationGrant;
     /** Ancestor agent DIDs, root first: the token's nested `act`. */
     lineage?: string[];
+    /** The Cred Link binding, for a delegation of a Link connection. */
+    link?: LinkHandleBinding;
   }): Record<string, unknown> {
     // Every handle and every receipt-bearing delegation is registered with
     // the cumulative ledger, with its parent, so a descendant's max_subtree
@@ -3587,6 +3586,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         scopes: input.scopes,
         expiresIn: input.expiresIn,
         ...(input.constraints ? { constraints: input.constraints } : {}),
+        ...(input.link ? { link: input.link } : {}),
       });
     }
 
@@ -3628,6 +3628,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     prf: string[];
     /** Validated capabilities; defaults to the granted scopes as operations. */
     capabilities?: CredDelegationDetail[];
+    /** The Cred Link binding, for a delegation of a Link connection. */
+    link?: LinkHandleBinding;
   }): DelegationGrant | null {
     const jkt = dpopBindingFor(input.agentDid);
     if (!jkt) return null;
@@ -3641,6 +3643,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       authorizationDetails: input.capabilities ?? capabilitiesFor(input.service, input.scopes),
       prf: input.prf,
+      ...(input.link ? { link: { ...input.link } } : {}),
     };
   }
 
@@ -3668,6 +3671,93 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       chainContext: { delegationId: input.delegationId, chainDepth: 0 },
     });
     return record.id;
+  }
+
+  /**
+   * The agent's did:key on a Cred Link delegate call, proven by a DPoP
+   * proof by that key, or null once the refusal is sent.
+   */
+  function checkLinkAgentKey(req: Request, res: Response, resourceId: string): string | null {
+    const agentDid = typeof req.body?.agent_did === 'string' ? req.body.agent_did as string : undefined;
+    if (!checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: resourceId } })) return null;
+    return agentDid!;
+  }
+
+  /**
+   * Record a Cred Link delegation and send its Delegation Token: bound to
+   * the agent's key and to the Link grant, restorable from the vault, and
+   * exercised like any other delegation. Its consent is the Link grant the
+   * end user confirmed.
+   */
+  async function issueLinkDelegationToken(req: Request, res: Response, input: {
+    delegationId: string;
+    agentDid: string;
+    service: string;
+    userId: string;
+    appClientId: string;
+    scopes: string[];
+    expiresIn: number;
+    link: LinkHandleBinding;
+    extra: Record<string, unknown>;
+  }): Promise<void> {
+    const receipt = createReceipt({
+      agentDid: input.agentDid,
+      service: input.service,
+      userId: input.userId,
+      appClientId: input.appClientId,
+      scopes: input.scopes,
+      delegationId: input.delegationId,
+      chainDepth: 0,
+      receiptClaims: extractTrustedReceiptClaims(req),
+    });
+    const consentId = `consent_${crypto.randomBytes(16).toString('hex')}`;
+    const grant = newDelegationGrant({
+      agentDid: input.agentDid,
+      service: input.service,
+      scopes: input.scopes,
+      appClientId: input.appClientId,
+      consentId,
+      prf: [receiptContentId(receipt)],
+      link: input.link,
+    })!;
+    const recorded = await recordIssuedDelegation(res, {
+      id: input.delegationId,
+      parentId: null,
+      agentDid: input.agentDid,
+      service: input.service,
+      userId: input.userId,
+      chainDepth: 0,
+      expiresAt: new Date(Date.now() + input.expiresIn * 1000).toISOString(),
+      grant,
+    }, crypto.randomUUID());
+    if (!recorded) return;
+    await vault.recordConsent({
+      id: consentId,
+      subject: input.userId,
+      agentDid: input.agentDid,
+      service: input.service,
+      capabilities: grant.authorizationDetails ?? capabilitiesFor(input.service, input.scopes),
+      source: 'connection',
+      approvedBy: `link:${input.link.grantId}`,
+      expiresAt: null,
+      chainContext: { delegationId: input.delegationId, chainDepth: 0, linkGrantId: input.link.grantId, linkGrantVersion: input.link.grantVersion },
+    });
+    // The Link vault user id is internal: the response names the connection.
+    const { user_id: _internalUserId, ...response } = buildDelegationResponse({
+      tokenFormat: 'handle',
+      grant,
+      accessToken: '',
+      expiresIn: input.expiresIn,
+      service: input.service,
+      userId: input.userId,
+      scopes: input.scopes,
+      delegationId: input.delegationId,
+      receipt,
+      agentDid: input.agentDid,
+      link: input.link,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ...response, ...input.extra });
   }
 
   /** Mint the Delegation Token for a recorded grant, signed with the receipt key. */
@@ -3734,7 +3824,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       url: string;
       method: string;
       delegation: BrokeredDelegation;
-      /** Link handles: the scopes checkLinkAccess allowed for this call. */
+      /** Link delegations: the scopes checkLinkAccess allowed for this call. */
       scopes?: string[];
     },
   ): Promise<{ allowed: true; effectiveScopes: string[]; decision?: GuardDecision } | { allowed: false }> {
@@ -4085,8 +4175,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return match ? match[1]! : null;
   }
 
-  // An exercise authenticates with the Delegation Token itself; only a
-  // Cred Link handle (no token yet) still uses the deployment credential.
+  // An exercise authenticates with the Delegation Token itself. A request
+  // without one is authenticated as an agent call and then refused by the
+  // route: an id alone authorizes nothing.
   function requireExerciseAuth(req: Request, res: Response, next: NextFunction): void {
     if (presentedDelegationToken(req) !== null) {
       next();
@@ -4109,6 +4200,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * issue (another replica, or before a restart): rebuilt from the recorded
    * grant, with the provider token loaded from the vault for this call.
    */
+  /** A recorded Link binding, or null when it is not one. */
+  function linkBindingFrom(value: Record<string, unknown>): LinkHandleBinding | null {
+    const { connectionId, clientId, grantId, grantVersion, agentId } = value;
+    if (typeof connectionId !== 'string' || typeof clientId !== 'string' || typeof grantId !== 'string'
+      || typeof grantVersion !== 'number' || typeof agentId !== 'string') return null;
+    return { connectionId, clientId, grantId, grantVersion, agentId };
+  }
+
   async function restoreTokenDelegation(
     delegationId: string,
     expiresAtSeconds: number,
@@ -4127,8 +4226,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (cumulativeConstraints((grant.constraints ?? []) as DelegationConstraint[]).length > 0 && !cumulativeLedger.has(delegationId)) {
       return 'cumulative_unenforceable';
     }
-    const vaultEntry = await getVaultEntry(record.service, record.userId);
-    if ('status' in vaultEntry) return null;
+    // A Cred Link delegation loads its provider token through Link at each
+    // exercise; any other loads it from the vault here.
+    const link = grant.link ? linkBindingFrom(grant.link) : null;
+    if (grant.link && (!link || !linkService)) return null;
+    let accessToken = '';
+    let providerLifetime = Number.POSITIVE_INFINITY;
+    if (!link) {
+      const vaultEntry = await getVaultEntry(record.service, record.userId);
+      if ('status' in vaultEntry) return null;
+      accessToken = vaultEntry.entry.accessToken;
+      providerLifetime = handleLifetimeSeconds(vaultEntry.entry.expiresAt);
+    }
     cumulativeLedger.register({
       id: delegationId,
       ...(record.parentId ? { parentId: record.parentId } : {}),
@@ -4136,16 +4245,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
     storeBrokeredDelegation({
       delegationId,
-      accessToken: vaultEntry.entry.accessToken,
+      accessToken,
       service: record.service,
       userId: record.userId,
       scopes: grant.scopes,
+      ...(link ? { link } : {}),
       // Never cache the provider token past its own expiry, the token's, or
       // the recorded delegation's.
       expiresIn: Math.max(1, Math.min(
         expiresAtSeconds - nowSeconds,
         recordExpiresAt - nowSeconds,
-        handleLifetimeSeconds(vaultEntry.entry.expiresAt),
+        providerLifetime,
       )),
       ...(grant.constraints && grant.constraints.length > 0 ? { constraints: grant.constraints as DelegationConstraint[] } : {}),
       agentDid: record.agentDid,
@@ -4209,9 +4319,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(400).json({ error: 'invalid_request', message: 'delegation_id does not match the Delegation Token' });
           return;
         }
-      } else if (typeof bodyDelegationId === 'string' && bodyDelegationId) {
-        delegationId = bodyDelegationId;
       } else {
+        // Every delegation, Cred Link's included, is exercised with its
+        // Delegation Token: an id alone authorizes nothing.
         refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
         return;
       }
@@ -4229,9 +4339,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const found = presentedToken !== null
-        ? getBrokeredDelegation(delegationId) ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!)
-        : getBrokeredDelegation(delegationId);
+      const found = getBrokeredDelegation(delegationId) ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!);
       if (found === 'cumulative_unenforceable') {
         res.status(403).json({
           error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
@@ -4245,26 +4353,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const delegation = found;
       if (!delegation) {
-        if (presentedToken !== null) refuseDelegationToken(res, 'The Delegation Token names no active delegation');
-        else res.status(404).json({ error: 'Delegation handle not found or expired' });
-        return;
-      }
-      // Only a Cred Link handle is still named by id; every other
-      // delegation is exercised with its Delegation Token.
-      if (presentedToken === null && !delegation.link) {
-        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
+        refuseDelegationToken(res, 'The Delegation Token names no active delegation');
         return;
       }
       // The token and the recorded delegation must name the same agent and key.
-      if (tokenBinding && (tokenBinding.agentDid !== delegation.agentDid || tokenBinding.jkt !== delegation.dpopJkt)) {
+      if (!tokenBinding || tokenBinding.agentDid !== delegation.agentDid || tokenBinding.jkt !== delegation.dpopJkt) {
         refuseDelegationToken(res, 'The Delegation Token does not match its delegation');
         return;
       }
       // A token is usable only with a DPoP proof by the key it is bound to,
       // naming this token (ath) and this exact request: the proof's cred_req
-      // covers the whole body (URL, method, upstream body, extra headers,
-      // quantities), so it authorizes one upstream call.
-      if (presentedToken !== null) {
+      // covers the whole body (URL, method, upstream body and extra
+      // headers), so it authorizes one upstream call.
+      {
         const requestHash = useRequestHashes.get(req) ?? null;
         if (requestHash === null) {
           res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
@@ -4320,7 +4421,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         });
         return;
       }
-      // Link handles: re-run the Link check (revoked, narrowed or
+      // Link delegations: re-run the Link check (revoked, narrowed or
       // needs_reauth connections are refused at once) before anything else.
       let linkAccess: Awaited<ReturnType<LinkService['authorizeUse']>> = null;
       if (delegation.link) {
@@ -4328,11 +4429,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(404).json({ error: 'Delegation handle not found or expired' });
           return;
         }
+        // The token and its DPoP proof were verified above.
         linkAccess = await linkService.authorizeUse(req, res, {
           service: delegation.service,
           scopes: delegation.scopes,
           link: delegation.link,
-        });
+        }, true);
         if (!linkAccess) return;
       }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
@@ -4624,8 +4726,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const correlationId = crypto.randomUUID();
 
     try {
-      // Link handles carry no constraints, so a Link request that sends some
-      // would get an unconstrained credential. Refuse rather than drop them.
+      // Link Delegation Tokens carry no ceilings yet, so a Link request that
+      // sends some would get an unbounded token. Refuse rather than drop them.
       if (linkService && req.body?.connection_id !== undefined && req.body?.constraints !== undefined) {
         res.status(400).json({
           error: 'invalid_constraints',

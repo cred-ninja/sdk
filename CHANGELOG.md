@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed: Cred Link on Delegation Tokens
+
+- `@credninja/server`: a Cred Link delegation (`connection_id`) is a
+  Delegation Token like any other. The agent sends `agent_did` (a did:key)
+  and a DPoP proof by that key, and gets `token_type: "DPoP"` with
+  `cnf.jkt`, alongside `connection_id`, `grant_id` and `grant_version`. The
+  token is recorded with the Link grant it was issued under, so it survives
+  a restart, takes part in delegation revocation, and is still checked
+  against the grant at every call (revoked, narrowed or `needs_reauth`
+  connections are refused). It is exercised with `Authorization: DPoP` at
+  `/api/v1/use`; a `delegation_id` with `Authorization: Bearer` no longer
+  authorizes anything. Link tokens are never issued to the shared static
+  Bearer identity (`server-agent`), and carry no ceilings yet.
+- `CRED_REQUIRE_DPOP` (`requireDpop`) is removed; setting it logs that it
+  is ignored.
+
 ### Added: consent records, approvals and CIBA
 
 - `@credninja/server`: a did:key agent's Permission is now checked at
@@ -135,8 +151,8 @@
   returns `token`; `use()` takes `token` and `agentIdentity`; new
   `subDelegateGrant()` and `redeemDelegationGrant()`. MCP and
   `@credninja/ai` keep the token in-process and show the model only an id.
-- Cred Link handles are unchanged in this release step; Link moves to
-  Delegation Tokens next.
+- Cred Link moves to Delegation Tokens too (see "Cred Link on Delegation
+  Tokens" above).
 
 ### Added: tamper-evident audit log; receipts name their issuer
 

@@ -39,7 +39,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
-    requireDpop: false,
+   
     providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: ['openid'] }],
     redirectBaseUri: BASE,
     ...overrides,

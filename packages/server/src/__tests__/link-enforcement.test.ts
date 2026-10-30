@@ -8,6 +8,7 @@ import { createServer } from '../server.js';
 import {
   ADMIN_TOKEN,
   AGENT_TOKEN,
+  BASE,
   Browser,
   CALENDAR_URL,
   activate,
@@ -52,14 +53,26 @@ describe('Link delegation enforcement without a Guard', () => {
     expect(JSON.stringify(raw.body)).not.toContain('ya29.access-1');
   });
 
-  it('issues no Link handle to the key-less static Bearer identity while CRED_REQUIRE_DPOP is on', async () => {
-    const { app } = await harness({ requireDpop: true });
-    const client = await registerClient(app);
-    const connectionId = await connectAndActivate(app, client);
-    const res = await delegate(app, { connection_id: connectionId });
+  it('issues no Link Delegation Token to the shared static Bearer identity, or without a key proof', async () => {
+    const staticBearer = await harness({ agentRequestVerifier: undefined });
+    const client = await registerClient(staticBearer.app);
+    const connectionId = await connectAndActivate(staticBearer.app, client);
+    const res = await delegate(staticBearer.app, { connection_id: connectionId });
     expect(res.status).toBe(400);
     expect(res.body.delegation_id).toBeUndefined();
-    expect(JSON.stringify(res.body)).toMatch(/bound to a key/);
+    expect(JSON.stringify(res.body)).toMatch(/identified agent/);
+
+    const { app } = await harness();
+    const keyed = await registerClient(app);
+    const keyedConnection = await connectAndActivate(app, keyed);
+    const noProof = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ connection_id: keyedConnection, agent_did: (await newAgent()).did });
+    expect(noProof.status).toBe(401);
+    expect(noProof.body.access_token).toBeUndefined();
+    const noKey = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ connection_id: keyedConnection });
+    expect(noKey.status).toBe(400);
+    expect(noKey.body.error).toBe('agent_key_required');
   });
 
   it('refuses pending, needs_reauth and revoked connections on delegate and use with typed codes', async () => {
@@ -166,8 +179,8 @@ describe('Link delegation enforcement without a Guard', () => {
     expect(raw.body.error).toBe('invalid_request');
     expect(raw.body.access_token).toBeUndefined();
     const def = await delegate(app, { connection_id: connectionId });
-    expect(def.body.token_type).toBe('Delegation');
-    expect(def.body.access_token).toBeUndefined();
+    expect(def.body.token_type).toBe('DPoP');
+    expect(JSON.stringify(def.body)).not.toContain('ya29');
   });
 
   it('issues raw tokens only with allow_raw_tokens and a refreshable provider, with an audit event each', async () => {
@@ -245,11 +258,30 @@ describe('Link delegation enforcement without a Guard', () => {
   });
 });
 
+describe('Link Delegation Tokens', () => {
+  it('are restored from the vault after a restart with their Link binding, so the grant still decides', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    const call = { delegation_id: minted.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+
+    const next = await hx.restart();
+    expect((await use(next.app, call)).status).toBe(200);
+    // Revoking the connection's grant refuses the restored token.
+    await next.link!.context.store.setConnectionStatus({ connection_id: connectionId, status: 'revoked', now: new Date().toISOString() });
+    const refused = await use(next.app, call);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('grant_revoked');
+  });
+});
+
 describe('Agent identity for Link checks (decision 6)', () => {
   it('uses the verified principal of a custom verifier; another agent cannot use the handle', async () => {
     const { app } = await harness({
       agentToken: undefined,
-      requireDpop: false, allowRawTokens: true,
+      allowRawTokens: true,
       agentRequestVerifier: (req) => {
         const id = req.get('x-test-agent');
         return id ? { ok: true, principal: { type: 'test', principalId: id } } : { ok: false };
@@ -257,24 +289,25 @@ describe('Agent identity for Link checks (decision 6)', () => {
     });
     const client = await registerClient(app);
     const connectionId = await connectAndActivate(app, client, { parOverrides: { agent_id: 'agent-a' } });
-    const asA = await request(app).post('/api/v1/delegate').set('x-test-agent', 'agent-a').send({ connection_id: connectionId });
+    const [keyA, keyB] = [await newAgent(), await newAgent()];
+    const asA = await delegateAs(app, keyA, { connection_id: connectionId }, { bearer: 'unused', base: BASE, headers: { 'x-test-agent': 'agent-a' } });
     expect(asA.status).toBe(200);
-    const asB = await request(app).post('/api/v1/delegate').set('x-test-agent', 'agent-b').send({ connection_id: connectionId, agent_id: 'agent-a' });
+    const asB = await delegateAs(app, keyB, { connection_id: connectionId, agent_id: 'agent-a' }, { bearer: 'unused', base: BASE, headers: { 'x-test-agent': 'agent-b' } });
     expect(asB.status).toBe(403);
     expect(asB.body.error).toBe('permission_required');
-    const useAsB = await request(app).post('/api/v1/use').set('x-test-agent', 'agent-b')
-      .send({ delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(useAsB.status).toBe(403);
-    expect(useAsB.body.error).toBe('permission_required');
-    const useAsA = await request(app).post('/api/v1/use').set('x-test-agent', 'agent-a')
-      .send({ delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(useAsA.status).toBe(200);
+    const call = { delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+    // Agent B has neither the token nor its key: the id alone is refused,
+    // and A's token with B's key fails the proof.
+    expect((await request(app).post('/api/v1/use').set('x-test-agent', 'agent-b').send(call)).status).toBe(401);
+    expect((await exerciseAs(app, keyB, asA.body.access_token, call, { base: BASE })).status).toBe(401);
+    expect((await exerciseAs(app, keyA, asA.body.access_token, call, { base: BASE })).status).toBe(200);
   });
 });
 
 describe('TOFU identity for Link checks', () => {
   it('maps a verified TOFU proof (bound to the connection_id) to tofu:<agentId>', async () => {
-    const { app, server } = await harness();
+    // TOFU identifies the caller of the static Bearer: no custom verifier.
+    const { app, server } = await harness({ agentRequestVerifier: undefined });
     const client = await registerClient(app);
     const connectionId = await connectAndActivate(app, client, { parOverrides: { agent_id: null } });
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -299,10 +332,13 @@ describe('TOFU identity for Link checks', () => {
     const wrongBinding = await delegate(app, { ...body, ...proof('default') });
     expect(wrongBinding.status).toBe(403);
     expect(wrongBinding.body.error).toBe('permission_required');
-    // The static bearer alone is 'server-agent', not the TOFU principal.
-    const asBearer = await use(app, { delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(asBearer.status).toBe(403);
-    expect(asBearer.body.error).toBe('permission_required');
+    // The static Bearer alone, naming the delegation, exercises nothing.
+    const asBearer = await request(app).post('/api/v1/use').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
+    expect(asBearer.status).toBe(401);
+    expect(asBearer.body.error).toBe('invalid_token');
+    // The TOFU agent's token, proven by its key, does.
+    expect((await use(app, { delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' })).status).toBe(200);
   });
 });
 
@@ -524,7 +560,7 @@ describe('Configuration and pre-existing gap fixes', () => {
       tofuPath: '/tmp/never-created-tofu.json',
       adminToken: ADMIN_TOKEN,
       agentToken: AGENT_TOKEN,
-      requireDpop: false, allowRawTokens: true,
+      allowRawTokens: true,
       providers: [],
       redirectBaseUri: 'http://localhost:3456',
       linkEnabled: true,
