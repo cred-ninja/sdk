@@ -32,7 +32,7 @@ except ConsentRequiredError as e:
     print(f"Redirect user to: {e.consent_url}")
 ```
 
-For brokered server-side use, issue the handle to the agent's own did:key. The handle is bound to that key: every request that uses it carries a DPoP proof (RFC 9449) signed by the agent, so a handle id copied out of a log is useless without the agent's private key.
+For brokered server-side use, issue the handle to the agent's own did:key. The handle is bound to that key: every request that uses it carries a DPoP proof (RFC 9449) signed by the agent, so a handle id copied out of a log is useless without the agent's private key. (This holds while the server requires DPoP, its default; a server run with `CRED_REQUIRE_DPOP=false` issues legacy Bearer-bound handles.)
 
 ```python
 from cred import AgentIdentity, generate_agent_identity

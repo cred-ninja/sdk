@@ -27,8 +27,10 @@ brokered handle. Now, by default (`CRED_REQUIRE_DPOP=true`):
   agent's `actor_token`; `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored
   (with a warning), so a leaked receipt cannot mint a handle bound to
   another key.
-- The SDK's base URL must name the same host as the server's
-  `REDIRECT_BASE_URI` (`htu` comparison).
+- The SDK's base URL must be the same origin and path as the server's
+  `REDIRECT_BASE_URI` (`htu` is compared by scheme, host, port and path).
+- The `CRED_REQUIRE_AGENT_IDENTITY=false` migration step above applies only
+  with `CRED_REQUIRE_DPOP=false`.
 - Python: `cred-auth` `delegate_handle()` and `use()` take `agent_identity`
   (`create_dpop_proof()` is exported), and the LangChain, CrewAI, OpenAI
   Agents, AutoGen and Semantic Kernel integrations take `agent_identity`.

@@ -150,9 +150,15 @@ export function verifyActorToken(
 /** A replay cache for assertion `jti`s, pruned as entries expire. */
 export function createJtiReplayCache(nowSeconds: () => number = () => Math.floor(Date.now() / 1000)): (jti: string, exp: number) => boolean {
   const seen = new Map<string, number>();
+  let lastSweep = -1;
   return (jti, exp) => {
     const t = nowSeconds();
-    for (const [k, e] of seen) if (e + CLOCK_SKEW_SECONDS < t) seen.delete(k);
+    // Prune expired entries at most once per second, so the per-request
+    // cost does not grow with the number of retained entries.
+    if (t !== lastSweep) {
+      lastSweep = t;
+      for (const [k, e] of seen) if (e + CLOCK_SKEW_SECONDS < t) seen.delete(k);
+    }
     if (seen.has(jti)) return true;
     seen.set(jti, exp);
     return false;

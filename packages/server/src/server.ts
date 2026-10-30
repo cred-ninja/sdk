@@ -3270,6 +3270,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         seenJti: dpopJtiSeen,
       });
     if (result.ok) return true;
+    // The audit log is readable by any Bearer caller for the user, so at
+    // /api/v1/use it does not name the agent the handle is bound to either.
+    const reason = input.path === '/api/v1/use' ? result.message.split(input.agentDid).join('the bound agent') : result.message;
     writeAuditEventIfSupported({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
@@ -3279,7 +3282,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       outcome: 'denied',
       correlationId: crypto.randomUUID(),
       errorMessage: 'invalid_dpop_proof',
-      metadata: { path: input.path, reason: result.message },
+      metadata: { path: input.path, reason },
     });
     // At /api/v1/use the reason stays in the audit log: it would tell a
     // caller which agent a handle it does not hold is bound to.
@@ -4146,13 +4149,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseHolderlessHandle(res);
         return;
       }
-      // The handle is bound to the key of the agent it names. The agent
-      // proves it holds that key before the handle exists, so a request
-      // cannot bind a handle to a key it does not hold.
-      if (tokenFormatFromBody(req) === 'handle' && requireDpop
-        && !checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: service } })) {
-        return;
-      }
       if (tokenFormatFromBody(req) === 'handle' && !isBrokerableService(service)) {
         res.status(400).json({
           error: 'brokered_format_unsupported',
@@ -4174,6 +4170,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       const userId = requestUserId(req, res, { agent: true, source: 'body' });
       if (userId === null) return;
+      // The handle is bound to the key of the agent it names. The agent
+      // proves it holds that key before the handle exists, so a request
+      // cannot bind a handle to a key it does not hold.
+      if (tokenFormatFromBody(req) === 'handle' && requireDpop
+        && !checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: `${service}/${userId}` } })) {
+        return;
+      }
       const requestedScopes = normalizeRequestedScopes(scopes);
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {

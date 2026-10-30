@@ -215,6 +215,17 @@ describe('DPoP at exercise (/api/v1/use)', () => {
     expect(JSON.stringify(res.body)).not.toContain(agent.did);
   });
 
+  it('keeps the bound agent out of the audit entry a Bearer caller can read', async () => {
+    const [agent, thief] = [await generateAgentIdentity(), await generateAgentIdentity()];
+    const { app, id } = await handleFor(agent);
+    expect((await useAs(app, thief, id)).status).toBe(401);
+    const audit = await request(app).get('/api/v1/audit').query({ user_id: 'alice' }).set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(audit.status).toBe(200);
+    const text = JSON.stringify(audit.body);
+    expect(text).toContain('invalid_dpop_proof');
+    expect(text).not.toContain(agent.did);
+  });
+
   it('refuses a valid proof by another agent', async () => {
     const [agent, thief] = [await generateAgentIdentity(), await generateAgentIdentity()];
     const { app, id } = await handleFor(agent);

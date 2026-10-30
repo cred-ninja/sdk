@@ -140,8 +140,9 @@ npm run dev
 > `jti`. Missing: `401 agent_identity_required`. Signed by another key or for another DID: `403
 > agent_identity_mismatch`. Parent agent not a did:key: `403 agent_identity_unverifiable`. The SDK
 > signs it when `subDelegate()` gets `delegatorIdentity`; the MCP server when
-> `CRED_AGENT_PRIVATE_KEY_HEX` is set. `CRED_REQUIRE_AGENT_IDENTITY=false` restores the old
-> behaviour (any Bearer caller holding the receipt) and logs a deprecation warning.
+> `CRED_AGENT_PRIVATE_KEY_HEX` is set. With `CRED_REQUIRE_DPOP=false`,
+> `CRED_REQUIRE_AGENT_IDENTITY=false` restores the old behaviour (any Bearer caller holding the
+> receipt) and logs a deprecation warning; while DPoP is on (the default) it has no effect.
 
 > **DPoP-bound handles (RFC 9449).** By default (`CRED_REQUIRE_DPOP=true`) every brokered handle
 > is bound to the key of the did:key agent it is issued to, and the handle id plus the deployment
@@ -159,8 +160,9 @@ npm run dev
 > `agentIdentity`; the MCP server when `CRED_AGENT_PRIVATE_KEY_HEX` is set. Raw-token delegation
 > (`"token_format": "raw"`) is unchanged and returns a provider bearer token. Cred Link handles keep
 > their own binding. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
-> (case-insensitive scheme and host, default port ignored), so the client's base URL must name the
-> same host as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different. At `/api/v1/use`
+> (case-insensitive scheme and host, default port ignored), so the client's base URL must be the
+> same origin and path as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different, and so are
+> `http` and `https` or two ports. At `/api/v1/use`
 > the response does not say why a proof failed; the audit log does. While DPoP is on,
 > `/api/v1/subdelegate` always requires the delegating agent's `actor_token`, whatever
 > `CRED_REQUIRE_AGENT_IDENTITY` says, so a leaked receipt cannot mint a handle bound to another
@@ -588,7 +590,7 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
 | `CRED_REQUIRE_DPOP` | No | `true` (default): brokered handles are issued only to did:key agents and bound to their keys; `/api/v1/delegate` and `/api/v1/use` require a DPoP proof (RFC 9449) by that key. `false`: deprecated Bearer-bound handles, logs a warning at startup |
-| `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup |
+| `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup; takes effect only with `CRED_REQUIRE_DPOP=false` |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |
 | `WEB_BOT_AUTH_NONCE_PATH` | No | SQLite path for shared Web Bot Auth nonce storage |

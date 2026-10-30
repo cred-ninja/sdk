@@ -129,6 +129,8 @@ default, requires a DPoP proof (RFC 9449) by that key to issue the handle and on
 SDK signs the proofs when you pass `agentIdentity`; the private key never leaves your process.
 
 ```typescript
+import { importAgentIdentity } from '@credninja/sdk';
+
 const agent = importAgentIdentity({ did: savedDid, privateKeyHex: savedKeyHex });
 
 const handle = await cred.delegateHandle({
