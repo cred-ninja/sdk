@@ -317,8 +317,22 @@ export function createServer(config: ServerConfig) {
 
   const app = express();
   const invalidConstraintJson = new WeakSet<object>();
+  // cred_req of each /api/v1/use request, computed from the bytes the client
+  // sent, before any middleware adds members to req.body (Web Bot Auth adds
+  // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
+  const useRequestHashes = new WeakMap<object, string | null>();
   app.use(express.json({
     verify(req, _res, buffer) {
+      if (req.method === 'POST' && /^\/api\/v1\/use\/?(?:\?|$)/i.test(req.url ?? '')) {
+        let hash: string | null = null;
+        try {
+          hash = dpopRequestHash(JSON.parse(buffer.toString('utf8')));
+        } catch {
+          hash = null;
+        }
+        useRequestHashes.set(req, hash);
+        return;
+      }
       if (req.method !== 'POST' || !/^\/api\/v1\/(?:delegate|subdelegate)\/?(?:\?|$)/i.test(req.url ?? '')) return;
       // JSON.parse is only for selecting constraint-bearing requests. Validate
       // the original bytes before duplicate members or unsafe numbers disappear.
@@ -3872,7 +3886,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // cred_req covers the whole body (URL, method, upstream body, extra
       // headers, quantities), so it authorizes one upstream call.
       if (delegation.dpopJkt) {
-        const requestHash = dpopRequestHash(req.body);
+        const requestHash = useRequestHashes.get(req) ?? null;
         if (requestHash === null) {
           res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
           return;

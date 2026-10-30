@@ -542,3 +542,40 @@ describe('verifyDpopProof', () => {
     expect(check(did, `${wrongAlg}.${signature}`).ok).toBe(false);
   });
 });
+
+describe('DPoP together with Web Bot Auth', () => {
+  function signWebBotAuthRequest(url: string, keyId: string, privateKey: crypto.KeyObject): Record<string, string> {
+    const created = Math.floor(Date.now() / 1000);
+    const nonce = crypto.randomBytes(12).toString('base64url');
+    const signatureAgent = `${BASE}/.well-known/http-message-signatures-directory`;
+    const params = `("@authority" "signature-agent");created=${created};expires=${created + 60};nonce="${nonce}";alg="ed25519";keyid="${keyId}";tag="web-bot-auth"`;
+    const base = [`"@authority": ${new URL(url).host}`, `"signature-agent": "${signatureAgent}"`, `"@signature-params": ${params}`].join('\n');
+    const signature = crypto.sign(null, Buffer.from(base, 'utf8'), privateKey).toString('base64');
+    return { 'Signature-Agent': `"${signatureAgent}"`, 'Signature-Input': `sig1=${params}`, Signature: `sig1=:${signature}:` };
+  }
+
+  it('hashes the /use body as the client sent it, before Web Bot Auth adds members', async () => {
+    const agent = await generateAgentIdentity();
+    const { app } = await setup({ webBotAuthMode: 'require' });
+    const wba = crypto.generateKeyPairSync('ed25519');
+    const spki = wba.publicKey.export({ type: 'spki', format: 'der' });
+    const key = await request(app).post('/api/v1/web-bot-auth/keys').set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ public_key: Buffer.from(spki.subarray(-32)).toString('base64') });
+    expect(key.status).toBe(201);
+    const minted = await request(app).post('/api/v1/delegate').set('Host', 'localhost:3456')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .set(signWebBotAuthRequest(`${BASE}/api/v1/delegate`, key.body.key_id, wba.privateKey))
+      .set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`))
+      .send({ service: 'google', user_id: 'alice', scopes: ['openid', 'email'], token_format: 'handle', agent_did: agent.did });
+    expect(minted.status).toBe(200);
+    const id = minted.body.delegation_id as string;
+    const upstream = mockUpstream();
+    const res = await request(app).post('/api/v1/use').set('Host', 'localhost:3456')
+      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .set(signWebBotAuthRequest(`${BASE}/api/v1/use`, key.body.key_id, wba.privateKey))
+      .set('DPoP', proofFor(agent, id))
+      .send(useBody(id));
+    expect(res.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+});

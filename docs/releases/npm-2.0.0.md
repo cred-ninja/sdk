@@ -72,7 +72,8 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
 11. Cred Link stays off unless `LINK_ENABLED` is set, and needs the SQLite
    vault. See the Link sections of the `@credninja/server` and
    `@credninja/link` READMEs before turning it on.
-12. Give every agent that uses brokered handles a did:key identity and pass it
+12. Outside Cred Link (whose handles are bound as in item 14), give every agent
+   that uses brokered handles a did:key identity and pass it
    to the client: `delegateHandle({ ..., agentIdentity })` and
    `use({ ..., agentIdentity })` in `@credninja/sdk`, `agent_identity=` in
    `cred-auth` and its integrations, `CRED_AGENT_DID` plus

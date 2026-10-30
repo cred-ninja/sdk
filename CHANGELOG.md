@@ -6,7 +6,8 @@
 
 - `@credninja/server` no longer hands provider access tokens to callers:
   `token_format: "raw"` on `/api/v1/delegate` and `GET /api/token/:provider`
-  get `403 raw_token_disabled`, and Cred Link raw tokens are refused even
+  get `403 raw_token_disabled`, and Cred Link raw tokens (Link's
+  `400 invalid_request`) are refused even
   for clients with `allow_raw_tokens`. A provider token is a bearer
   credential with the connection's full scope that cannot be bound to an
   agent key or revoked per delegation. `CRED_ALLOW_RAW_TOKENS=true` restores

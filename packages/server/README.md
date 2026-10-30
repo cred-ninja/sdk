@@ -592,7 +592,7 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
-| `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"`, `GET /api/token/:provider` and Cred Link raw tokens are refused with `raw_token_disabled`. `true`: deprecated, restores them and logs a warning at startup |
+| `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
 | `CRED_REQUIRE_DPOP` | No | `true` (default): brokered handles are issued only to did:key agents and bound to their keys; `/api/v1/delegate` and `/api/v1/use` require a DPoP proof (RFC 9449) by that key. `false`: deprecated Bearer-bound handles, logs a warning at startup |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup; takes effect only with `CRED_REQUIRE_DPOP=false` |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |

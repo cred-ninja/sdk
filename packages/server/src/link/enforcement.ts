@@ -299,12 +299,6 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     return;
   }
 
-  const loaded = await ctx.tokens.load(connection);
-  if (!loaded.ok) {
-    await sendTokenLoadFailure(deps, req, res, connection, loaded, state.agentId);
-    return;
-  }
-
   if (format === 'raw' && !deps.allowRawTokens) {
     sendLinkError(req, res, 400, 'invalid_request', { message: 'This server does not hand out provider tokens (CRED_ALLOW_RAW_TOKENS is off); request a handle' });
     return;
@@ -313,6 +307,12 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     sendLinkError(req, res, 400, 'invalid_request', {
       message: 'A Link handle is issued only to an agent bound to a key (a TOFU agent signing with Web Bot Auth, or a verified principal), not to the shared Bearer identity',
     });
+    return;
+  }
+
+  const loaded = await ctx.tokens.load(connection);
+  if (!loaded.ok) {
+    await sendTokenLoadFailure(deps, req, res, connection, loaded, state.agentId);
     return;
   }
 
