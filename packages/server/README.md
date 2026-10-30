@@ -597,6 +597,10 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
+| `CONSENT_RETENTION_DAYS` | No | Days a consent record is kept after the later of its grant and expiry, then purged daily (default and minimum `90`) |
+| `CRED_APPROVAL_WEBHOOK_URL` | No | Where an approval request for the subject is posted (`cred.approval_requested`, with a signed single-use `approve_url` for the built-in page). An error or redirect from it ends the request |
+| `CRED_CIBA_BACKCHANNEL_ENDPOINT`, `CRED_CIBA_TOKEN_ENDPOINT`, `CRED_CIBA_CLIENT_ID`, `CRED_CIBA_CLIENT_SECRET` | No | Ask the subject through an external OpenID Provider's CIBA endpoints instead, as its client (all four together) |
+| `CRED_CIBA_CONSENT_TTL_SECONDS` | No | How long an approved CIBA consent is reused for later requests it covers (default `86400`) |
 | `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
 | `CRED_REQUIRE_DPOP` | No | Removed: ignored, with a warning at startup. Every delegation, Cred Link's included, is a DPoP-bound Delegation Token, and a Link token is never issued to the shared static Bearer identity |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | Ignored and deprecated: `/api/v1/subdelegate` always requires an `actor_token` proving the caller is the agent the parent receipt names |

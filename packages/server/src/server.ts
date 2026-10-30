@@ -3994,7 +3994,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   function refusePermission(res: Response, code: string): void {
     const messages: Record<string, string> = {
       permission_expired: 'Permission has expired',
-      approval_required: 'This permission requires approval: a did:key agent asks at /bc-authorize (CIBA)',
+      approval_required: 'This permission requires approval: only a did:key agent\'s root delegation can be approved, by asking at /bc-authorize (CIBA)',
       rate_limited: 'Permission rate limit exceeded',
     };
     res.status(code === 'rate_limited' ? 429 : 403).json({ error: code, message: messages[code] ?? code });

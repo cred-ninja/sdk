@@ -339,8 +339,9 @@ brokered handle. Now, by default (`CRED_REQUIRE_DPOP=true`):
   gone, including after a revocation in another process.
 - Permission `expiresAt`, `rateLimit` and `requiresApproval` are enforced on
   `/api/v1/delegate` (TOFU principals) and `/api/v1/subdelegate`.
-  The server has no approval flow yet, so `requiresApproval: true` answers
-  `403 approval_required`. `rateLimit` answers `429 rate_limited`, an expired
+  `requiresApproval: true` answers `403 approval_required` there (a did:key
+  agent's root delegation is approved through CIBA instead: see "consent
+  records, approvals and CIBA" above). `rateLimit` answers `429 rate_limited`, an expired
   permission `403 permission_expired`.
 
 ### Fixed: local mode revocation in `cred_use` (`@credninja/mcp`, `@credninja/sdk`)

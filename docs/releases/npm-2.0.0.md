@@ -128,7 +128,31 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    - Python (`cred-auth`): `delegate_handle()` needs `agent_identity` and
      returns the token, and `use()` takes the token plus `agent_identity`,
      the same way.
-18. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+18. Ceilings are decided from what the server measures. `quantities` in the
+   `/api/v1/use` body is no longer read. A delegation carrying a constraint on
+   a key the server does not meter is refused at exercise
+   (`403 unmetered_constraint`): re-issue it under a metered key (`calls`,
+   `method`, `destination`, `request_bytes`, `response_bytes`, `items` and
+   its aliases). A response over a bound is withheld (`withheld: true`,
+   `upstream_status`), not truncated, so check `upstream_status` before
+   retrying a write.
+19. A Permission with `requiresApproval` is enforced, not refused. A did:key
+   agent asks at `POST /bc-authorize` (OpenID CIBA, poll mode) and polls
+   `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba`. Set
+   who approves per Permission (`approver`: `subject`, `admin` or `both`),
+   and give the subject a channel: `CRED_APPROVAL_WEBHOOK_URL` for the
+   built-in page, or an external OpenID Provider (`CRED_CIBA_*`). Without a
+   channel only admin approval works (`/admin/approvals`).
+20. Every Delegation Token names a consent record (`consent_id`), kept
+   `CONSENT_RETENTION_DAYS` (at least 90, the default) and purged daily. A
+   security event (`POST /admin/consents/revoke`) refuses the tokens under
+   the revoked consents (`401 consent_revoked`). Plan storage for the
+   retained records.
+21. Delegations may ask for RFC 9396 `authorization_details` of type
+   `cred_delegation`: granted scopes as operations, or catalogue operations
+   with resources for GitHub and Google Drive. Optional: without it, a token
+   carries its granted scopes as operations.
+22. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities

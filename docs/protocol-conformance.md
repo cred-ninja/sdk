@@ -104,7 +104,7 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
 - [ ] Reconcile this table against the protocol repo's formal conformance section (needs that repo in scope, or its `CONFORMANCE` doc).
 - [ ] Decide biscuit vs Ed25519-receipt token profile (SDK ↔ daemon convergence).
 - [x] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake. *(Done — `0.1.0` with explicit unsupported-version rejection.)*
-- [ ] Decide whether RAR (`authorization_details`) replaces or augments scope strings.
+- [x] Decide whether RAR (`authorization_details`) replaces or augments scope strings. *(Augments: a Delegation Token carries `authorization_details` of type `cred_delegation`, whose operations are the granted scopes or catalogue operations; scopes stay on the stored connection.)*
 - [x] Add a revocation-propagation latency test to back the "<5s" claim. *(Done: cascading revocation tests in `packages/vault` and `packages/server`.)*
 - [x] Align the acting-agent identifier with adopted WG framing (done in
   the draft-02 receipt layout: principal in `sub`, agent in `client_id` and
