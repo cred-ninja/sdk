@@ -104,17 +104,14 @@ describe('CredVault — SQLite backend', () => {
       accessToken: 'secret-token',
     });
 
-    // Open same DB with wrong passphrase
-    const wrongVault = await createVault({
+    // Opening the same DB with a wrong passphrase is refused at init,
+    // before any read; the stored check value no longer lets it get as far
+    // as a GCM auth tag failure.
+    await expect(createVault({
       passphrase: 'WRONG-passphrase',
       storage: 'sqlite',
       path: dbPath,
-    });
-
-    // Should throw (GCM auth tag failure) — never returns real data
-    await expect(
-      wrongVault.get({ provider: 'google', userId: 'user-1' })
-    ).rejects.toThrow();
+    })).rejects.toThrow(/passphrase does not match/);
   });
 
   it('preserves expiresAt and scopes', async () => {
@@ -261,13 +258,11 @@ describe('CredVault — File backend', () => {
 
     await vault.store({ provider: 'google', userId: 'u1', accessToken: 'secret' });
 
-    const wrongVault = await createVault({
+    await expect(createVault({
       passphrase: 'WRONG',
       storage: 'file',
       path: jsonPath,
-    });
-
-    await expect(wrongVault.get({ provider: 'google', userId: 'u1' })).rejects.toThrow();
+    })).rejects.toThrow(/passphrase does not match/);
   });
 });
 
@@ -289,5 +284,6 @@ describe('CredVault — throws before init', () => {
     const fs = await import('fs');
     try { fs.unlinkSync('/tmp/test-vault-lazy-init.json'); } catch {}
     try { fs.unlinkSync('/tmp/test-vault-lazy-init.json.salt'); } catch {}
+    try { fs.unlinkSync('/tmp/test-vault-lazy-init.json.check'); } catch {}
   });
 });

@@ -152,7 +152,7 @@ function exchange(app: Parameters<typeof request>[0], grant: string, actor: stri
 
 afterAll(() => {
   for (const base of [TEST_VAULT_PATH, TEST_TOFU_PATH]) {
-    for (const suffix of ['', '.salt', '-wal', '-shm']) {
+    for (const suffix of ['', '.salt', '.check', '-wal', '-shm']) {
       if (fs.existsSync(base + suffix)) fs.unlinkSync(base + suffix);
     }
   }

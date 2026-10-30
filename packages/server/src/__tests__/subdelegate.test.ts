@@ -96,7 +96,7 @@ function createBadSignatureReceipt(payload: Record<string, unknown>): string {
 describe('POST /api/v1/subdelegate', () => {
   afterAll(() => {
     for (const base of [TEST_VAULT_PATH, TEST_TOFU_PATH]) {
-      for (const suffix of ['', '.salt']) {
+      for (const suffix of ['', '.salt', '.check']) {
         const p = base + suffix;
         if (fs.existsSync(p)) fs.unlinkSync(p);
       }

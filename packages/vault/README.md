@@ -125,6 +125,8 @@ key = PBKDF2-SHA256(passphrase, salt, iterations=100000, keyLength=32)
 
 The **salt** is random (32 bytes) and stored in a `.salt` file alongside your vault. The salt is not secret. Only your passphrase needs to be kept private.
 
+A `.check` file next to it holds an HMAC of the derived key, so `init()` refuses a passphrase other than the one the vault was created with instead of failing later at decryption. It is not secret either. Removing the `.salt` file starts a new vault, and a new check value with it.
+
 ### IV (Initialization Vector)
 
 Each encryption operation uses a **fresh random 16-byte IV** (`crypto.randomBytes(16)`). This ensures that encrypting the same token twice produces different ciphertext, preventing pattern analysis.
@@ -135,6 +137,7 @@ Each encryption operation uses a **fresh random 16-byte IV** (`crypto.randomByte
 - IV (hex-encoded, 16 bytes)
 - GCM auth tag (hex-encoded, 16 bytes)
 - Salt (hex-encoded, 32 bytes, stored in `.salt` file)
+- Passphrase check value (hex-encoded HMAC-SHA256 of the derived key, stored in `.check` file)
 
 **What's never on disk:** passphrase, derived key, plaintext tokens.
 

@@ -12,7 +12,7 @@ import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
 import { CredVault } from '../vault.js';
 import { SQLiteBackend } from '../storage/sqlite.js';
-import { auditChainGenesis, auditChainHash } from '../audit.js';
+import { AUDIT_CHAIN_FIELDS, auditChainGenesis, auditChainHash } from '../audit.js';
 import type { AuditEvent, AuditRow } from '../audit.js';
 
 const dirs: string[] = [];
@@ -187,6 +187,26 @@ describe('tamper-evident audit chain', () => {
     const backend = new SQLiteBackend(join(dir, 'vault.db'));
     backend.init();
     expect(() => backend.writeAuditEvent(event('evt_1'))).toThrow(/Audit chain key not set/);
+  });
+
+  it('keeps the hash input stable, so existing chains still verify', () => {
+    const row: AuditRow = {
+      id: 'evt_pin', timestamp: '2026-10-30T00:00:00.000Z', actor_type: 'agent', actor_id: 'did:key:z6MkAgent',
+      actor_fingerprint: null, action: 'delegate', resource_type: 'token', resource_id: 'google/alice', outcome: 'success',
+      delegation_chain: '["a"]', scopes_requested: '["openid"]', scopes_granted: null, correlation_id: 'corr_pin',
+      sensitive_hmac: null, metadata_json: '{"n":1}', error_message: null, created_at: '2026-10-30T00:00:01.000Z',
+    };
+    expect(auditChainHash(Buffer.alloc(32, 7), auditChainGenesis(0), 1, row)).toBe('Yxg0YKGq69LOBIf1RfQTtKtEWihd3RbA97CUMvvYJSE');
+  });
+
+  it('hashes every column of the audit table', async () => {
+    const { path } = await vaultWith(0);
+    const db = new Database(path);
+    const columns = (db.prepare('PRAGMA table_info(vault_audit_events)').all() as Array<{ name: string }>)
+      .map((c) => c.name)
+      .filter((name) => name !== 'chain_seq' && name !== 'chain_hash');
+    db.close();
+    expect(new Set(columns)).toEqual(new Set(AUDIT_CHAIN_FIELDS));
   });
 
   it('keeps one chain across a batch write and single writes', async () => {

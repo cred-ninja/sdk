@@ -70,6 +70,7 @@ export class CredVault {
   // Passphrase held only in this field — never serialized or logged
   private readonly passphrase: string;
   private readonly saltPath: string;
+  private readonly checkPath: string;
   private derivedKey: Buffer | null = null;
   private initPromise: Promise<void> | null = null;
   private rotationEngine: RotationEngine | null = null;
@@ -81,6 +82,7 @@ export class CredVault {
     this.passphrase = options.passphrase;
     // Salt stored adjacent to the vault data file
     this.saltPath = options.path + '.salt';
+    this.checkPath = options.path + '.check';
 
     if (options.storage === 'sqlite') {
       this.backend = new SQLiteBackend(options.path);
@@ -101,8 +103,11 @@ export class CredVault {
    */
   async init(): Promise<void> {
     await this.backend.init();
+    const saltExisted = fs.existsSync(this.saltPath);
     const salt = this.loadOrCreateSalt();
-    this.derivedKey = deriveKey(this.passphrase, salt);
+    const derivedKey = deriveKey(this.passphrase, salt);
+    this.checkPassphrase(derivedKey, saltExisted);
+    this.derivedKey = derivedKey;
     // The audit chain key is derived from the passphrase-derived key and is
     // never stored, so a copy of the database alone cannot forge the chain.
     this.backend.setAuditChainKey?.(crypto.createHmac('sha256', this.derivedKey).update('cred:audit-chain:v1').digest());
@@ -128,6 +133,27 @@ export class CredVault {
     const salt = generateSalt();
     fs.writeFileSync(this.saltPath, salt.toString('hex'), { encoding: 'utf8', mode: 0o600 });
     return salt;
+  }
+
+  /**
+   * Refuse a passphrase other than the one this vault was created with,
+   * before anything is read or written: a wrong one would decrypt nothing
+   * and extend the audit chain under the wrong key. A new vault (its salt was
+   * just created) or one created before the check existed gets one now.
+   */
+  private checkPassphrase(derivedKey: Buffer, saltExisted: boolean): void {
+    const expected = crypto.createHmac('sha256', derivedKey).update('cred:passphrase-check:v1').digest();
+    if (!saltExisted || !fs.existsSync(this.checkPath)) {
+      fs.writeFileSync(this.checkPath, expected.toString('hex'), { encoding: 'utf8', mode: 0o600 });
+      return;
+    }
+    const stored = fs.readFileSync(this.checkPath, 'utf8').trim();
+    if (!/^[0-9a-f]{64}$/.test(stored)) {
+      throw new Error(`Vault passphrase check value at ${this.checkPath} is malformed`);
+    }
+    if (!crypto.timingSafeEqual(Buffer.from(stored, 'hex'), expected)) {
+      throw new Error('Vault passphrase does not match the passphrase this vault was created with');
+    }
   }
 
   private ensureKey(): Buffer {
