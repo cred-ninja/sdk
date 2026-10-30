@@ -12,13 +12,15 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives import serialization
+
+from .jcs import canonical_json
 
 # ── Cred Public Key (pinned at build time) ───────────────────────────────────
 
@@ -279,11 +281,17 @@ def dpop_ath(handle: str) -> str:
     return _base64url_encode(hashlib.sha256(handle.encode("ascii")).digest())
 
 
+def dpop_request_hash(request_body: Any) -> str:
+    """``cred_req`` for a request body: base64url SHA-256 of its RFC 8785 (JCS) form."""
+    return _base64url_encode(hashlib.sha256(canonical_json(request_body).encode("utf-8")).digest())
+
+
 def create_dpop_proof(
     identity: DpopSigningIdentity,
     htm: str,
     htu: str,
     handle: Optional[str] = None,
+    request_body: Optional[Any] = None,
 ) -> str:
     """Create a DPoP proof (RFC 9449) signed with the agent's own did:key.
 
@@ -299,6 +307,11 @@ def create_dpop_proof(
         htm: HTTP method, e.g. ``"POST"``.
         htu: Request URL without query or fragment.
         handle: Delegation handle id to bind the proof to, if any.
+        request_body: The whole JSON request body, exactly as sent. When
+            given, the proof carries ``cred_req``, the base64url SHA-256 of
+            its RFC 8785 (JCS) serialization, so it authorizes this one
+            request and no other. Raises :class:`CanonicalJsonError` (a
+            ``ValueError``) when the body has no JCS form.
 
     Returns:
         The proof as a compact JWS, for the ``DPoP`` request header.
@@ -330,6 +343,8 @@ def create_dpop_proof(
     }
     if handle is not None:
         claims["ath"] = dpop_ath(handle)
+    if request_body is not None:
+        claims["cred_req"] = dpop_request_hash(request_body)
 
     signing_input = f"{_base64url_encode(_compact_json(header))}.{_base64url_encode(_compact_json(claims))}"
     signature = private_key_obj.sign(signing_input.encode("ascii"))

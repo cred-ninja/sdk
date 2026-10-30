@@ -41,6 +41,26 @@ async function harness(overrides: Parameters<typeof makeHarness>[0] = {}): Promi
 }
 
 describe('Link delegation enforcement without a Guard', () => {
+  it('hands out no Link raw token while CRED_ALLOW_RAW_TOKENS is off, even with the client flag', async () => {
+    const { app } = await harness({ allowRawTokens: false });
+    const client = await registerClient(app, { allow_raw_tokens: true });
+    const connectionId = await connectAndActivate(app, client);
+    const raw = await delegate(app, { connection_id: connectionId, token_format: 'raw' });
+    expect(raw.status).toBe(400);
+    expect(raw.body.access_token).toBeUndefined();
+    expect(JSON.stringify(raw.body)).not.toContain('ya29.access-1');
+  });
+
+  it('issues no Link handle to the key-less static Bearer identity while CRED_REQUIRE_DPOP is on', async () => {
+    const { app } = await harness({ requireDpop: true });
+    const client = await registerClient(app);
+    const connectionId = await connectAndActivate(app, client);
+    const res = await delegate(app, { connection_id: connectionId });
+    expect(res.status).toBe(400);
+    expect(res.body.delegation_id).toBeUndefined();
+    expect(JSON.stringify(res.body)).toMatch(/bound to a key/);
+  });
+
   it('refuses pending, needs_reauth and revoked connections on delegate and use with typed codes', async () => {
     const { app, server } = await harness();
     const store = server.link!.context.store;
@@ -228,7 +248,7 @@ describe('Agent identity for Link checks (decision 6)', () => {
   it('uses the verified principal of a custom verifier; another agent cannot use the handle', async () => {
     const { app } = await harness({
       agentToken: undefined,
-      requireDpop: false,
+      requireDpop: false, allowRawTokens: true,
       agentRequestVerifier: (req) => {
         const id = req.get('x-test-agent');
         return id ? { ok: true, principal: { type: 'test', principalId: id } } : { ok: false };
@@ -503,7 +523,7 @@ describe('Configuration and pre-existing gap fixes', () => {
       tofuPath: '/tmp/never-created-tofu.json',
       adminToken: ADMIN_TOKEN,
       agentToken: AGENT_TOKEN,
-      requireDpop: false,
+      requireDpop: false, allowRawTokens: true,
       providers: [],
       redirectBaseUri: 'http://localhost:3456',
       linkEnabled: true,

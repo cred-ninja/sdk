@@ -602,14 +602,17 @@ export class Cred {
       );
     }
 
-    return this.post<BrokeredUseResult>('/api/v1/use', {
+    const requestBody = {
       delegation_id: params.delegationId,
       url: params.url,
       method: params.method,
       ...(params.body !== undefined ? { body: params.body } : {}),
       ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
-    }, params.agentIdentity
-      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId) }
+    };
+    // The proof commits to this exact request body (cred_req), so it
+    // authorizes this one upstream call and no other.
+    return this.post<BrokeredUseResult>('/api/v1/use', requestBody, params.agentIdentity
+      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId, requestBody) }
       : undefined);
   }
 

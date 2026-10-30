@@ -122,6 +122,14 @@ export interface ServerConfig {
   // Bearer credential only. Cred Link handles keep their own binding.
   requireDpop?: boolean;
 
+  // Hand a provider's access token to the caller (token_format "raw" on
+  // /api/v1/delegate, and GET /api/token/:provider) (env
+  // CRED_ALLOW_RAW_TOKENS). Default false: a provider token is a bearer
+  // credential with the connection's full scope that cannot be bound to an
+  // agent key, narrowed, or revoked per delegation, so the server only
+  // brokers calls. true is deprecated and logs a warning at startup.
+  allowRawTokens?: boolean;
+
   // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
   delegationGrantTtlSeconds?: number;
 
@@ -262,6 +270,11 @@ export function loadConfig(): ServerConfig {
   if (requireAgentIdentityRaw === 'true' || requireAgentIdentityRaw === '1') requireAgentIdentity = true;
   else if (requireAgentIdentityRaw === 'false' || requireAgentIdentityRaw === '0') requireAgentIdentity = false;
   else if (requireAgentIdentityRaw !== '') throw new Error('CRED_REQUIRE_AGENT_IDENTITY must be true or false');
+  const allowRawTokensRaw = (process.env.CRED_ALLOW_RAW_TOKENS ?? '').trim().toLowerCase();
+  let allowRawTokens: boolean | undefined;
+  if (allowRawTokensRaw === 'true' || allowRawTokensRaw === '1') allowRawTokens = true;
+  else if (allowRawTokensRaw === 'false' || allowRawTokensRaw === '0') allowRawTokens = false;
+  else if (allowRawTokensRaw !== '') throw new Error('CRED_ALLOW_RAW_TOKENS must be true or false');
   const requireDpopRaw = (process.env.CRED_REQUIRE_DPOP ?? '').trim().toLowerCase();
   let requireDpop: boolean | undefined;
   if (requireDpopRaw === 'true' || requireDpopRaw === '1') requireDpop = true;
@@ -320,6 +333,7 @@ export function loadConfig(): ServerConfig {
     ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
     ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
     ...(requireDpop !== undefined ? { requireDpop } : {}),
+    ...(allowRawTokens !== undefined ? { allowRawTokens } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

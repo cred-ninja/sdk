@@ -280,7 +280,7 @@ class TestDelegate:
 import base64 as _b64
 import hashlib as _hashlib
 
-from cred import generate_agent_identity
+from cred import canonical_json, generate_agent_identity
 
 
 def _fake_cred_server(calls: list):
@@ -312,12 +312,18 @@ def _assert_dpop_bound(calls: list, identity, outputs: list) -> None:
     delegate_claims = _dpop_claims(delegate_call["headers"]["DPoP"])
     assert delegate_claims["htu"] == f"{BASE_URL}/api/v1/delegate"
     assert "ath" not in delegate_claims
+    assert "cred_req" not in delegate_claims
 
     assert use_call["path"] == "/api/v1/use"
     use_claims = _dpop_claims(use_call["headers"]["DPoP"])
     assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
     expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(b"del_bound").digest()).rstrip(b"=").decode()
     assert use_claims["ath"] == expected_ath
+    # cred_req: the proof commits to the exact /api/v1/use body sent.
+    expected_req = _b64.urlsafe_b64encode(
+        _hashlib.sha256(canonical_json(use_call["body"]).encode("utf-8")).digest(),
+    ).rstrip(b"=").decode()
+    assert use_claims["cred_req"] == expected_req
 
     # The key never reaches what the model sees.
     for output in outputs:

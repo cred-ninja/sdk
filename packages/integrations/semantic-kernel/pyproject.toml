@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cred-semantic-kernel"
-version = "1.0.0"
+version = "1.1.0"
 description = "Cred Semantic Kernel integration — credential delegation plugin for Microsoft Semantic Kernel agents"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -13,7 +13,7 @@ requires-python = ">=3.9"
 authors = [{ name = "Cred", email = "hello@cred.ninja" }]
 keywords = ["cred", "semantic-kernel", "microsoft", "oauth", "delegation", "ai-agents"]
 dependencies = [
-    "cred-auth>=1.0.0",
+    "cred-auth>=1.1.0",
     "semantic-kernel>=1.0",
 ]
 

@@ -15,7 +15,7 @@ import respx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from cred import AsyncCred, Cred, CredError, create_dpop_proof, generate_agent_identity
+from cred import AsyncCred, CanonicalJsonError, Cred, CredError, canonical_json, create_dpop_proof, generate_agent_identity
 
 BASE_URL = "https://cred.example.com"
 TOKEN = "cred_at_test_token"
@@ -47,6 +47,11 @@ def decode_proof(proof: str) -> tuple[dict, dict, bytes]:
 
 def expected_ath(handle: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(handle.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+
+
+def expected_cred_req(body: dict) -> str:
+    digest = hashlib.sha256(canonical_json(body).encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 class TestCreateDpopProof:
@@ -118,6 +123,30 @@ class TestCreateDpopProof:
                 signature, f"{header_b64}.{claims_b64}".encode("ascii"),
             )
 
+    def test_cred_req_present_only_with_request_body(self):
+        identity = generate_agent_identity()
+        body = {"delegation_id": HANDLE, "url": "https://api.example.com/x", "method": "GET"}
+        _, with_body, _ = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", HANDLE, body))
+        _, without_body, _ = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", HANDLE))
+
+        assert with_body["cred_req"] == expected_cred_req(body)
+        assert "cred_req" not in without_body
+
+    def test_cred_req_does_not_depend_on_key_order(self):
+        identity = generate_agent_identity()
+        first = {"url": "https://api.example.com/x", "method": "GET", "delegation_id": HANDLE}
+        second = {"delegation_id": HANDLE, "method": "GET", "url": "https://api.example.com/x"}
+        claims_a = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", HANDLE, first))[1]
+        claims_b = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", HANDLE, second))[1]
+        assert claims_a["cred_req"] == claims_b["cred_req"]
+
+    def test_rejects_request_body_without_jcs_form(self):
+        with pytest.raises(CanonicalJsonError):
+            create_dpop_proof(
+                generate_agent_identity(), "POST", f"{BASE_URL}/api/v1/use", HANDLE,
+                {"delegation_id": HANDLE, "body": {"n": float("nan")}},
+            )
+
     def test_rejects_htu_with_query(self):
         with pytest.raises(ValueError, match="query or fragment"):
             create_dpop_proof(generate_agent_identity(), "POST", f"{BASE_URL}/api/v1/use?x=1")
@@ -139,6 +168,7 @@ class TestClientSendsDpop:
         assert claims["htm"] == "POST"
         assert claims["htu"] == f"{BASE_URL}/api/v1/delegate"
         assert "ath" not in claims
+        assert "cred_req" not in claims
 
     @respx.mock
     def test_delegate_handle_accepts_matching_agent_did(self):
@@ -186,6 +216,37 @@ class TestClientSendsDpop:
         _, claims, _ = decode_proof(request.headers["DPoP"])
         assert claims["htu"] == f"{BASE_URL}/api/v1/use"
         assert claims["ath"] == expected_ath(HANDLE)
+        # cred_req commits to the body actually sent.
+        assert claims["cred_req"] == expected_cred_req(json.loads(request.read()))
+
+    @respx.mock
+    def test_use_cred_req_covers_body_and_extra_headers(self):
+        identity = generate_agent_identity()
+        route = respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(200, json=USE_RESPONSE))
+
+        with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
+            cred.use(
+                delegation_id=HANDLE,
+                url="https://api.example.com/items",
+                method="POST",
+                body={"name": "caf\u00e9 \U0001F600", "qty": 2, "price": 0.1, "tags": []},
+                extra_headers={"X-Test": "1"},
+                agent_identity=identity,
+            )
+
+        request = route.calls[0].request
+        sent = json.loads(request.read())
+        assert sent == {
+            "delegation_id": HANDLE,
+            "url": "https://api.example.com/items",
+            "method": "POST",
+            "body": {"name": "caf\u00e9 \U0001F600", "qty": 2, "price": 0.1, "tags": []},
+            "extra_headers": {"X-Test": "1"},
+        }
+        claims = decode_proof(request.headers["DPoP"])[1]
+        assert claims["cred_req"] == expected_cred_req(sent)
+        tampered = dict(sent, url="https://api.example.com/other")
+        assert claims["cred_req"] != expected_cred_req(tampered)
 
     @respx.mock
     def test_use_without_identity_sends_no_proof(self):
@@ -235,6 +296,8 @@ class TestClientSendsDpop:
         _, use_claims, _ = decode_proof(use_route.calls[0].request.headers["DPoP"])
         assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
         assert use_claims["ath"] == expected_ath(HANDLE)
+        assert use_claims["cred_req"] == expected_cred_req(json.loads(use_route.calls[0].request.read()))
+        assert "cred_req" not in delegate_claims
 
     def test_async_client_rejects_mismatched_agent_did(self):
         identity = generate_agent_identity()

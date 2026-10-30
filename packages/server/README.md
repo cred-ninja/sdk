@@ -56,7 +56,7 @@ npm run dev
 | GET | `/connect/:provider` | Admin | Start OAuth flow (browser): `?request=<id>` from a connect request; see [User ids](#user-ids) |
 | POST | `/connect/:provider/start` | Admin | JSON `{ user_id, scopes }`: mint a single-use connect request, answers `{ url }` |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
-| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint. A handle is issued to the did:key in `agent_did`, which proves its key with a `DPoP` proof (see DPoP-bound handles below). Returns a brokered handle unless the request sends `"token_format": "raw"`. A service with no brokered-use path needs `raw` explicitly (`400 brokered_format_unsupported` otherwise) |
+| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint. A handle is issued to the did:key in `agent_did`, which proves its key with a `DPoP` proof (see DPoP-bound handles below). Returns a brokered handle. `"token_format": "raw"` gets `403 raw_token_disabled` unless the server runs with `CRED_ALLOW_RAW_TOKENS=true`; a service with no brokered-use path can then only be reached with that setting (`400 brokered_format_unsupported` otherwise) |
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
 | POST | `/api/v1/use` | Bearer + DPoP | Broker an upstream API call with a delegation handle, with a `DPoP` proof by the key the handle is bound to. Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
@@ -152,13 +152,16 @@ npm run dev
 > `htm` `POST`, `htu` `<REDIRECT_BASE_URI>/api/v1/delegate`, `iat` and a fresh `jti`. The response
 > carries `cnf.jkt`, the RFC 7638 thumbprint of that key. Every `POST /api/v1/use` needs a new
 > proof by the same key with `htu` `<REDIRECT_BASE_URI>/api/v1/use` and `ath` = base64url
-> SHA-256 of the `delegation_id`. A missing, stale (over 120 seconds), replayed, or mismatched
+> SHA-256 of the `delegation_id`, and `cred_req` = base64url SHA-256 of the RFC 8785 (JCS) form of
+> the whole JSON request body (handle, `url`, `method`, `body`, `extra_headers`, `quantities`). The
+> server recomputes `cred_req` from the request it received, so a proof authorizes exactly that one
+> upstream call. A missing, stale (over 120 seconds), replayed, or mismatched
 > proof gets `401 invalid_dpop_proof` with a `WWW-Authenticate: DPoP` header, before any upstream
 > call. Sub-delegated handles (`/api/v1/subdelegate`, and `/api/v1/token` after a grant) are bound
 > to the receiving agent's key, so the delegating agent that relays a handle cannot use it; the
 > receiving agent must be a did:key. The SDK signs proofs when `delegateHandle()` and `use()` get
-> `agentIdentity`; the MCP server when `CRED_AGENT_PRIVATE_KEY_HEX` is set. Raw-token delegation
-> (`"token_format": "raw"`) is unchanged and returns a provider bearer token. Cred Link handles keep
+> `agentIdentity`; the MCP server when `CRED_AGENT_PRIVATE_KEY_HEX` is set. Raw-token
+> delegation is off by default (`CRED_ALLOW_RAW_TOKENS`). Cred Link handles keep
 > their own binding. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
 > (case-insensitive scheme and host, default port ignored), so the client's base URL must be the
 > same origin and path as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different, and so are
@@ -589,6 +592,7 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
+| `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"`, `GET /api/token/:provider` and Cred Link raw tokens are refused with `raw_token_disabled`. `true`: deprecated, restores them and logs a warning at startup |
 | `CRED_REQUIRE_DPOP` | No | `true` (default): brokered handles are issued only to did:key agents and bound to their keys; `/api/v1/delegate` and `/api/v1/use` require a DPoP proof (RFC 9449) by that key. `false`: deprecated Bearer-bound handles, logs a warning at startup |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | `true` (default): `/api/v1/subdelegate` requires an `actor_token` proving the caller is the agent the parent receipt names. `false`: deprecated legacy behaviour, logs a warning at startup; takes effect only with `CRED_REQUIRE_DPOP=false` |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |

@@ -103,7 +103,10 @@ const cred = new Cred({
 
 ### `cred.delegate(params)`
 
-Get a delegated access token for a service on behalf of a user.
+Get a delegated access token for a service on behalf of a user. Against a Cred server this asks
+for the provider token itself, which servers refuse by default (`raw_token_disabled`): use
+`delegateHandle()` and `use()` below. It still works in local mode and against a server run with
+`CRED_ALLOW_RAW_TOKENS=true`.
 
 ```typescript
 const result = await cred.delegate({

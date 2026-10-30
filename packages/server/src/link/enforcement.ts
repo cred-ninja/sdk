@@ -263,6 +263,15 @@ export interface LinkDelegateHandlerDeps extends LinkEnforcementDeps {
     link: LinkHandleBinding;
   }) => void;
   handleTtlSeconds: number;
+  /** CRED_ALLOW_RAW_TOKENS: a raw provider token needs this and the client's allow_raw_tokens. */
+  allowRawTokens: boolean;
+  /**
+   * CRED_REQUIRE_DPOP: a handle is issued only to an agent identity bound to
+   * a key (a TOFU agent, which signs each /api/v1/use with Web Bot Auth, or
+   * a custom verifier principal), never to the key-less static Bearer
+   * identity, whose handle would be usable by anyone holding the Bearer.
+   */
+  requireKeyedAgent: boolean;
 }
 
 /**
@@ -293,6 +302,17 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
   const loaded = await ctx.tokens.load(connection);
   if (!loaded.ok) {
     await sendTokenLoadFailure(deps, req, res, connection, loaded, state.agentId);
+    return;
+  }
+
+  if (format === 'raw' && !deps.allowRawTokens) {
+    sendLinkError(req, res, 400, 'invalid_request', { message: 'This server does not hand out provider tokens (CRED_ALLOW_RAW_TOKENS is off); request a handle' });
+    return;
+  }
+  if (format === 'handle' && deps.requireKeyedAgent && state.agentId === STATIC_BEARER_AGENT_ID) {
+    sendLinkError(req, res, 400, 'invalid_request', {
+      message: 'A Link handle is issued only to an agent bound to a key (a TOFU agent signing with Web Bot Auth, or a verified principal), not to the shared Bearer identity',
+    });
     return;
   }
 
