@@ -253,6 +253,17 @@ export function linkDelegateState(req: Request): LinkDelegateState | undefined {
   return (req as LinkRequest).credLinkDelegate;
 }
 
+/** The `agent_did` a TOFU payload names, or undefined (its signature is checked by resolveTofuPrincipal). */
+function tofuPayloadAgentDid(payload: unknown): string | undefined {
+  if (typeof payload !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64').toString('utf8')) as { agent_did?: unknown };
+    return typeof parsed.agent_did === 'string' ? parsed.agent_did : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface LinkDelegateHandlerDeps extends LinkEnforcementDeps {
   /**
    * The agent's did:key, proven by a DPoP proof on this request, or null
@@ -264,6 +275,8 @@ export interface LinkDelegateHandlerDeps extends LinkEnforcementDeps {
    * `agentDid`'s key and to `link`; `extra` joins the response.
    */
   issueToken: (req: Request, res: Response, input: {
+    /** Writes the issuance audit event; called after the delegation is recorded, before the response. */
+    audit: () => void;
     delegationId: string;
     agentDid: string;
     service: string;
@@ -323,6 +336,13 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
   // Bearer alone cannot exercise it.
   let agentDid: string | null = null;
   if (format === 'handle') {
+    // A TOFU proof is a signed body field with no nonce: replayed beside
+    // another agent_did it would name this Link agent for a key it never
+    // held. On Link, the proof must name the key the token is bound to.
+    if (body.tofu_payload !== undefined && tofuPayloadAgentDid(body.tofu_payload) !== body.agent_did) {
+      sendLinkError(req, res, 400, 'invalid_request', { message: 'tofu_payload must name the agent_did the Delegation Token is bound to' });
+      return;
+    }
     agentDid = deps.checkAgentKey(req, res, `${connection.provider}/${linkVaultUserId(connection.id)}`);
     if (agentDid === null) return;
   }
@@ -390,20 +410,22 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     return;
   }
 
-  // Audit first (fail closed): no token exists without its record.
-  ctx.vault.writeAuditEvent({
-    id: newId(LINK_ID_PREFIXES.auditEvent),
-    timestamp: new Date(),
-    actor: { type: 'agent', id: state.agentId },
-    action: 'delegate',
-    resource: { type: 'token', id: delegationId },
-    outcome: 'success',
-    scopesRequested: scopes,
-    scopesGranted: scopes,
-    correlationId: requestId(req, res),
-    metadata: { connection_id: connection.id, grant_id: grant.id, grant_version: grant.version, client_id: connection.client_id },
-  });
   await deps.issueToken(req, res, {
+    // Once the delegation is recorded and before the token is sent (fail
+    // closed): no token exists without its audit record, and a refused
+    // issue leaves no success event.
+    audit: () => ctx.vault.writeAuditEvent({
+      id: newId(LINK_ID_PREFIXES.auditEvent),
+      timestamp: new Date(),
+      actor: { type: 'agent', id: state.agentId },
+      action: 'delegate',
+      resource: { type: 'token', id: delegationId },
+      outcome: 'success',
+      scopesRequested: scopes,
+      scopesGranted: scopes,
+      correlationId: requestId(req, res),
+      metadata: { connection_id: connection.id, grant_id: grant.id, grant_version: grant.version, client_id: connection.client_id },
+    }),
     delegationId,
     agentDid: agentDid!,
     service: connection.provider,
@@ -442,11 +464,16 @@ async function sendTokenLoadFailure(
 }
 
 /**
- * The Link check of POST /api/v1/use for a handle minted for a Link
- * connection: the caller must be the handle's agent, and checkLinkAccess
- * runs again (operation 'use', the handle's scopes, grant id and version),
- * so a revoked, narrowed or needs_reauth connection is refused at once.
- * Returns the allowed access, or null after sending the denial.
+ * The Link check of POST /api/v1/use for a delegation of a Link
+ * connection. Once /use has verified the Delegation Token and its DPoP
+ * proof (tokenVerified), the token names the Link agent it was issued to;
+ * otherwise the caller's own identity must be that agent. checkLinkAccess
+ * then runs again (operation 'use', the delegation's scopes, grant id and
+ * version), so a revoked, narrowed or needs_reauth connection is refused
+ * at once. A Link identity revoked after issue (a TOFU key, a custom
+ * principal) is not re-checked: its tokens last at most their lifetime,
+ * capped at the receipt TTL. Returns the allowed access, or null after
+ * sending the denial.
  */
 export async function authorizeLinkUse(
   deps: LinkEnforcementDeps,

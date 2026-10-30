@@ -452,7 +452,7 @@ export async function connectAndActivate(app: Server['app'], client: RegisteredC
 const keyedAgents = new WeakMap<object, Promise<AgentIdentity>>();
 const issuedTokens = new Map<string, { agent: AgentIdentity; token: string }>();
 
-function agentFor(app: Server['app']): Promise<AgentIdentity> {
+export function agentFor(app: Server['app']): Promise<AgentIdentity> {
   let agent = keyedAgents.get(app);
   if (!agent) {
     agent = newAgent();

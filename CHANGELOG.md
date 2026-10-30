@@ -9,12 +9,17 @@
   and a DPoP proof by that key, and gets `token_type: "DPoP"` with
   `cnf.jkt`, alongside `connection_id`, `grant_id` and `grant_version`. The
   token is recorded with the Link grant it was issued under, so it survives
-  a restart, takes part in delegation revocation, and is still checked
-  against the grant at every call (revoked, narrowed or `needs_reauth`
-  connections are refused). It is exercised with `Authorization: DPoP` at
+  a restart and is still checked against the grant at every call (revoked,
+  narrowed or `needs_reauth` connections are refused); revoking the did:key
+  agent revokes it too, but one Link token cannot yet be revoked by id. It
+  lasts no longer than a receipt, and the did:key agent checks (suspended,
+  scope ceiling) apply. It is exercised with `Authorization: DPoP` at
   `/api/v1/use`; a `delegation_id` with `Authorization: Bearer` no longer
   authorizes anything. Link tokens are never issued to the shared static
-  Bearer identity (`server-agent`), and carry no ceilings yet.
+  Bearer identity (`server-agent`); a TOFU proof on a Link call must name
+  the `agent_did` the token is bound to (`agent_did` in the signed payload),
+  so a replayed proof cannot bind another key. Guard rate limits at use key
+  on the Link agent. Link tokens carry no ceilings yet.
 - `CRED_REQUIRE_DPOP` (`requireDpop`) is removed; setting it logs that it
   is ignored.
 

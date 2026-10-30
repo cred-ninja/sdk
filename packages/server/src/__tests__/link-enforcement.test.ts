@@ -12,6 +12,7 @@ import {
   Browser,
   CALENDAR_URL,
   activate,
+  agentFor,
   authorizePath,
   basic,
   callback,
@@ -259,6 +260,49 @@ describe('Link delegation enforcement without a Guard', () => {
 });
 
 describe('Link Delegation Tokens', () => {
+  it('apply the did:key agent checks, write no success audit on a refused issue, and stop when the agent is revoked', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const agent = await agentFor(hx.app);
+    const suspendedAgent = await newAgent();
+    const now = new Date().toISOString();
+    const register = (id: string, did: string, status: 'active' | 'suspended', scopeCeiling: string[] = []) => hx.server.vault.registerAgent!({
+      id, did, name: id, fingerprint: `fp_${id}`, scopeCeiling, status, createdBy: 'admin', createdAt: now, updatedAt: now,
+    });
+    await register('agt_suspended', suspendedAgent.did, 'suspended');
+    const successes = () => (hx.server.vault.queryAuditEvents({ limit: 500 }) as Array<{ action: string; outcome: string }>)
+      .filter((e) => e.action === 'delegate' && e.outcome === 'success').length;
+    const before = successes();
+    const suspended = await delegateAs(hx.app, suspendedAgent, { connection_id: connectionId, scopes: ['calendar.readonly'] }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(suspended.status).toBe(403);
+    expect(suspended.body.error).toBe('agent_suspended');
+    const ceilinged = await newAgent();
+    await register('agt_ceiling', ceilinged.did, 'active', ['gmail.readonly']);
+    const overCeiling = await delegateAs(hx.app, ceilinged, { connection_id: connectionId, scopes: ['calendar.readonly'] }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(overCeiling.status).toBe(403);
+    expect(overCeiling.body.error).toBe('scope_ceiling_exceeded');
+    expect(successes()).toBe(before);
+
+    await register('agt_link', agent.did, 'active');
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    expect(successes()).toBe(before + 1);
+    const call = { delegation_id: minted.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+    expect((await use(hx.app, call)).status).toBe(200);
+    expect((await request(hx.app).delete('/admin/agents/agt_link').set('Authorization', `Bearer ${ADMIN_TOKEN}`)).status).toBeLessThan(300);
+    expect((await use(hx.app, call)).status).toBe(401);
+  });
+
+  it('last no longer than a receipt', async () => {
+    const hx = await harness({ receiptTtlSeconds: 60 });
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    expect(minted.body.expires_in).toBe(60);
+  });
+
   it('are restored from the vault after a restart with their Link binding, so the grant still decides', async () => {
     const hx = await harness();
     const client = await registerClient(hx.app);
@@ -314,8 +358,9 @@ describe('TOFU identity for Link checks', () => {
     const raw = new Uint8Array(publicKey.export({ type: 'spki', format: 'der' }).subarray(-32));
     const registration = await server.tofu.registerAgent({ publicKey: raw, initialScopes: [] });
     const tofuId = `tofu:${registration.agentId}`;
-    const proof = (userId: string) => {
-      const payload = Buffer.from(JSON.stringify({ service: 'google', userId, appClientId: 'local', scopes: ['calendar.readonly'], timestamp: new Date().toISOString() }));
+    const agentDid = (await agentFor(app)).did;
+    const proof = (userId: string, boundDid: string | null = agentDid) => {
+      const payload = Buffer.from(JSON.stringify({ service: 'google', userId, appClientId: 'local', scopes: ['calendar.readonly'], timestamp: new Date().toISOString(), ...(boundDid ? { agent_did: boundDid } : {}) }));
       return { tofu_fingerprint: registration.fingerprint, tofu_payload: payload.toString('base64'), tofu_signature: sign(null, payload, privateKey).toString('base64') };
     };
     const body = { connection_id: connectionId, service: 'google', scopes: ['calendar.readonly'] };
@@ -328,6 +373,14 @@ describe('TOFU identity for Link checks', () => {
       .send({ agent_id: tofuId, scopes: ['calendar.readonly'] });
     const ok = await delegate(app, { ...body, ...proof(connectionId) });
     expect(ok.status).toBe(200);
+    // The same signed proof replayed beside another key binds nothing: the
+    // payload names the key the token is bound to.
+    const thief = await newAgent();
+    const replayed = await delegateAs(app, thief, { ...body, ...proof(connectionId) }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(replayed.status).toBe(400);
+    expect(replayed.body.access_token).toBeUndefined();
+    const unbound = await delegate(app, { ...body, ...proof(connectionId, null) });
+    expect(unbound.status).toBe(400);
     // A proof signed for another userId does not establish identity.
     const wrongBinding = await delegate(app, { ...body, ...proof('default') });
     expect(wrongBinding.status).toBe(403);

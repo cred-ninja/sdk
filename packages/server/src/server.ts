@@ -1637,6 +1637,9 @@ export function createServer(config: ServerConfig) {
     && (!Number.isInteger(config.receiptTtlSeconds) || config.receiptTtlSeconds <= 0 || config.receiptTtlSeconds > MAX_RECEIPT_TTL_SECONDS)) {
     throw new Error(`receiptTtlSeconds must be a positive integer of at most ${MAX_RECEIPT_TTL_SECONDS} (1 hour)`);
   }
+  if ((config as unknown as Record<string, unknown>).requireDpop !== undefined) {
+    console.warn('[cred] requireDpop is ignored: every delegation, Cred Link\'s included, is a Delegation Token bound to the agent\'s key (DPoP). Remove the setting.');
+  }
   const consentRetentionDays = config.consentRetentionDays ?? 90;
   if (!Number.isInteger(consentRetentionDays) || consentRetentionDays < 90) {
     throw new Error('consentRetentionDays (CONSENT_RETENTION_DAYS) must be an integer of at least 90: the draft keeps consent records at least 90 days');
@@ -3690,6 +3693,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * end user confirmed.
    */
   async function issueLinkDelegationToken(req: Request, res: Response, input: {
+    audit: () => void;
     delegationId: string;
     agentDid: string;
     service: string;
@@ -3700,6 +3704,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     link: LinkHandleBinding;
     extra: Record<string, unknown>;
   }): Promise<void> {
+    // The same did:key controls as any root delegation: a suspended agent,
+    // or one asking past its scope ceiling, gets no Link token either.
+    const agentCheck = await didAgentCheck(input.agentDid, input.scopes);
+    if (!agentCheck.ok) {
+      res.status(403).json({ error: agentCheck.error, message: agentCheck.message });
+      return;
+    }
+    // No longer than the receipt its prf cites, as any other delegation.
+    const expiresIn = Math.max(1, Math.min(input.expiresIn, getReceiptTtlSeconds()));
     const receipt = createReceipt({
       agentDid: input.agentDid,
       service: input.service,
@@ -3720,17 +3733,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       prf: [receiptContentId(receipt)],
       link: input.link,
     })!;
-    const recorded = await recordIssuedDelegation(res, {
-      id: input.delegationId,
-      parentId: null,
-      agentDid: input.agentDid,
-      service: input.service,
-      userId: input.userId,
-      chainDepth: 0,
-      expiresAt: new Date(Date.now() + input.expiresIn * 1000).toISOString(),
-      grant,
-    }, crypto.randomUUID());
-    if (!recorded) return;
+    // The consent first: a delegation recorded after it never names a
+    // consent that does not exist. A Link consent is never reused, so one
+    // left behind by a refused issue grants nothing.
     await vault.recordConsent({
       id: consentId,
       subject: input.userId,
@@ -3742,12 +3747,24 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       expiresAt: null,
       chainContext: { delegationId: input.delegationId, chainDepth: 0, linkGrantId: input.link.grantId, linkGrantVersion: input.link.grantVersion },
     });
+    const recorded = await recordIssuedDelegation(res, {
+      id: input.delegationId,
+      parentId: null,
+      agentDid: input.agentDid,
+      service: input.service,
+      userId: input.userId,
+      chainDepth: 0,
+      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      grant,
+    }, crypto.randomUUID());
+    if (!recorded) return;
+    input.audit();
     // The Link vault user id is internal: the response names the connection.
     const { user_id: _internalUserId, ...response } = buildDelegationResponse({
       tokenFormat: 'handle',
       grant,
       accessToken: '',
-      expiresIn: input.expiresIn,
+      expiresIn,
       service: input.service,
       userId: input.userId,
       scopes: input.scopes,
@@ -4195,11 +4212,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     res.status(401).json({ error: 'invalid_token', message });
   }
 
-  /**
-   * The exercise state of a delegation whose token this process did not
-   * issue (another replica, or before a restart): rebuilt from the recorded
-   * grant, with the provider token loaded from the vault for this call.
-   */
   /** A recorded Link binding, or null when it is not one. */
   function linkBindingFrom(value: Record<string, unknown>): LinkHandleBinding | null {
     const { connectionId, clientId, grantId, grantVersion, agentId } = value;
@@ -4208,6 +4220,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return { connectionId, clientId, grantId, grantVersion, agentId };
   }
 
+  /**
+   * The exercise state of a delegation whose token this process did not
+   * issue (another replica, or before a restart): rebuilt from the recorded
+   * grant, with the provider token loaded from the vault for this call (a
+   * Cred Link delegation's is loaded through Link at exercise instead).
+   */
   async function restoreTokenDelegation(
     delegationId: string,
     expiresAtSeconds: number,
@@ -4356,6 +4374,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseDelegationToken(res, 'The Delegation Token names no active delegation');
         return;
       }
+      // A Link delegation's Guard identity is the Link agent it was issued
+      // to, not the key: an agent minting tokens under fresh keys still
+      // shares one rate-limit bucket.
+      if (delegation.link) (req as any).agentTokenHash = hashTokenValue(`link:${delegation.link.agentId}`);
       // The token and the recorded delegation must name the same agent and key.
       if (!tokenBinding || tokenBinding.agentDid !== delegation.agentDid || tokenBinding.jkt !== delegation.dpopJkt) {
         refuseDelegationToken(res, 'The Delegation Token does not match its delegation');
