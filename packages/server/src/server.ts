@@ -30,7 +30,7 @@ import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
-import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
+import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, constraintsSubsume, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
 import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant } from '@credninja/vault';
 import { SqliteCumulativeLedger } from '@credninja/vault';
 import {
@@ -3770,14 +3770,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
   /**
    * The permission controls the server enforces on top of allowedScopes:
-   * expiry, the per-permission rate limit, and human approval. This server
-   * has no approval flow yet, so a permission that requires approval is
-   * refused rather than silently honoured without one. Returns the refusal
-   * code, or null when the permission allows the request.
+   * expiry, the per-permission rate limit, and human approval. The rate
+   * limit is counted before approval, so an approval-gated permission is
+   * still held to it. 'approval_required' tells the caller to look for a
+   * consent that covers the request, or send the agent to /bc-authorize.
+   * Returns the refusal code, or null when the permission allows it.
    */
   async function permissionRefusal(permission: Permission): Promise<string | null> {
     if (permission.expiresAt && permission.expiresAt.getTime() <= Date.now()) return 'permission_expired';
-    if (permission.requiresApproval) return 'approval_required';
     if (permission.rateLimit && vault.checkPermissionRateLimit) {
       const allowed = await vault.checkPermissionRateLimit(
         permission.id,
@@ -3786,13 +3786,53 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       );
       if (!allowed) return 'rate_limited';
     }
+    if (permission.requiresApproval) return 'approval_required';
     return null;
+  }
+
+  /**
+   * The checks on a did:key agent's own record: revoked, suspended, or
+   * asking past its scope ceiling. On success, the record (null when the
+   * agent is not registered).
+   */
+  async function didAgentCheck(agentDid: string, requestedScopes: string[] | undefined): Promise<
+    { ok: true; record: AgentRecord | null } | { ok: false; error: string; message: string }
+  > {
+    const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
+    if (record?.status === 'revoked') return { ok: false, error: 'agent_revoked', message: 'Agent has been revoked' };
+    if (record?.status === 'suspended') return { ok: false, error: 'agent_suspended', message: 'Agent is suspended' };
+    const over = record?.scopeCeiling.length && requestedScopes?.length
+      ? requestedScopes.filter((scope) => !scopeCoveredBy(record.scopeCeiling, scope))
+      : [];
+    if (over.length > 0) return { ok: false, error: 'scope_ceiling_exceeded', message: `Agent scope ceiling exceeded: ${over.join(', ')}` };
+    return { ok: true, record };
+  }
+
+  /**
+   * The connection scopes a did:key agent may be given: within its scope
+   * ceiling and, under a Permission, within the Permission's allowedScopes.
+   */
+  function scopesForDidAgent(stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
+    return stored
+      .filter((scope) => !record?.scopeCeiling.length || scopeCoveredBy(record.scopeCeiling, scope))
+      .filter((scope) => !permission || permission.allowedScopes.some((allowed) => scopeEquivalent(allowed, scope)));
+  }
+
+  /** The roles an approver setting needs. */
+  function approverRoles(approver: Permission['approver']): Array<'subject' | 'admin'> {
+    return approver === 'both' ? ['subject', 'admin'] : [approver ?? 'subject'];
+  }
+
+  /** Whether an approval by `given` satisfies a Permission that now needs `needed`. */
+  function approvalCovers(given: Permission['approver'], needed: Permission['approver']): boolean {
+    const roles = approverRoles(given);
+    return approverRoles(needed).every((role) => roles.includes(role));
   }
 
   function refusePermission(res: Response, code: string): void {
     const messages: Record<string, string> = {
       permission_expired: 'Permission has expired',
-      approval_required: 'This permission requires human approval, which this server does not support yet',
+      approval_required: 'This permission requires approval: a did:key agent asks at /bc-authorize (CIBA)',
       rate_limited: 'Permission rate limit exceeded',
     };
     res.status(code === 'rate_limited' ? 429 : 403).json({ error: code, message: messages[code] ?? code });
@@ -4784,11 +4824,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // delegation is then issued only under a CIBA consent that still
       // covers it (unexpired, unrevoked, at least as wide), else the agent
       // asks at /bc-authorize.
+      // Looked up whatever else the request carries: TOFU fields beside a
+      // did:key must not step around the did's own Permission.
       let approvalRequired = false;
-      if (agentDid && !principalId) {
+      let didPermission: Permission | null = null;
+      if (agentDid) {
         const agentPermission = await getPermissionIfSupported(agentDid, service);
         if (agentPermission) {
-          authorizingPermission = agentPermission;
+          didPermission = agentPermission;
+          authorizingPermission ??= agentPermission;
           const refusal = await permissionRefusal(agentPermission);
           if (refusal === 'approval_required') approvalRequired = true;
           else if (refusal) {
@@ -4803,9 +4847,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(
-        (entry.scopes ?? [])
-          .filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope))
-          .filter((scope) => !didAgentRecord?.scopeCeiling.length || scopeCoveredBy(didAgentRecord.scopeCeiling, scope)),
+        scopesForDidAgent(
+          (entry.scopes ?? []).filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope)),
+          didAgentRecord,
+          didPermission,
+        ),
         effectiveRequestedScopes,
       );
 
@@ -4854,7 +4900,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         }
         let reusedConsentId: string | null = null;
         if (approvalRequired) {
-          reusedConsentId = await reusableConsent(userId, agentDid!, service, capabilities ?? capabilitiesFor(service, grantedScopes));
+          reusedConsentId = await reusableConsent({
+            subject: userId,
+            agentDid: agentDid!,
+            service,
+            capabilities: capabilities ?? capabilitiesFor(service, grantedScopes),
+            constraints: rootConstraints.constraints,
+            appClientId,
+            approver: didPermission?.approver,
+          });
           if (!reusedConsentId) {
             res.status(403).json({
               error: 'approval_required',
@@ -6319,17 +6373,34 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
   /**
    * The id of a CIBA consent that still covers this request: same subject,
-   * agent and service, unexpired, unrevoked, and with capabilities at least
-   * as wide. A broader request, an expired grant or a security event all
-   * mean asking again (Section 8.3).
+   * agent, service and app client, unexpired, unrevoked, given by every
+   * role the Permission now names, with capabilities at least as wide and
+   * ceilings at least as loose. A broader request, looser ceilings, a
+   * stricter approver, an expired grant or a security event all mean
+   * asking again (Section 8.3).
    */
-  async function reusableConsent(subject: string, agentDid: string, service: string, capabilities: CredDelegationDetail[]): Promise<string | null> {
+  async function reusableConsent(input: {
+    subject: string;
+    agentDid: string;
+    service: string;
+    capabilities: CredDelegationDetail[];
+    constraints: DelegationConstraint[];
+    appClientId: string;
+    approver: Permission['approver'];
+  }): Promise<string | null> {
     const now = new Date().toISOString();
-    for (const consent of await vault.findConsents({ subject, agentDid, service })) {
+    for (const consent of await vault.findConsents({ subject: input.subject, agentDid: input.agentDid, service: input.service })) {
       if (consent.source !== 'ciba') continue;
       if (consent.expiresAt && consent.expiresAt <= now) continue;
+      const approved = consent.chainContext as { appClientId?: unknown; constraints?: unknown; approver?: unknown };
+      if (approved.appClientId !== input.appClientId) continue;
+      if (approved.approver !== 'subject' && approved.approver !== 'admin' && approved.approver !== 'both') continue;
+      if (!approvalCovers(approved.approver, input.approver)) continue;
+      const approvedConstraints = parseConstraints(approved.constraints ?? []);
+      if (!approvedConstraints.ok || !constraintsSubsume(approvedConstraints.constraints, input.constraints).ok) continue;
+      if (!capabilitiesSubsumed(consent.capabilities as CredDelegationDetail[], input.capabilities)) continue;
       if (await vault.getConsentRevocation(consent.id)) continue;
-      if (capabilitiesSubsumed(consent.capabilities as CredDelegationDetail[], capabilities)) return consent.id;
+      return consent.id;
     }
     return null;
   }
@@ -6339,12 +6410,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (config.cibaProvider) {
       void askExternalProvider(config.cibaProvider, request).then((decision) => {
         if (decision !== 'expired') approvals.decide(request.authReqId, 'subject', decision, `oidc:${request.subject}`);
-      }).catch((err) => console.error('[ciba] external provider failed:', err instanceof Error ? err.message : err));
+      }).catch((err) => {
+        // The subject could not be asked: end the request, not leave it pending.
+        approvals.decide(request.authReqId, 'subject', 'deny', 'channel_failure');
+        console.error('[ciba] external provider failed:', err instanceof Error ? err.message : err);
+      });
       return;
     }
     const approveUrl = `${publicBaseUri()}/approve/${encodeURIComponent(request.authReqId)}?sig=${approvals.linkSignature(request.authReqId)}`;
-    await fetch(config.approvalWebhookUrl!, {
+    const delivered = await fetch(config.approvalWebhookUrl!, {
       method: 'POST',
+      signal: AbortSignal.timeout(10_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'cred.approval_requested',
@@ -6359,6 +6435,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }),
       redirect: 'manual',
     });
+    // A refusal or a redirect means nobody was asked.
+    if (!delivered.ok) throw new Error(`approval webhook answered ${delivered.status}`);
   }
 
   /**
@@ -6369,11 +6447,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.post('/bc-authorize', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const subject = body.login_hint;
+      const loginHint = body.login_hint;
       const service = body.service;
       const agentDid = body.agent_did;
-      if (typeof subject !== 'string' || !subject || typeof service !== 'string' || !service || typeof agentDid !== 'string') {
+      if (typeof loginHint !== 'string' || !loginHint || typeof service !== 'string' || !service || typeof agentDid !== 'string') {
         res.status(400).json({ error: 'invalid_request', error_description: 'login_hint, service and agent_did are required' });
+        return;
+      }
+      if (body.user_id !== undefined && body.user_id !== loginHint) {
+        res.status(400).json({ error: 'invalid_request', error_description: 'user_id and login_hint name different users' });
         return;
       }
       const jkt = dpopBindingFor(agentDid);
@@ -6381,9 +6463,46 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_request', error_description: 'agent_did must be a did:key' });
         return;
       }
+      // The same request checks /api/v1/delegate makes: the approval is for
+      // a Delegation Token, so the service needs a brokered-use path and the
+      // ceilings must be ones a later hop can restate.
+      if (!isBrokerableService(service)) {
+        res.status(400).json({ error: 'brokered_format_unsupported', error_description: `'${service}' has no brokered-use path` });
+        return;
+      }
+      if (invalidConstraintJson.has(req)) {
+        res.status(400).json({ error: 'invalid_constraints', error_description: 'Constraint-bearing requests must use strict JSON' });
+        return;
+      }
+      const constraints = parseConstraints(body.constraints);
+      if (!constraints.ok) {
+        res.status(400).json({ error: 'invalid_constraints', error_description: constraints.message });
+        return;
+      }
+      const unresolvable = unresolvableRankLabels(constraints.constraints);
+      if (unresolvable.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', error_description: `No rank ordering is registered for: ${unresolvable.join(', ')}` });
+        return;
+      }
+      const producerViolations = producerConstraintViolations(constraints.constraints);
+      if (producerViolations.length > 0) {
+        res.status(400).json({ error: 'invalid_constraints', error_description: producerViolations.join('; ') });
+        return;
+      }
+      // login_hint names the subject the same way user_id does on
+      // /api/v1/delegate: an agent bound to one user cannot ask for another.
+      (req.body as Record<string, unknown>).user_id = loginHint;
+      const subject = requestUserId(req, res, { agent: true, source: 'body' });
+      if (subject === null) return;
       if (!checkDpop(req, res, { agentDid, path: '/bc-authorize', resource: { type: 'connection', id: `${service}/${subject}` } })) return;
       if (body.binding_message !== undefined && (typeof body.binding_message !== 'string' || body.binding_message.length > 100)) {
         res.status(400).json({ error: 'invalid_binding_message', error_description: 'binding_message must be a string of at most 100 characters' });
+        return;
+      }
+      const requestedScopes = normalizeRequestedScopes(body.scopes);
+      const agentCheck = await didAgentCheck(agentDid, requestedScopes);
+      if (!agentCheck.ok) {
+        res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });
         return;
       }
       const permission = await getPermissionIfSupported(agentDid, service);
@@ -6391,8 +6510,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: 'invalid_request', error_description: 'This delegation needs no approval: request it at /api/v1/delegate' });
         return;
       }
-      if (permission.expiresAt && permission.expiresAt.getTime() <= Date.now()) {
-        refusePermission(res, 'permission_expired');
+      const refusal = await permissionRefusal(permission);
+      if (refusal && refusal !== 'approval_required') {
+        refusePermission(res, refusal);
         return;
       }
       const approver = permission.approver ?? 'subject';
@@ -6400,14 +6520,21 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(503).json({ error: 'approval_unavailable', error_description: 'No channel is configured to ask the subject (CRED_APPROVAL_WEBHOOK_URL or an external CIBA provider)' });
         return;
       }
+      if (!approvals.hasCapacity()) {
+        res.status(503).json({ error: 'approval_unavailable', error_description: 'Too many approval requests are pending; try again later' });
+        return;
+      }
       const vaultEntry = await getVaultEntry(service, subject);
       if ('status' in vaultEntry) {
         res.status(vaultEntry.status === 404 ? 403 : vaultEntry.status).json(vaultEntry.status === 404 ? { error: 'consent_required' } : vaultEntry.body);
         return;
       }
-      const { grantedScopes, widenedScopes } = resolveGrantedScopes(vaultEntry.entry.scopes ?? [], normalizeRequestedScopes(body.scopes as string[] | undefined));
+      const { grantedScopes, widenedScopes } = resolveGrantedScopes(
+        scopesForDidAgent(vaultEntry.entry.scopes ?? [], agentCheck.record, permission),
+        requestedScopes,
+      );
       if (widenedScopes.length > 0 || grantedScopes.length === 0) {
-        res.status(403).json({ error: 'scope_escalation_denied', error_description: 'Requested scopes exceed the stored connection' });
+        res.status(403).json({ error: 'scope_escalation_denied', error_description: 'Requested scopes exceed the stored connection or the Permission' });
         return;
       }
       let capabilities: CredDelegationDetail[] | undefined;
@@ -6418,11 +6545,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
         capabilities = checked.details;
-      }
-      const constraints = parseConstraints(body.constraints);
-      if (!constraints.ok) {
-        res.status(400).json({ error: 'invalid_constraints', error_description: constraints.message });
-        return;
       }
       const request = approvals.create({
         subject,
@@ -6469,11 +6591,34 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
-  /** Issue the Delegation Token for an approved CIBA request, recording its consent. */
+  /**
+   * Issue the Delegation Token for an approved CIBA request, recording its
+   * consent. What was approved is checked again against the state now: the
+   * agent, its Permission and the connection may have changed while the
+   * request waited, and an approval never outlasts them.
+   */
   async function issueApprovedDelegation(request: ApprovalRequest, res: Response): Promise<void> {
+    const refuse = (description: string) => res.status(400).json({ error: 'invalid_grant', error_description: description });
+    const agentCheck = await didAgentCheck(request.agentDid, request.scopes);
+    if (!agentCheck.ok) {
+      refuse(`The agent can no longer be delegated to (${agentCheck.error})`);
+      return;
+    }
+    const permission = await getPermissionIfSupported(request.agentDid, request.service);
+    if (!permission?.requiresApproval
+      || (permission.expiresAt && permission.expiresAt.getTime() <= Date.now())
+      || !approvalCovers(request.approver, permission.approver)) {
+      refuse('The Permission behind this approval changed; ask again');
+      return;
+    }
     const vaultEntry = await getVaultEntry(request.service, request.subject);
     if ('status' in vaultEntry) {
-      res.status(400).json({ error: 'invalid_grant', error_description: 'The connection behind this approval is gone' });
+      refuse('The connection behind this approval is gone');
+      return;
+    }
+    const stillAllowed = resolveGrantedScopes(scopesForDidAgent(vaultEntry.entry.scopes ?? [], agentCheck.record, permission), request.scopes);
+    if (stillAllowed.widenedScopes.length > 0) {
+      refuse('The approved scopes are no longer all allowed; ask again');
       return;
     }
     const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -6490,24 +6635,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       chainDepth: 0,
       constraints,
     });
-    const consent = await vault.recordConsent({
-      id: `consent_${crypto.randomBytes(16).toString('hex')}`,
-      subject: request.subject,
-      agentDid: request.agentDid,
-      service: request.service,
-      capabilities,
-      source: 'ciba',
-      approvedBy: [request.approvals.subject, request.approvals.admin].filter(Boolean).join(', '),
-      expiresAt: new Date(Date.now() + cibaConsentTtlSeconds * 1000).toISOString(),
-      chainContext: { delegationId, chainDepth: 0, authReqId: request.authReqId },
-    });
+    const consentId = `consent_${crypto.randomBytes(16).toString('hex')}`;
     const grant = newDelegationGrant({
       agentDid: request.agentDid,
       service: request.service,
       scopes: request.scopes,
       appClientId: request.appClientId,
       constraints,
-      consentId: consent.id,
+      consentId,
       prf: [receiptContentId(receipt)],
       capabilities,
     })!;
@@ -6522,6 +6657,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       grant,
     }, crypto.randomUUID());
     if (!recorded) return;
+    // Recorded once the delegation is, so a failed issue leaves no reusable
+    // consent behind. What reuse must match is kept with it.
+    await vault.recordConsent({
+      id: consentId,
+      subject: request.subject,
+      agentDid: request.agentDid,
+      service: request.service,
+      capabilities,
+      source: 'ciba',
+      approvedBy: [request.approvals.subject, request.approvals.admin].filter(Boolean).join(', '),
+      expiresAt: new Date(Date.now() + cibaConsentTtlSeconds * 1000).toISOString(),
+      chainContext: {
+        delegationId,
+        chainDepth: 0,
+        authReqId: request.authReqId,
+        appClientId: request.appClientId,
+        constraints,
+        approver: request.approver,
+      },
+    });
     res.json(buildDelegationResponse({
       tokenFormat: 'handle',
       grant,
@@ -6546,7 +6701,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       return;
     }
     const caps = JSON.stringify(request.capabilities ?? capabilitiesFor(request.service, request.scopes), null, 2);
-    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
+    res.set('X-Frame-Options', 'DENY');
     res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve delegation</title>
 <style>body{font:16px system-ui;max-width:40rem;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto}button{font:inherit;padding:.5rem 1rem;margin-right:.5rem}</style></head>
 <body><h1>Approve access for an agent?</h1>
@@ -6564,7 +6720,9 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
       res.status(404).send('This approval link is not valid or has already been used.');
       return;
     }
-    const request = approvals.decide(authReqId, 'subject', decision, `subject:${approvals.get(authReqId)?.subject ?? 'unknown'}`);
+    // Whoever holds the signed link decides: recorded as the link, not as
+    // the subject's own sign-in.
+    const request = approvals.decide(authReqId, 'subject', decision, `link:${approvals.get(authReqId)?.subject ?? 'unknown'}`);
     if (!request) {
       res.status(404).send('This approval link is not valid or has already been used.');
       return;
@@ -6624,6 +6782,10 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
     }
     const reason = typeof body.reason === 'string' && body.reason ? body.reason.slice(0, 200) : 'security_event';
     const revoked = await vault.revokeConsents(filter, reason);
+    // An approval given but not yet redeemed would otherwise issue after the event.
+    const cancelled = filter.subject || filter.agentDid
+      ? approvals.cancel({ ...(filter.subject ? { subject: filter.subject } : {}), ...(filter.agentDid ? { agentDid: filter.agentDid } : {}) }, `security_event:${reason}`)
+      : [];
     writeAuditEventIfSupported({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
@@ -6632,9 +6794,9 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
       resource: { type: 'permission', id: 'consents' },
       outcome: 'success',
       correlationId: crypto.randomUUID(),
-      metadata: { stage: 'consent_revoked', count: revoked.length, reason },
+      metadata: { stage: 'consent_revoked', count: revoked.length, cancelledApprovals: cancelled.length, reason },
     });
-    res.json({ revoked_count: revoked.length, revoked_ids: revoked });
+    res.json({ revoked_count: revoked.length, revoked_ids: revoked, cancelled_approvals: cancelled });
   });
 
   app.post('/api/v1/token', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {

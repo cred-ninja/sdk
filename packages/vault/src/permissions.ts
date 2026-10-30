@@ -55,6 +55,13 @@ export class PermissionStore {
       throw new Error('Permission storage not supported by this backend');
     }
 
+    // requiresApproval and the approver share a column: turning approval on
+    // without naming an approver keeps the one already set, never resetting
+    // 'admin' or 'both' to 'subject'. An empty update reads the row.
+    if (input.requiresApproval === true && input.approver === undefined) {
+      const current = this.rowToPermission(await this.backend.updatePermission(id, {}));
+      if (current.requiresApproval && current.approver) input = { ...input, approver: current.approver };
+    }
     const row = await this.backend.updatePermission(id, this.updateInputToRow(input));
     return this.rowToPermission(row);
   }
@@ -184,7 +191,7 @@ export class PermissionStore {
       updates.ttl_override = input.ttlOverride ?? null;
     }
     if ('requiresApproval' in input && input.requiresApproval !== undefined) {
-      updates.requires_approval = approvalCode(input.requiresApproval, (input as { approver?: PermissionApprover }).approver);
+      updates.requires_approval = approvalCode(input.requiresApproval, input.approver);
     }
     if ('delegatable' in input && input.delegatable !== undefined) {
       updates.delegatable = input.delegatable ? 1 : 0;

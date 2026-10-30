@@ -19,6 +19,20 @@
   (`POST /admin/consents/revoke`) means asking again, and tokens under a
   revoked consent are refused at exercise (`401 consent_revoked`).
   Approval requests are held in process memory.
+- The approval flow applies the checks `/api/v1/delegate` does: the
+  subject in `login_hint` is resolved like `user_id`, the agent's record
+  (revoked, suspended, scope ceiling) and its Permission's `allowedScopes`
+  bound the request, and the ceilings are validated. They are checked
+  again at redemption: an approval whose agent, Permission or connection
+  changed is refused (`invalid_grant`), as is one not redeemed before the
+  request expires (`expired_token`). A consent is reused only for the same
+  app client, ceilings at least as tight, and a Permission whose approver
+  needs no role that did not approve. A security event also ends approvals
+  not yet redeemed. A webhook that answers with an error ends the request
+  (`502`). A did:key agent's Permission is applied even when TOFU fields
+  accompany the request, and its rate limit counts approval-gated requests.
+- `@credninja/vault`: updating a Permission with `requiresApproval: true`
+  and no `approver` keeps the approver already set.
 - Consent records are kept `CONSENT_RETENTION_DAYS` (at least 90, the
   default) after the later of grant and expiry, then purged daily; the
   purge is recorded in the audit chain. Consent revocations are a

@@ -9,7 +9,7 @@ import request from 'supertest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import crypto from 'crypto';
+import crypto, { generateKeyPairSync, sign } from 'crypto';
 import { createDpopProof } from '@credninja/sdk';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
@@ -236,5 +236,148 @@ describe('consent retention', () => {
     expect(await vault.getConsent(consentId)).toBeNull();
     const events = vault.queryAuditEvents({ limit: 50 }) as Array<{ metadata?: Record<string, unknown> }>;
     expect(events.some((e) => e.metadata?.stage === 'consent_retention_purge' && e.metadata?.count === 1)).toBe(true);
+  });
+});
+
+describe('review regressions', () => {
+  async function approved(app: App, agent: AgentIdentity, hooks: Array<Record<string, any>>, body: Record<string, unknown> = {}) {
+    const asked = await bcAuthorize(app, agent, body);
+    expect(asked.status).toBe(200);
+    await approveViaLink(app, hooks.at(-1)!.approve_url, 'approve');
+    return asked.body.auth_req_id as string;
+  }
+
+  it('TOFU fields beside a gated did:key do not step around its approval', async () => {
+    const agent = await newAgent();
+    const server = await setup(agent, 'subject');
+    await server.tofu.init();
+    mockNetwork();
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const registration = await server.tofu.registerAgent({
+      publicKey: new Uint8Array(publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)), initialScopes: ['openid'],
+    });
+    const payload = Buffer.from(JSON.stringify({ service: 'google', userId: 'alice', appClientId: 'local', scopes: ['openid'], timestamp: new Date().toISOString() }));
+    const res = await delegateAs(server.app, agent, {
+      service: 'google', user_id: 'alice', scopes: ['openid'],
+      tofu_fingerprint: registration.fingerprint, tofu_payload: payload.toString('base64'), tofu_signature: sign(null, payload, privateKey).toString('base64'),
+    }, { bearer: TOKEN, base: BASE });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('approval_required');
+  });
+
+  it('an agent bound to one user cannot ask for another through login_hint', async () => {
+    const agent = await newAgent();
+    const { app } = await setup(agent, 'subject', {
+      agentRequestVerifier: () => ({ ok: true as const, principal: { type: 'custom' as const, principalId: 'agent-1', userId: 'bob' } }),
+    });
+    const hooks = mockNetwork();
+    const res = await bcAuthorize(app, agent);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('user_id_mismatch');
+    expect(hooks).toHaveLength(0);
+  });
+
+  it('refuses a suspended agent, and an approval whose agent was revoked before redemption', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const now = new Date().toISOString();
+    await vault.registerAgent!({ id: 'agt_ciba', did: agent.did, name: 'ciba', fingerprint: 'fp_ciba', scopeCeiling: [], status: 'suspended', createdBy: 'admin', createdAt: now, updatedAt: now });
+    const suspended = await bcAuthorize(app, agent);
+    expect(suspended.status).toBe(403);
+    expect(suspended.body.error).toBe('agent_suspended');
+
+    const other = await newAgent();
+    const second = await setup(other, 'subject');
+    await second.vault.registerAgent!({ id: 'agt_other', did: other.did, name: 'other', fingerprint: 'fp_other', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: now, updatedAt: now });
+    const authReqId = await approved(second.app, other, hooks);
+    await second.vault.revokeAgent('agt_other');
+    const redeemed = await poll(second.app, other, authReqId);
+    expect(redeemed.status).toBe(400);
+    expect(redeemed.body.error).toBe('invalid_grant');
+  });
+
+  it('refuses scopes past the agent ceiling or the Permission at /bc-authorize', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    mockNetwork();
+    const permission = await vault.getPermission!(agent.did, 'google');
+    await vault.updatePermission!(permission!.id, { allowedScopes: ['openid'] });
+    const res = await bcAuthorize(app, agent, { scopes: ['email'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('scope_escalation_denied');
+  });
+
+  it('refuses an approval request with ceilings /delegate would refuse', async () => {
+    const agent = await newAgent();
+    const { app } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const res = await bcAuthorize(app, agent, { constraints: [{ key: 'calls', max: 5 }] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_constraints');
+    expect(hooks).toHaveLength(0);
+  });
+
+  it('ends the request with 502 when the webhook answers with an error', async () => {
+    const agent = await newAgent();
+    const { app } = await setup(agent, 'subject');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('down', { status: 503 }));
+    const res = await bcAuthorize(app, agent);
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('approval_unavailable');
+    const listed = await request(app).get('/admin/approvals').set('Authorization', `Bearer ${ADMIN}`);
+    expect(listed.body.approvals).toHaveLength(0);
+  });
+
+  it('PATCH requiresApproval:true keeps the approver already set', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'both');
+    const permission = await vault.getPermission!(agent.did, 'google');
+    const patched = await request(app).patch(`/admin/permissions/${permission!.id}`).set('Authorization', `Bearer ${ADMIN}`).send({ requiresApproval: true });
+    expect(patched.status).toBe(200);
+    expect((await vault.getPermission!(agent.did, 'google'))?.approver).toBe('both');
+  });
+
+  it('holds an approval-gated permission to its rate limit', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    mockNetwork();
+    const permission = await vault.getPermission!(agent.did, 'google');
+    await vault.updatePermission!(permission!.id, { rateLimit: { maxRequests: 1, windowMs: 60_000 } });
+    expect((await delegate(app, agent)).body.error).toBe('approval_required');
+    const limited = await delegate(app, agent);
+    expect(limited.status).toBe(429);
+    expect(limited.body.error).toBe('rate_limited');
+  });
+
+  it('reuses a consent only under ceilings at least as tight and the same app client', async () => {
+    const agent = await newAgent();
+    const { app } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const authReqId = await approved(app, agent, hooks, { constraints: [{ key: 'request_bytes', max: 1000 }] });
+    expect((await poll(app, agent, authReqId)).status).toBe(200);
+    const withCeiling = (constraints: unknown[], extra: Record<string, unknown> = {}) =>
+      delegateAs(app, agent, { service: 'google', user_id: 'alice', scopes: ['openid'], constraints, ...extra }, { bearer: TOKEN, base: BASE });
+    expect((await withCeiling([])).body.error).toBe('approval_required');
+    expect((await withCeiling([{ key: 'request_bytes', max: 2000 }])).body.error).toBe('approval_required');
+    expect((await withCeiling([{ key: 'request_bytes', max: 500 }], { appClientId: 'other-app' })).body.error).toBe('approval_required');
+    expect((await withCeiling([{ key: 'request_bytes', max: 500 }])).status).toBe(200);
+  });
+
+  it('refuses to redeem once the Permission is removed, and a security event ends unredeemed approvals', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const first = await approved(app, agent, hooks);
+    const permission = await vault.getPermission!(agent.did, 'google');
+    await vault.revokePermission!(permission!.id);
+    expect((await poll(app, agent, first)).body.error).toBe('invalid_grant');
+
+    const other = await newAgent();
+    const second = await setup(other, 'subject');
+    const pending = await approved(second.app, other, hooks);
+    const revoked = await request(second.app).post('/admin/consents/revoke').set('Authorization', `Bearer ${ADMIN}`).send({ agent_did: other.did });
+    expect(revoked.body.cancelled_approvals).toEqual([pending]);
+    expect((await poll(second.app, other, pending)).body.error).toBe('access_denied');
   });
 });

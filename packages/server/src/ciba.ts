@@ -18,6 +18,8 @@ export const CIBA_GRANT_TYPE = 'urn:openid:params:grant-type:ciba';
 export const DEFAULT_CIBA_EXPIRES_SECONDS = 300;
 /** The minimum seconds between token polls (CIBA Section 7.3 `interval`). */
 export const DEFAULT_CIBA_INTERVAL_SECONDS = 5;
+/** The most requests held at once, so a flood of asks cannot grow memory without bound. */
+export const DEFAULT_MAX_APPROVAL_REQUESTS = 10_000;
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'redeemed';
 
@@ -54,8 +56,17 @@ export class ApprovalStore {
   private readonly requests = new Map<string, ApprovalRequest>();
   private readonly linkKey: Buffer;
 
-  constructor(linkKey: Buffer = crypto.randomBytes(32)) {
+  private readonly maxRequests: number;
+
+  constructor(linkKey: Buffer = crypto.randomBytes(32), opts: { maxRequests?: number } = {}) {
     this.linkKey = linkKey;
+    this.maxRequests = opts.maxRequests ?? DEFAULT_MAX_APPROVAL_REQUESTS;
+  }
+
+  /** Whether another request can be held now. */
+  hasCapacity(now = Date.now()): boolean {
+    this.sweep(now);
+    return this.requests.size < this.maxRequests;
   }
 
   create(input: Omit<ApprovalRequest, 'authReqId' | 'createdAt' | 'expiresAt' | 'intervalSeconds' | 'lastPolledAt' | 'status' | 'approvals'>, opts: {
@@ -82,7 +93,9 @@ export class ApprovalStore {
   get(authReqId: string, now = Date.now()): ApprovalRequest | null {
     const request = this.requests.get(authReqId);
     if (!request) return null;
-    if (request.status === 'pending' && now >= request.expiresAt) request.status = 'expired';
+    // An approval not redeemed within the request's lifetime lapses too
+    // (CIBA Section 7.3 `expires_in` covers the whole request).
+    if ((request.status === 'pending' || request.status === 'approved') && now >= request.expiresAt) request.status = 'expired';
     return request;
   }
 
@@ -109,6 +122,25 @@ export class ApprovalStore {
     const needed: Array<'subject' | 'admin'> = request.approver === 'both' ? ['subject', 'admin'] : [request.approver];
     if (needed.every((r) => request.approvals[r] !== undefined)) request.status = 'approved';
     return request;
+  }
+
+  /**
+   * End every undecided or unredeemed request matching the filter, as a
+   * consent revocation does (Section 8.3): an approval given before the
+   * security event is not redeemable after it. Returns the ids ended.
+   */
+  cancel(filter: { subject?: string; agentDid?: string }, by: string, now = Date.now()): string[] {
+    const ended: string[] = [];
+    for (const request of this.requests.values()) {
+      const status = this.get(request.authReqId, now)?.status;
+      if (status !== 'pending' && status !== 'approved') continue;
+      if (filter.subject !== undefined && request.subject !== filter.subject) continue;
+      if (filter.agentDid !== undefined && request.agentDid !== filter.agentDid) continue;
+      request.status = 'denied';
+      request.deniedBy = by;
+      ended.push(request.authReqId);
+    }
+    return ended;
   }
 
   /**
@@ -155,6 +187,9 @@ export class ApprovalStore {
   }
 }
 
+/** How long one call to an external provider may take. */
+const PROVIDER_TIMEOUT_MS = 10_000;
+
 /** An external OpenID Provider's CIBA endpoints, used to ask the subject. */
 export interface ExternalCibaProvider {
   backchannelAuthenticationEndpoint: string;
@@ -179,6 +214,7 @@ export async function askExternalProvider(
   const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
   const started = await doFetch(provider.backchannelAuthenticationEndpoint, {
     method: 'POST',
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form({
       scope: 'openid',
@@ -194,6 +230,7 @@ export async function askExternalProvider(
     await sleep(wait * 1000);
     const polled = await doFetch(provider.tokenEndpoint, {
       method: 'POST',
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
       headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: form({ grant_type: CIBA_GRANT_TYPE, auth_req_id: authReqId }),
     });

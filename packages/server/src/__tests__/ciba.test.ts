@@ -34,6 +34,16 @@ describe('ApprovalStore', () => {
     const late = store.create(base, { now: t0, expiresInSeconds: 60 });
     expect(store.poll(late.authReqId, 'jkt_a', t0 + 61_000)).toMatchObject({ ok: false, error: 'expired_token' });
     expect(store.decide(late.authReqId, 'subject', 'approve', 'alice', t0 + 61_000)).toBeNull();
+    // An approval not redeemed in time lapses too.
+    const unredeemed = store.create(base, { now: t0, expiresInSeconds: 60 });
+    store.decide(unredeemed.authReqId, 'subject', 'approve', 'alice', t0 + 1000);
+    expect(store.poll(unredeemed.authReqId, 'jkt_a', t0 + 61_000)).toMatchObject({ ok: false, error: 'expired_token' });
+  });
+
+  it('refuses new requests past its capacity', () => {
+    const store = new ApprovalStore(undefined, { maxRequests: 1 });
+    store.create(base);
+    expect(store.hasCapacity()).toBe(false);
   });
 
   it('needs both roles under approver both, and refuses a role the permission does not name', () => {
