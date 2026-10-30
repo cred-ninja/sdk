@@ -410,6 +410,31 @@ describe('POST /api/v1/subdelegate', () => {
     expect(res.body.parent_delegation_id).toBe('del_parent123');
   });
 
+  it('names this Delegation Server as the issuer of the receipts it signs', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const parentReceipt = createTestReceipt({
+      sub: 'did:key:z6MkParent', service: 'google', scopes: ['openid'], userId: 'default',
+      appClientId: 'local', delegationId: 'del_parent_iss', chainDepth: 0,
+    });
+    const res = await request(app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ parent_receipt: parentReceipt, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', appClientId: 'local', scopes: ['openid'] });
+    expect(res.status).toBe(200);
+    const claims = JSON.parse(Buffer.from(res.body.receipt.split('.')[1], 'base64url').toString('utf8'));
+    expect(claims.iss).toBe(makeTestConfig().redirectBaseUri);
+  });
+
+  it('refuses a correctly signed receipt that names another issuer', async () => {
+    const { app } = await setupVaultWithTokenAndPermissions();
+    const foreign = createTestReceipt({
+      iss: 'https://other-ds.example', sub: 'did:key:z6MkParent', service: 'google', scopes: ['openid'],
+      userId: 'default', appClientId: 'local', delegationId: 'del_foreign', chainDepth: 0,
+    });
+    const res = await request(app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .send({ parent_receipt: foreign, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', appClientId: 'local', scopes: ['openid'] });
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toMatch(/not issued by this Delegation Server/);
+  });
+
   it('attenuates scopes to the intersection of parent and permission', async () => {
     const { app } = await setupVaultWithTokenAndPermissions();
 

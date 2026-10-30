@@ -207,6 +207,10 @@ const PROVIDER_REVOKE_TIMEOUT_MS = 5_000;
 // default, never more than 1 hour.
 const DEFAULT_RECEIPT_TTL_SECONDS = 900;
 const MAX_RECEIPT_TTL_SECONDS = 3600;
+// The fixed issuer receipts carried before they named the Delegation Server.
+// Accepted while such receipts can still be live (at most one receipt
+// lifetime after an upgrade); never minted.
+const LEGACY_RECEIPT_ISSUER = 'did:key:local-cred';
 const DEFAULT_DELEGATION_GRANT_TTL_SECONDS = 60;
 const RECEIPT_CLOCK_SKEW_SECONDS = 60;
 const MAX_BROKER_RESPONSE_BYTES = 32_768;
@@ -1706,7 +1710,9 @@ export function createServer(config: ServerConfig) {
         }
       : { sub: input.agentDid, client_id: input.agentDid };
     const payload = {
-      iss: 'did:key:local-cred',
+      // The Delegation Server's identifier (Section 5.1 of the draft): the
+      // same value its chain-verifiable tokens carry in iss.
+      iss: config.redirectBaseUri,
       ...actor,
       iat: nowSeconds,
       exp,
@@ -1773,6 +1779,9 @@ export function createServer(config: ServerConfig) {
     } catch (err) {
       if (err instanceof StrictJsonError) throw new Error(`Receipt payload is malformed (${err.code}): ${err.message}`);
       throw err;
+    }
+    if (payload.iss !== config.redirectBaseUri && payload.iss !== LEGACY_RECEIPT_ISSUER) {
+      throw new Error('Receipt was not issued by this Delegation Server');
     }
     if (!payload.delegationId) {
       throw new Error('Receipt is missing delegationId');
@@ -2357,6 +2366,17 @@ export function createServer(config: ServerConfig) {
    * scoping, so an operator can see the full cross-agent audit trail.
    * Supports the same `service`/`limit` filters as the agent-facing route.
    */
+  // Recompute the tamper-evident audit chain and report its head, so an
+  // operator can record the head somewhere this host cannot rewrite.
+  app.get('/admin/audit/verify', adminAuditRateLimiter, requireAdminAuth, (_req: Request, res: Response) => {
+    try {
+      const result = vault.verifyAuditChain();
+      res.status(result.ok ? 200 : 409).json(result);
+    } catch (error) {
+      res.status(501).json({ error: 'audit_chain_unsupported', message: error instanceof Error ? error.message : 'unsupported' });
+    }
+  });
+
   app.get('/admin/audit', adminAuditRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const service = typeof req.query.service === 'string' ? req.query.service : undefined;

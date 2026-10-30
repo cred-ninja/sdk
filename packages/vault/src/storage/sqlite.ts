@@ -1,6 +1,7 @@
 import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
-import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow } from '../audit.js';
+import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow, AuditChainHead, AuditChainVerification } from '../audit.js';
+import { AUDIT_CHAIN_GENESIS, auditChainHash } from '../audit.js';
 import Database from 'better-sqlite3';
 import {
   assertRecordable,
@@ -100,6 +101,11 @@ export class SQLiteBackend implements StorageBackend {
     `);
 
     this.ensureColumn('vault_audit_events', 'metadata_json', 'ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
+    // Tamper-evident chain. Rows written before these columns existed stay
+    // unchained; the chain starts with the first row written after.
+    this.ensureColumn('vault_audit_events', 'chain_seq', 'ALTER TABLE vault_audit_events ADD COLUMN chain_seq INTEGER');
+    this.ensureColumn('vault_audit_events', 'chain_hash', 'ALTER TABLE vault_audit_events ADD COLUMN chain_hash TEXT');
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_chain_seq ON vault_audit_events(chain_seq) WHERE chain_seq IS NOT NULL');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS vault_agents (
@@ -831,41 +837,93 @@ export class SQLiteBackend implements StorageBackend {
 
   // ── Audit event methods ─────────────────────────────────────────────────────
 
+  private auditChainKey: Buffer | null = null;
+
+  setAuditChainKey(key: Buffer): void {
+    this.auditChainKey = Buffer.from(key);
+  }
+
   writeAuditEvent(event: AuditEvent): void {
     const db = this.ensureDb();
-    const now = new Date().toISOString();
-
-    db.prepare(`
-      INSERT INTO vault_audit_events (
-        id, timestamp, actor_type, actor_id, actor_fingerprint,
-        action, resource_type, resource_id, outcome,
-        delegation_chain, scopes_requested, scopes_granted,
-        correlation_id, sensitive_hmac, metadata_json, error_message, created_at
-      ) VALUES (
-        @id, @timestamp, @actorType, @actorId, @actorFingerprint,
-        @action, @resourceType, @resourceId, @outcome,
-        @delegationChain, @scopesRequested, @scopesGranted,
-        @correlationId, @sensitiveHmac, @metadataJson, @errorMessage, @createdAt
-      )
-    `).run({
+    // Fail closed: an audit row that cannot join the chain is not written.
+    const key = this.auditChainKey;
+    if (!key) {
+      throw new Error('Audit chain key not set: initialize the vault (CredVault.init()) before writing audit events');
+    }
+    const row: AuditRow = {
       id: event.id,
       timestamp: event.timestamp.toISOString(),
-      actorType: event.actor.type,
-      actorId: event.actor.id,
-      actorFingerprint: event.actor.fingerprint ?? null,
+      actor_type: event.actor.type,
+      actor_id: event.actor.id,
+      actor_fingerprint: event.actor.fingerprint ?? null,
       action: event.action,
-      resourceType: event.resource.type,
-      resourceId: event.resource.id,
+      resource_type: event.resource.type,
+      resource_id: event.resource.id,
       outcome: event.outcome,
-      delegationChain: event.delegationChain ? JSON.stringify(event.delegationChain) : null,
-      scopesRequested: event.scopesRequested ? JSON.stringify(event.scopesRequested) : null,
-      scopesGranted: event.scopesGranted ? JSON.stringify(event.scopesGranted) : null,
-      correlationId: event.correlationId,
-      sensitiveHmac: event.sensitiveFieldsHmac ? JSON.stringify(event.sensitiveFieldsHmac) : null,
-      metadataJson: event.metadata ? JSON.stringify(event.metadata) : null,
-      errorMessage: event.errorMessage ?? null,
-      createdAt: now,
+      delegation_chain: event.delegationChain ? JSON.stringify(event.delegationChain) : null,
+      scopes_requested: event.scopesRequested ? JSON.stringify(event.scopesRequested) : null,
+      scopes_granted: event.scopesGranted ? JSON.stringify(event.scopesGranted) : null,
+      correlation_id: event.correlationId,
+      sensitive_hmac: event.sensitiveFieldsHmac ? JSON.stringify(event.sensitiveFieldsHmac) : null,
+      metadata_json: event.metadata ? JSON.stringify(event.metadata) : null,
+      error_message: event.errorMessage ?? null,
+      created_at: new Date().toISOString(),
+    };
+    const append = db.transaction(() => {
+      // Read the head and append in one write transaction, so two writers
+      // (two processes on one file) cannot both extend the same entry.
+      const last = db.prepare('SELECT chain_seq, chain_hash FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq DESC LIMIT 1')
+        .get() as { chain_seq: number; chain_hash: string } | undefined;
+      const seq = (last?.chain_seq ?? 0) + 1;
+      const hash = auditChainHash(key, last?.chain_hash ?? AUDIT_CHAIN_GENESIS, seq, row);
+      db.prepare(`
+        INSERT INTO vault_audit_events (
+          id, timestamp, actor_type, actor_id, actor_fingerprint,
+          action, resource_type, resource_id, outcome,
+          delegation_chain, scopes_requested, scopes_granted,
+          correlation_id, sensitive_hmac, metadata_json, error_message, created_at,
+          chain_seq, chain_hash
+        ) VALUES (
+          @id, @timestamp, @actor_type, @actor_id, @actor_fingerprint,
+          @action, @resource_type, @resource_id, @outcome,
+          @delegation_chain, @scopes_requested, @scopes_granted,
+          @correlation_id, @sensitive_hmac, @metadata_json, @error_message, @created_at,
+          @chain_seq, @chain_hash
+        )
+      `).run({ ...row, chain_seq: seq, chain_hash: hash });
     });
+    if (db.inTransaction) append();
+    else append.immediate();
+  }
+
+  auditChainHead(): AuditChainHead | null {
+    const db = this.ensureDb();
+    const last = db.prepare('SELECT chain_seq, chain_hash FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq DESC LIMIT 1')
+      .get() as { chain_seq: number; chain_hash: string } | undefined;
+    return last ? { seq: last.chain_seq, hash: last.chain_hash } : null;
+  }
+
+  verifyAuditChain(): AuditChainVerification {
+    const db = this.ensureDb();
+    const key = this.auditChainKey;
+    if (!key) throw new Error('Audit chain key not set: initialize the vault before verifying');
+    const unchained = (db.prepare('SELECT COUNT(*) AS n FROM vault_audit_events WHERE chain_seq IS NULL').get() as { n: number }).n;
+    const rows = db.prepare('SELECT * FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq ASC')
+      .all() as Array<AuditRow & { chain_seq: number; chain_hash: string }>;
+    let previous = AUDIT_CHAIN_GENESIS;
+    let expectedSeq = 1;
+    for (const row of rows) {
+      if (row.chain_seq !== expectedSeq) {
+        return { ok: false, entries: rows.length, unchained, brokenAt: expectedSeq, reason: `entry ${expectedSeq} is missing` };
+      }
+      if (auditChainHash(key, previous, row.chain_seq, row) !== row.chain_hash) {
+        return { ok: false, entries: rows.length, unchained, brokenAt: row.chain_seq, reason: `entry ${row.chain_seq} does not match its hash` };
+      }
+      previous = row.chain_hash;
+      expectedSeq += 1;
+    }
+    const head = rows.length > 0 ? { seq: rows[rows.length - 1]!.chain_seq, hash: previous } : null;
+    return { ok: true, entries: rows.length, unchained, head };
   }
 
   /** Write several audit events in one transaction: one commit, not one per event. */

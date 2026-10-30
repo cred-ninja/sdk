@@ -1,4 +1,5 @@
 import fs from 'fs';
+import crypto from 'crypto';
 import { performance } from 'perf_hooks';
 import { generateSalt, encryptWithKey, decryptWithKey, deriveKey } from './crypto.js';
 import { SQLiteBackend } from './storage/sqlite.js';
@@ -20,7 +21,7 @@ import type {
   Rotation,
   RotationStrategy,
 } from './types.js';
-import type { AuditEvent, AuditFilter } from './audit.js';
+import type { AuditEvent, AuditFilter, AuditChainHead, AuditChainVerification } from './audit.js';
 import { RotationEngine } from './rotation.js';
 import {
   MemoryDelegationStore,
@@ -102,6 +103,9 @@ export class CredVault {
     await this.backend.init();
     const salt = this.loadOrCreateSalt();
     this.derivedKey = deriveKey(this.passphrase, salt);
+    // The audit chain key is derived from the passphrase-derived key and is
+    // never stored, so a copy of the database alone cannot forge the chain.
+    this.backend.setAuditChainKey?.(crypto.createHmac('sha256', this.derivedKey).update('cred:audit-chain:v1').digest());
   }
 
   /**
@@ -659,6 +663,22 @@ export class CredVault {
       return [];
     }
     return this.backend.queryAuditEvents(filter) as AuditEvent[];
+  }
+
+  /**
+   * Recompute the tamper-evident audit chain (SQLite storage). Reports the
+   * first entry that is missing or does not match its hash.
+   */
+  verifyAuditChain(): AuditChainVerification {
+    if (!this.backend.verifyAuditChain) {
+      throw new Error('The audit chain is not supported by this storage backend');
+    }
+    return this.backend.verifyAuditChain();
+  }
+
+  /** The newest chained audit entry, to record outside the vault host. */
+  auditChainHead(): AuditChainHead | null {
+    return this.backend.auditChainHead ? this.backend.auditChainHead() : null;
   }
 
   // ── Rotation methods ────────────────────────────────────────────────────

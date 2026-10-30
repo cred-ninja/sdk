@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added: tamper-evident audit log; receipts name their issuer
+
+- `@credninja/vault` (SQLite storage): every audit row carries an HMAC-SHA256
+  over the previous row's hash and its own stored fields, under a key
+  derived from the vault passphrase and never stored. `verifyAuditChain()`
+  reports the first missing, edited or reordered entry; `auditChainHead()`
+  returns the newest entry to record outside the host, which is what shows
+  a truncated tail. Rows written before this release stay unchained and are
+  counted as such. An audit write fails (and with it the operation) if the
+  vault has not been initialized. Exported: `auditChainHash`,
+  `AUDIT_CHAIN_GENESIS`, `AuditChainHead`, `AuditChainVerification`.
+- `@credninja/server`: `GET /admin/audit/verify` (admin token) runs the
+  check. Receipts now carry the Delegation Server's identifier
+  (`REDIRECT_BASE_URI`) in `iss` instead of the fixed `did:key:local-cred`,
+  and a parent receipt naming any other issuer is refused; receipts still
+  carrying the old value are accepted until they expire.
+
 ### Changed: delegation lifetimes and the draft's revocation path (`@credninja/server`)
 
 - Receipts default to 15 minutes (was 1 hour) and `RECEIPT_TTL_SECONDS`

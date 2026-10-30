@@ -87,6 +87,47 @@ export function hmacAuditField(value: string, secret: string): string {
   return crypto.createHmac('sha256', secret).update(value).digest('hex');
 }
 
+// ── Tamper-evident chain ──────────────────────────────────────────────────────
+
+/**
+ * Result of checking the audit chain. Each chained entry carries an
+ * HMAC-SHA256, under a key derived from the vault passphrase, over the
+ * previous entry's hash and its own stored fields, so editing, deleting or
+ * reordering a chained entry breaks every later one. Rows written before
+ * the chain existed are counted as `unchained`.
+ */
+export type AuditChainVerification =
+  | { ok: true; entries: number; unchained: number; head: AuditChainHead | null }
+  | { ok: false; entries: number; unchained: number; brokenAt: number; reason: string };
+
+/**
+ * The newest chained entry. Record it somewhere the vault's host cannot
+ * rewrite (an external log, a ticket, a time-stamp service): the chain
+ * proves nothing against an attacker who also holds the vault passphrase,
+ * except relative to a head recorded earlier.
+ */
+export interface AuditChainHead {
+  seq: number;
+  hash: string;
+}
+
+/** The value the first chained entry links to. */
+export const AUDIT_CHAIN_GENESIS = 'cred-audit-chain-v1';
+
+/**
+ * Chain hash of one stored row: HMAC-SHA256(key, previousHash "\n" JSON of
+ * the stored column values in a fixed order). Exported for verifiers.
+ */
+export function auditChainHash(key: Buffer, previousHash: string, seq: number, row: AuditRow): string {
+  const fields = [
+    seq, row.id, row.timestamp, row.actor_type, row.actor_id, row.actor_fingerprint,
+    row.action, row.resource_type, row.resource_id, row.outcome,
+    row.delegation_chain, row.scopes_requested, row.scopes_granted,
+    row.correlation_id, row.sensitive_hmac, row.metadata_json, row.error_message, row.created_at,
+  ];
+  return crypto.createHmac('sha256', key).update(`${previousHash}\n${JSON.stringify(fields)}`, 'utf8').digest('base64url');
+}
+
 // ── Raw DB row type ───────────────────────────────────────────────────────────
 
 /** Raw audit_events DB row — used by SQLite backends. */

@@ -645,3 +645,18 @@ describe('lifetimes (Section 10.6) and the revocation path (Section 7)', () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /admin/audit/verify', () => {
+  it('verifies the audit chain for the admin and refuses the agent token', async () => {
+    const agent = await generateAgentIdentity();
+    const { app } = await setup();
+    await delegateAs(app, agent);
+    const admin = await request(app).get('/admin/audit/verify').set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+    expect(admin.status).toBe(200);
+    expect(admin.body.ok).toBe(true);
+    expect(admin.body.entries).toBeGreaterThan(0);
+    expect(admin.body.head.seq).toBe(admin.body.entries);
+    const agentCall = await request(app).get('/admin/audit/verify').set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(agentCall.status).toBe(401);
+  });
+});
