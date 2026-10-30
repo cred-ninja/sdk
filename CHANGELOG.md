@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Changed: Node 26 (`@credninja/server`, CI, Docker)
+
+- Development, CI and the server image move to Node 26 (LTS since
+  2026-10-28). Node 20, which CI used, reached end of life on 2026-04-30.
+  `.nvmrc` pins 26.
+- BREAKING for npm consumers: every package's `engines` floor moves from
+  `>=18` to `>=22`, the oldest Node release line still supported (to
+  2027-04-30). CI runs the tests on Node 22 and 26.
+- `@credninja/server` moves `better-sqlite3` from `^11.8.1` to `^12.6.2`,
+  the range `@credninja/vault` and `@credninja/tofu` already use, so the
+  workspace resolves one copy (12.11.1). 11.x has no Node 26 build.
+- npm 11 asks for install scripts to be approved: `allowScripts` in the
+  root `package.json` approves `better-sqlite3` (native binding) and
+  `esbuild`, pinned to their locked versions. A version bump of either
+  needs `npm install-scripts approve <pkg>` again.
+- `packages/server/Dockerfile`: `node:26-alpine`. The image did not build
+  before this change: it lacked `scripts/write-package-types.cjs`, which the
+  package builds call, and the protocol, attenuation, tofu and guard
+  packages the server imports. It now copies and builds all of them.
+
 ### Added: draft-02 conformance
 
 - New package `@credninja/attenuation`, with no npm runtime dependencies: the

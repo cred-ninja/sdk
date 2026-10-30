@@ -40,7 +40,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "dependencies": {
     "@credninja/protocol": "^2.0.0"
