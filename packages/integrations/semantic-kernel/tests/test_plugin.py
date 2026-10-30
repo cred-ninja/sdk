@@ -5,19 +5,23 @@ output JSON, and error propagation. The Cred client is mocked -- no real HTTP.
 """
 
 import json
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pytest
 import httpx
 from unittest.mock import MagicMock, patch
 
 from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, ConsentRequiredError, CredError
+from cred import generate_agent_identity
 from cred_semantic_kernel import CredPlugin
+from cred_semantic_kernel.plugin import _remember_delegation_token
 
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 APP_CLIENT_ID = "app_1"
 BASE_URL = "https://cred.example.com"
+HANDLE_TOKEN = "eyJ.delegation.token-secret"
 
 
 def make_delegation_result(
@@ -42,7 +46,8 @@ def make_delegation_result(
 
 def make_handle_result(
     *,
-    token_type: str = "Delegation",
+    token_type: str = "DPoP",
+    token: str = HANDLE_TOKEN,
     expires_in: int = 3600,
     service: str = "google",
     user_id: str = USER_ID,
@@ -51,8 +56,10 @@ def make_handle_result(
 ) -> DelegationHandleResult:
     return DelegationHandleResult(
         token_type=token_type,
+        token=token,
+        jkt="jkt_test",
         expires_in=expires_in,
-        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
         service=service,
         user_id=user_id,
         scopes=scopes or [],
@@ -147,6 +154,7 @@ class TestDelegate:
         assert result["delegation_id"] == "del_abc"
 
     def test_handle_mode_returns_json_without_access_token(self, mock_cred):
+        identity = generate_agent_identity()
         mock_cred.delegate_handle.return_value = make_handle_result(
             scopes=["calendar.readonly"],
             delegation_id="del_brokered",
@@ -158,22 +166,29 @@ class TestDelegate:
                 app_client_id=APP_CLIENT_ID,
                 base_url=BASE_URL,
                 token_format="handle",
+                agent_identity=identity,
             )
 
         result_str = plugin.delegate(service="google", scopes="calendar.readonly")
         result = json.loads(result_str)
 
         assert "access_token" not in result
-        assert result["token_type"] == "Delegation"
+        assert "token" not in result
+        assert HANDLE_TOKEN not in result_str
+        assert result["token_type"] == "DPoP"
         assert result["delegation_id"] == "del_brokered"
         mock_cred.delegate_handle.assert_called_once_with(
             service="google",
             user_id=USER_ID,
             app_client_id=APP_CLIENT_ID,
             scopes=["calendar.readonly"],
+            agent_identity=identity,
         )
 
     def test_use_brokers_request(self, plugin, mock_cred):
+        identity = generate_agent_identity()
+        plugin._agent_identity = identity
+        _remember_delegation_token("del_brokered", HANDLE_TOKEN, time.time() + 600)
         mock_cred.use.return_value = BrokeredUseResult(
             status=200,
             ok=True,
@@ -191,12 +206,29 @@ class TestDelegate:
         assert result["ok"] is True
         assert result["body"] == {"items": []}
         mock_cred.use.assert_called_once_with(
-            delegation_id="del_brokered",
+            HANDLE_TOKEN,
             url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
             method="GET",
             body=None,
             extra_headers=None,
+            agent_identity=identity,
         )
+
+    def test_use_requires_agent_identity(self, plugin, mock_cred):
+        _remember_delegation_token("del_noid", HANDLE_TOKEN, time.time() + 600)
+
+        with pytest.raises(ValueError, match="agent_identity"):
+            plugin.use(delegation_id="del_noid", url="https://www.googleapis.com/x", method="GET")
+        mock_cred.use.assert_not_called()
+
+    def test_use_rejects_unknown_or_expired_delegation(self, plugin, mock_cred):
+        plugin._agent_identity = generate_agent_identity()
+        _remember_delegation_token("del_old", HANDLE_TOKEN, time.time() - 1)
+
+        for delegation_id in ("del_never_seen", "del_old"):
+            with pytest.raises(ValueError, match="Unknown or expired delegation"):
+                plugin.use(delegation_id=delegation_id, url="https://www.googleapis.com/x", method="GET")
+        mock_cred.use.assert_not_called()
 
     def test_passes_service_user_app_to_cred(self, plugin, mock_cred):
         mock_cred.delegate.return_value = make_delegation_result(service="github")
@@ -289,7 +321,9 @@ def _fake_cred_server(calls: list):
         calls.append({"path": path, "body": json, "headers": headers or {}})
         if path == "/api/v1/delegate":
             return httpx.Response(200, json={
-                "token_type": "Delegation",
+                "access_token": HANDLE_TOKEN,
+                "token_type": "DPoP",
+                "cnf": {"jkt": "jkt_test"},
                 "expires_in": 900,
                 "service": "google",
                 "user_id": USER_ID,
@@ -317,17 +351,20 @@ def _assert_dpop_bound(calls: list, identity, outputs: list) -> None:
     assert use_call["path"] == "/api/v1/use"
     use_claims = _dpop_claims(use_call["headers"]["DPoP"])
     assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
-    expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(b"del_bound").digest()).rstrip(b"=").decode()
+    expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(HANDLE_TOKEN.encode()).digest()).rstrip(b"=").decode()
     assert use_claims["ath"] == expected_ath
     # cred_req: the proof commits to the exact /api/v1/use body sent.
     expected_req = _b64.urlsafe_b64encode(
         _hashlib.sha256(canonical_json(use_call["body"]).encode("utf-8")).digest(),
     ).rstrip(b"=").decode()
     assert use_claims["cred_req"] == expected_req
+    assert use_call["headers"]["Authorization"] == f"DPoP {HANDLE_TOKEN}"
+    assert "delegation_id" not in use_call["body"]
 
     # The key never reaches what the model sees.
     for output in outputs:
         assert identity.private_key.hex() not in output
+        assert HANDLE_TOKEN not in output
         assert "agent_identity" not in output
 
 

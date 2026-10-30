@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -23,9 +23,11 @@ class DelegationResult:
 
 @dataclass
 class DelegationHandleResult:
-    """Result of a successful brokered delegation request."""
+    """Result of a successful brokered delegation request (a Delegation Token)."""
 
     token_type: str
+    token: str = field(repr=False)
+    jkt: str
     expires_in: int
     expires_at: datetime
     service: str

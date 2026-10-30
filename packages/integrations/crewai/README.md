@@ -57,9 +57,9 @@ agent = Agent(
 - Tool name auto-generated: `cred_google_delegate`, `cred_github_delegate`, etc.
 - Best for specialized agents (e.g., a "Calendar Manager" agent only needs Google tokens)
 
-Set `token_format="handle"` to return a brokered delegation handle instead of a provider access token. Pair it with `CredUseTool` when the agent needs to call service APIs through Cred.
+Set `token_format="handle"` to return a brokered delegation id instead of a provider access token. Pair it with `CredUseTool` when the agent needs to call service APIs through Cred.
 
-`agent_identity` binds brokered handles to the agent's own key: the Cred server (which requires DPoP by default) issues and accepts a handle only with a DPoP proof signed by it. The key stays in your process; it is never sent to the model or the server, and it is not a tool argument.
+`agent_identity` is required with `token_format="handle"`. The Cred server issues a Delegation Token (a DPoP-bound JWT) to the agent's own key and accepts it only with a DPoP proof signed by that key. The key stays in your process; it is never sent to the model or the server, and it is not a tool argument. The model only sees `delegation_id`: the token itself is kept in an in-process map (`delegation_id` to token and expiry), filled by the delegate tool and read by the use tool, so it never appears in tool output. The use tool raises a clear error if no `agent_identity` is configured or the `delegation_id` is unknown or expired (call the delegate tool again).
 
 One `CredTool` per service per agent = clearer intent, smaller decision space for the LLM.
 
@@ -70,4 +70,4 @@ Catch it and redirect the user to `e.consent_url` to complete the OAuth flow.
 
 ## Brokered Server Mode
 
-Point `CRED_BASE_URL` at your self-hosted `@credninja/server` deployment and set `token_format="handle"` when you want the agent to receive delegation handles instead of provider access tokens.
+Point `CRED_BASE_URL` at your self-hosted `@credninja/server` deployment and set `token_format="handle"` when you want the agent to receive delegation ids instead of provider access tokens.

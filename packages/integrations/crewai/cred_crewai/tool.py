@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Type
 
 from langchain_core.tools import BaseTool
@@ -27,6 +28,38 @@ if TYPE_CHECKING:
 def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
     """``agent_identity=`` for the SDK call, only when one is configured."""
     return {"agent_identity": agent_identity} if agent_identity is not None else {}
+
+
+# ── Delegation token store ────────────────────────────────────────────────────
+#
+# The model only ever sees ``delegation_id``. The Delegation Token that
+# ``cred_use`` needs stays in this in-process mapping (delegation_id ->
+# (token, expiry)), populated by the delegate tool and read by the use tool.
+
+_DELEGATION_TOKENS: dict[str, tuple[str, float]] = {}
+
+
+def _remember_delegation_token(delegation_id: str, token: str, expires_at: float) -> None:
+    now = time.time()
+    for key in [k for k, (_, exp) in _DELEGATION_TOKENS.items() if exp <= now]:
+        del _DELEGATION_TOKENS[key]
+    _DELEGATION_TOKENS[delegation_id] = (token, expires_at)
+
+
+def _lookup_delegation_token(delegation_id: str) -> str:
+    entry = _DELEGATION_TOKENS.get(delegation_id)
+    if entry is None or entry[1] <= time.time():
+        _DELEGATION_TOKENS.pop(delegation_id, None)
+        raise ValueError("Unknown or expired delegation: call the delegate tool first")
+    return entry[0]
+
+
+def _expiry_epoch(result: Any) -> float:
+    expires_at = getattr(result, "expires_at", None)
+    if isinstance(expires_at, datetime):
+        return expires_at.timestamp()
+    expires_in = getattr(result, "expires_in", 0)
+    return time.time() + (expires_in if isinstance(expires_in, (int, float)) else 0)
 
 
 class _CredToolInput(BaseModel):
@@ -145,6 +178,7 @@ class CredTool(BaseTool):
                 scopes=self._scopes if self._scopes else None,
                 **_identity_kwargs(self._agent_identity),
             )
+            _remember_delegation_token(result.delegation_id, result.token, _expiry_epoch(result))
             output = {
                 "token_type": result.token_type,
                 "expires_in": result.expires_in,
@@ -210,13 +244,19 @@ class CredUseTool(BaseTool):
         extra_headers: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ) -> str:
+        if self._agent_identity is None:
+            raise ValueError(
+                "cred_use requires an agent_identity: the delegation token is bound to the agent's key. "
+                "Pass agent_identity= to CredUseTool.",
+            )
+        token = _lookup_delegation_token(delegation_id)
         result = self._cred.use(
-            delegation_id=delegation_id,
+            token,
             url=url,
             method=method,
             body=body,
             extra_headers=extra_headers,
-            **_identity_kwargs(self._agent_identity),
+            agent_identity=self._agent_identity,
         )
         return json.dumps({
             "status": result.status,
