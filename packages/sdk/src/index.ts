@@ -44,7 +44,7 @@ export type {
   TofuDelegateParams,
   SubDelegateParams,
   SubDelegationResult,
-  SubDelegationHandleResult,
+  SubDelegationHandleResult,  DelegationGrantResult,
   GetConsentUrlParams,
   RevokeParams,
   LocalUseParams,

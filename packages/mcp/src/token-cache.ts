@@ -24,6 +24,11 @@ import { UrlAllowlistPolicy } from '@credninja/guard';
 export interface TokenEntry {
   accessToken?: string;
   serverDelegationId?: string;
+  /**
+   * The server's Delegation Token for a brokered delegation. It stays in
+   * this process: the model only ever sees the cache's own id.
+   */
+  delegationToken?: string;
   service: string;
   userId: string;
   scopes?: string[];

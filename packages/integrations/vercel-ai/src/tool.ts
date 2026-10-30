@@ -96,6 +96,18 @@ interface CredUseToolInput {
  * });
  * ```
  */
+/**
+ * Delegation Tokens by delegation id, so the model passes only the id
+ * between cred_delegate and cred_use and never sees the token.
+ */
+const delegationTokens = new Map<string, { token: string; expiresAtMs: number }>();
+
+function rememberDelegationToken(delegationId: string, token: string, expiresAtMs: number): void {
+  const now = Date.now();
+  for (const [id, entry] of delegationTokens) if (entry.expiresAtMs <= now) delegationTokens.delete(id);
+  delegationTokens.set(delegationId, { token, expiresAtMs });
+}
+
 export function credDelegateTool(options: CredDelegateToolOptions): Tool {
   const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle', agentIdentity } = options;
   const inputSchema = z.object({
@@ -175,6 +187,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
       const expiresAtMs = result.expiresAt instanceof Date
         ? result.expiresAt.getTime()
         : Date.now() + result.expiresIn * 1000;
+      if ('token' in result) rememberDelegationToken(result.delegationId, result.token, expiresAtMs);
       cachedResult = {
         ...('accessToken' in result ? { accessToken: result.accessToken } : {}),
         tokenType: result.tokenType,
@@ -229,14 +242,14 @@ export function credUseTool(options: CredUseToolOptions): Tool {
       'The provider access token stays on the Cred server.',
     inputSchema,
     execute: async ({ delegationId, url, method, body, extraHeaders }: CredUseToolInput) => {
-      return cred.use({
-        delegationId,
-        url,
-        method,
-        body,
-        extraHeaders,
-        ...(agentIdentity ? { agentIdentity } : {}),
-      });
+      const entry = delegationTokens.get(delegationId);
+      if (!entry || entry.expiresAtMs <= Date.now()) {
+        throw new Error('Unknown or expired delegation: call cred_delegate first');
+      }
+      if (!agentIdentity) {
+        throw new Error('cred_use needs agentIdentity: the Delegation Token is bound to the agent\'s key');
+      }
+      return cred.use({ token: entry.token, agentIdentity, url, method, body, extraHeaders });
     },
   } as any);
 }

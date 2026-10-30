@@ -6,6 +6,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
+import { newAgent, delegateAs, exerciseAs, actorTokenFor, type AgentIdentity } from './token-helpers.js';
 
 const ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 
@@ -59,22 +60,17 @@ async function serverWithGoogle() {
   return { app, vault };
 }
 
-function mintHandle(app: any, agent: string, body: Record<string, unknown> = {}) {
-  return request(app)
-    .post('/api/v1/delegate')
-    .set('X-Test-Agent', agent)
-    .send({ service: 'google', user_id: 'default', scopes: ['calendar.readonly'], ...body });
+const BASE = 'http://localhost:3456';
+const CALENDAR = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+
+/** Mint a Delegation Token for `agent` (the caller is the test runtime `runtime`). */
+function mintHandle(app: any, agent: AgentIdentity, body: Record<string, unknown> = {}, runtime = 'alpha') {
+  return delegateAs(app, agent, { service: 'google', user_id: 'default', scopes: ['calendar.readonly'], ...body },
+    { bearer: 'unused', base: BASE, headers: { 'X-Test-Agent': runtime } });
 }
 
-function useHandle(app: any, agent: string, delegationId: string) {
-  return request(app)
-    .post('/api/v1/use')
-    .set('X-Test-Agent', agent)
-    .send({
-      delegation_id: delegationId,
-      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-      method: 'GET',
-    });
+function useHandle(app: any, agent: AgentIdentity, token: string, runtime = 'alpha') {
+  return exerciseAs(app, agent, token, { url: CALENDAR, method: 'GET' }, { base: BASE, headers: { 'X-Test-Agent': runtime } });
 }
 
 function mockUpstream() {
@@ -90,38 +86,54 @@ afterEach(() => {
 });
 
 describe('brokered handle hardening', () => {
-  it('returns a brokered handle when token_format is omitted', async () => {
+  it('returns a key-bound Delegation Token when token_format is omitted', async () => {
     const { app } = await serverWithGoogle();
-    const res = await mintHandle(app, 'alpha');
+    const agent = await newAgent();
+    const res = await delegateAs(app, agent, { service: 'google', user_id: 'default', scopes: ['calendar.readonly'], token_format: undefined },
+      { bearer: 'unused', base: BASE, headers: { 'X-Test-Agent': 'alpha' } });
     expect(res.status).toBe(200);
-    expect(res.body.token_type).toBe('Delegation');
-    expect(res.body.access_token).toBeUndefined();
+    expect(res.body.token_type).toBe('DPoP');
+    expect(res.body.access_token.split('.')).toHaveLength(3);
+    expect(JSON.stringify(res.body)).not.toContain('ya29.handle-token');
+    expect(Buffer.from(res.body.access_token.split('.')[1], 'base64url').toString()).not.toContain('ya29');
   });
 
   it('still returns the provider token when raw is requested explicitly', async () => {
     const { app } = await serverWithGoogle();
-    const res = await mintHandle(app, 'alpha', { token_format: 'raw' });
+    const res = await request(app).post('/api/v1/delegate').set('X-Test-Agent', 'alpha')
+      .send({ service: 'google', user_id: 'default', scopes: ['calendar.readonly'], token_format: 'raw' });
     expect(res.status).toBe(200);
     expect(res.body.access_token).toBe('ya29.handle-token');
   });
 
-  it('refuses a handle presented by a caller other than the one it was minted for', async () => {
+  it('refuses a token presented without the agent key: another agent, or a leaked token with no proof', async () => {
     const { app } = await serverWithGoogle();
-    const minted = await mintHandle(app, 'alpha');
+    const alpha = await newAgent();
+    const mallory = await newAgent();
+    const minted = await mintHandle(app, alpha);
+    expect(minted.status).toBe(200);
+    const token = minted.body.access_token as string;
     const fetchSpy = mockUpstream();
 
-    const stolen = await useHandle(app, 'mallory', minted.body.delegation_id);
-    expect(stolen.status).toBe(404);
+    // Another agent with its own key (and the same runtime identity) is refused.
+    const stolen = await useHandle(app, mallory, token);
+    expect(stolen.status).toBe(401);
+    expect(stolen.body.error).toBe('invalid_dpop_proof');
+    // A leaked token with no proof at all is refused.
+    const bare = await request(app).post('/api/v1/use').set('X-Test-Agent', 'alpha')
+      .set('Authorization', `DPoP ${token}`).send({ url: CALENDAR, method: 'GET' });
+    expect(bare.status).toBe(401);
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    const own = await useHandle(app, 'alpha', minted.body.delegation_id);
+    const own = await useHandle(app, alpha, token);
     expect(own.status).toBe(200);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('ends live handles and revokes at the provider when the connection is revoked', async () => {
     const { app } = await serverWithGoogle();
-    const minted = await mintHandle(app, 'alpha');
+    const alpha = await newAgent();
+    const minted = await mintHandle(app, alpha);
     expect(minted.status).toBe(200);
     const fetchSpy = mockUpstream();
 
@@ -130,8 +142,9 @@ describe('brokered handle hardening', () => {
       .set('X-Test-Agent', 'alpha');
     expect(revoked.status).toBe(204);
 
-    const afterRevoke = await useHandle(app, 'alpha', minted.body.delegation_id);
-    expect(afterRevoke.status).toBe(404);
+    const afterRevoke = await useHandle(app, alpha, minted.body.access_token);
+    expect(afterRevoke.status).toBeGreaterThanOrEqual(400);
+    expect(afterRevoke.status).toBeLessThan(500);
 
     await vi.waitFor(() => {
       const revokeCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('oauth2.googleapis.com/revoke'));
@@ -143,13 +156,14 @@ describe('brokered handle hardening', () => {
 
   it('refuses a handle whose connection was removed outside this process', async () => {
     const { app, vault } = await serverWithGoogle();
-    const minted = await mintHandle(app, 'alpha');
+    const alpha = await newAgent();
+    const minted = await mintHandle(app, alpha);
     const fetchSpy = mockUpstream();
 
     // Another process sharing the vault deletes the connection directly.
     await vault.delete({ provider: 'google', userId: 'default' });
 
-    const res = await useHandle(app, 'alpha', minted.body.delegation_id);
+    const res = await useHandle(app, alpha, minted.body.access_token);
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('connection_revoked');
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -180,7 +194,7 @@ describe('brokered handle hardening', () => {
     });
   });
 
-  it('refuses a handle to a custom-verifier caller with no caller-specific identity', async () => {
+  it('binds a handle to the agent key, not the caller identity: a keyless caller is refused whatever the verifier says', async () => {
     const { app, vault } = createServer(makeConfig({
       agentRequestVerifier: () => ({ ok: true, principal: { type: 'external-runtime' } }),
     }));
@@ -197,7 +211,13 @@ describe('brokered handle hardening', () => {
       .post('/api/v1/delegate')
       .send({ service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
     expect(handle.status).toBe(400);
-    expect(handle.body.error).toBe('holder_identity_required');
+    expect(handle.body.error).toBe('agent_key_required');
+
+    // With a key the same anonymous runtime gets a token, bound to that key.
+    const agent = await newAgent();
+    const keyed = await delegateAs(app, agent, { service: 'google', user_id: 'default', scopes: ['calendar.readonly'] }, { bearer: 'unused', base: BASE });
+    expect(keyed.status).toBe(200);
+    expect(keyed.body.cnf.jkt).toBeTruthy();
 
     const raw = await request(app)
       .post('/api/v1/delegate')
@@ -208,8 +228,9 @@ describe('brokered handle hardening', () => {
 
   it('refuses a sub-delegation whose permission requires human approval', async () => {
     const { app, vault } = await serverWithGoogle();
+    const childAgent = await newAgent();
     await vault.createPermission({
-      agentId: 'did:key:child',
+      agentId: childAgent.did,
       connectionId: 'google',
       allowedScopes: ['calendar.readonly'],
       delegatable: true,
@@ -217,7 +238,8 @@ describe('brokered handle hardening', () => {
       requiresApproval: true,
       createdBy: 'test',
     });
-    const root = await mintHandle(app, 'parent', { agent_did: 'did:key:parent' });
+    const parent = await newAgent();
+    const root = await mintHandle(app, parent, {}, 'parent');
     expect(root.status).toBe(200);
 
     const child = await request(app)
@@ -225,7 +247,8 @@ describe('brokered handle hardening', () => {
       .set('X-Test-Agent', 'child')
       .send({
         parent_receipt: root.body.receipt,
-        agent_did: 'did:key:child',
+        actor_token: actorTokenFor(parent, '/api/v1/subdelegate', BASE),
+        agent_did: childAgent.did,
         service: 'google',
         user_id: 'default',
         scopes: ['calendar.readonly'],
@@ -236,8 +259,9 @@ describe('brokered handle hardening', () => {
 
   it('refuses a sub-delegation under an expired permission', async () => {
     const { app, vault } = await serverWithGoogle();
+    const childAgent = await newAgent();
     await vault.createPermission({
-      agentId: 'did:key:child',
+      agentId: childAgent.did,
       connectionId: 'google',
       allowedScopes: ['calendar.readonly'],
       delegatable: true,
@@ -246,14 +270,16 @@ describe('brokered handle hardening', () => {
       expiresAt: new Date(Date.now() - 1000),
       createdBy: 'test',
     });
-    const root = await mintHandle(app, 'parent', { agent_did: 'did:key:parent' });
+    const parent = await newAgent();
+    const root = await mintHandle(app, parent, {}, 'parent');
 
     const child = await request(app)
       .post('/api/v1/subdelegate')
       .set('X-Test-Agent', 'child')
       .send({
         parent_receipt: root.body.receipt,
-        agent_did: 'did:key:child',
+        actor_token: actorTokenFor(parent, '/api/v1/subdelegate', BASE),
+        agent_did: childAgent.did,
         service: 'google',
         user_id: 'default',
         scopes: ['calendar.readonly'],

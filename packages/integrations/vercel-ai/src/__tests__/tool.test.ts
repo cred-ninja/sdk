@@ -404,7 +404,16 @@ describe('credDelegateTool execute', () => {
 });
 
 describe('credUseTool execute', () => {
-  it('brokers an upstream request through Cred.use', async () => {
+  it('brokers an upstream request through Cred.use with the Delegation Token the model never sees', async () => {
+    const agentIdentity = { did: 'did:key:z6MkAgent', privateKey: new Uint8Array(32) };
+    mockDelegateHandle.mockResolvedValue({
+      tokenType: 'DPoP', token: 'dt.jwt.token', jkt: 'jkt', expiresIn: 900, expiresAt: new Date(Date.now() + 900_000),
+      service: 'google', userId: USER_ID, scopes: ['calendar.readonly'], delegationId: 'del_handle',
+    });
+    const delegateTool = credDelegateTool({ agentToken: TOKEN, userId: USER_ID, appClientId: 'app', baseUrl: 'https://cred.example.com', agentIdentity });
+    const delegated = await delegateTool.execute!({ service: 'google', scopes: [] }, { toolCallId: 'tc_0', messages: [], abortSignal: new AbortController().signal });
+    expect(JSON.stringify(delegated)).not.toContain('dt.jwt.token');
+
     mockUse.mockResolvedValue({
       status: 200,
       ok: true,
@@ -415,6 +424,7 @@ describe('credUseTool execute', () => {
     const t = credUseTool({
       agentToken: TOKEN,
       baseUrl: 'https://cred.example.com',
+      agentIdentity,
     });
 
     const result = await t.execute!(
@@ -434,7 +444,8 @@ describe('credUseTool execute', () => {
       body: { items: [] },
     });
     expect(mockUse).toHaveBeenCalledWith({
-      delegationId: 'del_handle',
+      token: 'dt.jwt.token',
+      agentIdentity,
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
       body: undefined,

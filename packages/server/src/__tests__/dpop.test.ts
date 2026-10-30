@@ -103,12 +103,14 @@ function delegateAs(app: App, agent: AgentIdentity, body: Record<string, unknown
   return delegate(app, agent.did, createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`), body);
 }
 
-function useBody(delegationId: string, extra: Record<string, unknown> = {}) {
-  return { delegation_id: delegationId, url: USERINFO, method: 'GET', ...extra };
+// The token is presented in Authorization, so the body names no delegation.
+function useBody(_token?: string, extra: Record<string, unknown> = {}) {
+  return { url: USERINFO, method: 'GET', ...extra };
 }
 
-function use(app: App, delegationId: string, proof?: string, body: Record<string, unknown> = useBody(delegationId)) {
-  const req = request(app).post('/api/v1/use').set('Authorization', `Bearer ${TEST_TOKEN}`);
+/** Exercise with a Delegation Token (RFC 9449: Authorization: DPoP <token>). */
+function use(app: App, token: string, proof?: string, body: Record<string, unknown> = useBody(token)) {
+  const req = request(app).post('/api/v1/use').set('Authorization', `DPoP ${token}`);
   if (proof !== undefined) req.set('DPoP', proof);
   return req.send(body);
 }
@@ -224,7 +226,7 @@ describe('DPoP at exercise (/api/v1/use)', () => {
     const { app } = await setup();
     const res = await delegateAs(app, agent);
     expect(res.status).toBe(200);
-    return { app, id: res.body.delegation_id as string };
+    return { app, id: res.body.access_token as string };
   }
 
   it('brokers the call with a proof by the bound key', async () => {
@@ -276,8 +278,8 @@ describe('DPoP at exercise (/api/v1/use)', () => {
   it('refuses a proof made for another handle (ath)', async () => {
     const agent = await generateAgentIdentity();
     const { app } = await setup();
-    const first = (await delegateAs(app, agent)).body.delegation_id;
-    const second = (await delegateAs(app, agent)).body.delegation_id;
+    const first = (await delegateAs(app, agent)).body.access_token;
+    const second = (await delegateAs(app, agent)).body.access_token;
     const res = await use(app, first, createDpopProof(agent, 'POST', `${BASE}/api/v1/use`, second, useBody(first)));
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('invalid_dpop_proof');
@@ -389,8 +391,8 @@ describe('DPoP across sub-delegation', () => {
     expect(sub.status).toBe(200);
     expect(sub.body.cnf).toEqual({ jkt: didKeyConfirmation(child.did)!.jkt });
     const upstream = mockUpstream();
-    expect((await useAs(app, root, sub.body.delegation_id)).status).toBe(401);
-    expect((await useAs(app, child, sub.body.delegation_id)).status).toBe(200);
+    expect((await useAs(app, root, sub.body.access_token)).status).toBe(401);
+    expect((await useAs(app, child, sub.body.access_token)).status).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
@@ -444,16 +446,18 @@ describe('DPoP across sub-delegation', () => {
 });
 
 describe('CRED_REQUIRE_DPOP=false (deprecated)', () => {
-  it('keeps the legacy Bearer-bound handles and warns at startup', async () => {
+  it('binds agent delegations to the key even with CRED_REQUIRE_DPOP=false, and warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const agent = await generateAgentIdentity();
     const { app } = await setup({ requireDpop: false });
     expect(warn.mock.calls.some(([m]) => String(m).includes('CRED_REQUIRE_DPOP=false'))).toBe(true);
-    const res = await delegate(app, agent.did);
+    expect((await delegate(app, agent.did)).status).toBe(401);
+    const res = await delegateAs(app, agent);
     expect(res.status).toBe(200);
-    expect(res.body.cnf).toBeUndefined();
+    expect(res.body.cnf).toEqual({ jkt: didKeyConfirmation(agent.did)!.jkt });
     mockUpstream();
-    expect((await use(app, res.body.delegation_id)).status).toBe(200);
+    expect((await use(app, res.body.access_token)).status).toBe(401);
+    expect((await useAs(app, agent, res.body.access_token)).status).toBe(200);
   });
 });
 
@@ -579,13 +583,13 @@ describe('DPoP together with Web Bot Auth', () => {
       .set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`))
       .send({ service: 'google', user_id: 'alice', scopes: ['openid', 'email'], token_format: 'handle', agent_did: agent.did });
     expect(minted.status).toBe(200);
-    const id = minted.body.delegation_id as string;
+    const token = minted.body.access_token as string;
     const upstream = mockUpstream();
     const res = await request(app).post('/api/v1/use').set('Host', 'localhost:3456')
-      .set('Authorization', `Bearer ${TEST_TOKEN}`)
+      .set('Authorization', `DPoP ${token}`)
       .set(signWebBotAuthRequest(`${BASE}/api/v1/use`, key.body.key_id, wba.privateKey))
-      .set('DPoP', proofFor(agent, id))
-      .send(useBody(id));
+      .set('DPoP', proofFor(agent, token))
+      .send(useBody(token));
     expect(res.status).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
   });
@@ -640,7 +644,7 @@ describe('lifetimes (Section 10.6) and the revocation path (Section 7)', () => {
     expect(revoked.body.elapsed_ms).toBeLessThan(1000);
     expect(wall).toBeLessThan(1000);
     const upstream = mockUpstream();
-    const res = await useAs(app, agent, id);
+    const res = await useAs(app, agent, minted.body.access_token);
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('delegation_revoked');
     expect(upstream).not.toHaveBeenCalled();

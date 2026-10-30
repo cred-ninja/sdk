@@ -17,6 +17,8 @@ import {
   SubDelegateParams,
   SubDelegationResult,
   SubDelegationHandleResult,
+  DelegationGrantResult,
+  DpopSigningIdentity,
   Connection,
   ProviderInfo,
   AuditEntry,
@@ -571,31 +573,70 @@ export class Cred {
     }
     if (params.constraints !== undefined) body.constraints = params.constraints;
 
-    const data = await this.post<{
-      token_type: 'Delegation';
-      expires_in?: number;
-      service: string;
-      user_id?: string;
-      scopes: string[];
-      delegation_id: string;
-      receipt: string;
-      chain_depth: number;
-      parent_delegation_id: string;
-    }>('/api/v1/subdelegate', body);
-
-    const DEFAULT_TTL_SECONDS = 900;
-    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    const data = await this.post<DelegationTokenWire & { chain_depth: number; parent_delegation_id: string }>('/api/v1/subdelegate', body);
     return {
-      tokenType: 'Delegation',
-      expiresIn,
-      expiresAt: new Date(Date.now() + expiresIn * 1000),
-      service: data.service,
-      userId: data.user_id ?? params.userId,
-      scopes: data.scopes,
-      delegationId: data.delegation_id,
-      receipt: data.receipt,
+      ...delegationTokenResult(data, params.userId),
       chainDepth: data.chain_depth,
       parentDelegationId: data.parent_delegation_id,
+    };
+  }
+
+  /**
+   * Step 2 of the Sub-Delegation Exchange: the receiving agent redeems the
+   * grant from subDelegateGrant() for its own Delegation Token (RFC 8693),
+   * proving its did:key with an RFC 7523 actor token.
+   */
+  async redeemDelegationGrant(params: { delegationGrant: string; agentIdentity: DpopSigningIdentity }): Promise<SubDelegationHandleResult> {
+    if (this.isLocal) {
+      throw new CredError('redeemDelegationGrant() is only supported with a Cred server.', 'local_mode_unsupported', 0);
+    }
+    const data = await this.post<DelegationTokenWire & { chain_depth: number; parent_delegation_id: string }>('/api/v1/token', {
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: params.delegationGrant,
+      subject_token_type: 'urn:credninja:params:oauth:token-type:delegation-grant',
+      actor_token: createActorToken(params.agentIdentity, `${this.baseUrl}/api/v1/token`),
+      actor_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+    });
+    return {
+      ...delegationTokenResult(data, data.user_id ?? ''),
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+    };
+  }
+
+  /**
+   * Step 1 of the Sub-Delegation Exchange: the delegating agent authorizes
+   * a hop and receives a single-use grant for the receiving agent, which
+   * alone can redeem it (redeemDelegationGrant()).
+   */
+  async subDelegateGrant(params: SubDelegateParams): Promise<DelegationGrantResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
+    if (this.isLocal) {
+      throw new CredError('subDelegateGrant() is only supported with a Cred server.', 'local_mode_unsupported', 0);
+    }
+    const body: Record<string, unknown> = {
+      parent_receipt: params.parentReceipt,
+      service: params.service,
+      user_id: params.userId,
+      appClientId: params.appClientId,
+      agent_did: params.agentDid,
+      exchange: 'grant',
+      ...this.actorTokenFor(params),
+    };
+    if (params.scopes && params.scopes.length > 0) body.scopes = params.scopes;
+    if (params.constraints !== undefined) body.constraints = params.constraints;
+    const data = await this.post<{
+      delegation_grant: string; delegation_id: string; agent_did: string; expires_in: number;
+      chain_depth: number; parent_delegation_id: string; scopes: string[];
+    }>('/api/v1/subdelegate', body);
+    return {
+      delegationGrant: data.delegation_grant,
+      delegationId: data.delegation_id,
+      agentDid: data.agent_did,
+      expiresIn: data.expires_in,
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+      scopes: data.scopes,
     };
   }
 
@@ -610,18 +651,22 @@ export class Cred {
 
     // Round-trip through JSON first, so the proof hashes exactly what the
     // server receives (a Date, say, travels as its ISO string).
+    if (!params.token || !params.agentIdentity) {
+      throw new CredError('use() needs the Delegation Token and the identity of the agent it was issued to', 'invalid_config', 0);
+    }
     const requestBody = JSON.parse(JSON.stringify({
-      delegation_id: params.delegationId,
       url: params.url,
       method: params.method,
       ...(params.body !== undefined ? { body: params.body } : {}),
       ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
     })) as Record<string, unknown>;
-    // The proof commits to this exact request body (cred_req), so it
+    // RFC 9449: the token goes in Authorization, and the proof commits to
+    // the token (ath) and to this exact request body (cred_req), so it
     // authorizes this one upstream call and no other.
-    return this.post<BrokeredUseResult>('/api/v1/use', requestBody, params.agentIdentity
-      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId, requestBody) }
-      : undefined);
+    return this.post<BrokeredUseResult>('/api/v1/use', requestBody, {
+      Authorization: `DPoP ${params.token}`,
+      DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.token, requestBody),
+    });
   }
 
   private validateConstraints(value: unknown) {
@@ -1381,30 +1426,13 @@ export class Cred {
       body.agent_did = agentDid;
     }
 
-    const data = await this.post<{
-      token_type: 'Delegation';
-      expires_in?: number;
-      service: string;
-      user_id?: string;
-      scopes: string[];
-      delegation_id: string;
-      receipt?: string;
-    }>('/api/v1/delegate', body, params.agentIdentity
-      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/delegate`) }
-      : undefined);
-
-    const DEFAULT_TTL_SECONDS = 900;
-    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
-    return {
-      tokenType: 'Delegation',
-      expiresIn,
-      expiresAt: new Date(Date.now() + expiresIn * 1000),
-      service: data.service,
-      userId: data.user_id ?? params.userId,
-      scopes: data.scopes,
-      delegationId: data.delegation_id,
-      receipt: data.receipt,
-    };
+    if (!params.agentIdentity) {
+      throw new CredError('delegateHandle() needs agentIdentity: the Delegation Token is bound to the agent\'s key', 'invalid_config', 0);
+    }
+    const data = await this.post<DelegationTokenWire>('/api/v1/delegate', body, {
+      DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/delegate`),
+    });
+    return delegationTokenResult(data, params.userId);
   }
 
   /**
@@ -2027,4 +2055,32 @@ export class Cred {
       failureAction: rotation.failureAction,
     };
   }
+}
+
+/** A Delegation Token response from /api/v1/delegate, /subdelegate or /token. */
+interface DelegationTokenWire {
+  access_token: string;
+  token_type: 'DPoP';
+  cnf: { jkt: string };
+  expires_in: number;
+  service: string;
+  user_id?: string;
+  scopes: string[];
+  delegation_id: string;
+  receipt?: string;
+}
+
+function delegationTokenResult(data: DelegationTokenWire, userId: string): DelegationHandleResult {
+  return {
+    tokenType: 'DPoP',
+    token: data.access_token,
+    jkt: data.cnf.jkt,
+    expiresIn: data.expires_in,
+    expiresAt: new Date(Date.now() + data.expires_in * 1000),
+    service: data.service,
+    userId: data.user_id ?? userId,
+    scopes: data.scopes,
+    delegationId: data.delegation_id,
+    receipt: data.receipt,
+  };
 }

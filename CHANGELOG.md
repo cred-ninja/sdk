@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### BREAKING: Delegation Tokens replace brokered handles
+
+- `@credninja/server`: `/api/v1/delegate`, `/api/v1/subdelegate` and the
+  `/api/v1/token` exchange issue a Delegation Token
+  (draft-sweeney-wimse-credential-delegation-02 Section 5): a JWT (`typ`
+  `dt+jwt`) carrying `iss`, `sub`, `client_id`, `act`,
+  `authorization_details` (type `cred_delegation`, the granted scopes as
+  operations), `delegation_constraints`, `cnf.jkt`, `consent_id`,
+  `credential_handle` and `prf` (the receipts' SHA-256 content
+  identifiers), with `token_type` `DPoP`. It is issued only to a did:key
+  agent. `/api/v1/use` takes `Authorization: DPoP <token>` and a DPoP proof
+  whose `ath` covers the token; the body no longer names a delegation.
+  Bearer-bound handles, `token_format`-without-key and the
+  `delegation-handle` token type are gone. The delegation state behind a
+  token is recorded in the vault, so tokens survive restarts and work
+  across replicas sharing one vault. `CRED_REQUIRE_DPOP=false` now affects
+  Cred Link only, and `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored.
+- `@credninja/vault`: delegation records carry the token's grant state;
+  consent records (`recordConsent`, `getConsent`) are stored once and
+  never updated.
+- `@credninja/attenuation`: `mintDelegationToken`,
+  `verifyDelegationToken`, `delegationTokenAth`, `receiptContentId`.
+- `@credninja/sdk`: `delegateHandle()` requires `agentIdentity` and
+  returns `token`; `use()` takes `token` and `agentIdentity`; new
+  `subDelegateGrant()` and `redeemDelegationGrant()`. MCP and
+  `@credninja/ai` keep the token in-process and show the model only an id.
+- Cred Link handles are unchanged in this release step; Link moves to
+  Delegation Tokens next.
+
 ### Added: tamper-evident audit log; receipts name their issuer
 
 - `@credninja/vault` (SQLite storage): every audit row carries an HMAC-SHA256

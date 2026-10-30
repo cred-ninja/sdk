@@ -8,6 +8,7 @@ import {
   collectDelegationSubtree,
   toRevoked,
   DelegationRevokedError,
+  type DelegationGrant,
   type DelegationRecord,
   type DelegationRevocationOptions,
   type DelegationRevocationSeed,
@@ -15,6 +16,7 @@ import {
   type RevokedDelegation,
 } from '../delegation-revocation.js';
 import { canonicalScopeSet, intersectScopes, scopeSetsEqual } from '@credninja/protocol';
+import type { ConsentRecord, RecordConsentInput } from '../consent.js';
 
 const IN_PROGRESS_ROTATION_STATES: RotationState[] = ['pending', 'testing', 'promoting'];
 
@@ -197,10 +199,31 @@ export class SQLiteBackend implements StorageBackend {
         created_at          TEXT NOT NULL,
         expires_at          TEXT,
         revoked_at          TEXT,
-        revoked_ancestor_id TEXT
+        revoked_ancestor_id TEXT,
+        grant_json          TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_delegations_parent ON vault_delegations(parent_id);
       CREATE INDEX IF NOT EXISTS idx_delegations_agent ON vault_delegations(agent_did);
+    `);
+    this.ensureColumn('vault_delegations', 'grant_json', 'ALTER TABLE vault_delegations ADD COLUMN grant_json TEXT');
+
+    // Consent records are written once and never updated (draft Section 8.2).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_consents (
+        id                 TEXT PRIMARY KEY,
+        subject            TEXT NOT NULL,
+        agent_did          TEXT NOT NULL,
+        service            TEXT NOT NULL,
+        capabilities_json  TEXT NOT NULL,
+        source             TEXT NOT NULL,
+        approved_by        TEXT NOT NULL,
+        granted_at         TEXT NOT NULL,
+        expires_at         TEXT,
+        chain_context_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_consents_granted ON vault_consents(granted_at);
+      CREATE TRIGGER IF NOT EXISTS vault_consents_immutable BEFORE UPDATE ON vault_consents
+      BEGIN SELECT RAISE(ABORT, 'consent records are immutable'); END;
     `);
   }
 
@@ -479,6 +502,50 @@ export class SQLiteBackend implements StorageBackend {
     `).run(status, now, revokedAt ?? null, id);
   }
 
+  // ── Consent methods ─────────────────────────────────────────────────────
+
+  storeConsent(input: RecordConsentInput, now: string): ConsentRecord {
+    const db = this.ensureDb();
+    db.prepare(`
+      INSERT INTO vault_consents (id, subject, agent_did, service, capabilities_json, source, approved_by, granted_at, expires_at, chain_context_json)
+      VALUES (@id, @subject, @agentDid, @service, @capabilities, @source, @approvedBy, @grantedAt, @expiresAt, @chainContext)
+      ON CONFLICT (id) DO NOTHING
+    `).run({
+      id: input.id,
+      subject: input.subject,
+      agentDid: input.agentDid,
+      service: input.service,
+      capabilities: JSON.stringify(input.capabilities),
+      source: input.source,
+      approvedBy: input.approvedBy,
+      grantedAt: now,
+      expiresAt: input.expiresAt,
+      chainContext: JSON.stringify(input.chainContext),
+    });
+    return this.getConsent(input.id)!;
+  }
+
+  getConsent(id: string): ConsentRecord | null {
+    const db = this.ensureDb();
+    const row = db.prepare('SELECT * FROM vault_consents WHERE id = ?').get(id) as {
+      id: string; subject: string; agent_did: string; service: string; capabilities_json: string; source: string;
+      approved_by: string; granted_at: string; expires_at: string | null; chain_context_json: string;
+    } | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      subject: row.subject,
+      agentDid: row.agent_did,
+      service: row.service,
+      capabilities: JSON.parse(row.capabilities_json) as unknown[],
+      source: row.source as ConsentRecord['source'],
+      approvedBy: row.approved_by,
+      grantedAt: row.granted_at,
+      expiresAt: row.expires_at,
+      chainContext: JSON.parse(row.chain_context_json) as Record<string, unknown>,
+    };
+  }
+
   // ── Delegation methods ──────────────────────────────────────────────────
 
   /**
@@ -511,8 +578,8 @@ export class SQLiteBackend implements StorageBackend {
         }
       }
       db.prepare(`
-        INSERT INTO vault_delegations (id, parent_id, agent_did, service, user_id, chain_depth, status, created_at, expires_at)
-        VALUES (@id, @parentId, @agentDid, @service, @userId, @chainDepth, 'active', @createdAt, @expiresAt)
+        INSERT INTO vault_delegations (id, parent_id, agent_did, service, user_id, chain_depth, status, created_at, expires_at, grant_json)
+        VALUES (@id, @parentId, @agentDid, @service, @userId, @chainDepth, 'active', @createdAt, @expiresAt, @grantJson)
         ON CONFLICT (id) DO NOTHING
       `).run({
         id: row.id,
@@ -523,6 +590,7 @@ export class SQLiteBackend implements StorageBackend {
         chainDepth: row.chainDepth ?? 0,
         createdAt: now,
         expiresAt: row.expiresAt ?? null,
+        grantJson: row.grant ? JSON.stringify(row.grant) : null,
       });
       // Present: inserted above, or already there when the id was replayed.
       return this.getDelegation(row.id)!;
@@ -535,7 +603,7 @@ export class SQLiteBackend implements StorageBackend {
     const db = this.ensureDb();
     const row = db.prepare(`
       SELECT id, parent_id, agent_did, service, user_id, chain_depth, status,
-             created_at, expires_at, revoked_at, revoked_ancestor_id
+             created_at, expires_at, revoked_at, revoked_ancestor_id, grant_json
       FROM vault_delegations
       WHERE id = ?
     `).get(id) as DelegationDbRow | undefined;
@@ -1270,6 +1338,7 @@ interface DelegationDbRow {
   expires_at: string | null;
   revoked_at: string | null;
   revoked_ancestor_id: string | null;
+  grant_json?: string | null;
 }
 
 function delegationFromDb(row: DelegationDbRow): DelegationRecord {
@@ -1286,5 +1355,6 @@ function delegationFromDb(row: DelegationDbRow): DelegationRecord {
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     revokedAncestorId: row.revoked_ancestor_id,
+    ...(row.grant_json ? { grant: JSON.parse(row.grant_json) as DelegationGrant } : {}),
   };
 }

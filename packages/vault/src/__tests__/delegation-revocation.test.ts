@@ -220,6 +220,33 @@ describe('SQLiteBackend delegation storage', () => {
     expect(upgraded.getDelegation('d1')?.status).toBe('active');
   });
 
+  it('keeps the grant behind a Delegation Token across a reopen', () => {
+    const grant = {
+      credentialHandle: 'ch_1', consentId: 'consent_1', jkt: 'jkt_1', scopes: ['repo'], appClientId: 'local',
+      constraints: [{ key: 'max_calls', max_lifetime: 3 }],
+      authorizationDetails: [{ type: 'cred_delegation', provider: 'github', operations: ['repo'] }],
+    };
+    backend.storeDelegation(rec('d1', null, { grant }), NOW);
+    const reopened = new SQLiteBackend(join(dir, 'vault.db'));
+    reopened.init();
+    expect(reopened.getDelegation('d1')?.grant).toEqual(grant);
+    backend.storeDelegation(rec('d2'), NOW);
+    expect(reopened.getDelegation('d2')?.grant).toBeUndefined();
+  });
+
+  it('adds the grant column to a delegation table created before it existed', () => {
+    const legacyPath = join(dir, 'legacy-grant.db');
+    const legacy = new Database(legacyPath);
+    legacy.exec(`CREATE TABLE vault_delegations (id TEXT PRIMARY KEY, parent_id TEXT, agent_did TEXT, service TEXT NOT NULL,
+      user_id TEXT NOT NULL, chain_depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
+      expires_at TEXT, revoked_at TEXT, revoked_ancestor_id TEXT)`);
+    legacy.close();
+    const upgraded = new SQLiteBackend(legacyPath);
+    upgraded.init();
+    upgraded.storeDelegation(rec('d1', null, { grant: { credentialHandle: 'ch', consentId: 'c', jkt: 'j', scopes: [], appClientId: 'local' } }), NOW);
+    expect(upgraded.getDelegation('d1')?.grant?.credentialHandle).toBe('ch');
+  });
+
   it('refuses to record a delegation for a revoked agent', () => {
     backend.storeAgent({
       id: 'agt_gone', did: 'did:key:z6MkGone', fingerprint: 'fp_gone', name: 'gone', scopeCeiling: '[]',

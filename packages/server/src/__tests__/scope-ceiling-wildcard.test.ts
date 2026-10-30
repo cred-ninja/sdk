@@ -7,7 +7,9 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { createPrivateKey, sign } from 'node:crypto';
+import { createActorToken } from '@credninja/sdk';
 import { createServer } from '../server.js';
+import { newAgent, delegateAs } from './token-helpers.js';
 import type { ServerConfig } from '../config.js';
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
@@ -36,9 +38,6 @@ function makeTestConfig(): ServerConfig {
       },
     ],
     redirectBaseUri: 'http://localhost:3456',
-    // Fixture DIDs here are not real did:keys, so these suites exercise the
-    // deprecated legacy path; agent-identity.test.ts covers the default.
-    requireAgentIdentity: false,
   };
 }
 
@@ -57,7 +56,7 @@ function getTestSigningKey() {
 function createTestReceipt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
   const payloadB64 = Buffer.from(JSON.stringify({
-    iss: 'did:key:local-cred',
+    iss: 'http://localhost:3456',
     iat: Math.floor(Date.now() / 1000),
     ...payload,
   })).toString('base64url');
@@ -77,6 +76,8 @@ describe('wildcard scope ceilings over HTTP', () => {
   });
 
   async function setup(childCeiling: string[]) {
+  const wild = await newAgent();
+  const wildChild = await newAgent();
     const { app, vault } = createServer(makeTestConfig());
     await vault.init();
     await vault.store({
@@ -89,7 +90,7 @@ describe('wildcard scope ceilings over HTTP', () => {
     if (vault.registerAgent) {
       await vault.registerAgent({
         id: 'agt_wild',
-        did: 'did:key:z6MkWild',
+        did: wild.did,
         name: 'wild-agent',
         fingerprint: 'fp_wild',
         scopeCeiling: ['calendar.*'],
@@ -100,7 +101,7 @@ describe('wildcard scope ceilings over HTTP', () => {
       });
       await vault.registerAgent({
         id: 'agt_wildchild',
-        did: 'did:key:z6MkWildChild',
+        did: wildChild.did,
         name: 'wild-child-agent',
         fingerprint: 'fp_wildchild',
         scopeCeiling: childCeiling,
@@ -121,61 +122,52 @@ describe('wildcard scope ceilings over HTTP', () => {
         createdBy: 'admin',
       });
     }
-    return { app, vault };
+    return { app, vault, wild, wildChild };
   }
 
   it('direct delegation permits a request under a wildcard ceiling', async () => {
-    const { app } = await setup(['calendar.*']);
-    const res = await request(app)
-      .post('/api/v1/delegate')
-      .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({
+    const { app, wild } = await setup(['calendar.*']);
+    const res = await delegateAs(app, wild, {
         service: 'google',
         user_id: 'default',
         appClientId: 'app_123',
-        agent_did: 'did:key:z6MkWild',
+        agent_did: wild.did,
         scopes: ['calendar.readonly'],
-      });
+    }, { bearer: TEST_TOKEN });
     expect(res.status).toBe(200);
     expect(res.body.scopes).toEqual(['calendar.readonly']);
   });
 
   it('direct delegation rejects a request outside a wildcard ceiling', async () => {
-    const { app } = await setup(['calendar.*']);
-    const res = await request(app)
-      .post('/api/v1/delegate')
-      .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({
+    const { app, wild } = await setup(['calendar.*']);
+    const res = await delegateAs(app, wild, {
         service: 'google',
         user_id: 'default',
         appClientId: 'app_123',
-        agent_did: 'did:key:z6MkWild',
+        agent_did: wild.did,
         scopes: ['mail.send'],
-      });
+    }, { bearer: TEST_TOKEN });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('scope_ceiling_exceeded');
   });
 
   it('stored-consent filtering keeps only ceiling-covered scopes on a no-scopes request', async () => {
-    const { app } = await setup(['calendar.*']);
-    const res = await request(app)
-      .post('/api/v1/delegate')
-      .set('Authorization', `Bearer ${TEST_TOKEN}`)
-      .send({
+    const { app, wild } = await setup(['calendar.*']);
+    const res = await delegateAs(app, wild, {
         service: 'google',
         user_id: 'default',
         appClientId: 'app_123',
-        agent_did: 'did:key:z6MkWild',
-      });
+        agent_did: wild.did,
+    }, { bearer: TEST_TOKEN });
     expect(res.status).toBe(200);
     expect(res.body.scopes).toEqual(expect.arrayContaining(['calendar.readonly', 'calendar.events.read']));
     expect(res.body.scopes).not.toContain('mail.send');
   });
 
   it('sub-delegation grants scopes under the child wildcard ceiling', async () => {
-    const { app } = await setup(['calendar.*']);
+    const { app, wild, wildChild } = await setup(['calendar.*']);
     const parentReceipt = createTestReceipt({
-      sub: 'did:key:z6MkWild',
+      sub: wild.did,
       service: 'google',
       scopes: ['calendar.readonly', 'calendar.events.read'],
       userId: 'default',
@@ -188,7 +180,8 @@ describe('wildcard scope ceilings over HTTP', () => {
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
       .send({
         parent_receipt: parentReceipt,
-        agent_did: 'did:key:z6MkWildChild',
+        actor_token: createActorToken(wild, 'http://localhost:3456/api/v1/subdelegate'),
+        agent_did: wildChild.did,
         service: 'google',
         user_id: 'default',
         scopes: ['calendar.readonly'],
@@ -198,9 +191,9 @@ describe('wildcard scope ceilings over HTTP', () => {
   });
 
   it('sub-delegation rejects when nothing granted fits the child wildcard ceiling', async () => {
-    const { app } = await setup(['mail.*']);
+    const { app, wild, wildChild } = await setup(['mail.*']);
     const parentReceipt = createTestReceipt({
-      sub: 'did:key:z6MkWild',
+      sub: wild.did,
       service: 'google',
       scopes: ['calendar.readonly', 'calendar.events.read'],
       userId: 'default',
@@ -213,7 +206,8 @@ describe('wildcard scope ceilings over HTTP', () => {
       .set('Authorization', `Bearer ${TEST_TOKEN}`)
       .send({
         parent_receipt: parentReceipt,
-        agent_did: 'did:key:z6MkWildChild',
+        actor_token: createActorToken(wild, 'http://localhost:3456/api/v1/subdelegate'),
+        agent_did: wildChild.did,
         service: 'google',
         user_id: 'default',
         scopes: ['calendar.readonly'],

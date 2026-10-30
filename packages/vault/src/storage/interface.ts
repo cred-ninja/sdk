@@ -1,5 +1,6 @@
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditChainVerification, AuditChainHead } from '../audit.js';
+import type { ConsentRecord, RecordConsentInput } from '../consent.js';
 import type {
   DelegationRecord,
   DelegationRevocationOptions,
@@ -112,6 +113,9 @@ export interface StorageBackend {
    * already exists is kept as first written.
    */
   storeDelegation?(input: RecordDelegationInput, now: string): DelegationRecord | Promise<DelegationRecord>;
+  /** Store a consent record once; an id that already exists is left as first written. */
+  storeConsent?(input: RecordConsentInput, now: string): ConsentRecord | Promise<ConsentRecord>;
+  getConsent?(id: string): ConsentRecord | null | Promise<ConsentRecord | null>;
   getDelegation?(id: string): DelegationRecord | null | Promise<DelegationRecord | null>;
   /**
    * Revoke the seeds and all their descendants, atomically where the

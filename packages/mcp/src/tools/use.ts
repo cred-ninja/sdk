@@ -144,14 +144,20 @@ export async function handleUse(
         isError: true,
       };
     }
+    if (!entry.delegationToken || !context.delegatorIdentity) {
+      return {
+        content: [{ type: 'text', text: 'Error: a brokered call needs the Delegation Token and this agent\'s identity (CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX).' }],
+        isError: true,
+      };
+    }
     try {
       const result = await context.cred.use({
-        delegationId: entry.serverDelegationId ?? input.delegation_id,
+        token: entry.delegationToken,
+        agentIdentity: context.delegatorIdentity,
         url: input.url,
         method: input.method,
         body: input.body,
         extraHeaders: input.extra_headers,
-        ...(context.delegatorIdentity ? { agentIdentity: context.delegatorIdentity } : {}),
       });
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

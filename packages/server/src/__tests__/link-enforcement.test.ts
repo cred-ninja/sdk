@@ -27,6 +27,7 @@ import {
   use,
 } from './link-harness.js';
 import type { Harness } from './link-harness.js';
+import { delegateAs, exerciseAs, newAgent } from './token-helpers.js';
 
 let h: Harness | null = null;
 
@@ -541,16 +542,18 @@ describe('Configuration and pre-existing gap fixes', () => {
     const { app, server } = await harness({ linkEnabled: false });
     await server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
-    const lin = await delegate(app, { service: 'linear', user_id: 'default', token_format: 'handle' });
+    const agent = await newAgent();
+    const mint = (service: string) => delegateAs(app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN });
+    const lin = await mint('linear');
     expect(lin.status).toBe(200);
-    const linUse = await use(app, { delegation_id: lin.body.delegation_id, url: 'https://api.linear.app/graphql', method: 'POST', body: { query: '{ viewer { id } }' } });
+    const linUse = await exerciseAs(app, agent, lin.body.access_token, { url: 'https://api.linear.app/graphql', method: 'POST', body: { query: '{ viewer { id } }' } });
     expect(linUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)).toEqual({ url: 'https://api.linear.app/graphql', authorization: 'Bearer lin_tok' });
-    const hub = await delegate(app, { service: 'hubspot', user_id: 'default', token_format: 'handle' });
-    const hubUse = await use(app, { delegation_id: hub.body.delegation_id, url: 'https://api.hubapi.com/crm/v3/objects/contacts', method: 'GET' });
+    const hub = await mint('hubspot');
+    const hubUse = await exerciseAs(app, agent, hub.body.access_token, { url: 'https://api.hubapi.com/crm/v3/objects/contacts', method: 'GET' });
     expect(hubUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.url).toBe('https://api.hubapi.com/crm/v3/objects/contacts');
-    const offHost = await use(app, { delegation_id: hub.body.delegation_id, url: 'https://evil.example.com/crm/v3/objects/contacts', method: 'GET' });
+    const offHost = await exerciseAs(app, agent, hub.body.access_token, { url: 'https://evil.example.com/crm/v3/objects/contacts', method: 'GET' });
     expect(offHost.status).toBe(400);
   });
 });

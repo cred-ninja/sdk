@@ -38,6 +38,7 @@ import {
   use,
 } from './link-harness.js';
 import type { Harness } from './link-harness.js';
+import { actorTokenFor, delegateAs, exerciseAs, newAgent } from './token-helpers.js';
 
 let h: Harness | null = null;
 
@@ -515,7 +516,7 @@ describe('small hardening items (review item 8)', () => {
       await agent(request(hx.app).delete('/api/token/google?user_id=default')),
       await agent(request(hx.app).get('/api/v1/connections?user_id=default')),
       await agent(request(hx.app).delete('/api/v1/connections/google?user_id=default')),
-      await agent(request(hx.app).post('/api/v1/delegate').send({ service: 'google', user_id: 'default' })),
+      await delegateAs(hx.app, await newAgent(), { service: 'google', user_id: 'default' }, { bearer: AGENT_TOKEN }),
       await request(hx.app).get('/providers?user_id=default').set('Authorization', `Bearer ${ADMIN_TOKEN}`),
     ];
     for (const res of responses) {
@@ -525,23 +526,27 @@ describe('small hardening items (review item 8)', () => {
   });
 
   it('subdelegate turns a ReservedVaultUserIdError from the vault into a 400', async () => {
-    const hx = await harness({ linkEnabled: false, requireAgentIdentity: false });
+    const hx = await harness({ linkEnabled: false });
     const vault = hx.server.vault;
     const nowIso = new Date().toISOString();
-    await vault.registerAgent!({ id: 'agt_child', did: 'did:key:z6MkChild', name: 'child', fingerprint: 'fp_child', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: nowIso, updatedAt: nowIso });
+    const [parentAgent, childAgent] = [await newAgent(), await newAgent()];
+    await vault.registerAgent!({ id: 'agt_child', did: childAgent.did, name: 'child', fingerprint: 'fp_child', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: nowIso, updatedAt: nowIso });
     await vault.createPermission!({ agentId: 'agt_child', connectionId: 'google', allowedScopes: ['calendar.readonly'], delegatable: true, maxDelegationDepth: 3, requiresApproval: false, createdBy: 'admin' });
     const seed = crypto.scryptSync('link-test-passphrase', 'cred:local-receipt:v1', 32);
     const key = crypto.createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8' });
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({
-      iss: 'did:key:local-cred', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600,
-      sub: 'did:key:z6MkParent', service: 'google', scopes: ['calendar.readonly'], userId: 'default', appClientId: 'local',
+      iss: 'did:key:local-cred', iat: Math.floor(Date.now() / 1000) - 60, exp: Math.floor(Date.now() / 1000) + 600,
+      sub: parentAgent.did, service: 'google', scopes: ['calendar.readonly'], userId: 'default', appClientId: 'local',
       delegationId: 'del_parent', chainDepth: 0,
     })).toString('base64url');
     const receipt = `${header}.${payload}.${crypto.sign(null, Buffer.from(`${header}.${payload}`), key).toString('base64url')}`;
     vi.spyOn(vault, 'get').mockRejectedValue(new ReservedVaultUserIdError('get'));
     const res = await request(hx.app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
-      .send({ parent_receipt: receipt, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+      .send({
+        parent_receipt: receipt, actor_token: actorTokenFor(parentAgent, '/api/v1/subdelegate'),
+        agent_did: childAgent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'],
+      });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_user_id');
   });
@@ -553,11 +558,12 @@ describe('broker allowlist (review item 9)', () => {
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'slack', userId: 'default', accessToken: 'xoxb-legacy', scopes: ['chat:write'] });
-    const handle = async (service: string) => (await delegate(hx.app, { service, user_id: 'default', token_format: 'handle' })).body.delegation_id as string;
+    const agent = await newAgent();
+    const handle = async (service: string) => (await delegateAs(hx.app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN, base: BASE })).body.access_token as string;
     const lin = await handle('linear');
     const hub = await handle('hubspot');
     const slk = await handle('slack');
-    const call = (id: string, url: string, method = 'POST') => use(hx.app, { delegation_id: id, url, method, ...(method === 'GET' ? {} : { body: {} }) });
+    const call = (token: string, url: string, method = 'POST') => exerciseAs(hx.app, agent, token, { url, method, ...(method === 'GET' ? {} : { body: {} }) }, { base: BASE });
 
     expect((await call(lin, 'https://api.linear.app/graphql')).status).toBe(200);
     expect((await call(lin, 'https://api.linear.app/graphql?x=1')).status).toBe(200);
@@ -740,9 +746,10 @@ describe('broker URLs cannot hide segments with percent-encoding (v2 item 1)', (
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await hx.server.vault.store({ provider: 'google', userId: 'default', accessToken: 'g_tok', scopes: ['calendar.readonly'] });
-    const handle = async (service: string) => (await delegate(hx.app, { service, user_id: 'default', token_format: 'handle' })).body.delegation_id as string;
+    const agent = await newAgent();
+    const handle = async (service: string) => (await delegateAs(hx.app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN, base: BASE })).body.access_token as string;
     const ids = { slack: await handle('slack'), hubspot: await handle('hubspot'), linear: await handle('linear'), google: await handle('google') };
-    const call = (service: keyof typeof ids, url: string, method = 'GET') => use(hx.app, { delegation_id: ids[service], url, method });
+    const call = (service: keyof typeof ids, url: string, method = 'GET') => exerciseAs(hx.app, agent, ids[service], { url, method }, { base: BASE });
 
     const refused: Array<[keyof typeof ids, string]> = [
       ['slack', 'https://slack.com/api/auth%2Erevoke'],

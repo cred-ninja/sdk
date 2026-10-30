@@ -94,6 +94,7 @@ export async function handleDelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          delegationToken: (result as { token: string }).token,
           ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,

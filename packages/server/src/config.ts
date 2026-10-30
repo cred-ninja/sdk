@@ -114,12 +114,10 @@ export interface ServerConfig {
   // is deprecated and logs a warning at startup.
   requireAgentIdentity?: boolean;
 
-  // Bind every brokered handle to the key of the agent it is issued to
-  // (env CRED_REQUIRE_DPOP). Default true: a handle is issued only to a
-  // did:key agent, /api/v1/delegate needs a DPoP proof (RFC 9449) by that
-  // key, and /api/v1/use needs one naming the handle. false is deprecated,
-  // logs a warning at startup, and leaves handles bound to the caller's
-  // Bearer credential only. Cred Link handles keep their own binding.
+  // Cred Link only (env CRED_REQUIRE_DPOP), until Link agents get keys:
+  // default true, no Link handle for the key-less static Bearer identity.
+  // Agent delegations are always Delegation Tokens bound to the agent's
+  // key, whatever this says. false is deprecated and logs a warning.
   requireDpop?: boolean;
 
   // Hand a provider's access token to the caller (token_format "raw" on

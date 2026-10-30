@@ -32,6 +32,33 @@ export interface DelegationRecord {
   revokedAt: string | null;
   /** The delegation whose revocation revoked this one (itself when revoked directly). */
   revokedAncestorId: string | null;
+  /**
+   * What a Delegation Token for this delegation authorizes, as the server
+   * needs it at exercise: absent on delegations issued without a token.
+   */
+  grant?: DelegationGrant;
+}
+
+/**
+ * The server-side state behind a Delegation Token. None of it is secret:
+ * `credentialHandle` is a random reference to the stored connection, not
+ * the provider credential.
+ */
+export interface DelegationGrant {
+  credentialHandle: string;
+  consentId: string;
+  /** RFC 7638 thumbprint of the key the token is bound to (`cnf.jkt`). */
+  jkt: string;
+  scopes: string[];
+  appClientId: string;
+  /** The token's `delegation_constraints`, as issued. */
+  constraints?: unknown[];
+  /** The token's `authorization_details`, as issued. */
+  authorizationDetails?: unknown[];
+  /** The token's `prf`: receipt content identifiers, root hop first. */
+  prf?: string[];
+  /** Cred Link binding, for delegations of a Link connection. */
+  link?: Record<string, unknown>;
 }
 
 /** Input for recording a new delegation. Status is always 'active' at issue. */
@@ -40,6 +67,7 @@ export type RecordDelegationInput = Pick<DelegationRecord, 'id' | 'service' | 'u
   agentDid?: string | null;
   chainDepth?: number;
   expiresAt?: string | null;
+  grant?: DelegationGrant;
 };
 
 /**
@@ -200,6 +228,7 @@ export class MemoryDelegationStore {
       expiresAt: input.expiresAt ?? null,
       revokedAt: null,
       revokedAncestorId: null,
+      ...(input.grant ? { grant: input.grant } : {}),
     };
     this.records.set(record.id, record);
     if (record.parentId) pushTo(this.children, record.parentId, record.id);

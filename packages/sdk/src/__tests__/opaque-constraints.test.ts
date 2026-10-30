@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPrivateKey, createPublicKey, scryptSync, sign } from 'node:crypto';
 import { CredVault } from '@credninja/vault';
-import { Cred } from '../index.js';
+import { Cred, generateAgentIdentity } from '../index.js';
 import { didKeyForPublicKey } from '../identity.js';
 
 const directories: string[] = [];
@@ -101,7 +101,10 @@ describe('cloud constraint transport', () => {
   it.each(['delegate', 'delegateHandle', 'subDelegate', 'subDelegateHandle'] as const)('never strips constraints in %s', async (method) => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: 'unknown_constraint' }), { status: 403 }));
     const cred = new Cred({ agentToken: 'cred_at_test', baseUrl: 'https://cred.example.com' });
-    await expect(cred[method]({ service: 'github', userId: 'user-test', appClientId: 'local', agentDid: 'did:key:child', parentReceipt: 'receipt', constraints })).rejects.toMatchObject({ code: 'unknown_constraint' });
+    // delegateHandle() binds the token to a key, so it takes the agent identity.
+    const agentIdentity = method === 'delegateHandle' ? await generateAgentIdentity() : undefined;
+    const params = { service: 'github', userId: 'user-test', appClientId: 'local', agentDid: agentIdentity?.did ?? 'did:key:child', parentReceipt: 'receipt', constraints, ...(agentIdentity ? { agentIdentity } : {}) };
+    await expect(cred[method](params)).rejects.toMatchObject({ code: 'unknown_constraint' });
     expect(JSON.parse(String(fetch.mock.calls[0]![1]!.body)).constraints).toEqual(constraints);
   });
 });
