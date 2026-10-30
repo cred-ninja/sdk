@@ -300,7 +300,7 @@ try {
 
 ## Requirements
 
-- Node.js 18+ (uses built-in `fetch`)
+- Node.js 22+ (uses built-in `fetch`)
 - Runtime dependencies: the dependency-free `@credninja/protocol` and
   `@credninja/attenuation` packages. Cloud-only installs do not need the optional
   `@credninja/vault` or `@credninja/oauth` peers.

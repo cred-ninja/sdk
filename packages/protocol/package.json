@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "author": "Cred",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",

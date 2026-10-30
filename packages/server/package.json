@@ -36,7 +36,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "dependencies": {
     "@credninja/attenuation": "^2.0.0",
@@ -45,7 +45,7 @@
     "@credninja/protocol": "^2.0.0",
     "@credninja/tofu": "^2.0.0",
     "@credninja/vault": "^2.0.0",
-    "better-sqlite3": "^11.8.1",
+    "better-sqlite3": "^12.6.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2"
   },

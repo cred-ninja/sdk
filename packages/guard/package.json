@@ -6,7 +6,7 @@
   "author": "CredNinja",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
