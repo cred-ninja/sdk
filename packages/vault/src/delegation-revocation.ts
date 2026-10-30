@@ -32,6 +32,33 @@ export interface DelegationRecord {
   revokedAt: string | null;
   /** The delegation whose revocation revoked this one (itself when revoked directly). */
   revokedAncestorId: string | null;
+  /**
+   * What a Delegation Token for this delegation authorizes, as the server
+   * needs it at exercise: absent on delegations issued without a token.
+   */
+  grant?: DelegationGrant;
+}
+
+/**
+ * The server-side state behind a Delegation Token. None of it is secret:
+ * `credentialHandle` is a random reference to the stored connection, not
+ * the provider credential.
+ */
+export interface DelegationGrant {
+  credentialHandle: string;
+  consentId: string;
+  /** RFC 7638 thumbprint of the key the token is bound to (`cnf.jkt`). */
+  jkt: string;
+  scopes: string[];
+  appClientId: string;
+  /** The token's `delegation_constraints`, as issued. */
+  constraints?: unknown[];
+  /** The token's `authorization_details`, as issued. */
+  authorizationDetails?: unknown[];
+  /** The token's `prf`: receipt content identifiers, root hop first. */
+  prf?: string[];
+  /** Cred Link binding, for delegations of a Link connection. */
+  link?: Record<string, unknown>;
 }
 
 /** Input for recording a new delegation. Status is always 'active' at issue. */
@@ -40,6 +67,7 @@ export type RecordDelegationInput = Pick<DelegationRecord, 'id' | 'service' | 'u
   agentDid?: string | null;
   chainDepth?: number;
   expiresAt?: string | null;
+  grant?: DelegationGrant;
 };
 
 /**
@@ -50,6 +78,12 @@ export type RecordDelegationInput = Pick<DelegationRecord, 'id' | 'service' | 'u
 export interface DelegationRevocationSeed {
   delegationIds?: readonly string[];
   agentDid?: string;
+  /**
+   * Revokes every delegation of one stored connection: used when the
+   * connection itself is revoked, so no token issued from it can be used
+   * with a credential stored later for the same service and user.
+   */
+  connection?: { service: string; userId: string };
 }
 
 export interface RevokedDelegation {
@@ -200,6 +234,7 @@ export class MemoryDelegationStore {
       expiresAt: input.expiresAt ?? null,
       revokedAt: null,
       revokedAncestorId: null,
+      ...(input.grant ? { grant: input.grant } : {}),
     };
     this.records.set(record.id, record);
     if (record.parentId) pushTo(this.children, record.parentId, record.id);
@@ -216,7 +251,12 @@ export class MemoryDelegationStore {
     revokedAt: string,
     options: DelegationRevocationOptions = {},
   ): { revoked: RevokedDelegation[]; truncated: boolean } {
-    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : [])];
+    const byConnection = seed.connection
+      ? [...this.records.values()]
+          .filter((r) => r.service === seed.connection!.service && r.userId === seed.connection!.userId)
+          .map((r) => r.id)
+      : [];
+    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : []), ...byConnection];
     const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => this.children.get(id) ?? [], options);
     const revoked: RevokedDelegation[] = [];
     for (const node of nodes) {

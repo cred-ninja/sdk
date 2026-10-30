@@ -9,6 +9,7 @@ import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
 import { CredGuard, rateLimitPolicy, scopeFilterPolicy, receiptClaimsPolicy, urlAllowlistPolicy } from '@credninja/guard';
 import { SqliteCumulativeLedger } from '@credninja/vault';
+import { newAgent, delegateAs, exerciseAs, actorTokenFor, type AgentIdentity } from './token-helpers.js';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -1033,15 +1034,12 @@ describe('@credninja/server', () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'needs-consent-user',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'needs-consent-user',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('consent_required');
@@ -1093,7 +1091,7 @@ describe('@credninja/server', () => {
       expect(res.body.expires_in).toBeGreaterThan(0);
     });
 
-    it('can return a brokered handle without exposing the access token', async () => {
+    it('can return a Delegation Token without exposing the provider access token', async () => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
 
@@ -1105,45 +1103,61 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'user-2',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'user-2',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       expect(delegateRes.status).toBe(200);
-      expect(delegateRes.body.access_token).toBeUndefined();
-      expect(delegateRes.body.token_type).toBe('Delegation');
+      expect(delegateRes.body.token_type).toBe('DPoP');
       expect(delegateRes.body.user_id).toBe('user-2');
       expect(delegateRes.body.delegation_id).toMatch(/^del_/);
+      // The access_token is the Delegation Token (a JWT), never the provider token.
+      const dtHeader = JSON.parse(Buffer.from(delegateRes.body.access_token.split('.')[0], 'base64url').toString());
+      expect(dtHeader.typ).toBe('dt+jwt');
+      expect(JSON.stringify(delegateRes.body)).not.toContain('ya29.brokered-token');
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
 
-      const useRes = await request(app)
+      // A caller that does not hold the bound key is refused, with or without the token.
+      const thief = await newAgent();
+      const stolen = await exerciseAs(app, thief, delegateRes.body.access_token, {
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'GET',
+      });
+      expect(stolen.status).toBe(401);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const bearerOnly = await request(app)
         .post('/api/v1/use')
         .set('Authorization', `Bearer ${TEST_TOKEN}`)
         .send({
           delegation_id: delegateRes.body.delegation_id,
           url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
           method: 'GET',
-          extra_headers: {
-            Authorization: 'Bearer attacker-token',
-            ' Authorization ': 'Bearer whitespace-attacker-token',
-            Host: 'attacker.com',
-            Cookie: 'session=secret',
-            'Content-Length': '999',
-            'X-Forwarded-For': '127.0.0.1',
-            'X-Test': '1',
-          },
         });
+      expect(bearerOnly.status).toBe(401);
+      expect(bearerOnly.body.error).toBe('invalid_token');
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        method: 'GET',
+        extra_headers: {
+          Authorization: 'Bearer attacker-token',
+          ' Authorization ': 'Bearer whitespace-attacker-token',
+          Host: 'attacker.com',
+          Cookie: 'session=secret',
+          'Content-Length': '999',
+          'X-Forwarded-For': '127.0.0.1',
+          'X-Test': '1',
+        },
+      });
 
       expect(useRes.status).toBe(200);
       expect(useRes.body.body).toEqual({ items: [] });
@@ -1166,6 +1180,7 @@ describe('@credninja/server', () => {
     // cumulative ledger atomically before the upstream call.
 
     async function delegateHandle(constraints: unknown, extra: Record<string, unknown> = {}, config: Partial<ServerConfig> = {}) {
+      const agent = await newAgent();
       const { app, vault } = createServer(makeTestConfig(config));
       await vault.init();
       await vault.store({
@@ -1175,31 +1190,25 @@ describe('@credninja/server', () => {
         expiresAt: new Date(Date.now() + 3600 * 1000),
         scopes: ['calendar.readonly'],
       });
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'user-asor02',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-          constraints,
-          ...extra,
-        });
-      return { app, res };
+      const res = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'user-asor02',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+        constraints,
+        ...extra,
+      }, { bearer: TEST_TOKEN });
+      return { app, res, agent };
     }
 
-    async function useHandle(app: Parameters<typeof request>[0], delegationId: string, quantities?: Record<string, unknown>) {
-      return request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegationId,
-          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-          method: 'GET',
-          ...(quantities ? { quantities } : {}),
-        });
+    /** Exercise a Delegation Token (res.body.access_token) as its bound agent. */
+    async function useHandle(app: Parameters<typeof request>[0], agent: AgentIdentity, token: string, quantities?: Record<string, unknown>) {
+      return exerciseAs(app, agent, token, {
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        method: 'GET',
+        ...(quantities ? { quantities } : {}),
+      });
     }
 
     function mockUpstream() {
@@ -1211,14 +1220,14 @@ describe('@credninja/server', () => {
 
     it('preserves opaque constraints on a handle but denies use before ledger debit or upstream', async () => {
       const constraints = [{ key: 'destination', future: { z: [1, 2], a: true } }, { key: 'max_calls', max_lifetime: 1 }];
-      const { app, res } = await delegateHandle(constraints, { agent_did: 'did:key:opaque-test' });
+      const { app, res, agent } = await delegateHandle(constraints);
       expect(res.status).toBe(200);
-      expect(res.body.access_token).toBeUndefined();
+      expect(res.body.access_token).not.toBe('ya29.asor02-token');
       expect(JSON.parse(Buffer.from(res.body.receipt.split('.')[1], 'base64url').toString()).constraints).toEqual(constraints);
       const fetchSpy = mockUpstream();
       const debitSpy = vi.spyOn(SqliteCumulativeLedger.prototype, 'debit');
       try {
-        const useRes = await useHandle(app, res.body.delegation_id);
+        const useRes = await useHandle(app, agent, res.body.access_token);
         expect(useRes.status).toBe(403);
         expect(useRes.body.error).toBe('unknown_constraint');
         expect(debitSpy).not.toHaveBeenCalled();
@@ -1244,12 +1253,12 @@ describe('@credninja/server', () => {
     });
 
     it('meters max_calls under max_lifetime at one per call and refuses past the bound', async () => {
-      const { app, res } = await delegateHandle([{ key: 'max_calls', max_lifetime: 2 }]);
+      const { app, res, agent } = await delegateHandle([{ key: 'max_calls', max_lifetime: 2 }]);
       expect(res.status).toBe(200);
       const fetchSpy = mockUpstream();
-      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
-      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
-      const third = await useHandle(app, res.body.delegation_id);
+      expect((await useHandle(app, agent, res.body.access_token)).status).toBe(200);
+      expect((await useHandle(app, agent, res.body.access_token)).status).toBe(200);
+      const third = await useHandle(app, agent, res.body.access_token);
       expect(third.status).toBe(403);
       expect(third.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_calls', type: 'max_lifetime' });
       expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -1257,14 +1266,14 @@ describe('@credninja/server', () => {
     });
 
     it('debits a declared quantity under max_subtree and refuses one that would overspend', async () => {
-      const { app, res } = await delegateHandle([{ key: 'max_spend', max_subtree: 1000 }]);
+      const { app, res, agent } = await delegateHandle([{ key: 'max_spend', max_subtree: 1000 }]);
       expect(res.status).toBe(200);
       const fetchSpy = mockUpstream();
-      expect((await useHandle(app, res.body.delegation_id, { max_spend: 600 })).status).toBe(200);
-      const over = await useHandle(app, res.body.delegation_id, { max_spend: 500 });
+      expect((await useHandle(app, agent, res.body.access_token, { max_spend: 600 })).status).toBe(200);
+      const over = await useHandle(app, agent, res.body.access_token, { max_spend: 500 });
       expect(over.status).toBe(403);
       expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', constraint: 'max_spend', type: 'max_subtree' });
-      expect((await useHandle(app, res.body.delegation_id, { max_spend: 400 })).status).toBe(200);
+      expect((await useHandle(app, agent, res.body.access_token, { max_spend: 400 })).status).toBe(200);
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       fetchSpy.mockRestore();
     });
@@ -1275,10 +1284,10 @@ describe('@credninja/server', () => {
       ['a quantity that is not a number', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: '5' }],
       ['a negative quantity', [{ key: 'max_spend', max_subtree: 1000 }], { max_spend: -1 }],
     ])('denies a use under %s that declares no valid quantity, before any upstream call', async (_name, constraints, quantities) => {
-      const { app, res } = await delegateHandle(constraints);
+      const { app, res, agent } = await delegateHandle(constraints);
       expect(res.status).toBe(200);
       const fetchSpy = mockUpstream();
-      const useRes = await useHandle(app, res.body.delegation_id, quantities);
+      const useRes = await useHandle(app, agent, res.body.access_token, quantities);
       expect(useRes.status).toBe(403);
       expect(useRes.body.error).toBe('cumulative_quantity_required');
       expect(fetchSpy).not.toHaveBeenCalled();
@@ -1286,39 +1295,36 @@ describe('@credninja/server', () => {
     });
 
     it('does not debit when the URL check refuses the call', async () => {
-      const { app, res } = await delegateHandle([{ key: 'max_calls', max_lifetime: 1 }]);
+      const { app, res, agent } = await delegateHandle([{ key: 'max_calls', max_lifetime: 1 }]);
       const fetchSpy = mockUpstream();
-      const refused = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({ delegation_id: res.body.delegation_id, url: 'https://evil.example.com/x', method: 'GET' });
+      const refused = await exerciseAs(app, agent, res.body.access_token, { url: 'https://evil.example.com/x', method: 'GET' });
       expect(refused.status).toBe(400);
-      expect((await useHandle(app, res.body.delegation_id)).status).toBe(200);
+      expect((await useHandle(app, agent, res.body.access_token)).status).toBe(200);
       fetchSpy.mockRestore();
     });
 
     it('does not deny brokered use under per-action constraints only', async () => {
-      const { app, res } = await delegateHandle([{ key: 'max_rows', max: 100 }, { key: 'max_rows', min: 1 }]);
+      const { app, res, agent } = await delegateHandle([{ key: 'max_rows', max: 100 }, { key: 'max_rows', min: 1 }]);
       expect(res.status).toBe(200);
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const useRes = await useHandle(app, res.body.delegation_id);
+      const useRes = await useHandle(app, agent, res.body.access_token);
       expect(useRes.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       fetchSpy.mockRestore();
     });
 
     it("records the cumulative deny where the owning user's audit log can see it", async () => {
-      const { app, res } = await delegateHandle(
+      const { app, res, agent } = await delegateHandle(
         [{ key: 'max_spend', max_subtree: 50 }],
         {},
         { vaultStorage: 'sqlite', vaultPath: TEST_SQLITE_VAULT_PATH },
       );
       expect(res.status).toBe(200);
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      const useRes = await useHandle(app, res.body.delegation_id);
+      const useRes = await useHandle(app, agent, res.body.access_token);
       expect(useRes.status).toBe(403);
       fetchSpy.mockRestore();
 
@@ -1376,23 +1382,17 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegateRes.body.delegation_id,
+      const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
           url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
           method: 'GET',
         });
@@ -1402,13 +1402,40 @@ describe('@credninja/server', () => {
       fetchSpy.mockRestore();
     });
 
+    const CAL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
     it.each([
-      ['missing delegation id', {}, 400, /delegation_id is required/],
-      ['missing URL', { delegation_id: 'del_missing', method: 'GET' }, 400, /url is required/],
-      ['invalid method', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'TRACE' }, 400, /method must be one of/],
-      ['GET body', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'GET', body: { q: 'bad' } }, 400, /GET requests cannot have a body/],
-      ['unknown delegation handle', { delegation_id: 'del_missing', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events', method: 'GET' }, 404, /Delegation handle not found/],
+      ['missing URL', { method: 'GET' }, 400, /url is required/],
+      ['invalid method', { url: CAL, method: 'TRACE' }, 400, /method must be one of/],
+      ['GET body', { url: CAL, method: 'GET', body: { q: 'bad' } }, 400, /GET requests cannot have a body/],
     ])('validates brokered use request shape: %s', async (_name, payload, status, errorPattern) => {
+      const { app, vault } = createServer(makeTestConfig());
+      await vault.init();
+      await vault.store({
+        provider: 'google', userId: 'shape-user', accessToken: 'ya29.shape',
+        expiresAt: new Date(Date.now() + 3600 * 1000), scopes: ['calendar.readonly'],
+      });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google', user_id: 'shape-user', scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN });
+      expect(delegateRes.status).toBe(200);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, payload);
+
+        expect(useRes.status).toBe(status);
+        expect(useRes.body.error).toMatch(errorPattern);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      ['missing Delegation Token and delegation id', {}, 401, 'invalid_token'],
+      ['unknown delegation id with no token (Cred Link style handle id)', { delegation_id: 'del_missing', url: CAL, method: 'GET' }, 404, /Delegation handle not found/],
+    ])('refuses a use with no Delegation Token: %s', async (_name, payload, status, errorMatch) => {
       const { app, vault } = createServer(makeTestConfig());
       await vault.init();
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -1420,7 +1447,7 @@ describe('@credninja/server', () => {
           .send(payload);
 
         expect(useRes.status).toBe(status);
-        expect(useRes.body.error).toMatch(errorPattern);
+        expect(useRes.body.error).toMatch(errorMatch);
         expect(fetchSpy).not.toHaveBeenCalled();
       } finally {
         fetchSpy.mockRestore();
@@ -1451,16 +1478,14 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'ssrf-user',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'ssrf-user',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       expect(delegateRes.status).toBe(200);
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
@@ -1469,11 +1494,7 @@ describe('@credninja/server', () => {
       }));
 
       try {
-        const useRes = await request(app)
-          .post('/api/v1/use')
-          .set('Authorization', `Bearer ${TEST_TOKEN}`)
-          .send({
-            delegation_id: delegateRes.body.delegation_id,
+        const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
             url: targetUrl,
             method: 'GET',
           });
@@ -1498,16 +1519,14 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'rebuild-user',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'rebuild-user',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
       expect(delegateRes.status).toBe(200);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
@@ -1516,11 +1535,7 @@ describe('@credninja/server', () => {
       }));
 
       try {
-        const useRes = await request(app)
-          .post('/api/v1/use')
-          .set('Authorization', `Bearer ${TEST_TOKEN}`)
-          .send({
-            delegation_id: delegateRes.body.delegation_id,
+        const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
             url: 'https://WWW.GOOGLEAPIS.COM:443/calendar/v3/calendars/primary/events?maxResults=5#frag',
             method: 'GET',
           });
@@ -1569,16 +1584,14 @@ describe('@credninja/server', () => {
         scopes: ['api'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'salesforce',
-          user_id: 'sf-user',
-          appClientId: 'app_123',
-          scopes: ['api'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'salesforce',
+        user_id: 'sf-user',
+        appClientId: 'app_123',
+        scopes: ['api'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
       expect(delegateRes.status).toBe(200);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
@@ -1587,10 +1600,7 @@ describe('@credninja/server', () => {
       }));
 
       try {
-        const useRes = await request(app)
-          .post('/api/v1/use')
-          .set('Authorization', `Bearer ${TEST_TOKEN}`)
-          .send({ delegation_id: delegateRes.body.delegation_id, url: targetUrl, method: 'GET' });
+        const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, { url: targetUrl, method: 'GET' });
 
         if (allowed) {
           expect(useRes.status).toBe(200);
@@ -1619,19 +1629,17 @@ describe('@credninja/server', () => {
         scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       expect(delegateRes.status).toBe(200);
-      expect(delegateRes.body.access_token).toBeUndefined();
+      expect(delegateRes.body.access_token).not.toBe('ya29.full-scope-url');
       expect(delegateRes.body.scopes).toEqual(['https://www.googleapis.com/auth/calendar.readonly']);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [] }), {
@@ -1639,11 +1647,7 @@ describe('@credninja/server', () => {
         headers: { 'content-type': 'application/json' },
       }));
 
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegateRes.body.delegation_id,
+      const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
           url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
           method: 'GET',
         });
@@ -1674,25 +1678,19 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly', 'gmail.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly', 'gmail.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly', 'gmail.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       expect(delegateRes.status).toBe(200);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegateRes.body.delegation_id,
+      const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
           url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
           method: 'GET',
         });
@@ -1716,31 +1714,21 @@ describe('@credninja/server', () => {
         scopes: [],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
-      expect(delegateRes.status).toBe(200);
-
-      const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegateRes.body.delegation_id,
-          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-          method: 'GET',
-        });
-
-      expect(useRes.status).toBe(400);
-      expect(fetchSpy).not.toHaveBeenCalled();
-      fetchSpy.mockRestore();
+      // Fails closed at issuance: no Delegation Token is minted with no granted
+      // scope, so there is nothing that could reach the upstream.
+      expect(delegateRes.status).toBe(400);
+      expect(delegateRes.body.error).toBe('invalid_scope');
+      expect(delegateRes.body.access_token).toBeUndefined();
+      expect(delegateRes.body.delegation_id).toBeUndefined();
+      expect(JSON.stringify(delegateRes.body)).not.toContain('ya29.no-scope-metadata');
     });
 
     it('returns upstream error responses without exposing the provider token', async () => {
@@ -1755,27 +1743,21 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-        });
+      const agent = await newAgent();
+      const delegateRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+      }, { bearer: TEST_TOKEN });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ message: 'Not Found' }), {
         status: 404,
         headers: { 'content-type': 'application/json' },
       }));
 
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegateRes.body.delegation_id,
+      const useRes = await exerciseAs(app, agent, delegateRes.body.access_token, {
           url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/missing',
           method: 'GET',
         });
@@ -1842,7 +1824,8 @@ describe('@credninja/server', () => {
 
       const now = new Date().toISOString();
       const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
-      const agentDid = `did:key:${agentId}`;
+      const agent = await newAgent();
+      const agentDid = agent.did;
       await vault.registerAgent({
         id: agentId,
         did: agentDid,
@@ -1862,16 +1845,12 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const allowedRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          agent_did: agentDid,
-          scopes: ['calendar.readonly'],
-        });
+      const allowedRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN });
 
       expect(allowedRes.status).toBe(200);
 
@@ -1884,16 +1863,12 @@ describe('@credninja/server', () => {
       expect(revokeRes.status).toBe(204);
       await expect(vault.getAgent(agentId)).resolves.toMatchObject({ status: 'revoked' });
 
-      const deniedRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          agent_did: agentDid,
-          scopes: ['calendar.readonly'],
-        });
+      const deniedRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN });
 
       expect(deniedRes.status).toBe(403);
       expect(deniedRes.body.error).toBe('agent_revoked');
@@ -1909,9 +1884,10 @@ describe('@credninja/server', () => {
 
       const now = new Date().toISOString();
       const agentId = `agt_${crypto.randomUUID().replace(/-/g, '')}`;
+      const agent = await newAgent();
       await vault.registerAgent({
         id: agentId,
-        did: `did:key:${agentId}`,
+        did: agent.did,
         fingerprint: `fp_${agentId}`,
         name: 'scope-ceiling-agent',
         scopeCeiling: ['calendar.readonly'],
@@ -1928,16 +1904,12 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly', 'gmail.readonly'],
       });
 
-      const deniedRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          agent_did: `did:key:${agentId}`,
-          scopes: ['gmail.readonly'],
-        });
+      const deniedRes = await delegateAs(app, agent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['gmail.readonly'],
+      }, { bearer: TEST_TOKEN });
 
       expect(deniedRes.status).toBe(403);
       expect(deniedRes.body.error).toBe('scope_ceiling_exceeded');
@@ -1983,17 +1955,12 @@ describe('@credninja/server', () => {
         privateKey: keypair.privateKey,
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Host', 'localhost:3456')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .set(signedHeaders)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN, headers: { Host: 'localhost:3456', ...signedHeaders } });
 
       expect(res.status).toBe(200);
 
@@ -2078,31 +2045,22 @@ describe('@credninja/server', () => {
         nonce: 'replay-test-nonce',
       });
 
-      const firstRes = await request(firstServer.app)
-        .post('/api/v1/delegate')
-        .set('Host', 'localhost:3456')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .set(signedHeaders)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-        });
+      const replayAgent = await newAgent();
+      const firstRes = await delegateAs(firstServer.app, replayAgent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN, headers: { Host: 'localhost:3456', ...signedHeaders } });
 
       expect(firstRes.status).toBe(200);
 
-      const replayRes = await request(secondServer.app)
-        .post('/api/v1/delegate')
-        .set('Host', 'localhost:3456')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .set(signedHeaders)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-        });
+      const replayRes = await delegateAs(secondServer.app, replayAgent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+      }, { bearer: TEST_TOKEN, headers: { Host: 'localhost:3456', ...signedHeaders } });
 
       expect(replayRes.status).toBe(401);
       expect(replayRes.body.error).toBe('invalid_web_bot_auth');
@@ -2389,8 +2347,10 @@ describe('@credninja/server', () => {
         scopes: ['repo'],
       });
 
+      const staffReviewer = await newAgent();
+      const releaseEngineer = await newAgent();
       await vault.createPermission({
-        agentId: 'did:key:release-engineer',
+        agentId: releaseEngineer.did,
         connectionId: 'github',
         allowedScopes: ['repo'],
         delegatable: true,
@@ -2399,16 +2359,12 @@ describe('@credninja/server', () => {
         createdBy: 'test',
       });
 
-      const rootRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('X-Test-Agent', 'staff-reviewer')
-        .send({
-          service: 'github',
-          user_id: 'default',
-          appClientId: 'app_123',
-          agent_did: 'did:key:staff-reviewer',
-          scopes: ['repo'],
-        });
+      const rootRes = await delegateAs(app, staffReviewer, {
+        service: 'github',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['repo'],
+      }, { bearer: 'unused', headers: { 'X-Test-Agent': 'staff-reviewer' } });
 
       expect(rootRes.status).toBe(200);
       expect(rootRes.body.receipt).toBeDefined();
@@ -2418,7 +2374,8 @@ describe('@credninja/server', () => {
         .set('X-Test-Agent', 'release-engineer')
         .send({
           parent_receipt: rootRes.body.receipt,
-          agent_did: 'did:key:release-engineer',
+          actor_token: actorTokenFor(staffReviewer, '/api/v1/subdelegate'),
+          agent_did: releaseEngineer.did,
           service: 'github',
           user_id: 'default',
           appClientId: 'app_123',
@@ -2442,15 +2399,12 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['gmail.send'],
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['gmail.send'],
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('scope_escalation_denied');
@@ -2469,15 +2423,12 @@ describe('@credninja/server', () => {
         scopes: ['calendar.readonly'],
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          agent_did: 'did:key:z6MkReceiptAgent',
-        });
+      const receiptAgent = await newAgent();
+      const res = await delegateAs(app, receiptAgent, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(200);
       expect(res.body.receipt).toBeTypeOf('string');
@@ -2489,8 +2440,8 @@ describe('@credninja/server', () => {
       const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
       // draft-02 layout: the principal in sub, the agent in client_id and act.sub.
       expect(payload.sub).toBe('default');
-      expect(payload.client_id).toBe('did:key:z6MkReceiptAgent');
-      expect(payload.act).toEqual({ sub: 'did:key:z6MkReceiptAgent' });
+      expect(payload.client_id).toBe(receiptAgent.did);
+      expect(payload.act).toEqual({ sub: receiptAgent.did });
       expect(payload.jti).toBe(payload.delegationId);
       expect(payload.appClientId).toBe('app_123');
       expect(payload.scopes).toEqual(['calendar.readonly']);
@@ -2547,22 +2498,19 @@ describe('@credninja/server', () => {
         timestamp: new Date().toISOString(),
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: proof.payloadBase64,
-          tofu_signature: proof.signatureBase64,
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: proof.payloadBase64,
+        tofu_signature: proof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(200);
       expect(res.body.scopes).toEqual(['calendar.readonly']);
-      expect(res.body.receipt).toBeUndefined();
+      expect(res.body.token_type).toBe('DPoP');
     });
 
     it('denies TOFU proof that exceeds bootstrap scopes', async () => {
@@ -2593,18 +2541,15 @@ describe('@credninja/server', () => {
         timestamp: new Date().toISOString(),
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['gmail.readonly'],
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: proof.payloadBase64,
-          tofu_signature: proof.signatureBase64,
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['gmail.readonly'],
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: proof.payloadBase64,
+        tofu_signature: proof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('scope_escalation_denied');
@@ -2644,18 +2589,15 @@ describe('@credninja/server', () => {
         timestamp: new Date().toISOString(),
       });
 
-      const denied = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: proof.payloadBase64,
-          tofu_signature: proof.signatureBase64,
-        });
+      const denied = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: proof.payloadBase64,
+        tofu_signature: proof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
 
       expect(denied.status).toBe(403);
       expect(denied.body.error).toContain('no permission');
@@ -2670,18 +2612,15 @@ describe('@credninja/server', () => {
         createdBy: 'admin',
       });
 
-      const allowed = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: proof.payloadBase64,
-          tofu_signature: proof.signatureBase64,
-        });
+      const allowed = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: proof.payloadBase64,
+        tofu_signature: proof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
 
       expect(allowed.status).toBe(200);
       expect(allowed.body.scopes).toEqual(['calendar.readonly']);
@@ -2715,18 +2654,15 @@ describe('@credninja/server', () => {
         timestamp: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
       });
 
-      const res = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: staleProof.payloadBase64,
-          tofu_signature: staleProof.signatureBase64,
-        });
+      const res = await delegateAs(app, await newAgent(), {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: staleProof.payloadBase64,
+        tofu_signature: staleProof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('timestamp');
@@ -3024,15 +2960,12 @@ describe('@credninja/server', () => {
 
         stream = await openSseStream(server, '/api/v1/audit/stream?user_id=default', TEST_TOKEN);
 
-        const delegateRes = await request(app)
-          .post('/api/v1/delegate')
-          .set('Authorization', `Bearer ${TEST_TOKEN}`)
-          .send({
-            service: 'google',
-            user_id: 'default',
-            appClientId: 'app_sse_test',
-            scopes: ['calendar.readonly'],
-          });
+        const delegateRes = await delegateAs(app, await newAgent(), {
+          service: 'google',
+          user_id: 'default',
+          appClientId: 'app_sse_test',
+          scopes: ['calendar.readonly'],
+        }, { bearer: TEST_TOKEN });
         expect(delegateRes.status).toBe(200);
 
         // Longer than one poll cycle, so a wrongly-streamed delegate event
@@ -4059,19 +3992,17 @@ describe('@credninja/server', () => {
         timestamp: new Date().toISOString(),
       });
 
-      const delegateRes = await request(app)
-        .post('/api/v1/delegate')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          service: 'google',
-          user_id: 'default',
-          appClientId: 'app_123',
-          scopes: ['calendar.readonly'],
-          token_format: 'handle',
-          tofu_fingerprint: registration.fingerprint,
-          tofu_payload: proof.payloadBase64,
-          tofu_signature: proof.signatureBase64,
-        });
+      const holder = await newAgent();
+      const delegateRes = await delegateAs(app, holder, {
+        service: 'google',
+        user_id: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        token_format: 'handle',
+        tofu_fingerprint: registration.fingerprint,
+        tofu_payload: proof.payloadBase64,
+        tofu_signature: proof.signatureBase64,
+      }, { bearer: TEST_TOKEN });
       expect(delegateRes.status).toBe(200);
       const delegationId = delegateRes.body.delegation_id;
       expect(delegationId).toMatch(/^del_/);
@@ -4091,14 +4022,10 @@ describe('@credninja/server', () => {
       expect(narrowRes.status).toBe(200);
       expect(narrowRes.body.permission.allowedScopes).toEqual([]);
 
-      const useRes = await request(app)
-        .post('/api/v1/use')
-        .set('Authorization', `Bearer ${TEST_TOKEN}`)
-        .send({
-          delegation_id: delegationId,
-          url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-          method: 'GET',
-        });
+      const useRes = await exerciseAs(app, holder, delegateRes.body.access_token, {
+        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        method: 'GET',
+      });
 
       expect(useRes.status).toBe(200);
       expect(useRes.body.body).toEqual({ items: [] });

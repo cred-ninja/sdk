@@ -31,7 +31,7 @@ import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
-import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger } from '@credninja/vault';
+import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant } from '@credninja/vault';
 import { SqliteCumulativeLedger, DEFAULT_RUNNING_COUNT_KEYS } from '@credninja/vault';
 import {
   receiptActorClaims,
@@ -44,7 +44,13 @@ import {
   publicKeyFromDidKey,
   unknownConstraints,
   UNKNOWN_CONSTRAINT,
+  mintDelegationToken,
+  verifyDelegationToken,
+  delegationTokenAth,
+  receiptContentId,
+  CRED_DELEGATION_TYPE,
 } from '@credninja/attenuation';
+import type { CredDelegationDetail } from '@credninja/attenuation';
 import { createReceiptKeys, checkReceiptSignature, type ReceiptKeys } from './receipt-signing.js';
 import { createDelegationGrantStore, createJtiReplayCache, verifyActorToken, DELEGATION_GRANT_TOKEN_TYPE, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE } from './delegation-grants.js';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
@@ -69,7 +75,7 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
-import { DPOP_ACCEPTED_ALGS, dpopAth, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
+import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,13 +132,6 @@ interface BrokeredDelegation {
    */
   dpopJkt?: string;
   /**
-   * The authenticated caller the handle was minted for. /api/v1/use refuses
-   * any other caller, so a leaked handle id is not a bearer credential.
-   * Absent on Link handles (Link checks its own agent binding) and on
-   * /api/v1/subdelegate handles, which a parent mints for another agent.
-   */
-  holder?: HandleHolder;
-  /**
    * Set by a cascading revocation that reached this handle. /api/v1/use
    * refuses the handle from then on (and re-checks right before the
    * upstream call, so a request already in flight is refused too).
@@ -140,16 +139,6 @@ interface BrokeredDelegation {
   revoked?: { at: number; revokedAncestorId: string };
 }
 
-interface HandleHolder {
-  /** agentTokenHash of the minting request (hash of the principal or bearer). */
-  principalHash: string;
-  /**
-   * The Web Bot Auth key that signed the minting request: its local TOFU
-   * fingerprint, or its directory and key id when it was verified through an
-   * external directory.
-   */
-  webBotAuthKey?: string;
-}
 
 interface WebBotAuthDirectoryResponse {
   keys: Array<{
@@ -406,7 +395,6 @@ export function createServer(config: ServerConfig) {
   const actorTokenJtiSeen = createJtiReplayCache();
   // DPoP proof replay cache, keyed by key thumbprint and jti.
   const dpopJtiSeen = createJtiReplayCache();
-  const requireDpop = config.requireDpop ?? true;
   const allowRawTokens = config.allowRawTokens ?? false;
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
@@ -1623,12 +1611,10 @@ export function createServer(config: ServerConfig) {
     throw new Error(`receiptTtlSeconds must be a positive integer of at most ${MAX_RECEIPT_TTL_SECONDS} (1 hour)`);
   }
   if (config.requireDpop === false) {
-    console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false issues brokered handles that any holder of the handle id and the deployment Bearer credential can use. Agents should prove their did:key with a DPoP proof; this setting will be removed.');
+    console.warn('[cred] DEPRECATED: CRED_REQUIRE_DPOP=false now only lets Cred Link issue handles to its key-less static Bearer identity. Agent delegations are always DPoP-bound Delegation Tokens. This setting will be removed.');
   }
-  if (config.requireAgentIdentity === false && (config.requireDpop ?? true)) {
-    console.warn('[cred] CRED_REQUIRE_AGENT_IDENTITY=false is ignored while CRED_REQUIRE_DPOP is on: /api/v1/subdelegate always requires the delegating agent\'s actor_token, so a leaked receipt cannot mint a handle bound to another key.');
-  } else if (config.requireAgentIdentity === false) {
-    console.warn('[cred] DEPRECATED: CRED_REQUIRE_AGENT_IDENTITY=false lets any Bearer caller sub-delegate from a receipt it holds. Callers should send an actor_token signed by the delegating agent; this setting will be removed.');
+  if (config.requireAgentIdentity === false) {
+    console.warn('[cred] CRED_REQUIRE_AGENT_IDENTITY=false is ignored: /api/v1/subdelegate always requires the delegating agent\'s actor_token, so a leaked receipt cannot mint a Delegation Token. This setting will be removed.');
   }
 
   function getReceiptTtlSeconds(): number {
@@ -3184,6 +3170,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     // Handles minted from this connection hold a copy of its access token.
     // Revoking the connection ends them too, not only at their expiry. Link
     // handles hold no token and re-check their connection on every use.
+    // Every delegation issued from this connection is revoked in the vault
+    // too, so no Delegation Token minted from it can be restored later
+    // against a credential stored again for the same service and user.
+    const cascade = await vault.revokeDelegations({ connection: { service: slug, userId } });
+    applyRevocation(cascade, performance.now(), {
+      actor: { type: 'agent', id: 'server-agent' },
+      correlationId: crypto.randomUUID(),
+      cause: `connection:${slug}/${userId}`,
+    });
     let handlesRevoked = 0;
     for (const [id, delegation] of brokeredDelegations) {
       if (delegation.link || delegation.service !== slug || delegation.userId !== userId) continue;
@@ -3208,7 +3203,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       resource: { type: 'connection', id: `${slug}/${userId}` },
       outcome: 'success',
       correlationId: crypto.randomUUID(),
-      metadata: { handlesRevoked },
+      metadata: { handlesRevoked, delegationsRevoked: cascade.count },
     });
   }
 
@@ -3223,7 +3218,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     constraints?: DelegationConstraint[];
     agentDid?: string;
     dpopJkt?: string;
-    holder?: HandleHolder;
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -3237,7 +3231,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.agentDid ? { agentDid: input.agentDid } : {}),
       ...(input.dpopJkt ? { dpopJkt: input.dpopJkt } : {}),
-      ...(input.holder ? { holder: input.holder } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -3267,45 +3260,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
   }
 
-  /**
-   * The authenticated caller of this request, as a handle binds it, or null
-   * when the request carries no caller-specific identity: a custom verifier
-   * that returned no principalId, with no Bearer token to fall back on. Such
-   * a caller cannot hold a handle, since every one of them would look alike.
-   */
-  function handleHolderFor(req: Request): HandleHolder | null {
-    const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
-    const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
-    let principalHash: string | undefined;
-    if (!principal || principal.type === 'static-bearer') {
-      principalHash = (req as any).agentTokenHash;
-    } else if (principal.principalId) {
-      principalHash = hashAgentPrincipal(principal);
-    } else {
-      const bearer = extractBearerToken(req);
-      if (bearer) principalHash = hashTokenValue(bearer);
-    }
-    if (!principalHash) return null;
-    const webBotAuthKey = webBotAuthIdentity
-      ? webBotAuthIdentity.fingerprint ?? `${webBotAuthIdentity.signatureAgent}#${webBotAuthIdentity.keyId}`
-      : undefined;
-    return { principalHash, ...(webBotAuthKey ? { webBotAuthKey } : {}) };
-  }
-
-  /** Whether this request comes from the caller the handle was minted for. */
-  function isHandleHolder(req: Request, holder: HandleHolder): boolean {
-    const caller = handleHolderFor(req);
-    if (!caller || caller.principalHash !== holder.principalHash) return false;
-    return !holder.webBotAuthKey || caller.webBotAuthKey === holder.webBotAuthKey;
-  }
-
-  function refuseHolderlessHandle(res: Response): void {
-    res.status(400).json({
-      error: 'holder_identity_required',
-      message: 'A brokered handle is bound to its caller, and this request has no caller-specific identity. '
-        + 'Return a principalId from agentRequestVerifier, or request token_format "raw".',
-    });
-  }
 
   function refuseRawToken(res: Response): void {
     res.status(403).json({
@@ -3506,7 +3460,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     constraints?: DelegationConstraint[];
     agentDelegationToken?: string;
     agentDid?: string;
-    holder?: HandleHolder;
+    /** The server-side state of the Delegation Token, as recorded. Required for tokenFormat 'handle'. */
+    grant?: DelegationGrant;
+    /** Ancestor agent DIDs, root first: the token's nested `act`. */
+    lineage?: string[];
   }): Record<string, unknown> {
     // Every handle and every receipt-bearing delegation is registered with
     // the cumulative ledger, with its parent, so a descendant's max_subtree
@@ -3519,13 +3476,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         constraints: input.constraints ?? [],
       });
     }
-    // CRED_REQUIRE_DPOP=false keeps the legacy, Bearer-bound handles.
-    const dpopJkt = input.tokenFormat === 'handle' && requireDpop ? dpopBindingFor(input.agentDid) : null;
+    let delegationToken: string | undefined;
     if (input.tokenFormat === 'handle') {
+      if (!input.grant || !input.agentDid) throw new Error('A Delegation Token needs a recorded grant and an agent DID');
+      delegationToken = mintDelegationTokenFor({
+        delegationId: input.delegationId,
+        agentDid: input.agentDid,
+        userId: input.userId,
+        lineage: input.lineage,
+        grant: input.grant,
+        expiresIn: input.expiresIn,
+      });
       storeBrokeredDelegation({
-        ...(input.agentDid ? { agentDid: input.agentDid } : {}),
-        ...(dpopJkt ? { dpopJkt } : {}),
-        ...(input.holder ? { holder: input.holder } : {}),
+        agentDid: input.agentDid,
+        dpopJkt: input.grant.jkt,
         delegationId: input.delegationId,
         accessToken: input.accessToken,
         service: input.service,
@@ -3539,9 +3503,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return {
       ...(input.tokenFormat === 'raw'
         ? { access_token: input.accessToken, token_type: input.tokenType ?? 'Bearer' }
-        : { token_type: 'Delegation' }),
-      // The key a handle is bound to: every /api/v1/use needs a DPoP proof by it.
-      ...(dpopJkt ? { cnf: { jkt: dpopJkt } } : {}),
+        // RFC 9449 Section 5: a DPoP-bound access token. Every exercise
+        // presents it as `Authorization: DPoP` with a proof by the bound key.
+        : { access_token: delegationToken, token_type: 'DPoP', cnf: { jkt: input.grant!.jkt } }),
       expires_in: input.expiresIn,
       service: input.service,
       user_id: input.userId,
@@ -3553,6 +3517,92 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.agentDelegationToken ? { agent_delegation_token: input.agentDelegationToken } : {}),
     };
+  }
+
+  /** The capabilities a delegation of `scopes` grants: the scopes as operations. */
+  function capabilitiesFor(service: string, scopes: string[]): CredDelegationDetail[] {
+    return [{ type: CRED_DELEGATION_TYPE, provider: service, operations: scopes }];
+  }
+
+  /**
+   * The server-side state behind a Delegation Token for one delegation, or
+   * null when the agent has no did:key to bind the token to.
+   */
+  function newDelegationGrant(input: {
+    agentDid: string | undefined;
+    service: string;
+    scopes: string[];
+    appClientId: string;
+    constraints?: DelegationConstraint[];
+    consentId: string;
+    prf: string[];
+  }): DelegationGrant | null {
+    const jkt = dpopBindingFor(input.agentDid);
+    if (!jkt) return null;
+    return {
+      // Random, so the token names neither the provider nor the user.
+      credentialHandle: `ch_${crypto.randomBytes(16).toString('hex')}`,
+      consentId: input.consentId,
+      jkt,
+      scopes: input.scopes,
+      appClientId: input.appClientId,
+      ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
+      authorizationDetails: capabilitiesFor(input.service, input.scopes),
+      prf: input.prf,
+    };
+  }
+
+  /** Record the consent behind a root delegation (draft Section 8.2) and return its id. */
+  async function recordRootConsent(input: {
+    userId: string;
+    agentDid: string;
+    service: string;
+    scopes: string[];
+    permission: Permission | null;
+    delegationId: string;
+  }): Promise<string> {
+    const record = await vault.recordConsent({
+      id: `consent_${crypto.randomBytes(16).toString('hex')}`,
+      subject: input.userId,
+      agentDid: input.agentDid,
+      service: input.service,
+      capabilities: capabilitiesFor(input.service, input.scopes),
+      // Without an approval flow, consent is the admin's Permission when one
+      // authorized the delegation, else the subject's own provider connection.
+      source: input.permission ? 'permission' : 'connection',
+      approvedBy: input.permission?.createdBy ?? input.userId,
+      expiresAt: input.permission?.expiresAt ? input.permission.expiresAt.toISOString() : null,
+      chainContext: { delegationId: input.delegationId, chainDepth: 0 },
+    });
+    return record.id;
+  }
+
+  /** Mint the Delegation Token for a recorded grant, signed with the receipt key. */
+  function mintDelegationTokenFor(input: {
+    delegationId: string;
+    agentDid: string;
+    userId: string;
+    lineage?: string[];
+    grant: DelegationGrant;
+    expiresIn: number;
+  }): string {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const actor = receiptActorClaims({ principal: input.userId, agentDid: input.agentDid, priorActors: input.lineage });
+    return mintDelegationToken({
+      iss: config.redirectBaseUri,
+      sub: actor.sub,
+      client_id: actor.client_id,
+      act: actor.act,
+      authorization_details: input.grant.authorizationDetails as CredDelegationDetail[],
+      ...(input.grant.constraints && input.grant.constraints.length > 0 ? { delegation_constraints: input.grant.constraints } : {}),
+      cnf: { jkt: input.grant.jkt },
+      iat: nowSeconds,
+      exp: nowSeconds + Math.max(1, Math.min(input.expiresIn, MAX_RECEIPT_TTL_SECONDS)),
+      jti: input.delegationId,
+      consent_id: input.grant.consentId,
+      credential_handle: input.grant.credentialHandle,
+      prf: input.grant.prf ?? [],
+    }, getReceiptKeys().signer);
   }
 
   // Stored provider consent is compared exact-match on purpose (scopeEquivalent,
@@ -3873,10 +3923,90 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     }
   });
 
-  app.post('/api/v1/use', tokenRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
+  /**
+   * The Delegation Token on an exercise request (RFC 9449 Section 7.1:
+   * `Authorization: DPoP <token>`), or null when the request carries none.
+   */
+  function presentedDelegationToken(req: Request): string | null {
+    const header = req.headers.authorization;
+    if (typeof header !== 'string') return null;
+    const match = /^DPoP\s+([A-Za-z0-9_\-.]+)$/i.exec(header.trim());
+    return match ? match[1]! : null;
+  }
+
+  // An exercise authenticates with the Delegation Token itself; only a
+  // Cred Link handle (no token yet) still uses the deployment credential.
+  function requireExerciseAuth(req: Request, res: Response, next: NextFunction): void {
+    if (presentedDelegationToken(req) !== null) {
+      next();
+      return;
+    }
+    requireAgentAuth(req, res, next);
+  }
+
+  function refuseDelegationToken(res: Response, message: string, absent = false): void {
+    // RFC 6750 Section 3.1: a request that presents no token gets the
+    // challenge without an error code.
+    res.set('WWW-Authenticate', absent
+      ? `DPoP algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`
+      : `DPoP error="invalid_token", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
+    res.status(401).json({ error: 'invalid_token', message });
+  }
+
+  /**
+   * The exercise state of a delegation whose token this process did not
+   * issue (another replica, or before a restart): rebuilt from the recorded
+   * grant, with the provider token loaded from the vault for this call.
+   */
+  async function restoreTokenDelegation(
+    delegationId: string,
+    expiresAtSeconds: number,
+  ): Promise<BrokeredDelegation | null | 'cumulative_unenforceable' | { revokedBy: string }> {
+    const record = await vault.getDelegation(delegationId);
+    if (!record?.grant || !record.agentDid) return null;
+    if (record.status === 'revoked') return { revokedBy: record.revokedAncestorId ?? record.id };
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const recordExpiresAt = record.expiresAt ? Math.floor(Date.parse(record.expiresAt) / 1000) : expiresAtSeconds;
+    if (recordExpiresAt <= nowSeconds) return null;
+    const grant = record.grant;
+    // A running total lives in this process's ledger unless one is shared
+    // (cumulativeLedgerPath). Registering the delegation afresh would reset
+    // its budget, so a delegation under a cumulative bound this ledger does
+    // not hold is refused, never restored with zero spent.
+    if (cumulativeConstraints((grant.constraints ?? []) as DelegationConstraint[]).length > 0 && !cumulativeLedger.has(delegationId)) {
+      return 'cumulative_unenforceable';
+    }
+    const vaultEntry = await getVaultEntry(record.service, record.userId);
+    if ('status' in vaultEntry) return null;
+    cumulativeLedger.register({
+      id: delegationId,
+      ...(record.parentId ? { parentId: record.parentId } : {}),
+      constraints: (grant.constraints ?? []) as DelegationConstraint[],
+    });
+    storeBrokeredDelegation({
+      delegationId,
+      accessToken: vaultEntry.entry.accessToken,
+      service: record.service,
+      userId: record.userId,
+      scopes: grant.scopes,
+      // Never cache the provider token past its own expiry, the token's, or
+      // the recorded delegation's.
+      expiresIn: Math.max(1, Math.min(
+        expiresAtSeconds - nowSeconds,
+        recordExpiresAt - nowSeconds,
+        handleLifetimeSeconds(vaultEntry.entry.expiresAt),
+      )),
+      ...(grant.constraints && grant.constraints.length > 0 ? { constraints: grant.constraints as DelegationConstraint[] } : {}),
+      agentDid: record.agentDid,
+      dpopJkt: grant.jkt,
+    });
+    return getBrokeredDelegation(delegationId);
+  }
+
+  app.post('/api/v1/use', tokenRateLimiter, requireExerciseAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     try {
       const {
-        delegation_id: delegationId,
+        delegation_id: bodyDelegationId,
         url,
         method,
         body,
@@ -3889,8 +4019,41 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         extra_headers?: Record<string, string>;
       };
 
-      if (!delegationId || typeof delegationId !== 'string') {
-        res.status(400).json({ error: 'delegation_id is required' });
+      const presentedToken = presentedDelegationToken(req);
+      let tokenExpiresAt: number | undefined;
+      let tokenBinding: { agentDid: string; jkt: string; credentialHandle: string } | undefined;
+      let delegationId: string;
+      if (presentedToken !== null) {
+        const keys = getReceiptKeys();
+        const verified = verifyDelegationToken(presentedToken, {
+          issuer: config.redirectBaseUri,
+          acceptedAlgs: keys.acceptedAlgs,
+          resolveKey: keys.resolveKey,
+          // This server minted it, on this clock: no skew allowance.
+          clockSkewSeconds: 0,
+        });
+        if (!verified.ok) {
+          refuseDelegationToken(res, `The Delegation Token is not valid (${verified.reason})`);
+          return;
+        }
+        delegationId = verified.claims.jti;
+        tokenExpiresAt = verified.claims.exp;
+        tokenBinding = {
+          agentDid: verified.claims.client_id,
+          jkt: verified.claims.cnf.jkt,
+          credentialHandle: verified.claims.credential_handle,
+        };
+        // The caller identity guard policies key on (rate limits, audit):
+        // the agent and key the token is bound to.
+        (req as any).agentTokenHash = hashTokenValue(`dpop:${verified.claims.client_id}:${verified.claims.cnf.jkt}`);
+        if (bodyDelegationId !== undefined && bodyDelegationId !== delegationId) {
+          res.status(400).json({ error: 'invalid_request', message: 'delegation_id does not match the Delegation Token' });
+          return;
+        }
+      } else if (typeof bodyDelegationId === 'string' && bodyDelegationId) {
+        delegationId = bodyDelegationId;
+      } else {
+        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
         return;
       }
       if (!url || typeof url !== 'string') {
@@ -3907,33 +4070,42 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const delegation = getBrokeredDelegation(delegationId);
-      if (!delegation) {
-        res.status(404).json({ error: 'Delegation handle not found or expired' });
-        return;
-      }
-      if (delegation.holder && !isHandleHolder(req, delegation.holder)) {
-        writeAuditEventIfSupported({
-          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-          timestamp: new Date(),
-          actor: { type: 'agent', id: verifiedPrincipalId(req) ?? (req as any).webBotAuthIdentity?.agentId ?? 'unverified' },
-          action: 'deny',
-          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
-          outcome: 'denied',
-          correlationId: crypto.randomUUID(),
-          errorMessage: 'delegation_holder_mismatch',
-          metadata: { delegationId },
+      const found = presentedToken !== null
+        ? getBrokeredDelegation(delegationId) ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!)
+        : getBrokeredDelegation(delegationId);
+      if (found === 'cumulative_unenforceable') {
+        res.status(403).json({
+          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          message: 'This delegation carries a cumulative constraint whose running total this server does not hold; set a shared cumulative ledger (cumulativeLedgerPath)',
         });
-        // Same answer as an unknown handle: a caller that does not hold the
-        // handle learns nothing about whether it exists.
-        res.status(404).json({ error: 'Delegation handle not found or expired' });
         return;
       }
-      // A handle bound to an agent key is usable only with a DPoP proof by
-      // that key, naming this handle and this exact request: the proof's
-      // cred_req covers the whole body (URL, method, upstream body, extra
-      // headers, quantities), so it authorizes one upstream call.
-      if (delegation.dpopJkt) {
+      if (found !== null && typeof found === 'object' && 'revokedBy' in found) {
+        res.status(401).json({ error: 'delegation_revoked', message: 'This delegation has been revoked', revoked_ancestor_id: found.revokedBy });
+        return;
+      }
+      const delegation = found;
+      if (!delegation) {
+        if (presentedToken !== null) refuseDelegationToken(res, 'The Delegation Token names no active delegation');
+        else res.status(404).json({ error: 'Delegation handle not found or expired' });
+        return;
+      }
+      // Only a Cred Link handle is still named by id; every other
+      // delegation is exercised with its Delegation Token.
+      if (presentedToken === null && !delegation.link) {
+        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
+        return;
+      }
+      // The token and the recorded delegation must name the same agent and key.
+      if (tokenBinding && (tokenBinding.agentDid !== delegation.agentDid || tokenBinding.jkt !== delegation.dpopJkt)) {
+        refuseDelegationToken(res, 'The Delegation Token does not match its delegation');
+        return;
+      }
+      // A token is usable only with a DPoP proof by the key it is bound to,
+      // naming this token (ath) and this exact request: the proof's cred_req
+      // covers the whole body (URL, method, upstream body, extra headers,
+      // quantities), so it authorizes one upstream call.
+      if (presentedToken !== null) {
         const requestHash = useRequestHashes.get(req) ?? null;
         if (requestHash === null) {
           res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
@@ -3942,13 +4114,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         if (!checkDpop(req, res, {
           agentDid: delegation.agentDid,
           path: '/api/v1/use',
-          ath: dpopAth(delegationId),
+          ath: delegationTokenAth(presentedToken),
           req: requestHash,
           resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
         })) return;
-      } else if (requireDpop && !delegation.link) {
-        refuseDpop(res, 401, 'invalid_dpop_proof', 'This handle is not bound to an agent key; request a new handle for a did:key agent');
-        return;
       }
       const revokedBy = await delegationRevokedBy(delegationId, delegation);
       if (revokedBy !== null) {
@@ -4237,8 +4406,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // Handles are the default format, but a service with no brokered-use
       // path could never redeem one. Such a service needs an explicit
       // token_format "raw" rather than a silent fallback to a raw token.
-      if (tokenFormatFromBody(req) === 'handle' && !handleHolderFor(req)) {
-        refuseHolderlessHandle(res);
+      // A Delegation Token is bound to the key of the agent it names
+      // (cnf.jkt), so it can only be issued to a did:key agent.
+      if (tokenFormatFromBody(req) === 'handle' && !dpopBindingFor(agentDid)) {
+        res.status(400).json({
+          error: 'agent_key_required',
+          message: 'A Delegation Token is bound to the agent\'s key: send agent_did as a did:key and a DPoP proof by that key',
+        });
         return;
       }
       if (tokenFormatFromBody(req) === 'handle' && !isBrokerableService(service)) {
@@ -4265,7 +4439,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // The handle is bound to the key of the agent it names. The agent
       // proves it holds that key before the handle exists, so a request
       // cannot bind a handle to a key it does not hold.
-      if (tokenFormatFromBody(req) === 'handle' && requireDpop
+      if (tokenFormatFromBody(req) === 'handle'
         && !checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: `${service}/${userId}` } })) {
         return;
       }
@@ -4297,6 +4471,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       let principalId: string | null = null;
       let principalFingerprint: string | undefined;
       let allowedByPrincipal: string[] | undefined;
+      let authorizingPermission: Permission | null = null;
       let didAgentRecord: AgentRecord | null = null;
       if (agentDid && vault.getAgentByDid) {
         didAgentRecord = await vault.getAgentByDid(agentDid);
@@ -4362,6 +4537,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         principalId = resolved.principal.principalId;
         principalFingerprint = resolved.principal.fingerprint;
         const permission = await getPermissionIfSupported(principalId, service);
+        authorizingPermission = permission;
         const permissionDenied = permission ? await permissionRefusal(permission) : null;
         if (permissionDenied) {
           writeAuditEventIfSupported({
@@ -4405,17 +4581,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
       const expiresIn = handleLifetimeSeconds(entry.expiresAt);
 
-      const recorded = await recordIssuedDelegation(res, {
-        id: delegationId,
-        parentId: null,
-        agentDid: agentDid ?? null,
-        service,
-        userId,
-        chainDepth: 0,
-        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      }, correlationId);
-      if (!recorded) return;
-
+      // The receipt comes first: the Delegation Token's prf names it. It is
+      // released only once the delegation is recorded below.
       const receipt = agentDid
         ? createReceipt({
             agentDid,
@@ -4430,6 +4597,38 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             ...(chainProfile.wanted ? { chainProfile: { format: 'agent_delegation' as const, jti: delegationId, scopeMapping: 'identity' as const } } : {}),
           })
         : undefined;
+
+      let grant: DelegationGrant | undefined;
+      if (tokenFormat === 'handle') {
+        if (grantedScopes.length === 0) {
+          res.status(400).json({ error: 'invalid_scope', message: 'A Delegation Token needs at least one granted scope' });
+          return;
+        }
+        const consentId = await recordRootConsent({
+          userId, agentDid: agentDid!, service, scopes: grantedScopes, permission: authorizingPermission, delegationId,
+        });
+        grant = newDelegationGrant({
+          agentDid,
+          service,
+          scopes: grantedScopes,
+          appClientId,
+          constraints: rootConstraints.constraints,
+          consentId,
+          prf: [receiptContentId(receipt!)],
+        })!;
+      }
+
+      const recorded = await recordIssuedDelegation(res, {
+        id: delegationId,
+        parentId: null,
+        agentDid: agentDid ?? null,
+        service,
+        userId,
+        chainDepth: 0,
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+        ...(grant ? { grant } : {}),
+      }, correlationId);
+      if (!recorded) return;
       let agentDelegationToken: string | undefined;
       if (chainProfile.wanted && receipt && agentDid) {
         const minted = mintChainProfileToken({
@@ -4477,7 +4676,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       res.json(buildDelegationResponse({
         tokenFormat,
-        holder: handleHolderFor(req) ?? undefined,
+        ...(grant ? { grant } : {}),
         accessToken: entry.accessToken,
         expiresIn,
         service,
@@ -5118,8 +5317,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       // The child handle is bound to the receiving agent's key, which only a
       // did:key carries. That agent proves the key each time it uses the handle.
-      if (requireDpop && !dpopBindingFor(agentDid)) {
-        refuseDpop(res, 400, 'agent_key_required', 'A sub-delegated handle is issued only to a did:key agent; its key binds the handle');
+      if (!dpopBindingFor(agentDid)) {
+        refuseDpop(res, 400, 'agent_key_required', 'A child Delegation Token is issued only to a did:key agent; its key binds the token');
         return;
       }
       if (!service || typeof service !== 'string') {
@@ -5188,7 +5387,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // deprecation warning at startup. Under DPoP-bound handles the check
       // always runs: without it, a leaked receipt plus the Bearer credential
       // could mint a child handle bound to a key the caller chose.
-      if ((config.requireAgentIdentity ?? true) || requireDpop) {
+      // Always: every child is a Delegation Token bound to the receiving
+      // agent's key, so a leaked receipt alone must never mint one.
+      {
         const actorToken = (req.body as { actor_token?: unknown }).actor_token;
         const denyIdentity = (status: number, error: string, message: string) => {
           writeAuditEventIfSupported({
@@ -5579,19 +5780,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         : entryExpiresIn;
 
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
-      const recorded = await recordIssuedDelegation(res, {
-        id: delegationId,
-        parentId: parent.delegationId,
-        agentDid,
-        service,
-        userId,
-        chainDepth: validation.chainDepth,
-        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      }, correlationId);
-      if (!recorded) return;
-
       const parentReceiptHash = crypto.createHash('sha256').update(parentReceipt).digest('hex');
 
+      // The receipt comes first: the child's Delegation Token names it in
+      // prf. It is released only once the delegation is recorded below.
       const receipt = createReceipt({
         expiresAtSecondsCeiling: parentExpiryBound,
         agentDid,
@@ -5628,6 +5820,51 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         }
         agentDelegationToken = minted.token;
       }
+
+      // The child's token keeps the consent its chain traces to and extends
+      // the parent's prf with the new receipt. A parent issued without a
+      // token (a receipt-only root) starts the list at its own receipt.
+      const parentGrant = (await vault.getDelegation(parent.delegationId))?.grant;
+      const consentId = parentGrant?.consentId ?? (await vault.recordConsent({
+        id: `consent_${crypto.randomBytes(16).toString('hex')}`,
+        subject: userId,
+        agentDid,
+        service,
+        capabilities: capabilitiesFor(service, validation.grantedScopes),
+        // A receipt-only parent: the delegating agent's hop is the consent event.
+        source: 'delegation',
+        approvedBy: parent.sub,
+        expiresAt: null,
+        chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
+      })).id;
+      const grantState = newDelegationGrant({
+        agentDid,
+        service,
+        scopes: validation.grantedScopes,
+        appClientId,
+        constraints: validation.grantedConstraints,
+        consentId,
+        prf: [...(parentGrant?.prf ?? [receiptContentId(parentReceipt)]), receiptContentId(receipt)],
+      });
+      if (!grantState || validation.grantedScopes.length === 0) {
+        res.status(400).json({
+          error: 'agent_key_required',
+          message: 'A Delegation Token is bound to the receiving agent\'s key: agent_did must be a did:key, with at least one granted scope',
+        });
+        return;
+      }
+
+      const recorded = await recordIssuedDelegation(res, {
+        id: delegationId,
+        parentId: parent.delegationId,
+        agentDid,
+        service,
+        userId,
+        chainDepth: validation.chainDepth,
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+        grant: grantState,
+      }, correlationId);
+      if (!recorded) return;
 
       // ── Sub-Delegation Exchange, step 1: authorization ───────────────────
       // The checks above are the hop's checks; the child is issued only when
@@ -5733,6 +5970,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           constraints: validation.grantedConstraints,
           ...(agentDelegationToken ? { agentDelegationToken } : {}),
           agentDid,
+          grant: grantState,
+          lineage: ancestorDids,
         }),
         // Always present: sub-delegation is broker-only at every depth, so
         // this both confirms the format and flags any downgrade from a
@@ -5772,10 +6011,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   app.post('/api/v1/token', subdelegateRateLimiter, requireAgentAuth, verifyWebBotAuth, async (req: Request, res: Response) => {
     const correlationId = crypto.randomUUID();
     try {
-      if (!handleHolderFor(req)) {
-        refuseHolderlessHandle(res);
-        return;
-      }
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (body.grant_type !== TOKEN_EXCHANGE_GRANT_TYPE) {
         res.status(400).json({ error: 'unsupported_grant_type' });
@@ -5846,7 +6081,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const entry = vaultEntry.entry;
-      const expiresIn = handleLifetimeSeconds(entry.expiresAt);
+      // The child was bounded by its parent at authorization (the recorded
+      // expiry); redemption can only shorten that, never extend it.
+      const childRecord = await vault.getDelegation(grant.delegationId);
+      const recordedExpiresIn = childRecord?.expiresAt
+        ? Math.floor((Date.parse(childRecord.expiresAt) - Date.now()) / 1000)
+        : Number.POSITIVE_INFINITY;
+      const expiresIn = Math.min(handleLifetimeSeconds(entry.expiresAt), recordedExpiresIn);
+      if (expiresIn <= 0) {
+        res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation behind this grant has expired' });
+        return;
+      }
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -5863,10 +6108,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         metadata: { stage: 'token_exchange', actorTokenJti: actor.jti },
       });
 
+      const recordedGrant = childRecord?.grant;
+      if (!recordedGrant) {
+        res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation behind this grant has no Delegation Token state' });
+        return;
+      }
       res.json({
         ...buildDelegationResponse({
           tokenFormat: 'handle',
-          holder: handleHolderFor(req) ?? undefined,
+          grant: recordedGrant,
+          lineage: grant.lineage,
           accessToken: entry.accessToken,
           expiresIn,
           service: grant.service,
@@ -5880,9 +6131,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           agentDid: grant.agentDid,
           ...(grant.agentDelegationToken ? { agentDelegationToken: grant.agentDelegationToken } : {}),
         }),
-        // RFC 8693 Section 2.2.1: the issued token is the brokered handle.
-        access_token: grant.delegationId,
-        issued_token_type: 'urn:credninja:params:oauth:token-type:delegation-handle',
+        // RFC 8693 Section 2.2.1: the issued token is the DPoP-bound
+        // Delegation Token, an access token (token_type DPoP).
+        issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
         token_format_enforced: 'brokered',
       });
     } catch (err) {

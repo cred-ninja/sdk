@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { Cred } from '../index.js';
+import { Cred, generateAgentIdentity } from '../index.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -35,6 +35,9 @@ it('transports a validated detached constraint list rather than invoking custom 
     toJSON() { return []; }
   }
   const constraint = { key: 'x', future: { a: [true, null, 1] } };
-  await cred.delegateHandle({ service: 'github', userId: 'owner', appClientId: 'local', constraints: new LossyList(constraint) });
+  await cred.delegateHandle({
+    service: 'github', userId: 'owner', appClientId: 'local', constraints: new LossyList(constraint),
+    agentIdentity: await generateAgentIdentity(),
+  }).catch(() => {});
   expect(JSON.parse(String(fetch.mock.calls[0]![1]!.body)).constraints).toEqual([constraint]);
 });

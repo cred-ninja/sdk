@@ -26,8 +26,10 @@ describe('MCP opaque constraints', () => {
 
   it('leaves brokered exercise to the server without requiring local vault support', async () => {
     const use = vi.fn().mockRejectedValue(new CredError('Opaque constraint refused by broker', 'unknown_constraint', 403));
-    const id = cache.store({ brokered: true, serverDelegationId: 'server-id', service: 'github', userId: 'user-test', constraints, expiresAt: Date.now() + 60_000 });
-    const result = await handleUse({ delegation_id: id, url: 'https://api.github.com/user', method: 'GET' }, { tokenCache: cache, cred: { use } as unknown as Cred });
+    const id = cache.store({ brokered: true, serverDelegationId: 'server-id', delegationToken: 'dt.jwt.token', service: 'github', userId: 'user-test', constraints, expiresAt: Date.now() + 60_000 });
+    const result = await handleUse({ delegation_id: id, url: 'https://api.github.com/user', method: 'GET' }, {
+      tokenCache: cache, cred: { use } as unknown as Cred, delegatorIdentity: { did: 'did:key:z6MkAgent', privateKey: new Uint8Array(32) },
+    });
     expect(use).toHaveBeenCalledTimes(1);
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain('unknown_constraint');
@@ -45,7 +47,7 @@ describe('MCP opaque constraints', () => {
     const requests: DelegateParams[] = [];
     const delegate = async (request: DelegateParams) => {
       requests.push(request);
-      return { tokenType: 'Delegation' as const, expiresIn: 60, expiresAt: new Date(Date.now() + 60_000), service: 'github', scopes: ['repo'], delegationId: 'server-handle', receipt: 'test-receipt', chainDepth: 1, parentDelegationId: 'parent' };
+      return { tokenType: 'DPoP' as const, token: 'dt.jwt.token', jkt: 'jkt', expiresIn: 60, expiresAt: new Date(Date.now() + 60_000), service: 'github', scopes: ['repo'], delegationId: 'server-handle', receipt: 'test-receipt', chainDepth: 1, parentDelegationId: 'parent' };
     };
     const cred = { delegateHandle: delegate, subDelegateHandle: delegate } as unknown as Cred;
     const context = { cred, tokenCache: cache, appClientId: 'local', useServerBroker: true };

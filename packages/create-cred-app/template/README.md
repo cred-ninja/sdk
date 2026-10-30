@@ -28,8 +28,8 @@ Edit `.env` to configure:
 | `GET /connect` | Admin | Admin UI for managing providers |
 | `GET /connect/:provider` | Admin | Start OAuth flow (from a connect request link) |
 | `POST /connect/:provider/start` | Admin | Mint a connect request for `{ user_id, scopes }` |
-| `POST /api/v1/delegate` | Bearer | Get a brokered handle or short-lived access token |
-| `POST /api/v1/use` | Bearer | Broker an upstream API call with a delegation handle |
+| `POST /api/v1/delegate` | Bearer + DPoP | Get a Delegation Token bound to the agent's did:key (`agent_did` and a `DPoP` proof by that key) |
+| `POST /api/v1/use` | `DPoP <token>` + DPoP | Broker an upstream API call with a Delegation Token and a fresh DPoP proof (`ath` = SHA-256 of the token) |
 | `GET /api/v1/connections` | Bearer | List stored provider connections |
 | `DELETE /api/v1/connections/:provider` | Bearer | Revoke a stored provider connection |
 | `GET /api/token/:provider` | Bearer | Compatibility token route |

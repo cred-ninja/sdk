@@ -18,6 +18,7 @@ import {
 } from '@credninja/attenuation';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
+import { newAgent, delegateAs, exerciseAs, type AgentIdentity } from './token-helpers.js';
 
 const TEST_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const TEST_ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
@@ -54,22 +55,18 @@ function derivedReceiptKey(): KeyObject {
   });
 }
 
-const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-function base58(bytes: Uint8Array): string {
-  let n = BigInt(`0x${Buffer.from(bytes).toString('hex')}`);
-  let out = '';
-  while (n > 0n) { out = BASE58[Number(n % 58n)] + out; n /= 58n; }
-  return out;
+type Agent = AgentIdentity;
+
+/** The agent's Ed25519 private key as a KeyObject, for signing custom actor tokens. */
+function keyOf(agent: Agent): KeyObject {
+  return createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(agent.privateKey)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
 }
 
-interface Agent { did: string; privateKey: KeyObject }
-function newAgent(): Agent {
-  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-  const raw = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
-  return { did: `did:key:z${base58(Buffer.concat([Buffer.from([0xed, 0x01]), raw]))}`, privateKey };
-}
-
-function actorToken(agent: Agent, overrides: Record<string, unknown> = {}, key: KeyObject = agent.privateKey): string {
+function actorToken(agent: Agent, overrides: Record<string, unknown> = {}, key: KeyObject = keyOf(agent)): string {
   const now = Math.floor(Date.now() / 1000);
   const claims = { iss: agent.did, sub: agent.did, aud: `${BASE}/api/v1/token`, iat: now, exp: now + 120, jti: crypto.randomUUID(), ...overrides };
   return signCompactJws(claims, { alg: 'EdDSA', kid: agent.did, sign: (input) => crypto.sign(null, input, key) });
@@ -79,9 +76,9 @@ function decode(jws: string, part: 0 | 1): Record<string, any> {
   return JSON.parse(Buffer.from(jws.split('.')[part]!, 'base64url').toString('utf8'));
 }
 
-const ROOT = newAgent();
-const CHILD = newAgent();
-const SIBLING = newAgent();
+const ROOT = await newAgent();
+const CHILD = await newAgent();
+const SIBLING = await newAgent();
 
 async function setup(overrides?: Partial<ServerConfig>) {
   const { app, vault } = createServer(makeTestConfig(overrides));
@@ -108,14 +105,7 @@ async function setup(overrides?: Partial<ServerConfig>) {
 }
 
 function delegateRoot(app: Parameters<typeof request>[0], body: Record<string, unknown> = {}) {
-  return request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${TEST_TOKEN}`).send({
-    service: 'google',
-    user_id: 'alice',
-    scopes: ['openid', 'email'],
-    agent_did: ROOT.did,
-    token_format: 'handle',
-    ...body,
-  });
+  return delegateAs(app, ROOT, { service: 'google', user_id: 'alice', scopes: ['openid', 'email'], ...body }, { bearer: TEST_TOKEN, base: BASE });
 }
 
 function subdelegate(app: Parameters<typeof request>[0], parentReceipt: string, agent: Agent, body: Record<string, unknown> = {}, delegator: Agent = ROOT) {
@@ -131,13 +121,13 @@ function subdelegate(app: Parameters<typeof request>[0], parentReceipt: string, 
   });
 }
 
-function use(app: Parameters<typeof request>[0], delegationId: string, quantities?: Record<string, number>) {
-  return request(app).post('/api/v1/use').set('Authorization', `Bearer ${TEST_TOKEN}`).send({
-    delegation_id: delegationId,
+/** Exercise a Delegation Token as the agent it is bound to. */
+function use(app: Parameters<typeof request>[0], agent: Agent, token: string, quantities?: Record<string, number>) {
+  return exerciseAs(app, agent, token, {
     url: 'https://www.googleapis.com/oauth2/v3/userinfo',
     method: 'GET',
     ...(quantities ? { quantities } : {}),
-  });
+  }, { base: BASE });
 }
 
 function exchange(app: Parameters<typeof request>[0], grant: string, actor: string) {
@@ -245,14 +235,15 @@ describe('caller identity on /api/v1/subdelegate', () => {
     expect((await subdelegate(app, root.body.receipt, CHILD)).status).toBe(200);
   });
 
-  it('keeps the legacy behaviour with the flag off, and warns at startup', async () => {
+  it('ignores CRED_REQUIRE_AGENT_IDENTITY=false: a leaked receipt alone never mints a token, and warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { app } = await setup({ requireAgentIdentity: false });
-    expect(warn.mock.calls.some((c) => String(c[0]).includes('CRED_REQUIRE_AGENT_IDENTITY=false'))).toBe(true);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('CRED_REQUIRE_AGENT_IDENTITY=false is ignored'))).toBe(true);
     warn.mockRestore();
     const root = await delegateRoot(app);
     const res = await subdelegate(app, root.body.receipt, CHILD, { actor_token: undefined });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(401);
+    expect(res.body.access_token).toBeUndefined();
   });
 });
 
@@ -266,10 +257,11 @@ describe('opaque constraints across delegation paths', () => {
     const child = await subdelegate(app, root.body.receipt, CHILD);
     expect(child.status).toBe(200);
     expect(decode(child.body.receipt, 1).constraints).toEqual(opaque);
-    expect(child.body.access_token).toBeUndefined();
+    expect(child.body.token_type).toBe('DPoP');
+    expect(decode(child.body.access_token, 1)).toMatchObject({ jti: child.body.delegation_id, client_id: CHILD.did });
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
     try {
-      expect((await use(app, child.body.delegation_id)).body.error).toBe('unknown_constraint');
+      expect((await use(app, CHILD, child.body.access_token)).body.error).toBe('unknown_constraint');
       expect(fetch).not.toHaveBeenCalled();
     } finally { fetch.mockRestore(); }
   });
@@ -298,7 +290,8 @@ describe('opaque constraints across delegation paths', () => {
     expect(grant.status).toBe(200);
     const issued = await exchange(app, grant.body.delegation_grant, actorToken(CHILD));
     expect(issued.status).toBe(200);
-    expect(issued.body.issued_token_type).toBe('urn:credninja:params:oauth:token-type:delegation-handle');
+    expect(issued.body.issued_token_type).toBe('urn:ietf:params:oauth:token-type:access_token');
+    expect(issued.body.token_type).toBe('DPoP');
     expect(decode(issued.body.receipt, 1).constraints).toEqual(opaque);
     const verified = verifyAgentDelegationChain([root.body.agent_delegation_token, issued.body.agent_delegation_token], { acceptedAlgs: ['EdDSA'], resolveKey: staticKeyResolver([createVerificationKey(derivedReceiptKey())]) });
     expect(verified.ok).toBe(true);
@@ -306,7 +299,7 @@ describe('opaque constraints across delegation paths', () => {
     expect(verified.leaf.constraints).toEqual(opaque);
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
     try {
-      expect((await use(app, issued.body.delegation_id)).body.error).toBe('unknown_constraint');
+      expect((await use(app, CHILD, issued.body.access_token)).body.error).toBe('unknown_constraint');
       expect(fetch).not.toHaveBeenCalled();
     } finally { fetch.mockRestore(); }
   });
@@ -322,12 +315,12 @@ describe('cumulative ledger across hops', () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }));
-    expect((await use(app, a.body.delegation_id, { max_spend: 60 })).status).toBe(200);
-    const over = await use(app, b.body.delegation_id, { max_spend: 50 });
+    expect((await use(app, CHILD, a.body.access_token, { max_spend: 60 })).status).toBe(200);
+    const over = await use(app, SIBLING, b.body.access_token, { max_spend: 50 });
     expect(over.status).toBe(403);
     expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', type: 'max_subtree' });
     expect(over.body.message).toContain(root.body.delegation_id);
-    expect((await use(app, b.body.delegation_id, { max_spend: 40 })).status).toBe(200);
+    expect((await use(app, SIBLING, b.body.access_token, { max_spend: 40 })).status).toBe(200);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     fetchSpy.mockRestore();
   });
@@ -335,30 +328,39 @@ describe('cumulative ledger across hops', () => {
 
 describe('Sub-Delegation Exchange', () => {
   async function grantFor(agent: Agent) {
-    const { app } = await setup();
+    const { app, vault } = await setup();
     const root = await delegateRoot(app);
     const res = await subdelegate(app, root.body.receipt, agent, { exchange: 'grant' });
     expect(res.status).toBe(200);
-    return { app, res };
+    return { app, vault, res };
   }
 
   it('authorizes with a single-use grant and issues the child to the agent it names', async () => {
-    const { app, res } = await grantFor(CHILD);
+    const { app, vault, res } = await grantFor(CHILD);
     expect(res.body.delegation_grant).toBeTypeOf('string');
     expect(res.body.agent_did).toBe(CHILD.did);
     // The child receipt anchors further hops, so the delegator never sees it.
     expect(res.body.receipt).toBeUndefined();
-    // No handle exists until the grant is redeemed.
-    expect((await use(app, res.body.delegation_id)).status).toBe(404);
+    // No Delegation Token reaches the delegator: it is minted only when the
+    // receiving agent redeems the grant, and the credential handle stays server-side.
+    expect(res.body.access_token).toBeUndefined();
+    expect(res.body.token_type).toBeUndefined();
+    const recorded = await vault.getDelegation(res.body.delegation_id);
+    expect(recorded?.grant?.credentialHandle).toMatch(/^ch_/);
+    expect(JSON.stringify(res.body)).not.toContain(recorded!.grant!.credentialHandle);
 
     const issued = await exchange(app, res.body.delegation_grant, actorToken(CHILD));
     expect(issued.status).toBe(200);
     expect(issued.body).toMatchObject({
       delegation_id: res.body.delegation_id,
-      access_token: res.body.delegation_id,
-      issued_token_type: 'urn:credninja:params:oauth:token-type:delegation-handle',
+      token_type: 'DPoP',
+      issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
       chain_depth: 1,
     });
+    // The access token is the child Delegation Token, bound to the receiving agent.
+    expect(decode(issued.body.access_token, 0).typ).toBe('dt+jwt');
+    expect(decode(issued.body.access_token, 1)).toMatchObject({ jti: res.body.delegation_id, client_id: CHILD.did, act: { sub: CHILD.did, act: { sub: ROOT.did } } });
+    expect(issued.body.access_token).not.toBe(res.body.delegation_id);
     expect(decode(issued.body.receipt, 1)).toMatchObject({ client_id: CHILD.did, delegationId: res.body.delegation_id });
 
     const again = await exchange(app, res.body.delegation_grant, actorToken(CHILD));
@@ -368,7 +370,7 @@ describe('Sub-Delegation Exchange', () => {
 
   it('rejects an exchange whose actor is not the agent the grant names, without consuming the grant', async () => {
     const { app, res } = await grantFor(CHILD);
-    const wrongKey = await exchange(app, res.body.delegation_grant, actorToken(CHILD, {}, SIBLING.privateKey));
+    const wrongKey = await exchange(app, res.body.delegation_grant, actorToken(CHILD, {}, keyOf(SIBLING)));
     expect(wrongKey.status).toBe(401);
     const wrongDid = await exchange(app, res.body.delegation_grant, actorToken(SIBLING));
     expect(wrongDid.status).toBe(401);

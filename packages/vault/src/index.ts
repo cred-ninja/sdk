@@ -27,6 +27,7 @@ export {
   DEFAULT_MAX_REVOCATION_DEPTH,
 } from './delegation-revocation.js';
 export type {
+  DelegationGrant,
   DelegationRecord,
   DelegationStatus,
   RecordDelegationInput,
@@ -154,3 +155,5 @@ export type {
   PreparedBudgetOperation,
   FrozenBudgetOperation,
 } from './durable-budget-admission.js';
+export { MemoryConsentStore } from './consent.js';
+export type { ConsentRecord, ConsentSource, RecordConsentInput } from './consent.js';

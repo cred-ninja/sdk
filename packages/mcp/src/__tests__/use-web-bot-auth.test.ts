@@ -133,10 +133,27 @@ describe('handleUse Web Bot Auth integration', () => {
     expect(headers['X-Test']).toBe('1');
   });
 
+  it('refuses a brokered call without the agent identity the token is bound to', async () => {
+    const brokeredId = tokenCache.store({
+      brokered: true, serverDelegationId: 'del_server', delegationToken: 'dt.jwt.token',
+      service: 'google', userId: 'default', scopes: ['calendar.readonly'], expiresAt: Date.now() + 60_000,
+    });
+    const use = vi.fn();
+    const result = await handleUse({
+      delegation_id: brokeredId,
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'GET',
+    }, { tokenCache, cred: { use } as any });
+    expect(result.isError).toBe(true);
+    expect(use).not.toHaveBeenCalled();
+  });
+
   it('routes brokered handles through the Cred server without local fetch', async () => {
+    const agentIdentity = { did: 'did:key:z6MkAgent', privateKey: new Uint8Array(32) };
     const brokeredId = tokenCache.store({
       brokered: true,
       serverDelegationId: 'del_server',
+      delegationToken: 'dt.jwt.token',
       service: 'google',
       userId: 'default',
       scopes: ['calendar.readonly'],
@@ -156,11 +173,13 @@ describe('handleUse Web Bot Auth integration', () => {
     }, {
       tokenCache,
       cred: { use } as any,
+      delegatorIdentity: agentIdentity,
     });
 
     expect(result.isError).toBe(false);
     expect(use).toHaveBeenCalledWith({
-      delegationId: 'del_server',
+      token: 'dt.jwt.token',
+      agentIdentity,
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
       body: undefined,

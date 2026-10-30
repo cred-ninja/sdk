@@ -50,7 +50,9 @@ describe('delegation tools', () => {
       {
         cred: {
           delegateHandle: async () => ({
-            tokenType: 'Delegation',
+            tokenType: 'DPoP',
+            token: 'dt.secret.token',
+            jkt: 'jkt',
             expiresIn: 900,
             expiresAt: new Date(Date.now() + 900_000),
             service: 'google',
@@ -62,14 +64,19 @@ describe('delegation tools', () => {
         appClientId: 'external-runtime',
         tokenCache,
         useServerBroker: true,
+        delegatorIdentity: { did: 'did:key:z6MkSelf', privateKey: new Uint8Array(32) },
       },
     );
 
     expect(result.isError).toBeUndefined();
+    // The model sees an id, never the Delegation Token.
+    expect(JSON.stringify(result.content)).not.toContain('dt.secret.token');
     const payload = JSON.parse(String(result.content[0]?.text));
     const cached = tokenCache.get(payload.delegationId);
     expect(cached?.brokered).toBe(true);
     expect(cached?.serverDelegationId).toBe('del_server');
+    expect(cached?.delegationToken).toBe('dt.secret.token');
+    expect(cached?.tokenAgentDid).toBe('did:key:z6MkSelf');
     expect(cached?.accessToken).toBeUndefined();
     tokenCache.destroy();
   });
@@ -94,6 +101,38 @@ describe('delegation tools', () => {
       },
     );
     expect(seen.delegatorIdentity).toBe(identity);
+    tokenCache.destroy();
+  });
+
+  it('keeps a child token bound to another agent out of cred_use, and out of the output', async () => {
+    const tokenCache = new TokenCache();
+    const identity = { did: 'did:key:z6MkSelf', privateKey: new Uint8Array(32) };
+    const result = await handleSubdelegate(
+      { parent_receipt: 'receipt_root', agent_did: 'did:key:z6MkChild', user_id: 'default', service: 'github', scopes: ['repo'] },
+      {
+        cred: {
+          subDelegateHandle: async () => ({
+            tokenType: 'DPoP', token: 'dt.child.token', jkt: 'jkt', expiresIn: 600, expiresAt: new Date(Date.now() + 600_000),
+            service: 'github', scopes: ['repo'], delegationId: 'del_child', receipt: 'r', chainDepth: 1, parentDelegationId: 'del_root',
+          }),
+        } as any,
+        appClientId: 'external-runtime',
+        tokenCache,
+        useServerBroker: true,
+        delegatorIdentity: identity,
+      },
+    );
+    expect(JSON.stringify(result.content)).not.toContain('dt.child.token');
+    const payload = JSON.parse(String(result.content[0]?.text));
+    expect(payload.note).toMatch(/only that agent can use it/);
+    const { handleUse } = await import('../tools/use.js');
+    let called = false;
+    const used = await handleUse(
+      { delegation_id: payload.delegationId, url: 'https://api.github.com/user', method: 'GET' },
+      { tokenCache, cred: { use: async () => { called = true; return {}; } } as any, delegatorIdentity: identity },
+    );
+    expect(used.isError).toBe(true);
+    expect(called).toBe(false);
     tokenCache.destroy();
   });
 

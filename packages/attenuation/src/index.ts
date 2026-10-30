@@ -98,3 +98,18 @@ export type {
 export { publicKeyFromDidKey, didKeyConfirmation } from './did-key.js';
 export { receiptActorClaims, readReceiptActor } from './receipt-claims.js';
 export type { ActorClaim, ReceiptActorClaims, ReceiptActorResult } from './receipt-claims.js';
+export {
+  mintDelegationToken,
+  verifyDelegationToken,
+  delegationTokenAth,
+  receiptContentId,
+  DELEGATION_TOKEN_TYP,
+  CRED_DELEGATION_TYPE,
+  DELEGATION_TOKEN_MAX_LIFETIME_SECONDS,
+} from './delegation-token.js';
+export type {
+  CredDelegationDetail,
+  DelegationTokenClaims,
+  DelegationTokenFailure,
+  DelegationTokenResult,
+} from './delegation-token.js';

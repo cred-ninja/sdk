@@ -80,8 +80,8 @@ When your MCP client needs your calendar, you approve interactively. The token i
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
-| `CRED_AGENT_DID` | No | | Stable agent identifier used when Cred should return signed delegation receipts |
-| `CRED_AGENT_PRIVATE_KEY_HEX` | Cloud mode | | Cloud mode: 32-byte Ed25519 private key (hex) of the did:key in `CRED_AGENT_DID`. `cred_delegate` and `cred_use` sign a DPoP proof with it, which servers require unless they run with `CRED_REQUIRE_DPOP=false`, and `cred_subdelegate` signs an `actor_token` with it, which servers require unless they run with `CRED_REQUIRE_AGENT_IDENTITY=false`. The key stays in the MCP process |
+| `CRED_AGENT_DID` | Cloud mode | | did:key of the agent. Brokered mode needs it together with `CRED_AGENT_PRIVATE_KEY_HEX`: the Delegation Token is bound to that key |
+| `CRED_AGENT_PRIVATE_KEY_HEX` | Cloud mode | | Cloud mode: 32-byte Ed25519 private key (hex) of the did:key in `CRED_AGENT_DID`. `cred_delegate` and `cred_use` sign a DPoP proof with it (servers always require one for agent delegations), and `cred_subdelegate` signs an `actor_token` with it (always required). The key stays in the MCP process |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
 | `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
 | `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing |
@@ -111,7 +111,7 @@ Get delegated OAuth access for a user's connected service.
 - `service` (string, required): Service name. One of `google`, `github`, `slack`, `notion`, `salesforce`.
 - `scopes` (string[], optional): OAuth scopes to request
 
-**Returns:** A local delegation handle and expiry, or a consent URL if the user hasn't authorized yet. In remote server mode the local handle maps to a server-side brokered handle, so provider tokens are not cached by MCP.
+**Returns:** A local delegation handle and expiry, or a consent URL if the user hasn't authorized yet. In remote server mode the local handle maps to a server-held, key-bound Delegation Token, so provider tokens are not cached by MCP.
 
 ### `cred_subdelegate`
 

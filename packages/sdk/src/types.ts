@@ -75,8 +75,15 @@ export interface DelegationResult {
 }
 
 export interface DelegationHandleResult {
-  tokenType: 'Delegation';
-  /** Seconds until handle expires. Always set — defaults to 900 (15 min). */
+  tokenType: 'DPoP';
+  /**
+   * The Delegation Token: a JWT bound to the agent's key (RFC 9449). Pass
+   * it to use() with the same agent identity; it is useless without the key.
+   */
+  token: string;
+  /** RFC 7638 thumbprint of the key the token is bound to. */
+  jkt: string;
+  /** Seconds until the token expires. */
   expiresIn: number;
   /** Absolute expiry timestamp. Always set. */
   expiresAt: Date;
@@ -89,17 +96,18 @@ export interface DelegationHandleResult {
 }
 
 export interface BrokeredUseParams {
-  delegationId: string;
+  /** The Delegation Token from delegateHandle(), subDelegateHandle() or redeemDelegationGrant(). */
+  token: string;
   url: string;
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
   /**
-   * The identity of the agent the handle was issued to. The client signs a
-   * DPoP proof (RFC 9449) with its key for this call; a server that binds
-   * handles to agent keys (the default) refuses the call without one.
+   * The identity of the agent the token was issued to. The client signs a
+   * DPoP proof (RFC 9449) with its key, naming the token and this exact
+   * request; the server refuses the call without it.
    */
-  agentIdentity?: DpopSigningIdentity;
+  agentIdentity: DpopSigningIdentity;
 }
 
 /** The part of an agent identity that signs DPoP proofs. */
@@ -369,6 +377,20 @@ export interface SubDelegationResult extends DelegationResult {
 export interface SubDelegationHandleResult extends DelegationHandleResult {
   chainDepth: number;
   parentDelegationId: string;
+}
+
+/**
+ * Step 1 of the two-step Sub-Delegation Exchange: a single-use grant the
+ * receiving agent redeems for its own token with redeemDelegationGrant().
+ */
+export interface DelegationGrantResult {
+  delegationGrant: string;
+  delegationId: string;
+  agentDid: string;
+  expiresIn: number;
+  chainDepth: number;
+  parentDelegationId: string;
+  scopes: string[];
 }
 
 // ── Agent scope ceiling & revocation types ──────────────────────────────────

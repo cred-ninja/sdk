@@ -31,6 +31,8 @@ import {
   type DelegationRevocationSeed,
   type RecordDelegationInput,
 } from './delegation-revocation.js';
+import { MemoryConsentStore } from './consent.js';
+import type { ConsentRecord, RecordConsentInput } from './consent.js';
 import { PermissionStore, type CreatePermissionInput } from './permissions.js';
 import { isReservedLinkVaultUserId, ReservedVaultUserIdError } from './link/vault-ids.js';
 import { LINK_VAULT_ACCESS, type LinkVaultAccess } from './link/vault-access.js';
@@ -76,6 +78,7 @@ export class CredVault {
   private rotationEngine: RotationEngine | null = null;
   private permissionStore: PermissionStore | null = null;
   private memoryDelegations: MemoryDelegationStore | null = null;
+  private memoryConsents: MemoryConsentStore | null = null;
 
   constructor(options: VaultOptions) {
     genuineVaults.add(this);
@@ -526,6 +529,21 @@ export class CredVault {
   async recordDelegation(input: RecordDelegationInput): Promise<DelegationRecord> {
     await this.ensureInit();
     return this.delegationStore().storeDelegation(input, new Date().toISOString());
+  }
+
+  /** Record a consent event once (draft Section 8.2); a replayed id keeps the first record. */
+  async recordConsent(input: RecordConsentInput): Promise<ConsentRecord> {
+    await this.ensureInit();
+    const now = new Date().toISOString();
+    if (this.backend.storeConsent) return this.backend.storeConsent(input, now);
+    this.memoryConsents ??= new MemoryConsentStore();
+    return this.memoryConsents.storeConsent(input, now);
+  }
+
+  async getConsent(id: string): Promise<ConsentRecord | null> {
+    await this.ensureInit();
+    if (this.backend.getConsent) return this.backend.getConsent(id);
+    return this.memoryConsents?.getConsent(id) ?? null;
   }
 
   async getDelegation(id: string): Promise<DelegationRecord | null> {

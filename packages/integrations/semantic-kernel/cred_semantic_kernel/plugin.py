@@ -8,6 +8,8 @@ At runtime, the agent provides ``service`` and ``scopes`` as function parameters
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 from semantic_kernel.functions import kernel_function
@@ -21,6 +23,65 @@ if TYPE_CHECKING:
 def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
     """``agent_identity=`` for the SDK call, only when one is configured."""
     return {"agent_identity": agent_identity} if agent_identity is not None else {}
+
+
+# ── Delegation token store ────────────────────────────────────────────────────
+#
+# The model only ever sees ``delegation_id``. The Delegation Token that
+# ``cred_use`` needs stays in this in-process mapping (delegation_id ->
+# (token, expiry)), populated by the delegate tool and read by the use tool.
+
+_DELEGATION_TOKENS: dict[str, tuple[str, float, str, str, Optional[str]]] = {}
+
+
+def _agent_did(agent_identity: Any) -> str:
+    return getattr(agent_identity, "did", "") or ""
+
+
+def _remember_delegation_token(
+    delegation_id: str,
+    token: str,
+    expires_at: float,
+    *,
+    base_url: str,
+    agent_did: str,
+    user_id: Optional[str] = None,
+) -> None:
+    """Store a token with the server, agent and user it was issued for."""
+    now = time.time()
+    for key in [k for k, entry in _DELEGATION_TOKENS.items() if entry[1] <= now]:
+        del _DELEGATION_TOKENS[key]
+    _DELEGATION_TOKENS[delegation_id] = (token, expires_at, base_url.rstrip("/"), agent_did, user_id)
+
+
+def _lookup_delegation_token(
+    delegation_id: str,
+    *,
+    base_url: str,
+    agent_did: str,
+    user_id: Optional[str] = None,
+) -> str:
+    """Return the token only to a tool configured for the same server, agent and user."""
+    entry = _DELEGATION_TOKENS.get(delegation_id)
+    if entry is None or entry[1] <= time.time():
+        _DELEGATION_TOKENS.pop(delegation_id, None)
+        raise ValueError("Unknown or expired delegation: call the delegate tool first")
+    _, _, entry_base_url, entry_agent_did, entry_user_id = entry
+    if (
+        entry_base_url != base_url.rstrip("/")
+        or entry_agent_did != agent_did
+        or (user_id is not None and entry_user_id != user_id)
+    ):
+        raise ValueError("This delegation was issued for a different server, agent or user")
+    return entry[0]
+
+
+def _expiry_epoch(result: Any) -> float:
+    expires_at = getattr(result, "expires_at", None)
+    if isinstance(expires_at, datetime):
+        return expires_at.timestamp()
+    expires_in = getattr(result, "expires_in", 0)
+    return time.time() + (expires_in if isinstance(expires_in, (int, float)) else 0)
 
 
 class CredPlugin:
@@ -71,6 +132,7 @@ class CredPlugin:
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._base_url = base_url
         self._user_id = user_id
         self._app_client_id = app_client_id
         self._token_format = token_format
@@ -104,6 +166,10 @@ class CredPlugin:
                 app_client_id=self._app_client_id,
                 scopes=scope_list if scope_list else None,
                 **_identity_kwargs(self._agent_identity),
+            )
+            _remember_delegation_token(
+                result.delegation_id, result.token, _expiry_epoch(result),
+                base_url=self._base_url, agent_did=_agent_did(self._agent_identity), user_id=self._user_id,
             )
             return json.dumps({
                 "token_type": result.token_type,
@@ -146,15 +212,23 @@ class CredPlugin:
         extra_headers: Annotated[str, "Optional JSON object of service-specific headers. Pass empty string when unused."] = "",
     ) -> str:
         """Broker an upstream API request and return JSON result."""
+        if self._agent_identity is None:
+            raise ValueError(
+                "use requires an agent_identity: the delegation token is bound to the agent's key. "
+                "Pass agent_identity= to CredPlugin.",
+            )
         parsed_body = json.loads(body) if body else None
         parsed_headers = json.loads(extra_headers) if extra_headers else None
+        token = _lookup_delegation_token(
+            delegation_id, base_url=self._base_url, agent_did=_agent_did(self._agent_identity), user_id=self._user_id,
+        )
         result = self._cred.use(
-            delegation_id=delegation_id,
+            token,
             url=url,
             method=method,
             body=parsed_body,
             extra_headers=parsed_headers,
-            **_identity_kwargs(self._agent_identity),
+            agent_identity=self._agent_identity,
         )
         return json.dumps({
             "status": result.status,

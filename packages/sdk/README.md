@@ -126,34 +126,40 @@ Throws `ConsentRequiredError` with `.consentUrl` if the user hasn't connected th
 
 ### `cred.delegateHandle(params)` and `cred.use(params)`
 
-Brokered delegation: the provider token stays on the Cred server, and the agent gets a handle it
-can use only with its own key. The server binds the handle to the agent's did:key and, by
-default, requires a DPoP proof (RFC 9449) by that key to issue the handle and on every call. The
-SDK signs the proofs when you pass `agentIdentity`; the private key never leaves your process.
+Brokered delegation: the provider token stays on the Cred server, and the agent gets a Delegation
+Token, a JWT it can use only with its own key. The server binds the token to the agent's did:key
+and requires a DPoP proof (RFC 9449) by that key to issue it and on every call. `delegateHandle()`
+requires `agentIdentity`; the SDK signs the proofs and the private key never leaves your process.
 
 ```typescript
 import { importAgentIdentity } from '@credninja/sdk';
 
 const agent = importAgentIdentity({ did: savedDid, privateKeyHex: savedKeyHex });
 
-const handle = await cred.delegateHandle({
+const credential = await cred.delegateHandle({
   userId: 'user_123',
   appClientId: 'app_xxx',
   service: 'google',
   scopes: ['calendar.readonly'],
-  agentIdentity: agent,          // the handle is bound to this key
+  agentIdentity: agent,          // the token is bound to this key
 });
 
 const res = await cred.use({
-  delegationId: handle.delegationId,
+  token: credential.token,       // sent as Authorization: DPoP <token>
   url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
   method: 'GET',
   agentIdentity: agent,          // signs a fresh DPoP proof for this call
 });
 ```
 
-The handle id alone, even together with the deployment's agent token, cannot make a call. A handle
-sub-delegated to another agent is bound to that agent's key, not yours.
+`delegateHandle()` returns `{ token, jkt, delegationId, receipt, expiresIn, ... }`. The token alone,
+even together with the deployment's agent token, cannot make a call: each `use()` carries a fresh
+DPoP proof whose `ath` is the SHA-256 of the token and whose `cred_req` covers the exact request
+body. A token sub-delegated to another agent is bound to that agent's key, not yours.
+
+For agent-to-agent handoff, the delegating agent calls `cred.subDelegateGrant({ ..., delegatorIdentity })`
+for a single-use grant, and the receiving agent calls
+`cred.redeemDelegationGrant({ delegationGrant, agentIdentity })` for its own Delegation Token.
 
 ### `cred.getConsentUrl(params)`
 

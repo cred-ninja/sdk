@@ -20,9 +20,12 @@ from cred import AsyncCred, CanonicalJsonError, Cred, CredError, canonical_json,
 BASE_URL = "https://cred.example.com"
 TOKEN = "cred_at_test_token"
 HANDLE = "del_handle_abc"
+DELEGATION_TOKEN = "eyJhbGciOiJFZERTQSJ9.eyJqdGkiOiJkZWxfaGFuZGxlX2FiYyJ9.c2lnbmF0dXJl"
 
 HANDLE_RESPONSE = {
-    "token_type": "Delegation",
+    "access_token": DELEGATION_TOKEN,
+    "token_type": "DPoP",
+    "cnf": {"jkt": "jkt_thumbprint"},
     "expires_in": 900,
     "service": "google",
     "user_id": "user_1",
@@ -80,11 +83,11 @@ class TestCreateDpopProof:
         assert isinstance(claims["jti"], str) and claims["jti"]
         assert "ath" not in claims
 
-    def test_ath_present_only_with_handle(self):
+    def test_ath_present_only_with_token(self):
         identity = generate_agent_identity()
-        _, claims, _ = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", HANDLE))
+        _, claims, _ = decode_proof(create_dpop_proof(identity, "POST", f"{BASE_URL}/api/v1/use", DELEGATION_TOKEN))
 
-        assert claims["ath"] == expected_ath(HANDLE)
+        assert claims["ath"] == expected_ath(DELEGATION_TOKEN)
         assert "=" not in claims["ath"]
 
     def test_jti_is_fresh_per_proof(self):
@@ -193,31 +196,35 @@ class TestClientSendsDpop:
                     )
             assert respx.calls.call_count == 0
 
-    @respx.mock
-    def test_delegate_handle_without_identity_sends_no_proof(self):
-        route = respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(200, json=HANDLE_RESPONSE))
-
-        with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
-            cred.delegate_handle(service="google", user_id="user_1", agent_did="did:key:zLegacy")
-
-        request = route.calls[0].request
-        assert "DPoP" not in request.headers
-        assert json.loads(request.read())["agent_did"] == "did:key:zLegacy"
+    def test_delegate_handle_without_identity_raises_before_http(self):
+        with respx.mock:
+            with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
+                with pytest.raises(CredError) as exc:
+                    cred.delegate_handle(service="google", user_id="user_1", agent_did="did:key:zLegacy")
+            assert exc.value.code == "invalid_config"
+            assert respx.calls.call_count == 0
 
     @respx.mock
-    def test_use_sends_proof_bound_to_handle(self):
+    def test_use_sends_proof_bound_to_token(self):
         identity = generate_agent_identity()
         route = respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(200, json=USE_RESPONSE))
 
         with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
-            cred.use(delegation_id=HANDLE, url="https://www.googleapis.com/calendar/v3/x", agent_identity=identity)
+            cred.use(DELEGATION_TOKEN, url="https://www.googleapis.com/calendar/v3/x", agent_identity=identity)
 
         request = route.calls[0].request
         _, claims, _ = decode_proof(request.headers["DPoP"])
         assert claims["htu"] == f"{BASE_URL}/api/v1/use"
-        assert claims["ath"] == expected_ath(HANDLE)
+        assert claims["ath"] == expected_ath(DELEGATION_TOKEN)
         # cred_req commits to the body actually sent.
-        assert claims["cred_req"] == expected_cred_req(json.loads(request.read()))
+        sent = json.loads(request.read())
+        assert claims["cred_req"] == expected_cred_req(sent)
+        assert "delegation_id" not in sent
+        # The per-request DPoP Authorization overrides the client's default Bearer.
+        assert request.headers["Authorization"] == f"DPoP {DELEGATION_TOKEN}"
+        assert expected_ath(DELEGATION_TOKEN) == base64.urlsafe_b64encode(
+            hashlib.sha256(DELEGATION_TOKEN.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
 
     @respx.mock
     def test_use_cred_req_covers_body_and_extra_headers(self):
@@ -226,7 +233,7 @@ class TestClientSendsDpop:
 
         with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
             cred.use(
-                delegation_id=HANDLE,
+                DELEGATION_TOKEN,
                 url="https://api.example.com/items",
                 method="POST",
                 body={"name": "caf\u00e9 \U0001F600", "qty": 2, "price": 0.1, "tags": []},
@@ -237,7 +244,6 @@ class TestClientSendsDpop:
         request = route.calls[0].request
         sent = json.loads(request.read())
         assert sent == {
-            "delegation_id": HANDLE,
             "url": "https://api.example.com/items",
             "method": "POST",
             "body": {"name": "caf\u00e9 \U0001F600", "qty": 2, "price": 0.1, "tags": []},
@@ -248,14 +254,30 @@ class TestClientSendsDpop:
         tampered = dict(sent, url="https://api.example.com/other")
         assert claims["cred_req"] != expected_cred_req(tampered)
 
-    @respx.mock
-    def test_use_without_identity_sends_no_proof(self):
-        route = respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(200, json=USE_RESPONSE))
+    def test_use_without_identity_or_token_raises_before_http(self):
+        with respx.mock:
+            with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
+                with pytest.raises(CredError) as exc:
+                    cred.use(DELEGATION_TOKEN, url="https://www.googleapis.com/calendar/v3/x")
+                assert exc.value.code == "invalid_config"
+                with pytest.raises(CredError) as exc:
+                    cred.use("", url="https://www.googleapis.com/calendar/v3/x", agent_identity=generate_agent_identity())
+                assert exc.value.code == "invalid_config"
+            assert respx.calls.call_count == 0
 
-        with Cred(agent_token=TOKEN, base_url=BASE_URL) as cred:
-            cred.use(delegation_id=HANDLE, url="https://www.googleapis.com/calendar/v3/x")
+    def test_async_delegate_handle_and_use_require_identity(self):
+        async def scenario():
+            async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
+                with pytest.raises(CredError) as exc:
+                    await client.delegate_handle(service="google", user_id="user_1")
+                assert exc.value.code == "invalid_config"
+                with pytest.raises(CredError) as exc:
+                    await client.use(DELEGATION_TOKEN, url="https://www.googleapis.com/calendar/v3/x")
+                assert exc.value.code == "invalid_config"
 
-        assert "DPoP" not in route.calls[0].request.headers
+        with respx.mock:
+            asyncio.run(scenario())
+            assert respx.calls.call_count == 0
 
     @respx.mock
     def test_htu_uses_normalised_base_url(self):
@@ -263,7 +285,7 @@ class TestClientSendsDpop:
         route = respx.post(f"{BASE_URL}/api/v1/use").mock(return_value=httpx.Response(200, json=USE_RESPONSE))
 
         with Cred(agent_token=TOKEN, base_url=f"{BASE_URL}/") as cred:
-            cred.use(delegation_id=HANDLE, url="https://www.googleapis.com/calendar/v3/x", agent_identity=identity)
+            cred.use(DELEGATION_TOKEN, url="https://www.googleapis.com/calendar/v3/x", agent_identity=identity)
 
         _, claims, _ = decode_proof(route.calls[0].request.headers["DPoP"])
         assert claims["htu"] == f"{BASE_URL}/api/v1/use"
@@ -280,7 +302,7 @@ class TestClientSendsDpop:
             async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
                 handle = await client.delegate_handle(service="google", user_id="user_1", agent_identity=identity)
                 await client.use(
-                    delegation_id=handle.delegation_id,
+                    handle.token,
                     url="https://www.googleapis.com/calendar/v3/x",
                     agent_identity=identity,
                 )
@@ -295,8 +317,9 @@ class TestClientSendsDpop:
 
         _, use_claims, _ = decode_proof(use_route.calls[0].request.headers["DPoP"])
         assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
-        assert use_claims["ath"] == expected_ath(HANDLE)
+        assert use_claims["ath"] == expected_ath(DELEGATION_TOKEN)
         assert use_claims["cred_req"] == expected_cred_req(json.loads(use_route.calls[0].request.read()))
+        assert use_route.calls[0].request.headers["Authorization"] == f"DPoP {DELEGATION_TOKEN}"
         assert "cred_req" not in delegate_claims
 
     def test_async_client_rejects_mismatched_agent_did(self):

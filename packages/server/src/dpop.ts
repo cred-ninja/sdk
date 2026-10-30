@@ -1,21 +1,14 @@
 /**
- * DPoP proofs (RFC 9449) that tie a brokered delegation handle to the key of
- * the agent it was issued to.
+ * DPoP proofs (RFC 9449) that tie a Delegation Token to the key of the
+ * agent it was issued to.
  *
- * A handle issued to a did:key agent records that key's RFC 7638 thumbprint,
- * the same `cnf.jkt` its receipt carries. Every request that exercises the
- * handle carries a `DPoP` header: a JWS of type `dpop+jwt`, signed by that
- * key, naming the HTTP method and URL of the request and, through `ath`, the
- * handle itself. A handle id copied out of a log or a prompt is useless
+ * A Delegation Token carries the RFC 7638 thumbprint of the agent's did:key
+ * in `cnf.jkt`. Every exercise presents the token as `Authorization: DPoP
+ * <token>` with a `DPoP` header: a JWS of type `dpop+jwt`, signed by that
+ * key, naming the HTTP method and URL of the request, the token (`ath`, the
+ * SHA-256 of the token, RFC 9449 Section 4.2) and, through `cred_req`, the
+ * exact request body. A token copied out of a log or a prompt is useless
  * without the agent's private key.
- *
- * Cred profile of RFC 9449: the deployment's Bearer credential stays in
- * `Authorization` and the handle travels in the body, so `ath` is computed
- * over the handle id (SHA-256, base64url) rather than over an
- * `Authorization: DPoP` access token. A proof for /api/v1/use also carries
- * `cred_req`: base64url SHA-256 of the RFC 8785 (JCS) serialization of the
- * whole JSON request body (handle, upstream URL, method, body, extra
- * headers, quantities), so a proof authorizes exactly one upstream call.
  */
 import { createHash, createPublicKey, type KeyObject } from 'node:crypto';
 import {
@@ -37,9 +30,9 @@ export const DPOP_CLOCK_SKEW_SECONDS = 60;
 
 export type DpopResult = { ok: true; jkt: string; jti: string } | { ok: false; message: string };
 
-/** `ath` for a handle: base64url SHA-256 of the handle id. */
-export function dpopAth(handle: string): string {
-  return createHash('sha256').update(handle, 'ascii').digest('base64url');
+/** `ath` for an access token: base64url SHA-256 of the token (RFC 9449 Section 4.2). */
+export function dpopAth(token: string): string {
+  return createHash('sha256').update(token, 'ascii').digest('base64url');
 }
 
 /**

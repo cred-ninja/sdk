@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteCumulativeLedger } from '@credninja/vault';
-import { createActorToken, generateAgentIdentity } from '@credninja/sdk';
+import { createActorToken, createDpopProof, generateAgentIdentity } from '@credninja/sdk';
+import { delegateAs, exerciseAs } from './token-helpers.js';
 import { createServer } from '../server.js';
 
 const directories: string[] = [];
@@ -34,18 +35,20 @@ const rootBody = { service: 'github', user_id: 'owner', agent_did: 'did:key:root
 
 it.each(['/api/v1/delegate', '/api/v1/subdelegate'])('rejects unsafe raw constraint JSON on %s before issuing a receipt', async (route) => {
   const { app, vault } = await setup();
-  let body: Record<string, unknown> = rootBody;
   const identity = await generateAgentIdentity();
+  let body: Record<string, unknown> = { ...rootBody, agent_did: identity.did };
   if (route.endsWith('/subdelegate')) {
-    await vault.createPermission({ agentId: 'did:key:child', connectionId: 'github', allowedScopes: ['repo'], requiresApproval: false, delegatable: true, maxDelegationDepth: 3, createdBy: 'fixture' });
-    const root = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${token}`).send({ ...rootBody, agent_did: identity.did });
+    const child = await generateAgentIdentity();
+    await vault.createPermission({ agentId: child.did, connectionId: 'github', allowedScopes: ['repo'], requiresApproval: false, delegatable: true, maxDelegationDepth: 3, createdBy: 'fixture' });
+    const root = await delegateAs(app, identity, { ...rootBody, agent_did: identity.did }, { bearer: token });
     expect(root.status).toBe(200);
-    body = { ...rootBody, parent_receipt: root.body.receipt, agent_did: 'did:key:child' };
+    body = { ...rootBody, parent_receipt: root.body.receipt, agent_did: child.did };
   }
   const send = (members: string) => {
     const payload = route.endsWith('/subdelegate')
       ? { ...body, actor_token: createActorToken(identity, 'http://localhost:3456/api/v1/subdelegate') } : body;
-    return request(app).post(route).set('Authorization', `Bearer ${token}`).type('json')
+    return request(app).post(route).set('Authorization', `Bearer ${token}`)
+      .set('DPoP', createDpopProof(identity, 'POST', `http://localhost:3456${route}`)).type('json')
       .send(JSON.stringify(payload).slice(0, -1) + ',' + members + '}');
   };
   // Both paths really issue without the malformed constraints (including actor proof).
@@ -72,15 +75,14 @@ it.each(['/api/v1/delegate', '/api/v1/subdelegate'])('rejects unsafe raw constra
 
 it('exposes unknown-constraint exercise denial only in the owning user audit feed without debit or dispatch', async () => {
   const { app } = await setup();
-  const issued = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${token}`).send({
-    ...rootBody, constraints: [{ key: 'x', future: { nested: true } }, { key: 'max_calls', max_lifetime: 1 }],
-  });
+  const agent = await generateAgentIdentity();
+  const issued = await delegateAs(app, agent, {
+    ...rootBody, agent_did: agent.did, constraints: [{ key: 'x', future: { nested: true } }, { key: 'max_calls', max_lifetime: 1 }],
+  }, { bearer: token });
   expect(issued.status).toBe(200);
   const debit = vi.spyOn(SqliteCumulativeLedger.prototype, 'debit');
   const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
-  const denied = await request(app).post('/api/v1/use').set('Authorization', `Bearer ${token}`).send({
-    delegation_id: issued.body.delegation_id, url: 'https://api.github.com/user', method: 'GET',
-  });
+  const denied = await exerciseAs(app, agent, issued.body.access_token, { url: 'https://api.github.com/user', method: 'GET' });
   expect(denied.status).toBe(403);
   expect(denied.body.error).toBe('unknown_constraint');
   expect(debit).not.toHaveBeenCalled();

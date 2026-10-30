@@ -105,11 +105,11 @@ back to `default` on its own.
 | GET | `/api/v1/providers` | Bearer | List configured provider slugs |
 | GET | `/api/v1/connections` | Bearer | List stored connections |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke a stored connection |
-| POST | `/api/v1/use` | Bearer + DPoP | Brokered upstream API call via a delegation handle, with a DPoP proof by the agent key the handle is bound to (handles issued under `CRED_REQUIRE_DPOP=false` and Cred Link handles take no proof) |
+| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`). Cred Link handles still use Bearer + `delegation_id` |
 | DELETE | `/api/v1/delegations/:delegationId` (also `/delegation/:delegationId`) | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
-| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; a brokered handle is issued to, and bound to the key of, the did:key agent that proves it with a DPoP proof (handle requests while `CRED_REQUIRE_DPOP` is on; raw-token requests take no proof) |
-| POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token` (unless `CRED_REQUIRE_AGENT_IDENTITY=false`); always returns a brokered handle, or with `exchange: "grant"` a single-use delegation grant |
-| POST | `/api/v1/token` | Bearer + actor token | RFC 8693 token exchange redeeming a delegation grant; the receiving agent proves its did:key with an RFC 7523 `actor_token` |
+| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; issues a Delegation Token (DPoP-bound JWT: `authorization_details`, `prf`, `consent_id`, `credential_handle`) to the did:key agent that proves its key with a DPoP proof, and records the consent behind it; raw-token requests take no proof |
+| POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token`; always required; returns the child's Delegation Token, bound to the receiving agent's key, or with `exchange: "grant"` a single-use delegation grant |
+| POST | `/api/v1/token` | Bearer + actor token | RFC 8693 token exchange redeeming a delegation grant; the receiving agent proves its did:key with an RFC 7523 `actor_token` and receives its Delegation Token (`token_type` DPoP) |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |

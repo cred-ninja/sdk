@@ -95,6 +95,8 @@ export async function handleSubdelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          delegationToken: (result as { token: string }).token,
+          tokenAgentDid: input.agent_did,
           ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
@@ -123,7 +125,11 @@ export async function handleSubdelegate(
             chainDepth: result.chainDepth,
             parentDelegationId: result.parentDelegationId,
             ...(guard ? { guard } : {}),
-            note: 'Pass delegationId to cred_use to make authenticated API calls.',
+            note: context.useServerBroker && input.agent_did !== context.delegatorIdentity?.did
+              // The child's token is bound to the receiving agent's key, so
+              // only that agent can exercise it; hand it the receipt.
+              ? `The child delegation is bound to ${input.agent_did}; only that agent can use it. Give it the receipt.`
+              : 'Pass delegationId to cred_use to make authenticated API calls.',
           }),
         },
       ],

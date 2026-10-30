@@ -8,7 +8,7 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pytest
@@ -18,6 +18,10 @@ from langchain_core.tools import BaseTool
 from pydantic import SecretStr
 
 from cred import BrokeredUseResult, DelegationHandleResult, DelegationResult, Connection, ConsentRequiredError
+import time
+
+from cred import generate_agent_identity
+from cred_langchain.tools import _remember_delegation_token
 from cred_langchain import (
     CredToolkit,
     CredDelegateTool,
@@ -31,6 +35,7 @@ from cred_langchain import (
 TOKEN = "cred_at_test"
 USER_ID = "user_123"
 BASE_URL = "https://cred.example.com"
+HANDLE_TOKEN = "eyJ.delegation.token-secret"
 
 
 def make_delegation_result(
@@ -55,7 +60,8 @@ def make_delegation_result(
 
 def make_handle_result(
     *,
-    token_type: str = "Delegation",
+    token_type: str = "DPoP",
+    token: str = HANDLE_TOKEN,
     expires_in: int = 3600,
     service: str = "google",
     user_id: str = USER_ID,
@@ -64,8 +70,10 @@ def make_handle_result(
 ) -> DelegationHandleResult:
     return DelegationHandleResult(
         token_type=token_type,
+        token=token,
+        jkt="jkt_test",
         expires_in=expires_in,
-        expires_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
         service=service,
         user_id=user_id,
         scopes=scopes or [],
@@ -165,7 +173,10 @@ class TestCredDelegateTool:
             scopes=["calendar.readonly"],
             delegation_id="del_brokered",
         )
-        tk = CredToolkit(agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID, token_format="handle")
+        identity = generate_agent_identity()
+        tk = CredToolkit(
+            agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID, token_format="handle", agent_identity=identity,
+        )
         tk._cred = mock_cred
 
         delegate = next(t for t in tk.get_tools() if t.name == "cred_delegate")
@@ -177,7 +188,9 @@ class TestCredDelegateTool:
 
         data = json.loads(result)
         assert "access_token" not in data
-        assert data["token_type"] == "Delegation"
+        assert data["token_type"] == "DPoP"
+        assert "token" not in data
+        assert HANDLE_TOKEN not in result
         assert data["delegation_id"] == "del_brokered"
         assert data["user_id"] == USER_ID
         mock_cred.delegate_handle.assert_called_once_with(
@@ -185,6 +198,7 @@ class TestCredDelegateTool:
             user_id=USER_ID,
             app_client_id="app_1",
             scopes=["calendar.readonly"],
+            agent_identity=identity,
         )
 
     def test_cred_use_tool_brokers_request(self, mock_cred):
@@ -194,8 +208,16 @@ class TestCredDelegateTool:
             content_type="application/json",
             body={"items": []},
         )
+        identity = generate_agent_identity()
         use = CredUseTool()
         use._cred = mock_cred
+        use._base_url = BASE_URL
+        use._user_id = USER_ID
+        use._agent_identity = identity
+        _remember_delegation_token(
+            "del_brokered", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
 
         result = use._run(
             delegation_id="del_brokered",
@@ -207,12 +229,65 @@ class TestCredDelegateTool:
         assert data["ok"] is True
         assert data["body"] == {"items": []}
         mock_cred.use.assert_called_once_with(
-            delegation_id="del_brokered",
+            HANDLE_TOKEN,
             url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
             method="GET",
             body=None,
             extra_headers=None,
+            agent_identity=identity,
         )
+
+    def test_cred_use_tool_requires_agent_identity(self, mock_cred):
+        use = CredUseTool()
+        use._cred = mock_cred
+        use._base_url = BASE_URL
+        use._user_id = USER_ID
+        _remember_delegation_token(
+            "del_noid", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
+
+        with pytest.raises(ValueError, match="agent_identity"):
+            use._run(delegation_id="del_noid", url="https://www.googleapis.com/x")
+        mock_cred.use.assert_not_called()
+
+    def test_cred_use_tool_rejects_unknown_or_expired_delegation(self, mock_cred):
+        use = CredUseTool()
+        use._cred = mock_cred
+        use._base_url = BASE_URL
+        use._user_id = USER_ID
+        use._agent_identity = generate_agent_identity()
+        _remember_delegation_token(
+            "del_old", HANDLE_TOKEN, time.time() - 1,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
+
+        for delegation_id in ("del_never_seen", "del_old"):
+            with pytest.raises(ValueError, match="Unknown or expired delegation"):
+                use._run(delegation_id=delegation_id, url="https://www.googleapis.com/x")
+        mock_cred.use.assert_not_called()
+
+    def test_cred_use_tool_refuses_delegation_issued_for_another_scope(self, mock_cred):
+        identity = generate_agent_identity()
+        other = generate_agent_identity()
+        url = "https://www.googleapis.com/x"
+        _remember_delegation_token(
+            "del_scoped", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
+        for base_url, agent, user_id in (
+            ("https://other.example.com", identity, USER_ID),
+            (BASE_URL, other, USER_ID),
+            (BASE_URL, identity, "another_user"),
+        ):
+            use = CredUseTool()
+            use._cred = mock_cred
+            use._base_url = base_url
+            use._user_id = user_id
+            use._agent_identity = agent
+            with pytest.raises(ValueError, match="different server, agent or user"):
+                use._run(delegation_id="del_scoped", url=url)
+        mock_cred.use.assert_not_called()
 
     def test_propagates_consent_required_error(self, toolkit, mock_cred):
         mock_cred.delegate.side_effect = ConsentRequiredError(
@@ -379,7 +454,9 @@ def _fake_cred_server(calls: list):
         calls.append({"path": path, "body": json, "headers": headers or {}})
         if path == "/api/v1/delegate":
             return httpx.Response(200, json={
-                "token_type": "Delegation",
+                "access_token": HANDLE_TOKEN,
+                "token_type": "DPoP",
+                "cnf": {"jkt": "jkt_test"},
                 "expires_in": 900,
                 "service": "google",
                 "user_id": USER_ID,
@@ -407,17 +484,20 @@ def _assert_dpop_bound(calls: list, identity, outputs: list) -> None:
     assert use_call["path"] == "/api/v1/use"
     use_claims = _dpop_claims(use_call["headers"]["DPoP"])
     assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
-    expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(b"del_bound").digest()).rstrip(b"=").decode()
+    expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(HANDLE_TOKEN.encode()).digest()).rstrip(b"=").decode()
     assert use_claims["ath"] == expected_ath
     # cred_req: the proof commits to the exact /api/v1/use body sent.
     expected_req = _b64.urlsafe_b64encode(
         _hashlib.sha256(canonical_json(use_call["body"]).encode("utf-8")).digest(),
     ).rstrip(b"=").decode()
     assert use_claims["cred_req"] == expected_req
+    assert use_call["headers"]["Authorization"] == f"DPoP {HANDLE_TOKEN}"
+    assert "delegation_id" not in use_call["body"]
 
     # The key never reaches what the model sees.
     for output in outputs:
         assert identity.private_key.hex() not in output
+        assert HANDLE_TOKEN not in output
         assert "agent_identity" not in output
 
 
