@@ -197,6 +197,9 @@ describe('tamper-evident audit chain', () => {
       sensitive_hmac: null, metadata_json: '{"n":1}', error_message: null, created_at: '2026-10-30T00:00:01.000Z',
     };
     expect(auditChainHash(Buffer.alloc(32, 7), auditChainGenesis(0), 1, row)).toBe('Yxg0YKGq69LOBIf1RfQTtKtEWihd3RbA97CUMvvYJSE');
+    // Every field distinct and non-null, so swapping any two changes the hash.
+    const distinct = Object.fromEntries(AUDIT_CHAIN_FIELDS.map((field, i) => [field, `v${String(i + 1).padStart(2, '0')}`])) as unknown as AuditRow;
+    expect(auditChainHash(Buffer.alloc(32, 7), auditChainGenesis(0), 1, distinct)).toBe('n-9eyumMc9s49AZPHGp9G0Uu8laY4pKtkItAPxbba2g');
   });
 
   it('hashes every column of the audit table', async () => {

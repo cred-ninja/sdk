@@ -125,7 +125,7 @@ key = PBKDF2-SHA256(passphrase, salt, iterations=100000, keyLength=32)
 
 The **salt** is random (32 bytes) and stored in a `.salt` file alongside your vault. The salt is not secret. Only your passphrase needs to be kept private.
 
-A `.check` file next to it holds an HMAC of the derived key, so `init()` refuses a passphrase other than the one the vault was created with instead of failing later at decryption. It is not secret either. Removing the `.salt` file starts a new vault, and a new check value with it.
+A `.check` file next to it holds an HMAC of the derived key, so `init()` refuses a passphrase other than the one the vault was created with instead of failing later at decryption. It holds no key material, but with the salt it lets someone test passphrase guesses offline, as the vault file already does: protect it like the vault file (it is written mode 0600). Removing the `.salt` file starts a new vault, and a new check value with it. If a vault created before this check was first opened with a mistaken passphrase, that passphrase is the one recorded: remove the `.check` file and start again with the correct one.
 
 ### IV (Initialization Vector)
 

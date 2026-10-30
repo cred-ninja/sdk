@@ -103,10 +103,9 @@ export class CredVault {
    */
   async init(): Promise<void> {
     await this.backend.init();
-    const saltExisted = fs.existsSync(this.saltPath);
-    const salt = this.loadOrCreateSalt();
+    const { salt, created } = this.loadOrCreateSalt();
     const derivedKey = deriveKey(this.passphrase, salt);
-    this.checkPassphrase(derivedKey, saltExisted);
+    this.checkPassphrase(derivedKey, created);
     this.derivedKey = derivedKey;
     // The audit chain key is derived from the passphrase-derived key and is
     // never stored, so a copy of the database alone cannot forge the chain.
@@ -124,15 +123,18 @@ export class CredVault {
     await this.initPromise;
   }
 
-  private loadOrCreateSalt(): Buffer {
-    if (fs.existsSync(this.saltPath)) {
-      const hex = fs.readFileSync(this.saltPath, 'utf8').trim();
-      return Buffer.from(hex, 'hex');
+  /**
+   * Load the salt, or create it. Two processes creating the same vault at
+   * once converge on one salt: only the first write lands, and the other
+   * reads it.
+   */
+  private loadOrCreateSalt(): { salt: Buffer; created: boolean } {
+    if (!fs.existsSync(this.saltPath)) {
+      const salt = generateSalt();
+      if (writeFileIfAbsent(this.saltPath, salt.toString('hex'))) return { salt, created: true };
     }
-
-    const salt = generateSalt();
-    fs.writeFileSync(this.saltPath, salt.toString('hex'), { encoding: 'utf8', mode: 0o600 });
-    return salt;
+    const hex = fs.readFileSync(this.saltPath, 'utf8').trim();
+    return { salt: Buffer.from(hex, 'hex'), created: false };
   }
 
   /**
@@ -141,18 +143,23 @@ export class CredVault {
    * and extend the audit chain under the wrong key. A new vault (its salt was
    * just created) or one created before the check existed gets one now.
    */
-  private checkPassphrase(derivedKey: Buffer, saltExisted: boolean): void {
+  private checkPassphrase(derivedKey: Buffer, saltCreated: boolean): void {
     const expected = crypto.createHmac('sha256', derivedKey).update('cred:passphrase-check:v1').digest();
-    if (!saltExisted || !fs.existsSync(this.checkPath)) {
-      fs.writeFileSync(this.checkPath, expected.toString('hex'), { encoding: 'utf8', mode: 0o600 });
+    if (saltCreated) {
+      // A new salt is a new vault: any check value left beside it is stale.
+      replaceFile(this.checkPath, expected.toString('hex'));
       return;
     }
+    if (writeFileIfAbsent(this.checkPath, expected.toString('hex'))) return;
     const stored = fs.readFileSync(this.checkPath, 'utf8').trim();
     if (!/^[0-9a-f]{64}$/.test(stored)) {
       throw new Error(`Vault passphrase check value at ${this.checkPath} is malformed`);
     }
     if (!crypto.timingSafeEqual(Buffer.from(stored, 'hex'), expected)) {
-      throw new Error('Vault passphrase does not match the passphrase this vault was created with');
+      throw new Error(
+        `Vault passphrase does not match the passphrase this vault was created with (check value in ${this.checkPath}). `
+        + 'If that file was written by a start with a mistaken passphrase, remove it and start again with the correct one.',
+      );
     }
   }
 
@@ -812,4 +819,37 @@ export async function createVault(options: VaultOptions): Promise<CredVault> {
   const vault = new CredVault(options);
   await vault.init();
   return vault;
+}
+
+/**
+ * Write a small file, mode 0600, only if nothing is at `path` yet: the
+ * content is written to a temporary file and linked into place, so the
+ * file appears complete or not at all. Returns false when it already exists.
+ */
+function writeFileIfAbsent(path: string, content: string): boolean {
+  const tmp = `${path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.linkSync(tmp, path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    // Filesystems without hard links: an exclusive create instead.
+    try {
+      fs.writeFileSync(path, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      return true;
+    } catch (fallback) {
+      if ((fallback as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw fallback;
+    }
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** Replace a small file atomically, mode 0600. */
+function replaceFile(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tmp, path);
 }

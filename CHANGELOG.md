@@ -22,9 +22,13 @@
   one the vault was created with, before any read or write, instead of
   failing later at decryption (and, until now, extending the audit chain
   under the wrong key). The check value is an HMAC of the derived key in
-  `<path>.check`, next to `<path>.salt`; like the salt it is not secret. A
-  vault created before this release gets one on its first init. Removing
-  the salt starts a new vault and a new check value.
+  `<path>.check`, next to `<path>.salt`, written mode 0600 and only if
+  absent, so processes creating a vault at once agree on one salt and one
+  check value. It holds no key material, but with the salt it allows
+  offline passphrase guessing, as the vault file does. A vault created
+  before this release gets one on its first init; if that init used a
+  mistaken passphrase, remove the file and start again. Removing the salt
+  starts a new vault and a new check value.
 - **Breaking** for code that uses `SQLiteBackend` directly: `writeAuditEvent`
   throws until `setAuditChainKey()` has been called (`CredVault.init()` does
   this). Custom `StorageBackend` implementations need no change; without the

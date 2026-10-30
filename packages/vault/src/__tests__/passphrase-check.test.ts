@@ -5,8 +5,8 @@
  * configuration mistake as tampering.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
 import { CredVault } from '../vault.js';
@@ -77,8 +77,24 @@ describe('vault passphrase check', () => {
     rmSync(path);
     unlinkSync(`${path}.salt`);
     await expect(new CredVault({ passphrase: 'new-passphrase', storage: 'sqlite', path }).init()).resolves.toBeUndefined();
+    expect(statSync(`${path}.check`).mode & 0o777).toBe(0o600);
     await expect(new CredVault({ passphrase: 'old-passphrase', storage: 'sqlite', path }).init())
       .rejects.toThrow(/passphrase does not match/);
+  });
+
+  it('converges on one salt and check value when two instances create the vault at once', async () => {
+    const path = vaultPath('vault.db');
+    const passphrase = 'right-passphrase';
+    await Promise.all(Array.from({ length: 4 }, () => new CredVault({ passphrase, storage: 'sqlite', path }).init()));
+    await expect(new CredVault({ passphrase, storage: 'sqlite', path }).init()).resolves.toBeUndefined();
+    expect(readdirSync(dirname(path)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('names the check file and the way out when the passphrase does not match', async () => {
+    const path = vaultPath('vault.db');
+    await new CredVault({ passphrase: 'right-passphrase', storage: 'sqlite', path }).init();
+    await expect(new CredVault({ passphrase: 'wrong-passphrase', storage: 'sqlite', path }).init())
+      .rejects.toThrow(new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.check.*remove it`));
   });
 
   it('enforces the check on file storage as well', async () => {
