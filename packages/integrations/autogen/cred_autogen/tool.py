@@ -13,11 +13,19 @@ agent-controlled inputs.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 from autogen_core.tools import FunctionTool
 
 from cred import Cred
+
+if TYPE_CHECKING:
+    from cred import DpopSigningIdentity
+
+
+def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
+    """``agent_identity=`` for the SDK call, only when one is configured."""
+    return {"agent_identity": agent_identity} if agent_identity is not None else {}
 
 
 def cred_delegate_tool(
@@ -26,6 +34,8 @@ def cred_delegate_tool(
     app_client_id: str,
     base_url: str,
     token_format: str = "raw",
+    *,
+    agent_identity: Optional[DpopSigningIdentity] = None,
 ) -> FunctionTool:
     """Create an AutoGen FunctionTool for credential delegation.
 
@@ -37,6 +47,12 @@ def cred_delegate_tool(
         user_id:        The user whose credentials to delegate.
         app_client_id:  The Cred app client ID to delegate for.
         base_url:       Override the API base URL.
+        token_format:   ``"raw"`` (access token) or ``"handle"`` (brokered handle).
+        agent_identity: The agent's own identity (an ``AgentIdentity`` from
+                        ``cred``). Brokered handles are bound to this key: the
+                        Cred server requires a DPoP proof by it to issue a
+                        handle and to use one. The key stays in your process;
+                        it is never sent to the model or the server.
 
     Returns:
         A ``FunctionTool`` ready to use with AutoGen agents.
@@ -54,6 +70,9 @@ def cred_delegate_tool(
             agent_token=os.environ["CRED_AGENT_TOKEN"],
             user_id="user_123",
             app_client_id="my_app",
+            base_url=os.environ["CRED_BASE_URL"],
+            token_format="handle",
+            agent_identity=identity,  # an AgentIdentity; never shown to the model
         )
         # Register with an AutoGen agent
     """
@@ -80,6 +99,7 @@ def cred_delegate_tool(
                 user_id=user_id,
                 app_client_id=app_client_id,
                 scopes=resolved_scopes,
+                **_identity_kwargs(agent_identity),
             )
             return json.dumps({
                 "token_type": result.token_type,
@@ -122,6 +142,8 @@ def cred_delegate_tool(
 def cred_use_tool(
     agent_token: str,
     base_url: str,
+    *,
+    agent_identity: Optional[DpopSigningIdentity] = None,
 ) -> FunctionTool:
     """Create an AutoGen FunctionTool for brokered upstream API calls."""
     cred = Cred(agent_token=agent_token, base_url=base_url)
@@ -140,6 +162,7 @@ def cred_use_tool(
             method=method,
             body=body,
             extra_headers=extra_headers,
+            **_identity_kwargs(agent_identity),
         )
         return json.dumps({
             "status": result.status,

@@ -102,6 +102,8 @@ export interface UseToolContext {
   /** True in cloud mode, where every cached entry is a server handle. */
   useServerBroker?: boolean;
   agentDid?: string;
+  /** This agent's own identity; signs the DPoP proof for each brokered call. */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleUse(
@@ -149,6 +151,7 @@ export async function handleUse(
         method: input.method,
         body: input.body,
         extraHeaders: input.extra_headers,
+        ...(context.delegatorIdentity ? { agentIdentity: context.delegatorIdentity } : {}),
       });
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

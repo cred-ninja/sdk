@@ -48,7 +48,7 @@ import {
   isCredProtocolVersionSupported,
 } from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
-import { createActorToken } from './identity.js';
+import { createActorToken, createDpopProof } from './identity.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
 // No default base URL — users must explicitly set their server URL.
@@ -608,7 +608,9 @@ export class Cred {
       method: params.method,
       ...(params.body !== undefined ? { body: params.body } : {}),
       ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
-    });
+    }, params.agentIdentity
+      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.delegationId) }
+      : undefined);
   }
 
   private validateConstraints(value: unknown) {
@@ -1348,8 +1350,12 @@ export class Cred {
       body.scopes = params.scopes;
     }
     if (params.constraints !== undefined) body.constraints = params.constraints;
-    if (params.agentDid) {
-      body.agent_did = params.agentDid;
+    if (params.agentIdentity && params.agentDid && params.agentDid !== params.agentIdentity.did) {
+      throw new CredError('agentDid and agentIdentity.did name different agents', 'invalid_config', 0);
+    }
+    const agentDid = params.agentIdentity?.did ?? params.agentDid;
+    if (agentDid) {
+      body.agent_did = agentDid;
     }
 
     const data = await this.post<{
@@ -1360,7 +1366,9 @@ export class Cred {
       scopes: string[];
       delegation_id: string;
       receipt?: string;
-    }>('/api/v1/delegate', body);
+    }>('/api/v1/delegate', body, params.agentIdentity
+      ? { DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/delegate`) }
+      : undefined);
 
     const DEFAULT_TTL_SECONDS = 900;
     const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
@@ -1765,8 +1773,8 @@ export class Cred {
     };
   }
 
-  private requestHeaders(path: string, method: string): Record<string, string> {
-    const headers = this.headers();
+  private requestHeaders(path: string, method: string, extra?: Record<string, string>): Record<string, string> {
+    const headers = { ...this.headers(), ...(extra ?? {}) };
     if (!this.webBotAuthSigner || !this.baseUrl) return headers;
     return this.webBotAuthSigner.signRequest({
       url: `${this.baseUrl}${path}`,
@@ -1775,10 +1783,10 @@ export class Cred {
     });
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: this.requestHeaders(path, 'POST'),
+      headers: this.requestHeaders(path, 'POST', extraHeaders),
       body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);

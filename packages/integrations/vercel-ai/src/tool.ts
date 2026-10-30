@@ -38,6 +38,14 @@ export interface CredDelegateToolOptions {
    * token to the LLM context and defeats the brokered security model.
    */
   tokenFormat?: 'raw' | 'handle';
+  /**
+   * The agent's own identity (`did` and Ed25519 `privateKey`, e.g. from
+   * `importAgentIdentity` in `@credninja/sdk`). Brokered handles are bound to
+   * this key: the Cred server requires a DPoP proof by it to issue a handle
+   * and to use one. The key stays in your process; it is never sent to the
+   * model or the server.
+   */
+  agentIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export interface CredUseToolOptions {
@@ -45,6 +53,14 @@ export interface CredUseToolOptions {
   agentToken: string;
   /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl: string;
+  /**
+   * The agent's own identity (`did` and Ed25519 `privateKey`, e.g. from
+   * `importAgentIdentity` in `@credninja/sdk`). Brokered handles are bound to
+   * this key: the Cred server requires a DPoP proof by it to issue a handle
+   * and to use one. The key stays in your process; it is never sent to the
+   * model or the server.
+   */
+  agentIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 interface CredUseToolInput {
@@ -81,7 +97,7 @@ interface CredUseToolInput {
  * ```
  */
 export function credDelegateTool(options: CredDelegateToolOptions): Tool {
-  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle' } = options;
+  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle', agentIdentity } = options;
   const inputSchema = z.object({
     service: z
       .string()
@@ -147,6 +163,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
             userId,
             appClientId,
             scopes: resolvedScopes,
+            ...(agentIdentity ? { agentIdentity } : {}),
           })
         : await cred.delegate({
             service,
@@ -192,7 +209,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
  * Use this with `credDelegateTool({ tokenFormat: 'handle', ... })`.
  */
 export function credUseTool(options: CredUseToolOptions): Tool {
-  const { agentToken, baseUrl } = options;
+  const { agentToken, baseUrl, agentIdentity } = options;
   const cred = new Cred({
     agentToken,
     baseUrl,
@@ -218,6 +235,7 @@ export function credUseTool(options: CredUseToolOptions): Tool {
         method,
         body,
         extraHeaders,
+        ...(agentIdentity ? { agentIdentity } : {}),
       });
     },
   } as any);

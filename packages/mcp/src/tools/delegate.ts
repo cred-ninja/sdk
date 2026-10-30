@@ -58,6 +58,12 @@ export interface DelegateToolContext {
   agentDid?: string;
   tokenCache: TokenCache;
   useServerBroker?: boolean;
+  /**
+   * This agent's own identity (cloud mode, CRED_AGENT_PRIVATE_KEY_HEX).
+   * A brokered handle is bound to its key: the server requires a DPoP proof
+   * by it when the handle is issued and each time it is used.
+   */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleDelegate(
@@ -74,7 +80,10 @@ export async function handleDelegate(
       ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
     };
     const result = context.useServerBroker
-      ? await context.cred.delegateHandle(request)
+      ? await context.cred.delegateHandle({
+        ...request,
+        ...(context.delegatorIdentity ? { agentIdentity: context.delegatorIdentity } : {}),
+      })
       : await context.cred.delegate(request);
 
     // Store either the local token or the server-side broker handle in the local

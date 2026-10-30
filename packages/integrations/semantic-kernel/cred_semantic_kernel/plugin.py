@@ -8,11 +8,19 @@ At runtime, the agent provides ``service`` and ``scopes`` as function parameters
 from __future__ import annotations
 
 import json
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 from semantic_kernel.functions import kernel_function
 
 from cred import Cred
+
+if TYPE_CHECKING:
+    from cred import DpopSigningIdentity
+
+
+def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
+    """``agent_identity=`` for the SDK call, only when one is configured."""
+    return {"agent_identity": agent_identity} if agent_identity is not None else {}
 
 
 class CredPlugin:
@@ -31,6 +39,9 @@ class CredPlugin:
             agent_token=os.environ["CRED_AGENT_TOKEN"],
             user_id="user_123",
             app_client_id="my_app",
+            base_url=os.environ["CRED_BASE_URL"],
+            token_format="handle",
+            agent_identity=identity,  # an AgentIdentity; never shown to the model
         )
         kernel.add_plugin(plugin, plugin_name="cred")
 
@@ -47,13 +58,25 @@ class CredPlugin:
         app_client_id: str,
         base_url: str,
         token_format: str = "raw",
+        *,
+        agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> None:
+        """
+        Args:
+            agent_identity: The agent's own identity (an ``AgentIdentity`` from
+                ``cred``). Brokered handles are bound to this key: the Cred server
+                requires a DPoP proof by it to issue a handle and to use one. The
+                key stays in your process; it is never sent to the model or the server.
+        """
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
         self._user_id = user_id
         self._app_client_id = app_client_id
         self._token_format = token_format
+        # The agent's DPoP signing identity; never part of a kernel function's
+        # parameters or result.
+        self._agent_identity = agent_identity
 
     @kernel_function(
         name="delegate",
@@ -80,6 +103,7 @@ class CredPlugin:
                 user_id=self._user_id,
                 app_client_id=self._app_client_id,
                 scopes=scope_list if scope_list else None,
+                **_identity_kwargs(self._agent_identity),
             )
             return json.dumps({
                 "token_type": result.token_type,
@@ -130,6 +154,7 @@ class CredPlugin:
             method=method,
             body=parsed_body,
             extra_headers=parsed_headers,
+            **_identity_kwargs(self._agent_identity),
         )
         return json.dumps({
             "status": result.status,

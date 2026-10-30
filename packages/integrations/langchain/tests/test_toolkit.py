@@ -363,3 +363,70 @@ class TestSecretFromCred:
 
         assert isinstance(secret, SecretStr)
         assert secret.get_secret_value() == "ya29.secret"
+
+
+# ── DPoP: agent_identity reaches delegate_handle() and use() ─────────────────
+
+import base64 as _b64
+import hashlib as _hashlib
+
+from cred import generate_agent_identity
+
+
+def _fake_cred_server(calls: list):
+    """httpx.Client.request stand-in that records each request's headers."""
+    def request(self, method, path, json=None, headers=None, **kwargs):
+        calls.append({"path": path, "body": json, "headers": headers or {}})
+        if path == "/api/v1/delegate":
+            return httpx.Response(200, json={
+                "token_type": "Delegation",
+                "expires_in": 900,
+                "service": "google",
+                "user_id": USER_ID,
+                "scopes": ["calendar.readonly"],
+                "delegation_id": "del_bound",
+            })
+        return httpx.Response(200, json={"status": 200, "ok": True, "contentType": "application/json", "body": {}})
+    return request
+
+
+def _dpop_claims(proof: str) -> dict:
+    segment = proof.split(".")[1]
+    return json.loads(_b64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+
+
+def _assert_dpop_bound(calls: list, identity, outputs: list) -> None:
+    delegate_call, use_call = calls
+    assert delegate_call["path"] == "/api/v1/delegate"
+    assert delegate_call["body"]["agent_did"] == identity.did
+    delegate_claims = _dpop_claims(delegate_call["headers"]["DPoP"])
+    assert delegate_claims["htu"] == f"{BASE_URL}/api/v1/delegate"
+    assert "ath" not in delegate_claims
+
+    assert use_call["path"] == "/api/v1/use"
+    use_claims = _dpop_claims(use_call["headers"]["DPoP"])
+    assert use_claims["htu"] == f"{BASE_URL}/api/v1/use"
+    expected_ath = _b64.urlsafe_b64encode(_hashlib.sha256(b"del_bound").digest()).rstrip(b"=").decode()
+    assert use_claims["ath"] == expected_ath
+
+    # The key never reaches what the model sees.
+    for output in outputs:
+        assert identity.private_key.hex() not in output
+        assert "agent_identity" not in output
+
+
+class TestAgentIdentity:
+    def test_agent_identity_reaches_delegate_handle_and_use(self):
+        identity = generate_agent_identity()
+        toolkit = CredToolkit(
+            agent_token=TOKEN, base_url=BASE_URL, user_id=USER_ID,
+            token_format="handle", agent_identity=identity,
+        )
+        tools = {t.name: t for t in toolkit.get_tools()}
+        for name in ("cred_delegate", "cred_use"):
+            assert "agent_identity" not in tools[name].args_schema.model_json_schema()["properties"]
+        calls: list = []
+        with patch("httpx.Client.request", _fake_cred_server(calls)):
+            delegated = tools["cred_delegate"]._run(service="google", app_client_id="app_1", scopes=["calendar.readonly"])
+            used = tools["cred_use"]._run(delegation_id="del_bound", url="https://www.googleapis.com/x")
+        _assert_dpop_bound(calls, identity, [delegated, used])

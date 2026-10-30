@@ -94,6 +94,18 @@ export interface BrokeredUseParams {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
+  /**
+   * The identity of the agent the handle was issued to. The client signs a
+   * DPoP proof (RFC 9449) with its key for this call; a server that binds
+   * handles to agent keys (the default) refuses the call without one.
+   */
+  agentIdentity?: DpopSigningIdentity;
+}
+
+/** The part of an agent identity that signs DPoP proofs. */
+export interface DpopSigningIdentity {
+  did: string;
+  privateKey: Uint8Array;
 }
 
 export interface BrokeredUseResult {
@@ -129,6 +141,14 @@ export interface DelegateParams {
   scopes?: string[];
   /** Agent's DID (did:key:...). If provided, Cred returns a signed receipt. */
   agentDid?: string;
+  /**
+   * The agent's identity, for `delegateHandle()`. The handle is issued to
+   * `agentIdentity.did` and bound to its key: the client proves the key with
+   * a DPoP proof (RFC 9449), and every `use()` of the handle needs the same
+   * identity. A server that binds handles to agent keys (the default)
+   * refuses a handle request without one.
+   */
+  agentIdentity?: DpopSigningIdentity;
   /** Optional trusted claims embedded into a local delegation receipt. */
   receiptClaims?: string[];
   /** Wire constraint objects. Unknown types cannot authorize raw-token issuance. */

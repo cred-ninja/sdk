@@ -13,6 +13,11 @@ if TYPE_CHECKING:
     from cred import Cred
 
 
+def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
+    """``agent_identity=`` for the SDK call, only when one is configured."""
+    return {"agent_identity": agent_identity} if agent_identity is not None else {}
+
+
 # ── Input schemas ─────────────────────────────────────────────────────────────
 
 class DelegateInput(BaseModel):
@@ -67,7 +72,9 @@ class CredDelegateTool(BaseTool):
     _cred: Any = None
     _user_id: str = ""
     _token_format: str = "raw"
-    _cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[Any, float]] = {}
+    # The agent's DPoP signing identity; never part of the tool's input or output.
+    _agent_identity: Any = None
+    _cache: dict[tuple[str, str, str, str, tuple[str, ...]], tuple[Any, float]] = {}
 
     def _get_delegation_result(
         self,
@@ -76,7 +83,9 @@ class CredDelegateTool(BaseTool):
         scopes: Optional[list[str]],
     ) -> Any:
         resolved_scopes = scopes or []
-        cache_key = (self._token_format, service, app_client_id, tuple(resolved_scopes))
+        # A handle is bound to the agent's key, so the key is part of the cache key.
+        agent_did = getattr(self._agent_identity, "did", "")
+        cache_key = (self._token_format, agent_did, service, app_client_id, tuple(resolved_scopes))
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached and cached[1] > now:
@@ -88,6 +97,7 @@ class CredDelegateTool(BaseTool):
                 user_id=self._user_id,
                 app_client_id=app_client_id,
                 scopes=resolved_scopes,
+                **_identity_kwargs(self._agent_identity),
             )
         else:
             result = self._cred.delegate(
@@ -143,6 +153,8 @@ class CredUseTool(BaseTool):
     args_schema: Type[BaseModel] = UseInput
 
     _cred: Any = None
+    # The agent's DPoP signing identity; never part of the tool's input or output.
+    _agent_identity: Any = None
 
     def _run(
         self,
@@ -159,6 +171,7 @@ class CredUseTool(BaseTool):
             method=method,
             body=body,
             extra_headers=extra_headers,
+            **_identity_kwargs(self._agent_identity),
         )
         return json.dumps({
             "status": result.status,

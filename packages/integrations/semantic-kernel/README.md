@@ -14,6 +14,12 @@ pip install cred-semantic-kernel
 import os
 import semantic_kernel as sk
 from cred_semantic_kernel import CredPlugin
+from cred import AgentIdentity
+
+# The agent's own did:key identity, created once with cred.generate_agent_identity()
+# and persisted with identity.export(); load_agent_identity() stands for your own
+# secret store lookup returning that dict.
+identity = AgentIdentity.from_export(load_agent_identity())
 
 kernel = sk.Kernel()
 
@@ -23,6 +29,7 @@ plugin = CredPlugin(
     user_id="user_123",
     app_client_id="my_app_client_id",
     token_format="handle",
+    agent_identity=identity,
 )
 
 kernel.add_plugin(plugin, plugin_name="cred")
@@ -42,6 +49,8 @@ The `cred` plugin exposes two kernel functions:
 `user_id` and `app_client_id` are pre-configured at construction time, not agent-controlled.
 
 By default, `delegate` returns a legacy access token for backwards compatibility. Set `token_format="handle"` to return a brokered delegation handle instead, then call `use` to make allowed service API calls without exposing provider access tokens.
+
+`agent_identity` binds brokered handles to the agent's own key: the Cred server (which requires DPoP by default) issues and accepts a handle only with a DPoP proof signed by it. The key stays in your process; it is never sent to the model or the server, and it is not a tool argument.
 
 ### `use`
 

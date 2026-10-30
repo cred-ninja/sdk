@@ -24,6 +24,7 @@ function makeConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN_TOKEN,
     requireAgentIdentity: false,
+    requireDpop: false,
     agentRequestVerifier: (req) => {
       const agent = req.get('X-Test-Agent');
       return agent
