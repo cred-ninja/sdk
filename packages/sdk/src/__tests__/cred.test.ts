@@ -369,6 +369,16 @@ describe('Cred.delegateHandle() and use()', () => {
       .toMatchObject({ iss: child.did, aud: `${BASE_URL}/api/v1/token` });
   });
 
+  it('sends requested capabilities as authorization_details', async () => {
+    const agent = await generateAgentIdentity();
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'dt', token_type: 'DPoP', cnf: { jkt: 'j' }, expires_in: 900, service: 'github', user_id: 'u', scopes: ['repo'], delegation_id: 'd',
+    }));
+    const authorizationDetails = [{ type: 'cred_delegation' as const, provider: 'github', operations: ['github.issues.create'], resources: ['repo:acme/app'] }];
+    await cred.delegateHandle({ service: 'github', userId: 'u', appClientId: 'app', agentIdentity: agent, authorizationDetails });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).authorization_details).toEqual(authorizationDetails);
+  });
+
   it('refuses to request a Delegation Token without the agent identity it is bound to', async () => {
     await expect(cred.delegateHandle({ service: 'google', userId: 'user_1', appClientId: 'app_1' }))
       .rejects.toMatchObject({ code: 'invalid_config' });

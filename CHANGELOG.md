@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added: capabilities and the operation catalogue
+
+- `@credninja/server`: `/api/v1/delegate` and `/api/v1/subdelegate` accept
+  `authorization_details` (RFC 9396, type `cred_delegation`). An operation
+  is a granted OAuth scope, which allows what that scope allows, or a
+  catalogue operation, which allows one method and URL template: GitHub
+  (`github.user.get`, `github.repos.get`, `github.contents.get`,
+  `github.issues.{list,get,create,comment}`, `github.pulls.{list,get}`)
+  and Google Drive (`drive.files.{list,get,export,create}`). Resources
+  narrow a catalogue operation: `repo:owner/name` (case-insensitive) or
+  `file:<id>`. Unknown operations and resource kinds are refused at
+  issuance (`400 invalid_authorization_details`) and calls outside the
+  capabilities are refused at exercise (`403 capability_denied`). A child
+  is held within its parent's capabilities (`403
+  capability_escalation_denied`); a child that names none inherits a
+  narrowed parent's. Without `authorization_details`, a token's
+  capabilities are its granted scopes, as before.
+- `@credninja/sdk`: `authorizationDetails` on `delegateHandle()`,
+  `subDelegateHandle()` and `subDelegateGrant()`.
+
 ### BREAKING: Delegation Tokens replace brokered handles
 
 - `@credninja/server`: `/api/v1/delegate`, `/api/v1/subdelegate` and the

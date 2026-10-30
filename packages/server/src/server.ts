@@ -75,6 +75,7 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
+import { capabilitiesAllow, capabilitiesSubsumed, validateCapabilities } from './capabilities.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -125,6 +126,8 @@ interface BrokeredDelegation {
   link?: LinkHandleBinding;
   /** DID the handle was issued to, when the request named one. */
   agentDid?: string;
+  /** The Delegation Token's capabilities: exercise is held within them. */
+  capabilities?: CredDelegationDetail[];
   /**
    * RFC 7638 thumbprint of `agentDid`'s key when it is a did:key. Every
    * /api/v1/use of the handle must carry a DPoP proof (RFC 9449) by that
@@ -3218,6 +3221,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     constraints?: DelegationConstraint[];
     agentDid?: string;
     dpopJkt?: string;
+    capabilities?: CredDelegationDetail[];
   }): void {
     const expiresAt = Date.now() + Math.max(1, input.expiresIn) * 1000;
     brokeredDelegations.set(input.delegationId, {
@@ -3231,6 +3235,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.agentDid ? { agentDid: input.agentDid } : {}),
       ...(input.dpopJkt ? { dpopJkt: input.dpopJkt } : {}),
+      ...(input.capabilities ? { capabilities: input.capabilities } : {}),
     });
     const timeout = setTimeout(() => brokeredDelegations.delete(input.delegationId), Math.max(1, input.expiresIn) * 1000);
     if (timeout.unref) timeout.unref();
@@ -3490,6 +3495,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       storeBrokeredDelegation({
         agentDid: input.agentDid,
         dpopJkt: input.grant.jkt,
+        capabilities: input.grant.authorizationDetails as CredDelegationDetail[],
         delegationId: input.delegationId,
         accessToken: input.accessToken,
         service: input.service,
@@ -3536,6 +3542,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     constraints?: DelegationConstraint[];
     consentId: string;
     prf: string[];
+    /** Validated capabilities; defaults to the granted scopes as operations. */
+    capabilities?: CredDelegationDetail[];
   }): DelegationGrant | null {
     const jkt = dpopBindingFor(input.agentDid);
     if (!jkt) return null;
@@ -3547,7 +3555,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       scopes: input.scopes,
       appClientId: input.appClientId,
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
-      authorizationDetails: capabilitiesFor(input.service, input.scopes),
+      authorizationDetails: input.capabilities ?? capabilitiesFor(input.service, input.scopes),
       prf: input.prf,
     };
   }
@@ -3560,13 +3568,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     scopes: string[];
     permission: Permission | null;
     delegationId: string;
+    capabilities?: CredDelegationDetail[];
   }): Promise<string> {
     const record = await vault.recordConsent({
       id: `consent_${crypto.randomBytes(16).toString('hex')}`,
       subject: input.userId,
       agentDid: input.agentDid,
       service: input.service,
-      capabilities: capabilitiesFor(input.service, input.scopes),
+      capabilities: input.capabilities ?? capabilitiesFor(input.service, input.scopes),
       // Without an approval flow, consent is the admin's Permission when one
       // authorized the delegation, else the subject's own provider connection.
       source: input.permission ? 'permission' : 'connection',
@@ -3999,6 +4008,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       ...(grant.constraints && grant.constraints.length > 0 ? { constraints: grant.constraints as DelegationConstraint[] } : {}),
       agentDid: record.agentDid,
       dpopJkt: grant.jkt,
+      capabilities: grant.authorizationDetails as CredDelegationDetail[],
     });
     return getBrokeredDelegation(delegationId);
   }
@@ -4204,6 +4214,30 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
       }
+      // The token's capabilities narrow the scopes further: a catalogue
+      // operation allows one method and URL template, a resource one
+      // repository or file (Section 5.2).
+      if (delegation.capabilities && !capabilitiesAllow(
+        delegation.capabilities,
+        delegation.service,
+        normalizedMethod,
+        upstreamUrl,
+        (ops) => resolveBrokerUrl(delegation.service, url, ops.filter((op) => guardResult.effectiveScopes.includes(op))) !== null,
+      )) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: delegation.agentDid ?? 'unverified' },
+          action: 'deny',
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: 'capability_denied',
+          metadata: { delegationId, method: normalizedMethod },
+        });
+        res.status(403).json({ error: 'capability_denied', message: 'This call is outside the delegation\'s capabilities' });
+        return;
+      }
 
       let upstreamToken = delegation.accessToken;
       if (linkAccess && delegation.link) {
@@ -4341,6 +4375,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         appClientId = 'local',
         scopes,
         constraints: requestedConstraintsRaw,
+        authorization_details: requestedCapabilities,
         agent_did: agentDid,
         tofu_fingerprint: tofuFingerprint,
         tofu_payload: tofuPayload,
@@ -4356,6 +4391,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
          * Every hop below must restate each at least as tight.
          */
         constraints?: unknown;
+        /** RFC 9396 capabilities (type cred_delegation); default: the granted scopes. */
+        authorization_details?: unknown;
         agent_did?: string;
         tofu_fingerprint?: string;
         tofu_payload?: string;
@@ -4604,8 +4641,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(400).json({ error: 'invalid_scope', message: 'A Delegation Token needs at least one granted scope' });
           return;
         }
+        let capabilities: CredDelegationDetail[] | undefined;
+        if (requestedCapabilities !== undefined) {
+          const checked = validateCapabilities(requestedCapabilities, service, grantedScopes);
+          if (!checked.ok) {
+            res.status(400).json({ error: 'invalid_authorization_details', message: checked.message });
+            return;
+          }
+          capabilities = checked.details;
+        }
         const consentId = await recordRootConsent({
           userId, agentDid: agentDid!, service, scopes: grantedScopes, permission: authorizingPermission, delegationId,
+          ...(capabilities ? { capabilities } : {}),
         });
         grant = newDelegationGrant({
           agentDid,
@@ -4615,6 +4662,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           constraints: rootConstraints.constraints,
           consentId,
           prf: [receiptContentId(receipt!)],
+          ...(capabilities ? { capabilities } : {}),
         })!;
       }
 
@@ -5254,6 +5302,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         appClientId = 'local',
         scopes: requestedScopes,
         constraints: requestedConstraintsRaw,
+        authorization_details: requestedCapabilities,
         ancestor_receipts: ancestorReceipts,
         exchange,
         agent_delegation_chain: parentAgentDelegationChain,
@@ -5264,6 +5313,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
          * the receiving agent redeems at POST /api/v1/token.
          */
         exchange?: string;
+        authorization_details?: unknown;
         /**
          * With token_profile "agent_delegation": the parent's
          * agent_delegation token chain, root first, so the child token can
@@ -5837,6 +5887,32 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         expiresAt: null,
         chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
       })).id;
+      // The child's capabilities must be within the parent's (Section 5.2):
+      // what it asks for, or by default its granted scopes as operations.
+      const parentCapabilities = (parentGrant?.authorizationDetails as CredDelegationDetail[] | undefined)
+        ?? capabilitiesFor(service, parent.scopes);
+      let childCapabilities = capabilitiesFor(service, validation.grantedScopes);
+      if (requestedCapabilities !== undefined) {
+        const checked = validateCapabilities(requestedCapabilities, service, validation.grantedScopes);
+        if (!checked.ok) {
+          res.status(400).json({ error: 'invalid_authorization_details', message: checked.message });
+          return;
+        }
+        childCapabilities = checked.details;
+      } else if (!capabilitiesSubsumed(parentCapabilities, childCapabilities)) {
+        // A parent narrowed to catalogue operations passes them down
+        // unchanged, provided the child's own scopes still grant them.
+        const inherited = validateCapabilities(parentCapabilities, service, validation.grantedScopes);
+        if (!inherited.ok) {
+          res.status(403).json({ error: 'capability_escalation_denied', message: `The child's scopes do not cover the parent's capabilities: ${inherited.message}` });
+          return;
+        }
+        childCapabilities = inherited.details;
+      }
+      if (!capabilitiesSubsumed(parentCapabilities, childCapabilities)) {
+        res.status(403).json({ error: 'capability_escalation_denied', message: 'The requested capabilities are wider than the parent delegation\'s' });
+        return;
+      }
       const grantState = newDelegationGrant({
         agentDid,
         service,
@@ -5845,6 +5921,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         constraints: validation.grantedConstraints,
         consentId,
         prf: [...(parentGrant?.prf ?? [receiptContentId(parentReceipt)]), receiptContentId(receipt)],
+        capabilities: childCapabilities,
       });
       if (!grantState || validation.grantedScopes.length === 0) {
         res.status(400).json({
