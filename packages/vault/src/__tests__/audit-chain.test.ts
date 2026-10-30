@@ -12,7 +12,7 @@ import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
 import { CredVault } from '../vault.js';
 import { SQLiteBackend } from '../storage/sqlite.js';
-import { AUDIT_CHAIN_GENESIS, auditChainHash } from '../audit.js';
+import { auditChainGenesis, auditChainHash } from '../audit.js';
 import type { AuditEvent, AuditRow } from '../audit.js';
 
 const dirs: string[] = [];
@@ -31,6 +31,12 @@ function event(id: string, outcome: AuditEvent['outcome'] = 'success'): AuditEve
     correlationId: `corr_${id}`,
     metadata: { n: id },
   };
+}
+
+function insertUnchained(db: Database.Database, id: string): void {
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO vault_audit_events (id, timestamp, actor_type, actor_id, action, resource_type, resource_id, outcome, correlation_id, created_at)
+    VALUES (?, ?, 'system', 'admin', 'revoke', 'token', 'google/alice', 'success', ?, ?)`).run(id, now, `corr_${id}`, now);
 }
 
 async function vaultWith(events: number, passphrase = 'audit-chain-test-passphrase') {
@@ -75,10 +81,12 @@ describe('tamper-evident audit chain', () => {
     db2.close();
     // Truncating the tail leaves a valid shorter chain: only a head recorded
     // elsewhere shows the loss.
+    expect(recordedHead!.seq).toBe(5);
+    expect(head!.seq).toBe(5);
     const after = second.vault.verifyAuditChain();
-    expect(after.ok).toBe(true);
-    expect(second.vault.auditChainHead()).not.toEqual(head);
-    expect(recordedHead).not.toBeNull();
+    expect(after).toMatchObject({ ok: true, entries: 4 });
+    expect(after.ok && after.head!.seq).toBe(4);
+    expect(after.ok && after.head!.hash).not.toBe(head!.hash);
   });
 
   it('detects reordered entries', async () => {
@@ -99,7 +107,7 @@ describe('tamper-evident audit chain', () => {
     const db = new Database(path);
     db.prepare("UPDATE vault_audit_events SET outcome = 'denied' WHERE chain_seq = 2").run();
     const rows = db.prepare('SELECT * FROM vault_audit_events ORDER BY chain_seq').all() as Array<AuditRow & { chain_seq: number }>;
-    let previous = AUDIT_CHAIN_GENESIS;
+    let previous = auditChainGenesis(0);
     for (const row of rows) {
       const hash = auditChainHash(forgedKey, previous, row.chain_seq, row);
       db.prepare('UPDATE vault_audit_events SET chain_hash = ? WHERE chain_seq = ?').run(hash, row.chain_seq);
@@ -112,11 +120,65 @@ describe('tamper-evident audit chain', () => {
   it('counts rows written before the chain existed as unchained and chains new ones', async () => {
     const { vault, path } = await vaultWith(0);
     const db = new Database(path);
-    db.prepare(`INSERT INTO vault_audit_events (id, timestamp, actor_type, actor_id, action, resource_type, resource_id, outcome, correlation_id, created_at)
-      VALUES ('evt_legacy', ?, 'system', 'admin', 'revoke', 'token', 'google/alice', 'success', 'corr_legacy', ?)`).run(new Date().toISOString(), new Date().toISOString());
+    insertUnchained(db, 'evt_legacy');
     db.close();
     vault.writeAuditEvent(event('evt_new'));
     expect(vault.verifyAuditChain()).toMatchObject({ ok: true, entries: 1, unchained: 1 });
+  });
+
+  it('detects an unchained row added after the chain started', async () => {
+    const { vault, path } = await vaultWith(3);
+    const db = new Database(path);
+    insertUnchained(db, 'evt_forged');
+    db.close();
+    expect(vault.verifyAuditChain()).toMatchObject({ ok: false, brokenAt: 1, unchained: 1 });
+  });
+
+  it('detects the newest entries being un-chained instead of deleted', async () => {
+    const { vault, path } = await vaultWith(5);
+    const db = new Database(path);
+    db.exec("UPDATE vault_audit_events SET chain_seq = NULL, chain_hash = NULL, outcome = 'denied' WHERE chain_seq >= 4");
+    db.close();
+    expect(vault.verifyAuditChain()).toMatchObject({ ok: false, brokenAt: 1, unchained: 2 });
+  });
+
+  it('detects rows from before the chain being removed or added', async () => {
+    const { vault, path } = await vaultWith(0);
+    const db = new Database(path);
+    insertUnchained(db, 'evt_legacy_1');
+    insertUnchained(db, 'evt_legacy_2');
+    vault.writeAuditEvent(event('evt_new'));
+    expect(vault.verifyAuditChain()).toMatchObject({ ok: true, unchained: 2 });
+    db.prepare("DELETE FROM vault_audit_events WHERE id = 'evt_legacy_1'").run();
+    db.close();
+    expect(vault.verifyAuditChain()).toMatchObject({ ok: false, brokenAt: 1 });
+  });
+
+  it('upgrades a database written before the chain existed, in place and idempotently', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cred-audit-chain-'));
+    dirs.push(dir);
+    const path = join(dir, 'vault.db');
+    // The audit table as releases before the chain created it.
+    const db = new Database(path);
+    db.exec(`CREATE TABLE vault_audit_events (
+      id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id TEXT NOT NULL,
+      actor_fingerprint TEXT, action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+      outcome TEXT NOT NULL, delegation_chain TEXT, scopes_requested TEXT, scopes_granted TEXT,
+      correlation_id TEXT NOT NULL, sensitive_hmac TEXT, metadata_json TEXT, error_message TEXT, created_at TEXT NOT NULL)`);
+    insertUnchained(db, 'evt_old_1');
+    insertUnchained(db, 'evt_old_2');
+    db.close();
+
+    const passphrase = 'audit-chain-test-passphrase';
+    const first = new CredVault({ passphrase, storage: 'sqlite', path });
+    await first.init();
+    first.writeAuditEvent(event('evt_new_1'));
+    // A second process (or a restart) opening the upgraded file.
+    const second = new CredVault({ passphrase, storage: 'sqlite', path });
+    await second.init();
+    second.writeAuditEvent(event('evt_new_2'));
+    expect(second.verifyAuditChain()).toMatchObject({ ok: true, entries: 2, unchained: 2 });
+    expect(first.verifyAuditChain()).toMatchObject({ ok: true, entries: 2, unchained: 2 });
   });
 
   it('refuses to write an audit row that cannot join the chain', () => {

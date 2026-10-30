@@ -115,6 +115,17 @@ export interface AuditChainHead {
 export const AUDIT_CHAIN_GENESIS = 'cred-audit-chain-v1';
 
 /**
+ * What the first chained entry links to: the genesis value and the number
+ * of unchained rows (written before the chain existed) at that moment. The
+ * count is bound into every hash after it, so an unchained row added later,
+ * or a chained row stripped of its chain columns, breaks the chain at
+ * entry 1 instead of passing as a pre-upgrade row.
+ */
+export function auditChainGenesis(unchainedBefore: number): string {
+  return `${AUDIT_CHAIN_GENESIS}:${unchainedBefore}`;
+}
+
+/**
  * Chain hash of one stored row: HMAC-SHA256(key, previousHash "\n" JSON of
  * the stored column values in a fixed order). Exported for verifiers.
  */
@@ -153,6 +164,11 @@ export interface AuditRow {
 
 // ── SQLite audit backend ──────────────────────────────────────────────────────
 
+/**
+ * Standalone audit log in its own SQLite file. Its rows are not chained:
+ * do not point it at a vault database, whose chain verification would
+ * report them as tampering.
+ */
 export class SQLiteAuditBackend implements AuditBackend {
   private db: import('better-sqlite3').Database | null = null;
 

@@ -1,7 +1,7 @@
 import type { StorageBackend } from './interface.js';
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow, RotationStrategy, RotationState, RotationFailureAction } from '../types.js';
 import type { AuditEvent, AuditFilter, AuditActor, AuditResource, AuditRow, AuditChainHead, AuditChainVerification } from '../audit.js';
-import { AUDIT_CHAIN_GENESIS, auditChainHash } from '../audit.js';
+import { auditChainGenesis, auditChainHash } from '../audit.js';
 import Database from 'better-sqlite3';
 import {
   assertRecordable,
@@ -875,7 +875,8 @@ export class SQLiteBackend implements StorageBackend {
       const last = db.prepare('SELECT chain_seq, chain_hash FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq DESC LIMIT 1')
         .get() as { chain_seq: number; chain_hash: string } | undefined;
       const seq = (last?.chain_seq ?? 0) + 1;
-      const hash = auditChainHash(key, last?.chain_hash ?? AUDIT_CHAIN_GENESIS, seq, row);
+      const previous = last?.chain_hash ?? auditChainGenesis(this.countUnchainedAuditRows(db));
+      const hash = auditChainHash(key, previous, seq, row);
       db.prepare(`
         INSERT INTO vault_audit_events (
           id, timestamp, actor_type, actor_id, actor_fingerprint,
@@ -896,6 +897,10 @@ export class SQLiteBackend implements StorageBackend {
     else append.immediate();
   }
 
+  private countUnchainedAuditRows(db: Database.Database): number {
+    return (db.prepare('SELECT COUNT(*) AS n FROM vault_audit_events WHERE chain_seq IS NULL').get() as { n: number }).n;
+  }
+
   auditChainHead(): AuditChainHead | null {
     const db = this.ensureDb();
     const last = db.prepare('SELECT chain_seq, chain_hash FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq DESC LIMIT 1')
@@ -907,31 +912,43 @@ export class SQLiteBackend implements StorageBackend {
     const db = this.ensureDb();
     const key = this.auditChainKey;
     if (!key) throw new Error('Audit chain key not set: initialize the vault before verifying');
-    const unchained = (db.prepare('SELECT COUNT(*) AS n FROM vault_audit_events WHERE chain_seq IS NULL').get() as { n: number }).n;
-    const rows = db.prepare('SELECT * FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq ASC')
-      .all() as Array<AuditRow & { chain_seq: number; chain_hash: string }>;
-    let previous = AUDIT_CHAIN_GENESIS;
-    let expectedSeq = 1;
-    for (const row of rows) {
-      if (row.chain_seq !== expectedSeq) {
-        return { ok: false, entries: rows.length, unchained, brokenAt: expectedSeq, reason: `entry ${expectedSeq} is missing` };
+    // One read transaction, so a concurrent append cannot land between the
+    // count and the walk.
+    return db.transaction((): AuditChainVerification => {
+      const unchained = this.countUnchainedAuditRows(db);
+      const entries = (db.prepare('SELECT COUNT(*) AS n FROM vault_audit_events WHERE chain_seq IS NOT NULL').get() as { n: number }).n;
+      // Walk the rows one at a time: the log can be large.
+      const rows = db.prepare('SELECT * FROM vault_audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq ASC')
+        .iterate() as IterableIterator<AuditRow & { chain_seq: number; chain_hash: string }>;
+      let previous = auditChainGenesis(unchained);
+      let expectedSeq = 1;
+      for (const row of rows) {
+        if (row.chain_seq !== expectedSeq) {
+          return { ok: false, entries, unchained, brokenAt: expectedSeq, reason: `entry ${expectedSeq} is missing` };
+        }
+        if (auditChainHash(key, previous, row.chain_seq, row) !== row.chain_hash) {
+          const reason = row.chain_seq === 1
+            ? 'entry 1 does not match its hash, or unchained entries were added or removed'
+            : `entry ${row.chain_seq} does not match its hash`;
+          return { ok: false, entries, unchained, brokenAt: row.chain_seq, reason };
+        }
+        previous = row.chain_hash;
+        expectedSeq += 1;
       }
-      if (auditChainHash(key, previous, row.chain_seq, row) !== row.chain_hash) {
-        return { ok: false, entries: rows.length, unchained, brokenAt: row.chain_seq, reason: `entry ${row.chain_seq} does not match its hash` };
-      }
-      previous = row.chain_hash;
-      expectedSeq += 1;
-    }
-    const head = rows.length > 0 ? { seq: rows[rows.length - 1]!.chain_seq, hash: previous } : null;
-    return { ok: true, entries: rows.length, unchained, head };
+      const head = entries > 0 ? { seq: expectedSeq - 1, hash: previous } : null;
+      return { ok: true, entries, unchained, head };
+    })();
   }
 
   /** Write several audit events in one transaction: one commit, not one per event. */
   writeAuditEvents(events: readonly AuditEvent[]): void {
     const db = this.ensureDb();
-    db.transaction((batch: readonly AuditEvent[]) => {
+    const write = db.transaction((batch: readonly AuditEvent[]) => {
       for (const event of batch) this.writeAuditEvent(event);
-    })(events);
+    });
+    // Take the write lock before reading the head, as a single write does.
+    if (db.inTransaction) write(events);
+    else write.immediate(events);
   }
 
   queryAuditEvents(filter: AuditFilter): AuditEvent[] {

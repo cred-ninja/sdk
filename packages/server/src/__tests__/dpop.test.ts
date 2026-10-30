@@ -12,6 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
 import { createActorToken, createDpopProof, generateAgentIdentity, type AgentIdentity } from '@credninja/sdk';
 import { canonicalJson, didKeyConfirmation } from '@credninja/attenuation';
 import { createServer } from '../server.js';
@@ -658,5 +659,20 @@ describe('GET /admin/audit/verify', () => {
     expect(admin.body.head.seq).toBe(admin.body.entries);
     const agentCall = await request(app).get('/admin/audit/verify').set('Authorization', `Bearer ${TEST_TOKEN}`);
     expect(agentCall.status).toBe(401);
+  });
+
+  it('answers 409 naming the first broken entry once a row is edited', async () => {
+    const agent = await generateAgentIdentity();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-dpop-'));
+    tmpDirs.push(dir);
+    const vaultPath = path.join(dir, 'vault.sqlite');
+    const { app } = await setup({ vaultPath });
+    await delegateAs(app, agent);
+    const db = new Database(vaultPath);
+    db.prepare("UPDATE vault_audit_events SET outcome = 'denied' WHERE chain_seq = 1").run();
+    db.close();
+    const res = await request(app).get('/admin/audit/verify').set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ error: 'audit_chain_broken', ok: false, brokenAt: 1 });
   });
 });

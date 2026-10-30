@@ -208,8 +208,9 @@ const PROVIDER_REVOKE_TIMEOUT_MS = 5_000;
 const DEFAULT_RECEIPT_TTL_SECONDS = 900;
 const MAX_RECEIPT_TTL_SECONDS = 3600;
 // The fixed issuer receipts carried before they named the Delegation Server.
-// Accepted while such receipts can still be live (at most one receipt
-// lifetime after an upgrade); never minted.
+// Never minted here. Accepted only on a receipt issued before this process
+// started, so the allowance ends one receipt lifetime (at most an hour)
+// after an upgrade. Remove once no deployment can hold such a receipt.
 const LEGACY_RECEIPT_ISSUER = 'did:key:local-cred';
 const DEFAULT_DELEGATION_GRANT_TTL_SECONDS = 60;
 const RECEIPT_CLOCK_SKEW_SECONDS = 60;
@@ -316,6 +317,7 @@ function sendProtocolVersionUnsupported(res: Response, requestedVersion: string)
 // ── Server factory ───────────────────────────────────────────────────────────
 
 export function createServer(config: ServerConfig) {
+  const startedAtSeconds = Math.floor(Date.now() / 1000);
   if (!config.agentToken && !config.agentRequestVerifier) {
     throw new Error('Either agentToken or agentRequestVerifier is required');
   }
@@ -1780,7 +1782,9 @@ export function createServer(config: ServerConfig) {
       if (err instanceof StrictJsonError) throw new Error(`Receipt payload is malformed (${err.code}): ${err.message}`);
       throw err;
     }
-    if (payload.iss !== config.redirectBaseUri && payload.iss !== LEGACY_RECEIPT_ISSUER) {
+    const legacyIssuer = payload.iss === LEGACY_RECEIPT_ISSUER
+      && typeof payload.iat === 'number' && payload.iat <= startedAtSeconds;
+    if (payload.iss !== config.redirectBaseUri && !legacyIssuer) {
       throw new Error('Receipt was not issued by this Delegation Server');
     }
     if (!payload.delegationId) {
@@ -2369,12 +2373,20 @@ export function createServer(config: ServerConfig) {
   // Recompute the tamper-evident audit chain and report its head, so an
   // operator can record the head somewhere this host cannot rewrite.
   app.get('/admin/audit/verify', adminAuditRateLimiter, requireAdminAuth, (_req: Request, res: Response) => {
+    let result;
     try {
-      const result = vault.verifyAuditChain();
-      res.status(result.ok ? 200 : 409).json(result);
+      result = vault.verifyAuditChain();
     } catch (error) {
-      res.status(501).json({ error: 'audit_chain_unsupported', message: error instanceof Error ? error.message : 'unsupported' });
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('not supported')) {
+        res.status(501).json({ error: 'audit_chain_unsupported', message });
+        return;
+      }
+      console.error('Audit chain verification failed:', message);
+      res.status(500).json({ error: 'audit_chain_verify_failed' });
+      return;
     }
+    res.status(result.ok ? 200 : 409).json(result.ok ? result : { error: 'audit_chain_broken', ...result });
   });
 
   app.get('/admin/audit', adminAuditRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
