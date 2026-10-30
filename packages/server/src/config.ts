@@ -251,8 +251,8 @@ export function loadConfig(): ServerConfig {
   let receiptTtlSeconds: number | undefined;
   if (receiptTtlSecondsRaw !== undefined) {
     receiptTtlSeconds = parseInt(receiptTtlSecondsRaw, 10);
-    if (!Number.isFinite(receiptTtlSeconds) || receiptTtlSeconds <= 0) {
-      throw new Error('RECEIPT_TTL_SECONDS must be a positive integer');
+    if (!Number.isFinite(receiptTtlSeconds) || receiptTtlSeconds <= 0 || receiptTtlSeconds > 3600) {
+      throw new Error('RECEIPT_TTL_SECONDS must be a positive integer of at most 3600 (1 hour)');
     }
   }
   const receiptAudience = process.env.RECEIPT_AUDIENCE || undefined;

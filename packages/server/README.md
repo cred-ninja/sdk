@@ -60,7 +60,7 @@ npm run dev
 | POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt. Always returns a brokered handle (never the raw provider token), regardless of the requested `token_format` — see note below |
 | POST | `/api/v1/use` | Bearer + DPoP | Broker an upstream API call with a delegation handle, with a `DPoP` proof by the key the handle is bound to. Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
-| DELETE | `/api/v1/delegations/:delegationId` | Bearer | Revoke a delegation and every delegation derived from it, see [Cascading revocation](#cascading-revocation) |
+| DELETE | `/api/v1/delegations/:delegationId`, `/delegation/:delegationId` | Bearer | Revoke a delegation and every delegation derived from it, see [Cascading revocation](#cascading-revocation). The second path is the one the Internet-Draft names; the id is the receipt `jti` |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
@@ -586,7 +586,7 @@ All configuration via environment variables (or `.env` file):
 | `VAULT_PATH` | No | Path to vault file (default: `./data/vault.sqlite`) |
 | `REDIRECT_BASE_URI` | No | OAuth redirect base (default: `http://localhost:3456`) |
 | `SINGLE_USER_MODE` | No | `true`: legacy requests without `user_id` act on the shared user `default`. `false` (default): they are refused with `400 user_id_required`. See [User ids](#user-ids) |
-| `RECEIPT_TTL_SECONDS` | No | TTL (seconds) for the `exp` claim on delegation receipts, and the max age for legacy receipts minted without one (default: `3600`) |
+| `RECEIPT_TTL_SECONDS` | No | TTL (seconds) for the `exp` claim on delegation receipts, and the max age for legacy receipts minted without one (default: `900`, at most `3600`; a larger value fails at startup). A brokered handle lives no longer than this or than the provider token it brokers |
 | `RECEIPT_AUDIENCE` | No | Audience (`aud` claim) for delegation receipts (default: `REDIRECT_BASE_URI`) |
 | `RECEIPT_SIGNING_KEY_PEM` | No | PKCS#8 Ed25519 (EdDSA) or P-256 (ES256) private key for receipts (default: Ed25519 key derived from `VAULT_PASSPHRASE`) |
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
