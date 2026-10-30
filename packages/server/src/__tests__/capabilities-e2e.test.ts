@@ -98,6 +98,22 @@ describe('capabilities at exercise', () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
+  it('never lets a method override run a method the capability does not name', async () => {
+    const agent = await newAgent();
+    const app = await setup();
+    const token = (await delegateFile(app, agent)).body.access_token;
+    const upstream = mockUpstream();
+    const viaHeader = await exerciseAs(app, agent, token, {
+      url: FILE_URL('abc'), method: 'GET', extra_headers: { 'X-HTTP-Method-Override': 'DELETE' },
+    }, { base: BASE });
+    expect(viaHeader.status).toBe(200);
+    const [, init] = upstream.mock.calls[0]!;
+    expect(new Headers(init!.headers).get('x-http-method-override')).toBeNull();
+    const viaQuery = await exerciseAs(app, agent, token, { url: `${FILE_URL('abc')}?$httpMethod=DELETE`, method: 'GET' }, { base: BASE });
+    expect(viaQuery.status).toBe(400);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a token issued without capabilities as broad as its scopes', async () => {
     const agent = await newAgent();
     const app = await setup();
@@ -135,5 +151,59 @@ describe('capabilities across sub-delegation', () => {
       expect(sub.status).toBe(403);
       expect(sub.body.error).toBe('capability_escalation_denied');
     }
+  });
+});
+
+describe('GitHub capabilities end to end', () => {
+  async function githubSetup(extra: Partial<ServerConfig> = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-cap-gh-'));
+    dirs.push(dir);
+    const { app, vault } = createServer({
+      port: 0, host: '127.0.0.1', vaultPassphrase: 'test-passphrase-not-for-production', vaultStorage: 'sqlite',
+      vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'file', tofuPath: path.join(dir, 'tofu.json'),
+      adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN,
+      providers: [{ slug: 'github', clientId: 'cid', clientSecret: 'secret', defaultScopes: ['repo'] }],
+      redirectBaseUri: BASE, ...extra,
+    });
+    await vault.init();
+    await vault.store({ provider: 'github', userId: 'alice', accessToken: 'gho_cap', scopes: ['repo', 'read:user'] });
+    return app;
+  }
+  const delegateGh = (app: App, agent: AgentIdentity, details: unknown, extra: Record<string, unknown> = {}) => delegateAs(app, agent, {
+    service: 'github', user_id: 'alice', scopes: ['repo', 'read:user'], authorization_details: details, ...extra,
+  }, { bearer: TOKEN, base: BASE });
+
+  it('holds a repository-narrowed token to that repository and those operations', async () => {
+    const agent = await newAgent();
+    const app = await githubSetup();
+    const minted = await delegateGh(app, agent, [{ type: 'cred_delegation', provider: 'github', operations: ['github.issues.create'], resources: ['repo:acme/app'] }]);
+    expect(minted.status).toBe(200);
+    const upstream = mockUpstream();
+    const call = (method: string, url: string) => exerciseAs(app, agent, minted.body.access_token, { url, method, ...(method === 'POST' ? { body: { title: 't' } } : {}) }, { base: BASE });
+    expect((await call('POST', 'https://api.github.com/repos/Acme/App/issues')).status).toBe(200);
+    expect((await call('POST', 'https://api.github.com/repos/victim/secret/issues')).status).toBe(403);
+    expect((await call('DELETE', 'https://api.github.com/repos/acme/app')).status).toBe(403);
+    expect((await call('GET', 'https://api.github.com/user')).status).toBe(403);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses at issuance a scope operation beside a narrowed one, which would widen it', async () => {
+    const agent = await newAgent();
+    const app = await githubSetup();
+    const res = await delegateGh(app, agent, [
+      { type: 'cred_delegation', provider: 'github', operations: ['github.issues.list'], resources: ['repo:a/b'] },
+      { type: 'cred_delegation', provider: 'github', operations: ['read:user'] },
+    ]);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_authorization_details');
+  });
+
+  it('refuses capabilities on a raw token instead of dropping them', async () => {
+    const agent = await newAgent();
+    const app = await githubSetup({ allowRawTokens: true });
+    const res = await delegateGh(app, agent, [{ type: 'cred_delegation', provider: 'github', operations: ['github.issues.list'], resources: ['repo:a/b'] }], { token_format: 'raw' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_authorization_details');
+    expect(JSON.stringify(res.body)).not.toContain('gho_cap');
   });
 });

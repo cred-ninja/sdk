@@ -21,7 +21,7 @@ const noScopes = () => false;
 const CASES: Record<string, { method: string; allow: string; deny: [string, string] }> = {
   'github.user.get': { method: 'GET', allow: 'https://api.github.com/user', deny: ['GET', 'https://api.github.com/user/emails'] },
   'github.repos.get': { method: 'GET', allow: 'https://api.github.com/repos/acme/app', deny: ['DELETE', 'https://api.github.com/repos/acme/app'] },
-  'github.contents.get': { method: 'GET', allow: 'https://api.github.com/repos/acme/app/contents/src/index.ts', deny: ['GET', 'https://api.github.com/repos/acme/app/contents'] },
+  'github.contents.get': { method: 'GET', allow: 'https://api.github.com/repos/acme/app/contents/src/index.ts', deny: ['PUT', 'https://api.github.com/repos/acme/app/contents/src/index.ts'] },
   'github.issues.list': { method: 'GET', allow: 'https://api.github.com/repos/acme/app/issues', deny: ['POST', 'https://api.github.com/repos/acme/app/issues'] },
   'github.issues.get': { method: 'GET', allow: 'https://api.github.com/repos/acme/app/issues/7', deny: ['PATCH', 'https://api.github.com/repos/acme/app/issues/7'] },
   'github.issues.create': { method: 'POST', allow: 'https://api.github.com/repos/acme/app/issues', deny: ['POST', 'https://api.github.com/repos/acme/app/issues/7/lock'] },
@@ -71,6 +71,20 @@ describe('resources', () => {
   });
 });
 
+describe('template parameters', () => {
+  it('bind only numbers to {number}, so issues.get never reaches another endpoint', () => {
+    const details = [gh(['github.issues.get'], ['repo:acme/app'])];
+    expect(capabilitiesAllow(details, 'github', 'GET', 'https://api.github.com/repos/acme/app/issues/42', noScopes)).toBe(true);
+    expect(capabilitiesAllow(details, 'github', 'GET', 'https://api.github.com/repos/acme/app/issues/comments', noScopes)).toBe(false);
+    expect(capabilitiesAllow(details, 'github', 'GET', 'https://api.github.com/repos/acme/app/issues/events', noScopes)).toBe(false);
+  });
+
+  it('let contents.get read a repository root', () => {
+    const details = [gh(['github.contents.get'], ['repo:acme/app'])];
+    expect(capabilitiesAllow(details, 'github', 'GET', 'https://api.github.com/repos/acme/app/contents', noScopes)).toBe(true);
+  });
+});
+
 describe('scope operations', () => {
   it('defer to the broker scope rules, and are not narrowed by resources', () => {
     expect(capabilitiesAllow([gh(['repo'])], 'github', 'DELETE', 'https://api.github.com/repos/acme/app', () => true)).toBe(true);
@@ -101,6 +115,19 @@ describe('validateCapabilities', () => {
     expect(validateCapabilities([gh(['github.repos.get', 'github.user.get'], ['repo:acme/app'])], 'github', ['repo', 'read:user'])).toMatchObject({ ok: false });
   });
 
+  it('refuses scope operations beside catalogue operations, which would widen them', () => {
+    // A GitHub scope operation allows the whole API: beside a narrowed entry it
+    // would turn a token that looks narrow into a broad one.
+    expect(validateCapabilities([gh(['github.issues.list'], ['repo:a/b']), gh(['read:user'])], 'github', ['repo', 'read:user']))
+      .toMatchObject({ ok: false, message: /not both/ });
+    expect(validateCapabilities([gh(['repo', 'github.issues.list'])], 'github', ['repo'])).toMatchObject({ ok: false, message: /not both/ });
+  });
+
+  it('accepts a Google scope operation in the short form, stored in the granted spelling', () => {
+    const result = validateCapabilities([drive(['drive.readonly'])], 'google', ['https://www.googleapis.com/auth/drive.readonly']);
+    expect(result).toMatchObject({ ok: true, details: [{ operations: ['https://www.googleapis.com/auth/drive.readonly'] }] });
+  });
+
   it('refuses unknown members and the wrong type', () => {
     expect(validateCapabilities([{ ...gh(['repo']), actions: ['x'] }], 'github', ['repo'])).toMatchObject({ ok: false });
     expect(validateCapabilities([{ ...gh(['repo']), type: 'agent_delegation' }], 'github', ['repo'])).toMatchObject({ ok: false });
@@ -113,6 +140,11 @@ describe('capabilitiesSubsumed', () => {
     expect(capabilitiesSubsumed([gh(['repo'])], [gh(['github.issues.create'], ['repo:acme/app'])])).toBe(true);
     expect(capabilitiesSubsumed([gh(['github.issues.create', 'github.issues.list'], ['repo:acme/app', 'repo:acme/web'])],
       [gh(['github.issues.list'], ['repo:acme/web'])])).toBe(true);
+  });
+
+  it('accepts a narrower scope under a wildcard scope, and a repository named in another case', () => {
+    expect(capabilitiesSubsumed([gh(['repo.*'])], [gh(['repo.read'])])).toBe(true);
+    expect(capabilitiesSubsumed([gh(['github.issues.list'], ['repo:acme/app'])], [gh(['github.issues.list'], ['repo:Acme/App'])])).toBe(true);
   });
 
   it('refuses wider children', () => {

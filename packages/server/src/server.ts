@@ -272,7 +272,23 @@ const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'x-forwarded-host',
   'x-forwarded-proto',
   'x-real-ip',
+  // Method overrides: an upstream that honours one (Google APIs do) would
+  // run a different method than the one the call was authorized for.
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
 ]);
+
+/** Query parameters some APIs read as a method override. */
+const METHOD_OVERRIDE_QUERY_PARAMS = new Set(['$httpmethod', '_method', 'x-http-method-override']);
+
+function hasMethodOverrideQuery(url: string): boolean {
+  try {
+    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_PARAMS.has(key.toLowerCase()));
+  } catch {
+    return true;
+  }
+}
 
 function isForwardableBrokerHeader(key: string, value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -4210,6 +4226,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (!guardResult.allowed) return;
 
       const upstreamUrl = resolveBrokerUrl(delegation.service, url, guardResult.effectiveScopes);
+      if (upstreamUrl && hasMethodOverrideQuery(upstreamUrl)) {
+        res.status(400).json({ error: 'invalid_request', message: 'A method override is not allowed: the call runs the method it names' });
+        return;
+      }
       if (!upstreamUrl || (linkAccess && !linkService!.upstreamAllowed(linkAccess.connection, upstreamUrl))) {
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
@@ -4365,6 +4385,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({
           error: 'invalid_constraints',
           message: 'constraints are not supported on Cred Link delegation (connection_id)',
+        });
+        return;
+      }
+      // Capabilities live in a Delegation Token: a raw token or a Cred Link
+      // handle could not be held to them, so refuse rather than drop them.
+      if (req.body?.authorization_details !== undefined
+        && (tokenFormatFromBody(req) === 'raw' || req.body?.connection_id !== undefined)) {
+        res.status(400).json({
+          error: 'invalid_authorization_details',
+          message: 'authorization_details needs a Delegation Token: not supported with token_format "raw" or on Cred Link delegation (connection_id)',
         });
         return;
       }
@@ -5875,18 +5905,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // the parent's prf with the new receipt. A parent issued without a
       // token (a receipt-only root) starts the list at its own receipt.
       const parentGrant = (await vault.getDelegation(parent.delegationId))?.grant;
-      const consentId = parentGrant?.consentId ?? (await vault.recordConsent({
-        id: `consent_${crypto.randomBytes(16).toString('hex')}`,
-        subject: userId,
-        agentDid,
-        service,
-        capabilities: capabilitiesFor(service, validation.grantedScopes),
-        // A receipt-only parent: the delegating agent's hop is the consent event.
-        source: 'delegation',
-        approvedBy: parent.sub,
-        expiresAt: null,
-        chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
-      })).id;
       // The child's capabilities must be within the parent's (Section 5.2):
       // what it asks for, or by default its granted scopes as operations.
       const parentCapabilities = (parentGrant?.authorizationDetails as CredDelegationDetail[] | undefined)
@@ -5913,6 +5931,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: 'capability_escalation_denied', message: 'The requested capabilities are wider than the parent delegation\'s' });
         return;
       }
+      // Recorded only once the hop's checks pass. A receipt-only parent has
+      // no recorded consent: the delegating agent's hop is the consent event.
+      const consentId = parentGrant?.consentId ?? (await vault.recordConsent({
+        id: `consent_${crypto.randomBytes(16).toString('hex')}`,
+        subject: userId,
+        agentDid,
+        service,
+        capabilities: childCapabilities,
+        source: 'delegation',
+        approvedBy: parent.sub,
+        expiresAt: null,
+        chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
+      })).id;
       const grantState = newDelegationGrant({
         agentDid,
         service,

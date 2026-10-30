@@ -18,7 +18,14 @@
   is held within its parent's capabilities (`403
   capability_escalation_denied`); a child that names none inherits a
   narrowed parent's. Without `authorization_details`, a token's
-  capabilities are its granted scopes, as before.
+  capabilities are its granted scopes, as before. A token names scopes or
+  catalogue operations, never both: a scope operation allows what the
+  broker lets that scope do (for GitHub, the whole API), so beside a
+  narrowed entry it would silently widen it. `authorization_details` is
+  refused on raw-token and Cred Link requests. Brokered calls never
+  forward a method override (`X-HTTP-Method-Override`, `$httpMethod`).
+  Drive folder resources are not offered: holding a listing to a folder
+  would mean parsing Drive's query language.
 - `@credninja/sdk`: `authorizationDetails` on `delegateHandle()`,
   `subDelegateHandle()` and `subDelegateGrant()`.
 

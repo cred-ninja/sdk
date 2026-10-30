@@ -13,7 +13,7 @@
  * is never read as broad.
  */
 import { CRED_DELEGATION_TYPE, scopeCoveredBy, type CredDelegationDetail } from '@credninja/attenuation';
-import { googleScopeMatches } from './google-scopes.js';
+import { brokerScopeEquivalent, googleScopeMatches } from './google-scopes.js';
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
@@ -91,6 +91,8 @@ export function validateCapabilities(
 ): { ok: true; details: CredDelegationDetail[] } | CapabilityProblem {
   if (!Array.isArray(details) || details.length === 0) return { ok: false, message: 'authorization_details must be a non-empty array' };
   const out: CredDelegationDetail[] = [];
+  let usesScopes = false;
+  let usesCatalogue = false;
   for (const raw of details) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ok: false, message: 'each authorization_details entry must be an object' };
     const { type, provider: p, operations, resources, ...rest } = raw as Record<string, unknown>;
@@ -106,9 +108,18 @@ export function validateCapabilities(
       if (entry) {
         if (entry.provider !== provider) return { ok: false, message: `operation ${op} is not a ${provider} operation` };
         if (!operationGranted(entry, grantedScopes)) return { ok: false, message: `operation ${op} needs a scope this delegation is not granted` };
-      } else if (!grantedScopes.some((scope) => scope === op || scopeCoveredBy([scope], op))) {
+      } else if (!grantedScopes.some((scope) => scope === op || scopeCoveredBy([scope], op)
+        || (provider === 'google' && brokerScopeEquivalent(scope, op)))) {
         return { ok: false, message: `unknown operation ${op}: not a granted scope or a catalogue operation` };
       }
+      if (entry) usesCatalogue = true;
+      else usesScopes = true;
+    }
+    // A scope operation allows what the broker lets that scope do, which for
+    // most providers is the whole API. Beside a catalogue operation it would
+    // silently widen a token that looks narrowed, so a token is one or the other.
+    if (usesScopes && usesCatalogue) {
+      return { ok: false, message: 'authorization_details must name scopes or catalogue operations, not both: a scope operation would widen the catalogue operations beside it' };
     }
     if (resources !== undefined) {
       if (!Array.isArray(resources) || resources.length === 0 || !resources.every((r) => typeof r === 'string')) {
@@ -126,7 +137,11 @@ export function validateCapabilities(
     out.push({
       type: CRED_DELEGATION_TYPE,
       provider,
-      operations: [...ops],
+      // A Google scope op is stored in the granted spelling, which the
+      // broker's scope rules compare against.
+      operations: ops.map((op) => (catalogueOperation(op) || provider !== 'google'
+        ? op
+        : grantedScopes.find((scope) => brokerScopeEquivalent(scope, op)) ?? op)),
       ...(resources !== undefined ? { resources: [...(resources as string[])] } : {}),
     });
   }
@@ -154,15 +169,21 @@ function matchTemplate(template: string, url: URL): Record<string, string> | nul
     const seg = tSegs[i]!;
     const rest = /^\{(\w+)\+\}$/.exec(seg);
     if (rest) {
-      if (i !== tSegs.length - 1 || uSegs.length <= i || uSegs.slice(i).some((s) => s === '')) return null;
+      // `{x+}` binds the rest of the path, possibly nothing (a repository's
+      // contents root), but never an empty segment.
+      if (i !== tSegs.length - 1 || uSegs.slice(i).some((s) => s === '')) return null;
       bound[rest[1]!] = uSegs.slice(i).map(decodeURIComponent).join('/');
       return bound;
     }
     const value = uSegs[i];
     if (value === undefined || value === '') return null;
     const param = /^\{(\w+)\}$/.exec(seg);
-    if (param) bound[param[1]!] = decodeURIComponent(value);
-    else if (seg !== value) return null;
+    if (param) {
+      const decoded = decodeURIComponent(value);
+      // Issue and pull request numbers are numbers, never another endpoint.
+      if (param[1] === 'number' && !/^\d+$/.test(decoded)) return null;
+      bound[param[1]!] = decoded;
+    } else if (seg !== value) return null;
   }
   return uSegs.length === tSegs.length ? bound : null;
 }
@@ -211,9 +232,12 @@ export function capabilitiesAllow(
 
 /** Whether `child` is within `parent`: every child entry covered by one parent entry. */
 export function capabilitiesSubsumed(parent: readonly CredDelegationDetail[], child: readonly CredDelegationDetail[]): boolean {
+  const sameResource = (a: string, b: string) => (a.startsWith('repo:') ? a.toLowerCase() === b.toLowerCase() : a === b);
   return child.every((c) => parent.some((p) => p.provider === c.provider
     && c.operations.every((op) => p.operations.includes(op)
-      // A parent scope operation covers a catalogue operation it makes available.
+      // A parent scope operation covers a narrower scope, and a catalogue
+      // operation it makes available.
+      || (!p.resources && !catalogueOperation(op) && p.operations.some((po) => !catalogueOperation(po)) && scopeCoveredBy(p.operations, op))
       || (!p.resources && catalogueOperation(op) !== undefined && operationGranted(catalogueOperation(op)!, p.operations)))
-    && (!p.resources || (c.resources !== undefined && c.resources.every((r) => p.resources!.includes(r))))));
+    && (!p.resources || (c.resources !== undefined && c.resources.every((r) => p.resources!.some((pr) => sameResource(pr, r)))))));
 }
