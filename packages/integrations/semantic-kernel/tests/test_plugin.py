@@ -188,7 +188,10 @@ class TestDelegate:
     def test_use_brokers_request(self, plugin, mock_cred):
         identity = generate_agent_identity()
         plugin._agent_identity = identity
-        _remember_delegation_token("del_brokered", HANDLE_TOKEN, time.time() + 600)
+        _remember_delegation_token(
+            "del_brokered", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
         mock_cred.use.return_value = BrokeredUseResult(
             status=200,
             ok=True,
@@ -215,7 +218,10 @@ class TestDelegate:
         )
 
     def test_use_requires_agent_identity(self, plugin, mock_cred):
-        _remember_delegation_token("del_noid", HANDLE_TOKEN, time.time() + 600)
+        _remember_delegation_token(
+            "del_noid", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
 
         with pytest.raises(ValueError, match="agent_identity"):
             plugin.use(delegation_id="del_noid", url="https://www.googleapis.com/x", method="GET")
@@ -223,11 +229,32 @@ class TestDelegate:
 
     def test_use_rejects_unknown_or_expired_delegation(self, plugin, mock_cred):
         plugin._agent_identity = generate_agent_identity()
-        _remember_delegation_token("del_old", HANDLE_TOKEN, time.time() - 1)
+        _remember_delegation_token(
+            "del_old", HANDLE_TOKEN, time.time() - 1,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
 
         for delegation_id in ("del_never_seen", "del_old"):
             with pytest.raises(ValueError, match="Unknown or expired delegation"):
                 plugin.use(delegation_id=delegation_id, url="https://www.googleapis.com/x", method="GET")
+        mock_cred.use.assert_not_called()
+
+    def test_use_refuses_delegation_issued_for_another_scope(self, plugin, mock_cred):
+        identity = generate_agent_identity()
+        _remember_delegation_token(
+            "del_scoped", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
+        for base_url, agent, user_id in (
+            ("https://other.example.com", identity, USER_ID),
+            (BASE_URL, generate_agent_identity(), USER_ID),
+            (BASE_URL, identity, "another_user"),
+        ):
+            plugin._base_url = base_url
+            plugin._agent_identity = agent
+            plugin._user_id = user_id
+            with pytest.raises(ValueError, match="different server, agent or user"):
+                plugin.use(delegation_id="del_scoped", url="https://www.googleapis.com/x", method="GET")
         mock_cred.use.assert_not_called()
 
     def test_passes_service_user_app_to_cred(self, plugin, mock_cred):

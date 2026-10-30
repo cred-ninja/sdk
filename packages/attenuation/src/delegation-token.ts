@@ -168,6 +168,7 @@ export function verifyDelegationToken(
   const claims = payload as unknown as DelegationTokenClaims;
   if (claims.iss !== opts.issuer) return { ok: false, reason: 'wrong_issuer' };
   const now = opts.nowSeconds ?? Math.floor(Date.now() / 1000);
-  if (now > claims.exp + (opts.clockSkewSeconds ?? DEFAULT_CLOCK_SKEW_SECONDS)) return { ok: false, reason: 'expired' };
+  // RFC 7519 Section 4.1.4: not accepted on or after exp.
+  if (now >= claims.exp + (opts.clockSkewSeconds ?? DEFAULT_CLOCK_SKEW_SECONDS)) return { ok: false, reason: 'expired' };
   return { ok: true, claims };
 }

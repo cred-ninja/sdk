@@ -147,17 +147,18 @@ for (const peer of ['@credninja/vault', '@credninja/oauth']) {
 }
 const sdkPackage = require('./node_modules/@credninja/sdk/package.json');
 assert.equal(sdkPackage.dependencies['@credninja/attenuation'], '^2.0.0');
-for (const { Cred } of [await import('@credninja/sdk'), require('@credninja/sdk')]) {
+for (const { Cred, generateAgentIdentity } of [await import('@credninja/sdk'), require('@credninja/sdk')]) {
+  const agent = await generateAgentIdentity();
   const cred = new Cred({ agentToken: 'cred_at_cloud_fixture', baseUrl: 'https://cred.example.com' });
   let requests = 0;
   let sent;
   globalThis.fetch = async (_url, init) => {
     requests++;
     sent = JSON.parse(init.body);
-    return new Response(JSON.stringify({ token_type: 'Delegation', service: 'github', scopes: ['repo'], delegation_id: 'fixture' }));
+    return new Response(JSON.stringify({ access_token: 'fixture.token.value', token_type: 'DPoP', cnf: { jkt: 'fixture-jkt' }, expires_in: 900, service: 'github', scopes: ['repo'], delegation_id: 'fixture' }));
   };
   for (const method of ['delegate', 'delegateHandle', 'subDelegate', 'subDelegateHandle', 'tofuDelegate']) {
-    const params = { service: 'github', userId: 'owner', appClientId: 'local', agentDid: 'did:key:child', parentReceipt: 'fixture', fingerprint: 'fixture', privateKeyBytes: new Uint8Array(32).fill(1) };
+    const params = { service: 'github', userId: 'owner', appClientId: 'local', agentDid: agent.did, agentIdentity: agent, parentReceipt: 'fixture', fingerprint: 'fixture', privateKeyBytes: new Uint8Array(32).fill(1) };
     const before = requests;
     await assert.rejects(cred[method]({ ...params, constraints: [{ key: 'x', future: { mandatory: undefined } }] }), { code: 'invalid_constraints' });
     assert.equal(requests, before);
@@ -265,31 +266,37 @@ try {
     const connections = await cred.getUserConnections('sdk-user');
     assert.equal(connections.length, 1);
     assert.equal(connections[0].slug, 'google');
-    // Brokered handles are bound to the agent's key (DPoP): issued only to an
-    // agent that proves it, and usable only with a fresh proof by it.
+    // Delegation Tokens are bound to the agent's key (DPoP): issued only to an
+    // agent that proves it, and usable only with a fresh proof by that key.
     const agent = await generateAgentIdentity();
-    const handle = await cred.delegateHandle({
+    const credential = await cred.delegateHandle({
       service: 'google',
       userId: 'sdk-user',
       appClientId: 'app_smoke',
       scopes: ['calendar.readonly'],
       agentIdentity: agent,
     });
-    assert.equal(handle.tokenType, 'Delegation');
-    assert.ok(!('accessToken' in handle));
+    assert.equal(credential.tokenType, 'DPoP');
+    assert.ok(credential.token && credential.jkt);
+    assert.ok(!('accessToken' in credential));
+    const driveUrl = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+    // A stolen token is useless without the agent's key: a proof from another
+    // key is refused.
+    const thief = await generateAgentIdentity();
     await assert.rejects(
-      cred.use({
-        delegationId: handle.delegationId,
-        url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-        method: 'GET',
-      }),
+      cred.use({ token: credential.token, agentIdentity: thief, url: driveUrl, method: 'GET' }),
       (err) => err.code === 'invalid_dpop_proof',
     );
+    // Without a proof the SDK refuses to send the call at all.
+    await assert.rejects(
+      cred.use({ token: credential.token, url: driveUrl, method: 'GET' }),
+      (err) => err.code === 'invalid_config',
+    );
     const used = await cred.use({
-      delegationId: handle.delegationId,
-      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-      method: 'GET',
+      token: credential.token,
       agentIdentity: agent,
+      url: driveUrl,
+      method: 'GET',
     });
     assert.equal(used.ok, true);
     assert.deepEqual(used.body, { items: [{ id: 'evt_smoke' }] });

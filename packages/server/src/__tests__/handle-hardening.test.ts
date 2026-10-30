@@ -143,8 +143,8 @@ describe('brokered handle hardening', () => {
     expect(revoked.status).toBe(204);
 
     const afterRevoke = await useHandle(app, alpha, minted.body.access_token);
-    expect(afterRevoke.status).toBeGreaterThanOrEqual(400);
-    expect(afterRevoke.status).toBeLessThan(500);
+    expect(afterRevoke.status).toBe(401);
+    expect(afterRevoke.body.error).toBe('delegation_revoked');
 
     await vi.waitFor(() => {
       const revokeCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('oauth2.googleapis.com/revoke'));

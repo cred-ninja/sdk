@@ -62,10 +62,10 @@ async function setup(agents: AgentIdentity[] = []) {
 
 type App = Parameters<typeof request>[0];
 
-function delegateAs(app: App, agent: AgentIdentity) {
+function delegateAs(app: App, agent: AgentIdentity, body: Record<string, unknown> = {}) {
   return request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${TEST_TOKEN}`)
     .set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`))
-    .send({ service: 'google', user_id: 'alice', scopes: ['openid', 'email'], token_format: 'handle', agent_did: agent.did });
+    .send({ service: 'google', user_id: 'alice', scopes: ['openid', 'email'], token_format: 'handle', agent_did: agent.did, ...body });
 }
 
 function exercise(app: App, agent: AgentIdentity, token: string) {
@@ -158,6 +158,59 @@ describe('Delegation Token exercise', () => {
       .send({ delegation_id: minted.body.delegation_id, url: USERINFO, method: 'GET' });
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('invalid_token');
+    // RFC 6750 Section 3.1: no token was presented, so the challenge carries no error code.
+    expect(res.headers['www-authenticate']).toMatch(/^DPoP algs=/);
+  });
+
+  it('keeps a revocation across a restart', async () => {
+    const agent = await generateAgentIdentity();
+    const { app, vaultPath } = await setup();
+    const minted = await delegateAs(app, agent);
+    const revoked = await request(app).delete(`/api/v1/delegations/${minted.body.delegation_id}`)
+      .query({ user_id: 'alice' }).set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(revoked.status).toBe(200);
+    const restarted = createServer(makeConfig(vaultPath));
+    await restarted.vault.init();
+    const upstream = mockUpstream();
+    const res = await exercise(restarted.app, agent, minted.body.access_token);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('delegation_revoked');
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('never revives a token when its connection is revoked and stored again', async () => {
+    const agent = await generateAgentIdentity();
+    const { app, vault, vaultPath } = await setup();
+    const token = (await delegateAs(app, agent)).body.access_token as string;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 200 }));
+    const disconnected = await request(app).delete('/api/v1/connections/google')
+      .query({ user_id: 'alice' }).set('Authorization', `Bearer ${TEST_TOKEN}`);
+    expect(disconnected.status).toBeLessThan(300);
+    vi.restoreAllMocks();
+    await vault.store({
+      provider: 'google', userId: 'alice', accessToken: 'ya29.reconnected',
+      expiresAt: new Date(Date.now() + 3600 * 1000), scopes: ['openid', 'email'],
+    });
+    const upstream = mockUpstream();
+    expect((await exercise(app, agent, token)).status).toBe(401);
+    const restarted = createServer(makeConfig(vaultPath));
+    await restarted.vault.init();
+    expect((await exercise(restarted.app, agent, token)).status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('refuses after a restart to restore a token whose cumulative total this process does not hold', async () => {
+    const agent = await generateAgentIdentity();
+    const { app, vaultPath } = await setup();
+    const minted = await delegateAs(app, agent, { constraints: [{ key: 'max_calls', max_lifetime: 2 }] });
+    expect(minted.status).toBe(200);
+    mockUpstream();
+    expect((await exercise(app, agent, minted.body.access_token)).status).toBe(200);
+    const restarted = createServer(makeConfig(vaultPath));
+    await restarted.vault.init();
+    const res = await exercise(restarted.app, agent, minted.body.access_token);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('cumulative_constraint_unenforceable');
   });
 
   it('refuses an expired token', async () => {
@@ -197,6 +250,39 @@ describe('Delegation Token sub-delegation', () => {
     expect((await exercise(app, child, sub.body.access_token)).status).toBe(200);
   });
 
+  it('never lets a redeemed child outlive its parent, even after the provider token is refreshed', async () => {
+    const [root, child] = [await generateAgentIdentity(), await generateAgentIdentity()];
+    const { app, vault } = await setup([child]);
+    // A provider token expiring in 2 minutes caps the parent at 2 minutes.
+    await vault.store({
+      provider: 'google', userId: 'alice', accessToken: 'ya29.short',
+      expiresAt: new Date(Date.now() + 120 * 1000), scopes: ['openid', 'email'],
+    });
+    const parent = await delegateAs(app, root);
+    expect(parent.body.expires_in).toBeLessThanOrEqual(120);
+    const authorized = await request(app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${TEST_TOKEN}`).send({
+      parent_receipt: parent.body.receipt,
+      actor_token: createActorToken(root, `${BASE}/api/v1/subdelegate`),
+      agent_did: child.did, service: 'google', user_id: 'alice', scopes: ['openid'], exchange: 'grant',
+    });
+    expect(authorized.status).toBe(200);
+    // The provider token is refreshed before the child redeems the grant.
+    await vault.store({
+      provider: 'google', userId: 'alice', accessToken: 'ya29.refreshed',
+      expiresAt: new Date(Date.now() + 3600 * 1000), scopes: ['openid', 'email'],
+    });
+    const exchanged = await request(app).post('/api/v1/token').set('Authorization', `Bearer ${TEST_TOKEN}`).send({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: authorized.body.delegation_grant,
+      subject_token_type: authorized.body.subject_token_type,
+      actor_token: createActorToken(child, `${BASE}/api/v1/token`),
+      actor_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+    });
+    expect(exchanged.status).toBe(200);
+    expect(claimsOf(exchanged.body.access_token).exp).toBeLessThanOrEqual(claimsOf(parent.body.access_token).exp);
+    expect(exchanged.body.expires_in).toBeLessThanOrEqual(120);
+  });
+
   it('issues the token at the exchange to the agent that redeems the grant', async () => {
     const [root, child] = [await generateAgentIdentity(), await generateAgentIdentity()];
     const { app } = await setup([child]);
@@ -216,6 +302,8 @@ describe('Delegation Token sub-delegation', () => {
     });
     expect(exchanged.status).toBe(200);
     expect(exchanged.body.token_type).toBe('DPoP');
+    // Never past the parent: the child was bounded at authorization.
+    expect(claimsOf(exchanged.body.access_token).exp).toBeLessThanOrEqual(claimsOf(parent.body.access_token).exp);
     expect(exchanged.body.issued_token_type).toBe('urn:ietf:params:oauth:token-type:access_token');
     expect(claimsOf(exchanged.body.access_token)).toMatchObject({ jti: authorized.body.delegation_id, client_id: child.did });
     mockUpstream();

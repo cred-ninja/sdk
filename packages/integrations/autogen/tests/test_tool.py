@@ -197,7 +197,10 @@ class TestInvoke:
 
     def test_cred_use_tool_brokers_request(self, mock_cred):
         identity = generate_agent_identity()
-        _remember_delegation_token("del_brokered", HANDLE_TOKEN, time.time() + 600)
+        _remember_delegation_token(
+            "del_brokered", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
         mock_cred.use.return_value = BrokeredUseResult(
             status=200,
             ok=True,
@@ -229,7 +232,10 @@ class TestInvoke:
         )
 
     def test_cred_use_tool_requires_agent_identity(self, mock_cred):
-        _remember_delegation_token("del_noid", HANDLE_TOKEN, time.time() + 600)
+        _remember_delegation_token(
+            "del_noid", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
         with patch("cred_autogen.tool.Cred", return_value=mock_cred):
             use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL)
 
@@ -241,7 +247,10 @@ class TestInvoke:
         mock_cred.use.assert_not_called()
 
     def test_cred_use_tool_rejects_unknown_or_expired_delegation(self, mock_cred):
-        _remember_delegation_token("del_old", HANDLE_TOKEN, time.time() - 1)
+        _remember_delegation_token(
+            "del_old", HANDLE_TOKEN, time.time() - 1,
+            base_url=BASE_URL, agent_did="", user_id=USER_ID,
+        )
         with patch("cred_autogen.tool.Cred", return_value=mock_cred):
             use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=generate_agent_identity())
 
@@ -249,6 +258,25 @@ class TestInvoke:
             with pytest.raises(ValueError, match="Unknown or expired delegation"):
                 run(use_tool.run_json(
                     {"delegation_id": delegation_id, "url": "https://www.googleapis.com/x", "method": "GET"},
+                    CancellationToken(),
+                ))
+        mock_cred.use.assert_not_called()
+
+    def test_cred_use_tool_refuses_delegation_issued_for_another_scope(self, mock_cred):
+        identity = generate_agent_identity()
+        _remember_delegation_token(
+            "del_scoped", HANDLE_TOKEN, time.time() + 600,
+            base_url=BASE_URL, agent_did=identity.did, user_id=USER_ID,
+        )
+        for base_url, agent in (
+            ("https://other.example.com", identity),
+            (BASE_URL, generate_agent_identity()),
+        ):
+            with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+                use_tool = cred_use_tool(agent_token=TOKEN, base_url=base_url, agent_identity=agent)
+            with pytest.raises(ValueError, match="different server, agent or user"):
+                run(use_tool.run_json(
+                    {"delegation_id": "del_scoped", "url": "https://www.googleapis.com/x", "method": "GET"},
                     CancellationToken(),
                 ))
         mock_cred.use.assert_not_called()

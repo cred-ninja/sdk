@@ -19,6 +19,13 @@
   token is recorded in the vault, so tokens survive restarts and work
   across replicas sharing one vault. `CRED_REQUIRE_DPOP=false` now affects
   Cred Link only, and `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored.
+  Exercise authenticates with the token alone: the deployment Bearer
+  credential and a custom `agentRequestVerifier` no longer gate
+  `/api/v1/use` (guard policies key on the token's agent and key).
+  Revoking a connection revokes every delegation issued from it. A token
+  under a cumulative constraint is refused by a process whose ledger does
+  not hold its running total (a restart or another replica), unless a
+  shared `cumulativeLedgerPath` is configured.
 - `@credninja/vault`: delegation records carry the token's grant state;
   consent records (`recordConsent`, `getConsent`) are stored once and
   never updated.

@@ -144,6 +144,12 @@ export async function handleUse(
         isError: true,
       };
     }
+    if (entry.tokenAgentDid && context.delegatorIdentity && entry.tokenAgentDid !== context.delegatorIdentity.did) {
+      return {
+        content: [{ type: 'text', text: `Error: this delegation is bound to ${entry.tokenAgentDid}; only that agent can use it.` }],
+        isError: true,
+      };
+    }
     if (!entry.delegationToken || !context.delegatorIdentity) {
       return {
         content: [{ type: 'text', text: 'Error: a brokered call needs the Delegation Token and this agent\'s identity (CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX).' }],

@@ -12,7 +12,9 @@ export type ConsentSource =
   /** The subject's stored provider connection authorized it (no Permission). */
   | 'connection'
   /** An approver approved a CIBA request for it. */
-  | 'ciba';
+  | 'ciba'
+  /** A delegating agent's hop from a parent with no recorded consent. */
+  | 'delegation';
 
 export interface ConsentRecord {
   id: string;

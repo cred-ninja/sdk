@@ -73,16 +73,16 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    vault. See the Link sections of the `@credninja/server` and
    `@credninja/link` READMEs before turning it on.
 12. Outside Cred Link (whose handles are bound as in item 14), give every agent
-   that uses brokered handles a did:key identity and pass it
+   that uses brokered delegations a did:key identity and pass it
    to the client: `delegateHandle({ ..., agentIdentity })` and
    `use({ ..., agentIdentity })` in `@credninja/sdk`, `agent_identity=` in
    `cred-auth` and its integrations, `CRED_AGENT_DID` plus
    `CRED_AGENT_PRIVATE_KEY_HEX` for `@credninja/mcp` in cloud mode. The server
-   binds each handle to that key and requires a DPoP proof (RFC 9449) for every
-   use, and each `/api/v1/use` proof covers that exact request (`cred_req`), so
-   a proof authorizes one upstream call. The client's base URL must be the
-   same origin and path as the server's `REDIRECT_BASE_URI`. During migration,
-   `CRED_REQUIRE_DPOP=false` keeps Bearer-bound handles (deprecated).
+   binds each Delegation Token to that key and requires a DPoP proof (RFC 9449)
+   for every use, and each `/api/v1/use` proof covers that exact request
+   (`cred_req`), so a proof authorizes one upstream call. The client's base URL
+   must be the same origin and path as the server's `REDIRECT_BASE_URI`. See
+   item 17 for the token contract.
 13. Move callers that receive provider tokens to brokered handles: the server
    no longer returns provider access tokens (`token_format: "raw"` on
    `/api/v1/delegate`, `GET /api/token/:provider`, and Cred Link raw tokens all
@@ -102,7 +102,26 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    `GET /admin/audit/verify` periodically and record the returned head outside
    the host. Receipts now name the server (`REDIRECT_BASE_URI`) in `iss`; keep
    that value stable, since a parent receipt naming another issuer is refused.
-17. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+17. Brokered handles are replaced by DPoP-bound Delegation Tokens (JWTs):
+   - `delegateHandle()` needs `agentIdentity` and returns `{ token, jkt,
+     delegationId, receipt, expiresIn, ... }`; the server answers
+     `access_token`, `token_type: "DPoP"` and `cnf.jkt`.
+   - `use()` takes `{ token, agentIdentity, url, method, ... }` and sends
+     `Authorization: DPoP <token>` plus a proof with `ath` = base64url SHA-256
+     of the token. `delegationId` in the body, and `Authorization: Bearer`
+     for an agent delegation, no longer work.
+   - Sub-delegation hands off with `subDelegateGrant()` (delegating agent) and
+     `redeemDelegationGrant()` (receiving agent); `/api/v1/subdelegate` always
+     requires the delegator's `actor_token`.
+   - `CRED_REQUIRE_DPOP=false` now affects Cred Link only, and
+     `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored. Neither relaxes agent
+     delegations any more.
+   - `@credninja/mcp` in brokered mode needs `CRED_AGENT_DID` and
+     `CRED_AGENT_PRIVATE_KEY_HEX`.
+   - Python (`cred-auth`): `delegate_handle()` needs `agent_identity` and
+     returns the token, and `use()` takes the token plus `agent_identity`,
+     the same way.
+18. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities

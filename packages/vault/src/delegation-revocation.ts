@@ -78,6 +78,12 @@ export type RecordDelegationInput = Pick<DelegationRecord, 'id' | 'service' | 'u
 export interface DelegationRevocationSeed {
   delegationIds?: readonly string[];
   agentDid?: string;
+  /**
+   * Revokes every delegation of one stored connection: used when the
+   * connection itself is revoked, so no token issued from it can be used
+   * with a credential stored later for the same service and user.
+   */
+  connection?: { service: string; userId: string };
 }
 
 export interface RevokedDelegation {
@@ -245,7 +251,12 @@ export class MemoryDelegationStore {
     revokedAt: string,
     options: DelegationRevocationOptions = {},
   ): { revoked: RevokedDelegation[]; truncated: boolean } {
-    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : [])];
+    const byConnection = seed.connection
+      ? [...this.records.values()]
+          .filter((r) => r.service === seed.connection!.service && r.userId === seed.connection!.userId)
+          .map((r) => r.id)
+      : [];
+    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : []), ...byConnection];
     const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => this.children.get(id) ?? [], options);
     const revoked: RevokedDelegation[] = [];
     for (const node of nodes) {

@@ -53,6 +53,7 @@ class CredToolkit:
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
         self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._base_url = base_url
         self._user_id = user_id
         self._token_format = token_format
         self._agent_identity = agent_identity
@@ -62,6 +63,7 @@ class CredToolkit:
         delegate = CredDelegateTool()
         delegate._cred = self._cred
         delegate._user_id = self._user_id
+        delegate._base_url = self._base_url
         delegate._token_format = self._token_format
         delegate._agent_identity = self._agent_identity
         if self._token_format == "handle":
@@ -83,6 +85,8 @@ class CredToolkit:
         if self._token_format == "handle":
             use = CredUseTool()
             use._cred = self._cred
+            use._base_url = self._base_url
+            use._user_id = self._user_id
             use._agent_identity = self._agent_identity
             tools.append(use)
 

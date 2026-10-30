@@ -29,6 +29,8 @@ export interface TokenEntry {
    * this process: the model only ever sees the cache's own id.
    */
   delegationToken?: string;
+  /** The agent the Delegation Token is bound to: only that agent can exercise it. */
+  tokenAgentDid?: string;
   service: string;
   userId: string;
   scopes?: string[];

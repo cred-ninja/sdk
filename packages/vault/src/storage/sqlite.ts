@@ -623,6 +623,7 @@ export class SQLiteBackend implements StorageBackend {
     const db = this.ensureDb();
     const childrenStmt = db.prepare('SELECT id FROM vault_delegations WHERE parent_id = ?').pluck();
     const byAgentStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? ORDER BY created_at, id').pluck();
+    const byConnectionStmt = db.prepare('SELECT id FROM vault_delegations WHERE service = ? AND user_id = ? ORDER BY created_at, id').pluck();
     const rowStmt = db.prepare('SELECT id, parent_id, agent_did, service, user_id, status FROM vault_delegations WHERE id = ?');
     const revokeStmt = db.prepare(`
       UPDATE vault_delegations
@@ -634,6 +635,7 @@ export class SQLiteBackend implements StorageBackend {
       const seeds = [
         ...(seed.delegationIds ?? []),
         ...(seed.agentDid ? byAgentStmt.all(seed.agentDid) as string[] : []),
+        ...(seed.connection ? byConnectionStmt.all(seed.connection.service, seed.connection.userId) as string[] : []),
       ];
       const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => childrenStmt.all(id) as string[], options);
       const revoked: RevokedDelegation[] = [];

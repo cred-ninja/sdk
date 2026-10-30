@@ -108,10 +108,9 @@ export interface ServerConfig {
   // budget.
   cumulativeLedgerPath?: string;
 
-  // Require the caller of /api/v1/subdelegate to prove it is the agent the
-  // parent receipt names, with an RFC 7523 actor_token signed by that
-  // agent's did:key (env CRED_REQUIRE_AGENT_IDENTITY). Default true. false
-  // is deprecated and logs a warning at startup.
+  // Ignored and deprecated (env CRED_REQUIRE_AGENT_IDENTITY): the caller of
+  // /api/v1/subdelegate must always prove it is the agent the parent receipt
+  // names, with an RFC 7523 actor_token signed by that agent's did:key.
   requireAgentIdentity?: boolean;
 
   // Cred Link only (env CRED_REQUIRE_DPOP), until Link agents get keys:

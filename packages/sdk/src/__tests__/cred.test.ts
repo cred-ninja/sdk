@@ -333,6 +333,42 @@ describe('Cred.delegateHandle() and use()', () => {
     expect(init.headers.DPoP).toBeTruthy();
   });
 
+  it('authorizes a hop as a grant, and redeems it as the receiving agent (RFC 8693)', async () => {
+    const [delegator, child] = [await generateAgentIdentity(), await generateAgentIdentity()];
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      delegation_grant: 'grant_1', delegation_id: 'del_child', agent_did: child.did, expires_in: 60,
+      chain_depth: 1, parent_delegation_id: 'del_root', scopes: ['openid'],
+    }));
+    const grant = await cred.subDelegateGrant({
+      parentReceipt: 'receipt', service: 'google', userId: 'user_1', appClientId: 'app_1',
+      agentDid: child.did, scopes: ['openid'], delegatorIdentity: delegator,
+    });
+    expect(grant).toMatchObject({ delegationGrant: 'grant_1', delegationId: 'del_child', agentDid: child.did });
+    const [authUrl, authInit] = mockFetch.mock.calls[0];
+    expect(authUrl).toBe(`${BASE_URL}/api/v1/subdelegate`);
+    const authBody = JSON.parse(authInit.body);
+    expect(authBody).toMatchObject({ exchange: 'grant', agent_did: child.did, parent_receipt: 'receipt' });
+    expect(JSON.parse(Buffer.from(authBody.actor_token.split('.')[1], 'base64url').toString('utf8')))
+      .toMatchObject({ iss: delegator.did, aud: `${BASE_URL}/api/v1/subdelegate` });
+
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      access_token: 'dt.child', token_type: 'DPoP', cnf: { jkt: 'jkt_child' }, expires_in: 60, service: 'google',
+      user_id: 'user_1', scopes: ['openid'], delegation_id: 'del_child', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_root',
+    }));
+    const redeemed = await cred.redeemDelegationGrant({ delegationGrant: 'grant_1', agentIdentity: child });
+    expect(redeemed).toMatchObject({ tokenType: 'DPoP', token: 'dt.child', jkt: 'jkt_child', chainDepth: 1, parentDelegationId: 'del_root' });
+    const [redeemUrl, redeemInit] = mockFetch.mock.calls[1];
+    expect(redeemUrl).toBe(`${BASE_URL}/api/v1/token`);
+    const redeemBody = JSON.parse(redeemInit.body);
+    expect(redeemBody).toMatchObject({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: 'grant_1',
+      actor_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+    });
+    expect(JSON.parse(Buffer.from(redeemBody.actor_token.split('.')[1], 'base64url').toString('utf8')))
+      .toMatchObject({ iss: child.did, aud: `${BASE_URL}/api/v1/token` });
+  });
+
   it('refuses to request a Delegation Token without the agent identity it is bound to', async () => {
     await expect(cred.delegateHandle({ service: 'google', userId: 'user_1', appClientId: 'app_1' }))
       .rejects.toMatchObject({ code: 'invalid_config' });

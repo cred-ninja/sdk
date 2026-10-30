@@ -3170,6 +3170,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     // Handles minted from this connection hold a copy of its access token.
     // Revoking the connection ends them too, not only at their expiry. Link
     // handles hold no token and re-check their connection on every use.
+    // Every delegation issued from this connection is revoked in the vault
+    // too, so no Delegation Token minted from it can be restored later
+    // against a credential stored again for the same service and user.
+    const cascade = await vault.revokeDelegations({ connection: { service: slug, userId } });
+    applyRevocation(cascade, performance.now(), {
+      actor: { type: 'agent', id: 'server-agent' },
+      correlationId: crypto.randomUUID(),
+      cause: `connection:${slug}/${userId}`,
+    });
     let handlesRevoked = 0;
     for (const [id, delegation] of brokeredDelegations) {
       if (delegation.link || delegation.service !== slug || delegation.userId !== userId) continue;
@@ -3194,7 +3203,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       resource: { type: 'connection', id: `${slug}/${userId}` },
       outcome: 'success',
       correlationId: crypto.randomUUID(),
-      metadata: { handlesRevoked },
+      metadata: { handlesRevoked, delegationsRevoked: cascade.count },
     });
   }
 
@@ -3584,7 +3593,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       sub: actor.sub,
       client_id: actor.client_id,
       act: actor.act,
-      authorization_details: (input.grant.authorizationDetails ?? capabilitiesFor('unknown', input.grant.scopes)) as CredDelegationDetail[],
+      authorization_details: input.grant.authorizationDetails as CredDelegationDetail[],
       ...(input.grant.constraints && input.grant.constraints.length > 0 ? { delegation_constraints: input.grant.constraints } : {}),
       cnf: { jkt: input.grant.jkt },
       iat: nowSeconds,
@@ -3935,8 +3944,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     requireAgentAuth(req, res, next);
   }
 
-  function refuseDelegationToken(res: Response, message: string): void {
-    res.set('WWW-Authenticate', `DPoP error="invalid_token", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
+  function refuseDelegationToken(res: Response, message: string, absent = false): void {
+    // RFC 6750 Section 3.1: a request that presents no token gets the
+    // challenge without an error code.
+    res.set('WWW-Authenticate', absent
+      ? `DPoP algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`
+      : `DPoP error="invalid_token", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
     res.status(401).json({ error: 'invalid_token', message });
   }
 
@@ -3945,12 +3958,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * issue (another replica, or before a restart): rebuilt from the recorded
    * grant, with the provider token loaded from the vault for this call.
    */
-  async function restoreTokenDelegation(delegationId: string, expiresAtSeconds: number): Promise<BrokeredDelegation | null> {
+  async function restoreTokenDelegation(
+    delegationId: string,
+    expiresAtSeconds: number,
+  ): Promise<BrokeredDelegation | null | 'cumulative_unenforceable' | { revokedBy: string }> {
     const record = await vault.getDelegation(delegationId);
     if (!record?.grant || !record.agentDid) return null;
+    if (record.status === 'revoked') return { revokedBy: record.revokedAncestorId ?? record.id };
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const recordExpiresAt = record.expiresAt ? Math.floor(Date.parse(record.expiresAt) / 1000) : expiresAtSeconds;
+    if (recordExpiresAt <= nowSeconds) return null;
+    const grant = record.grant;
+    // A running total lives in this process's ledger unless one is shared
+    // (cumulativeLedgerPath). Registering the delegation afresh would reset
+    // its budget, so a delegation under a cumulative bound this ledger does
+    // not hold is refused, never restored with zero spent.
+    if (cumulativeConstraints((grant.constraints ?? []) as DelegationConstraint[]).length > 0 && !cumulativeLedger.has(delegationId)) {
+      return 'cumulative_unenforceable';
+    }
     const vaultEntry = await getVaultEntry(record.service, record.userId);
     if ('status' in vaultEntry) return null;
-    const grant = record.grant;
     cumulativeLedger.register({
       id: delegationId,
       ...(record.parentId ? { parentId: record.parentId } : {}),
@@ -3962,7 +3989,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       service: record.service,
       userId: record.userId,
       scopes: grant.scopes,
-      expiresIn: Math.max(1, expiresAtSeconds - Math.floor(Date.now() / 1000)),
+      // Never cache the provider token past its own expiry, the token's, or
+      // the recorded delegation's.
+      expiresIn: Math.max(1, Math.min(
+        expiresAtSeconds - nowSeconds,
+        recordExpiresAt - nowSeconds,
+        handleLifetimeSeconds(vaultEntry.entry.expiresAt),
+      )),
       ...(grant.constraints && grant.constraints.length > 0 ? { constraints: grant.constraints as DelegationConstraint[] } : {}),
       agentDid: record.agentDid,
       dpopJkt: grant.jkt,
@@ -4010,6 +4043,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           jkt: verified.claims.cnf.jkt,
           credentialHandle: verified.claims.credential_handle,
         };
+        // The caller identity guard policies key on (rate limits, audit):
+        // the agent and key the token is bound to.
+        (req as any).agentTokenHash = hashTokenValue(`dpop:${verified.claims.client_id}:${verified.claims.cnf.jkt}`);
         if (bodyDelegationId !== undefined && bodyDelegationId !== delegationId) {
           res.status(400).json({ error: 'invalid_request', message: 'delegation_id does not match the Delegation Token' });
           return;
@@ -4017,7 +4053,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       } else if (typeof bodyDelegationId === 'string' && bodyDelegationId) {
         delegationId = bodyDelegationId;
       } else {
-        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>');
+        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
         return;
       }
       if (!url || typeof url !== 'string') {
@@ -4034,9 +4070,21 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const delegation = presentedToken !== null
+      const found = presentedToken !== null
         ? getBrokeredDelegation(delegationId) ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!)
         : getBrokeredDelegation(delegationId);
+      if (found === 'cumulative_unenforceable') {
+        res.status(403).json({
+          error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
+          message: 'This delegation carries a cumulative constraint whose running total this server does not hold; set a shared cumulative ledger (cumulativeLedgerPath)',
+        });
+        return;
+      }
+      if (found !== null && typeof found === 'object' && 'revokedBy' in found) {
+        res.status(401).json({ error: 'delegation_revoked', message: 'This delegation has been revoked', revoked_ancestor_id: found.revokedBy });
+        return;
+      }
+      const delegation = found;
       if (!delegation) {
         if (presentedToken !== null) refuseDelegationToken(res, 'The Delegation Token names no active delegation');
         else res.status(404).json({ error: 'Delegation handle not found or expired' });
@@ -4045,7 +4093,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // Only a Cred Link handle is still named by id; every other
       // delegation is exercised with its Delegation Token.
       if (presentedToken === null && !delegation.link) {
-        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>');
+        refuseDelegationToken(res, 'Present the Delegation Token as Authorization: DPoP <token>', true);
         return;
       }
       // The token and the recorded delegation must name the same agent and key.
@@ -5783,7 +5831,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         agentDid,
         service,
         capabilities: capabilitiesFor(service, validation.grantedScopes),
-        source: 'permission',
+        // A receipt-only parent: the delegating agent's hop is the consent event.
+        source: 'delegation',
         approvedBy: parent.sub,
         expiresAt: null,
         chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
@@ -6032,7 +6081,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const entry = vaultEntry.entry;
-      const expiresIn = handleLifetimeSeconds(entry.expiresAt);
+      // The child was bounded by its parent at authorization (the recorded
+      // expiry); redemption can only shorten that, never extend it.
+      const childRecord = await vault.getDelegation(grant.delegationId);
+      const recordedExpiresIn = childRecord?.expiresAt
+        ? Math.floor((Date.parse(childRecord.expiresAt) - Date.now()) / 1000)
+        : Number.POSITIVE_INFINITY;
+      const expiresIn = Math.min(handleLifetimeSeconds(entry.expiresAt), recordedExpiresIn);
+      if (expiresIn <= 0) {
+        res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation behind this grant has expired' });
+        return;
+      }
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -6049,7 +6108,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         metadata: { stage: 'token_exchange', actorTokenJti: actor.jti },
       });
 
-      const recordedGrant = (await vault.getDelegation(grant.delegationId))?.grant;
+      const recordedGrant = childRecord?.grant;
       if (!recordedGrant) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'The delegation behind this grant has no Delegation Token state' });
         return;

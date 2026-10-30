@@ -404,6 +404,25 @@ describe('credDelegateTool execute', () => {
 });
 
 describe('credUseTool execute', () => {
+  it('refuses a delegation issued for another agent or server', async () => {
+    const issuer = { did: 'did:key:z6MkIssuer', privateKey: new Uint8Array(32) };
+    mockDelegateHandle.mockResolvedValue({
+      tokenType: 'DPoP', token: 'dt.other', jkt: 'jkt', expiresIn: 900, expiresAt: new Date(Date.now() + 900_000),
+      service: 'google', userId: USER_ID, scopes: [], delegationId: 'del_other',
+    });
+    const delegateTool = credDelegateTool({ agentToken: TOKEN, userId: USER_ID, appClientId: 'app', baseUrl: 'https://cred.example.com', agentIdentity: issuer });
+    await delegateTool.execute!({ service: 'google', scopes: [] }, { toolCallId: 'tc', messages: [], abortSignal: new AbortController().signal });
+    const ctx = { toolCallId: 'tc', messages: [], abortSignal: new AbortController().signal };
+    const call = { delegationId: 'del_other', url: 'https://www.googleapis.com/x', method: 'GET' as const };
+    const otherAgent = credUseTool({ agentToken: TOKEN, baseUrl: 'https://cred.example.com', agentIdentity: { did: 'did:key:z6MkOther', privateKey: new Uint8Array(32) } });
+    await expect(otherAgent.execute!(call, ctx)).rejects.toThrow(/another agent or server/);
+    const otherServer = credUseTool({ agentToken: TOKEN, baseUrl: 'https://other.example.com', agentIdentity: issuer });
+    await expect(otherServer.execute!(call, ctx)).rejects.toThrow(/another agent or server/);
+    const unknown = credUseTool({ agentToken: TOKEN, baseUrl: 'https://cred.example.com', agentIdentity: issuer });
+    await expect(unknown.execute!({ ...call, delegationId: 'del_missing' }, ctx)).rejects.toThrow(/Unknown or expired/);
+    expect(mockUse).not.toHaveBeenCalled();
+  });
+
   it('brokers an upstream request through Cred.use with the Delegation Token the model never sees', async () => {
     const agentIdentity = { did: 'did:key:z6MkAgent', privateKey: new Uint8Array(32) };
     mockDelegateHandle.mockResolvedValue({

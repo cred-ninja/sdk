@@ -49,7 +49,7 @@ The `cred_delegate` tool accepts:
 
 By default, returns an object with `accessToken`, `tokenType`, `expiresIn`, `service`, `scopes`, and `delegationId` for backwards compatibility.
 
-Set `tokenFormat: "handle"` to return a brokered delegation handle instead of a provider access token. Pair it with `credUseTool()` so the model can call allowed service APIs without seeing the token.
+Set `tokenFormat: "handle"` to broker the delegation instead of returning a provider access token. The server issues a DPoP-bound Delegation Token to the agent's did:key, so pass the same `agentIdentity` (`{ did, privateKey }`) to `credDelegateTool()` and `credUseTool()`. The token is kept inside the tools and the model only sees `delegationId`. Pair it with `credUseTool()` so the model can call allowed service APIs without seeing the token.
 
 ### `cred_use`
 
@@ -57,7 +57,7 @@ The `cred_use` tool accepts:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `delegationId` | `string` | Brokered handle returned by `cred_delegate` |
+| `delegationId` | `string` | Delegation id returned by `cred_delegate`; the tool looks up the matching Delegation Token and signs the DPoP proof with `agentIdentity` |
 | `url` | `string` | Full HTTPS API URL |
 | `method` | `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` | HTTP method |
 | `body` | `object` | Optional JSON body |
@@ -84,4 +84,4 @@ try {
 
 ## Brokered Server Mode
 
-Point `baseUrl` at your self-hosted `@credninja/server` deployment and set `tokenFormat: "handle"` when you want the model to receive delegation handles instead of provider access tokens.
+Point `baseUrl` at your self-hosted `@credninja/server` deployment and set `tokenFormat: "handle"` and an `agentIdentity` when you want brokered, key-bound delegation instead of provider access tokens.

@@ -95,6 +95,16 @@ describe.each(stores)('cascading revocation (%s)', (_name, make) => {
     expect(store.getDelegation('missing')).toBeNull();
   });
 
+  it('revokes every delegation of one connection, and only those', () => {
+    seedTree(store);
+    store.storeDelegation(rec('other_user', null, { userId: 'user-2' }), NOW);
+    store.storeDelegation(rec('other_service', null, { service: 'github' }), NOW);
+    const { revoked } = store.revokeDelegationTree({ connection: { service: 'google', userId: 'user-1' } }, LATER);
+    expect(new Set(revoked.map((r) => r.id))).toEqual(new Set(['root', 'a', 'a1', 'a2', 'b', 'b1', 'other', 'o1']));
+    expect(store.getDelegation('other_user')?.status).toBe('active');
+    expect(store.getDelegation('other_service')?.status).toBe('active');
+  });
+
   it('revoking the root of a 3-level chain revokes every descendant', () => {
     seedTree(store);
     const { revoked, truncated } = store.revokeDelegationTree({ delegationIds: ['root'] }, LATER);

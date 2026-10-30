@@ -100,12 +100,20 @@ interface CredUseToolInput {
  * Delegation Tokens by delegation id, so the model passes only the id
  * between cred_delegate and cred_use and never sees the token.
  */
-const delegationTokens = new Map<string, { token: string; expiresAtMs: number }>();
+interface RememberedToken {
+  token: string;
+  expiresAtMs: number;
+  /** Which server and agent the token was issued for: cred_use refuses any other. */
+  baseUrl: string | undefined;
+  agentDid: string;
+}
 
-function rememberDelegationToken(delegationId: string, token: string, expiresAtMs: number): void {
+const delegationTokens = new Map<string, RememberedToken>();
+
+function rememberDelegationToken(delegationId: string, entry: RememberedToken): void {
   const now = Date.now();
-  for (const [id, entry] of delegationTokens) if (entry.expiresAtMs <= now) delegationTokens.delete(id);
-  delegationTokens.set(delegationId, { token, expiresAtMs });
+  for (const [id, old] of delegationTokens) if (old.expiresAtMs <= now) delegationTokens.delete(id);
+  delegationTokens.set(delegationId, entry);
 }
 
 export function credDelegateTool(options: CredDelegateToolOptions): Tool {
@@ -187,7 +195,9 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
       const expiresAtMs = result.expiresAt instanceof Date
         ? result.expiresAt.getTime()
         : Date.now() + result.expiresIn * 1000;
-      if ('token' in result) rememberDelegationToken(result.delegationId, result.token, expiresAtMs);
+      if ('token' in result && agentIdentity) {
+        rememberDelegationToken(result.delegationId, { token: result.token, expiresAtMs, baseUrl, agentDid: agentIdentity.did });
+      }
       cachedResult = {
         ...('accessToken' in result ? { accessToken: result.accessToken } : {}),
         tokenType: result.tokenType,
@@ -248,6 +258,10 @@ export function credUseTool(options: CredUseToolOptions): Tool {
       }
       if (!agentIdentity) {
         throw new Error('cred_use needs agentIdentity: the Delegation Token is bound to the agent\'s key');
+      }
+      // Tool instances in one process may serve different servers or agents.
+      if (entry.agentDid !== agentIdentity.did || entry.baseUrl !== baseUrl) {
+        throw new Error('This delegation was issued for another agent or server');
       }
       return cred.use({ token: entry.token, agentIdentity, url, method, body, extraHeaders });
     },
