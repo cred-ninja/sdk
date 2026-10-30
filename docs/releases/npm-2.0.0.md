@@ -97,7 +97,12 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    `RECEIPT_TTL_SECONDS` may not exceed 3600. Callers that held handles for
    longer must request new ones; legacy receipts without `exp` also expire
    after this lifetime.
-16. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+16. The audit log becomes tamper-evident from the first event written after
+   the upgrade; earlier rows are reported as unchained. Run
+   `GET /admin/audit/verify` periodically and record the returned head outside
+   the host. Receipts now name the server (`REDIRECT_BASE_URI`) in `iss`; keep
+   that value stable, since a parent receipt naming another issuer is refused.
+17. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities

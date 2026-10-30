@@ -1,5 +1,5 @@
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
-import type { AuditEvent, AuditFilter } from '../audit.js';
+import type { AuditEvent, AuditFilter, AuditChainVerification, AuditChainHead } from '../audit.js';
 import type {
   DelegationRecord,
   DelegationRevocationOptions,
@@ -99,6 +99,10 @@ export interface StorageBackend {
   /** Write several events at once, in one transaction where the backend can. */
   writeAuditEvents?(events: readonly AuditEvent[]): void | Promise<void>;
   queryAuditEvents?(filter: AuditFilter): AuditEvent[] | Promise<AuditEvent[]>;
+  /** Key for the tamper-evident audit chain (set by CredVault.init()). */
+  setAuditChainKey?(key: Buffer): void;
+  verifyAuditChain?(): AuditChainVerification;
+  auditChainHead?(): AuditChainHead | null;
 
   // ── Delegation methods (optional; CredVault falls back to process memory) ─
 

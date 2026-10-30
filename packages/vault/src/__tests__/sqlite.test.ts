@@ -203,6 +203,8 @@ describe('SQLiteBackend — vault_agents', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'cred-sqlite-agent-'));
     backend = new SQLiteBackend(join(tmpDir, 'vault.db'));
     backend.init();
+    // CredVault.init() derives this from the passphrase; a bare backend needs one.
+    backend.setAuditChainKey(Buffer.alloc(32, 7));
   });
 
   afterEach(() => {

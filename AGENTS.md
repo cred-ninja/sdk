@@ -92,6 +92,7 @@ back to `default` on its own.
 | PATCH | `/admin/permissions/:id` | Admin | Update a Permission record |
 | DELETE | `/admin/permissions/:id` | Admin | Delete a Permission record |
 | GET | `/admin/audit` | Admin | Audit events across all agents (not scoped to one user) |
+| GET | `/admin/audit/verify` | Admin | Recompute the tamper-evident audit chain; `200` with `entries`, `unchained` and the `head` (`seq`, `hash`) to record outside the host, or `409` naming the first broken entry |
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
