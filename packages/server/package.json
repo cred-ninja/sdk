@@ -45,12 +45,12 @@
     "@credninja/protocol": "^2.0.0",
     "@credninja/tofu": "^2.0.0",
     "@credninja/vault": "^2.0.0",
+    "@types/express": "^5.0.5",
     "better-sqlite3": "^12.6.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2"
   },
   "devDependencies": {
-    "@types/express": "^5.0.5",
     "@types/node": "^20.10.6",
     "typescript": "^5.3.3",
     "tsx": "^4.7.0",
