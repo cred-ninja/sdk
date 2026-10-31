@@ -9,11 +9,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
-const registryVersion = process.argv[2] === '--registry-version' ? process.argv[3] : undefined;
-if (process.argv.length > 2 && (!registryVersion || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(registryVersion))) {
+const args = process.argv.slice(2);
+const registryVersion = args[0] === '--registry-version' && args.length === 2 ? args[1] : undefined;
+if (args.length > 0 && (!registryVersion || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(registryVersion))) {
   throw new Error('Usage: smoke-npm-packages.mjs [--registry-version VERSION]');
 }
+const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
   'packages/protocol',
@@ -233,7 +234,6 @@ for (const pkg of ['@credninja/protocol', '@credninja/attenuation', '@credninja/
   const cjs = require(pkg);
   if (!cjs || Object.keys(cjs).length === 0) throw new Error(pkg + ' CJS require exported nothing');
 }
-
 
 const { Cred, generateAgentIdentity } = await import('@credninja/sdk');
 const { createServer } = await import('@credninja/server');
