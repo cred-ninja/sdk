@@ -26,12 +26,13 @@ permissions:
 jobs:
   sdk-python:
     name: SDK Python (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # setup-python has no Python 3.9 build for Ubuntu 26.04.
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.12']
+        python-version: ['3.9', '3.10', '3.12']
     steps:
       - uses: actions/checkout@v4
 
@@ -87,15 +88,19 @@ jobs:
         run: python -m pytest '${{ matrix.package }}/tests'
 
   wheel-smoke:
-    name: Python Wheel Smoke
-    runs-on: ubuntu-latest
+    name: Python Wheel Smoke (${{ matrix.python-version }})
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.12']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             packages/sdk-python/pyproject.toml
