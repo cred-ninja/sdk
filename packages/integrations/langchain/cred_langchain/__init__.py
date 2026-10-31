@@ -1,5 +1,7 @@
 """Cred LangChain integration."""
 
+from __future__ import annotations
+
 from pydantic import SecretStr
 
 from cred import Cred
