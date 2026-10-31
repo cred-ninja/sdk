@@ -165,7 +165,7 @@ const EXTRA_MEMBERS: Readonly<Record<KnownDelegationConstraintType, readonly str
  * producer refuses to mint it and uses `max_lifetime` or `max_subtree`
  * (-02 section 4.2). The draft reserves no key names; this is Cred's list.
  */
-export const DEFAULT_RUNNING_COUNT_KEYS: readonly string[] = Object.freeze(['max_calls']);
+export const DEFAULT_RUNNING_COUNT_KEYS: readonly string[] = Object.freeze(['max_calls', 'calls']);
 
 /**
  * Orderings for rank labels, per constraint key, lowest to highest. A label's
@@ -652,4 +652,43 @@ export function producerConstraintViolations(
     out.push(`'${c.key}' is a running count; a per-action max bounds nothing. Use max_lifetime or max_subtree`);
   }
   return out;
+}
+
+/**
+ * Whether one exercise's measured `value` is within a per-exercise
+ * constraint (`max`, `min`, `one_of`, `not_one_of`, `prefix`, `rank`).
+ * Returns null when it is, else why not. A value of the wrong kind for the
+ * constraint is a violation, never a pass. Cumulative and unknown types are
+ * the caller's to handle and are refused here.
+ */
+export function exerciseConstraintViolation(
+  c: DelegationConstraint,
+  value: unknown,
+  options: { rankOrderings?: RankOrderings } = {},
+): string | null {
+  const type = constraintTypeOf(c);
+  const k = (c as { key: string }).key;
+  switch (type) {
+    case 'max':
+      return typeof value === 'number' && value <= (c as MaxConstraint).max ? null : `${k} ${String(value)} exceeds max ${(c as MaxConstraint).max}`;
+    case 'min':
+      return typeof value === 'number' && value >= (c as MinConstraint).min ? null : `${k} ${String(value)} is below min ${(c as MinConstraint).min}`;
+    case 'one_of':
+      return (c as OneOfConstraint).one_of.some((m) => m === value) ? null : `${k} ${String(value)} is not one of the allowed values`;
+    case 'not_one_of':
+      return ['string', 'number', 'boolean'].includes(typeof value) && !(c as NotOneOfConstraint).not_one_of.some((m) => m === value)
+        ? null : `${k} ${String(value)} is a refused value`;
+    case 'prefix':
+      return typeof value === 'string' && value.startsWith((c as PrefixConstraint).prefix) ? null : `${k} does not start with the allowed prefix`;
+    case 'rank': {
+      const rank = (c as RankConstraint).rank;
+      if (typeof rank === 'number') return typeof value === 'number' && value <= rank ? null : `${k} ${String(value)} is above rank ${rank}`;
+      const order = (c as RankConstraint).order ?? { ...DEFAULT_RANK_ORDERINGS, ...(options.rankOrderings ?? {}) }[k];
+      const limit = order ? order.indexOf(rank) : -1;
+      const at = order && typeof value === 'string' ? order.indexOf(value) : -1;
+      return limit >= 0 && at >= 0 && at <= limit ? null : `${k} ${String(value)} is above rank ${rank}`;
+    }
+    default:
+      return `${k}: a ${type} constraint is not decided per exercise`;
+  }
 }

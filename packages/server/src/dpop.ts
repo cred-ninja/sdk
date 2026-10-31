@@ -159,7 +159,7 @@ export function verifyDpopProof(
   }
   if (opts.ath !== undefined && claims.ath !== opts.ath) return { ok: false, message: 'DPoP proof ath does not match the handle' };
   if (opts.req !== undefined && claims.cred_req !== opts.req) {
-    return { ok: false, message: 'DPoP proof cred_req does not match this request (URL, method, body, headers, or quantities)' };
+    return { ok: false, message: 'DPoP proof cred_req does not match this request (URL, method, body or headers)' };
   }
   // Keyed by thumbprint so two agents cannot collide on a jti.
   if (opts.seenJti(`${expectedJkt}:${claims.jti}`, claims.iat + DPOP_MAX_AGE_SECONDS)) {

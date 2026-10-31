@@ -32,7 +32,7 @@ import {
   type RecordDelegationInput,
 } from './delegation-revocation.js';
 import { MemoryConsentStore } from './consent.js';
-import type { ConsentRecord, RecordConsentInput } from './consent.js';
+import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from './consent.js';
 import { PermissionStore, type CreatePermissionInput } from './permissions.js';
 import { isReservedLinkVaultUserId, ReservedVaultUserIdError } from './link/vault-ids.js';
 import { LINK_VAULT_ACCESS, type LinkVaultAccess } from './link/vault-access.js';
@@ -544,6 +544,35 @@ export class CredVault {
     await this.ensureInit();
     if (this.backend.getConsent) return this.backend.getConsent(id);
     return this.memoryConsents?.getConsent(id) ?? null;
+  }
+
+  /** Revoke consents after a security event (draft Section 8.3); returns the revoked ids. */
+  async revokeConsents(filter: ConsentRevocationFilter, reason: string): Promise<string[]> {
+    await this.ensureInit();
+    const now = new Date().toISOString();
+    if (this.backend.revokeConsents) return this.backend.revokeConsents(filter, reason, now);
+    this.memoryConsents ??= new MemoryConsentStore();
+    return this.memoryConsents.revokeConsents(filter, reason, now);
+  }
+
+  /** Consent records of one subject, agent and service, newest first. */
+  async findConsents(filter: { subject: string; agentDid: string; service: string }): Promise<ConsentRecord[]> {
+    await this.ensureInit();
+    if (this.backend.findConsents) return this.backend.findConsents(filter);
+    return (this.memoryConsents?.findConsents(filter) ?? []).reverse();
+  }
+
+  async getConsentRevocation(id: string): Promise<ConsentRevocation | null> {
+    await this.ensureInit();
+    if (this.backend.getConsentRevocation) return this.backend.getConsentRevocation(id);
+    return this.memoryConsents?.getConsentRevocation(id) ?? null;
+  }
+
+  /** Delete consent records whose retention (from the later of grant and expiry) ended before `before`. */
+  async purgeConsents(before: Date): Promise<number> {
+    await this.ensureInit();
+    if (this.backend.purgeConsents) return this.backend.purgeConsents(before.toISOString());
+    return this.memoryConsents?.purgeConsents(before.toISOString()) ?? 0;
   }
 
   async getDelegation(id: string): Promise<DelegationRecord | null> {

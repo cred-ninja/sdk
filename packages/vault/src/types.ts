@@ -37,6 +37,8 @@ export interface PermissionRateLimit {
 /**
  * Permission granted to an agent for a given connection.
  */
+export type PermissionApprover = 'subject' | 'admin' | 'both';
+
 export interface Permission {
   id: string;
   agentId: string;
@@ -45,6 +47,12 @@ export interface Permission {
   rateLimit?: PermissionRateLimit;
   ttlOverride?: number;
   requiresApproval: boolean;
+  /**
+   * Who approves a delegation under a permission that requires approval
+   * (draft Section 8.1): the subject (the account owner, the default), an
+   * admin, or both. Ignored when requiresApproval is false.
+   */
+  approver?: PermissionApprover;
   delegatable: boolean;
   maxDelegationDepth: number;
   createdAt: Date;

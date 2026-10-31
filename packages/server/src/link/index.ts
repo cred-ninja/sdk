@@ -90,13 +90,13 @@ export interface CreateLinkServiceOptions {
   storePath: string;
   /** True when config.agentRequestVerifier is set. */
   customVerifier: boolean;
-  /** Stores a brokered handle bound to a Link connection (no token inside). */
-  storeHandle: Parameters<typeof handleLinkDelegate>[0]['storeHandle'];
+  /** Checks the agent's did:key and its DPoP proof on a Link delegate call. */
+  checkAgentKey: Parameters<typeof handleLinkDelegate>[0]['checkAgentKey'];
+  /** Records a Link delegation and sends its Delegation Token. */
+  issueToken: Parameters<typeof handleLinkDelegate>[0]['issueToken'];
   /** CRED_ALLOW_RAW_TOKENS (default false). */
   allowRawTokens?: boolean;
-  /** CRED_REQUIRE_DPOP (default true): no Link handle for the key-less static Bearer identity. */
-  requireKeyedAgent?: boolean;
-  /** Lifetime of Link brokered handles, seconds (default 300, capped at 900). */
+  /** Lifetime of Link Delegation Tokens, seconds (default 300, capped at 900). */
   handleTtlSeconds?: number;
   makeRateLimiter: (max: number) => RequestHandler;
   /** Start the unref'd expiry sweep interval. Default true. */
@@ -114,7 +114,7 @@ export interface LinkService {
   /** The Link branch of /api/v1/delegate; returns false when the call names no connection. */
   handleDelegate(req: Request, res: Response): Promise<boolean>;
   /** The Link check of /api/v1/use; null after sending a denial. */
-  authorizeUse(req: Request, res: Response, handle: { service: string; scopes: string[]; link: LinkHandleBinding }): ReturnType<typeof authorizeLinkUse>;
+  authorizeUse(req: Request, res: Response, handle: { service: string; scopes: string[]; link: LinkHandleBinding }, tokenVerified: boolean): ReturnType<typeof authorizeLinkUse>;
   /** Load the provider token for a use call; null after sending the failure. */
   loadUseToken(req: Request, res: Response, access: { connection: Parameters<typeof loadLinkUseToken>[3] }, agentId: string): Promise<string | null>;
   /** Salesforce instance pinning for brokered calls. */
@@ -202,9 +202,9 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
   const enforcement: LinkEnforcementDeps = { ctx, tofu: options.tofu, customVerifier: options.customVerifier };
   const delegateDeps = {
     ...enforcement,
-    storeHandle: options.storeHandle,
+    checkAgentKey: options.checkAgentKey,
+    issueToken: options.issueToken,
     allowRawTokens: options.allowRawTokens ?? false,
-    requireKeyedAgent: options.requireKeyedAgent ?? true,
     handleTtlSeconds: Math.min(Math.max(1, Math.floor(options.handleTtlSeconds ?? LINK_HANDLE_TTL_DEFAULT_SECONDS)), LINK_HANDLE_TTL_MAX_SECONDS),
   };
 
@@ -287,9 +287,9 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
       await handleLinkDelegate(delegateDeps, req, res, state);
       return true;
     },
-    async authorizeUse(req, res, handle) {
+    async authorizeUse(req, res, handle, tokenVerified) {
       await ready.catch(() => undefined);
-      return authorizeLinkUse(enforcement, req, res, handle);
+      return authorizeLinkUse(enforcement, req, res, handle, tokenVerified);
     },
     loadUseToken(req, res, access, agentId) {
       return loadLinkUseToken(enforcement, req, res, access.connection, agentId);

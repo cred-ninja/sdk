@@ -1,6 +1,5 @@
 /**
- * DPoP-bound handles (RFC 9449), with the server's default
- * CRED_REQUIRE_DPOP=true. A brokered handle is issued only to a did:key
+ * DPoP-bound handles (RFC 9449). A brokered handle is issued only to a did:key
  * agent, bound to that key, and usable only with a fresh DPoP proof by it:
  * the handle id and the deployment Bearer credential together are no longer
  * enough. Proofs come from the TypeScript client's createDpopProof(), so the
@@ -16,6 +15,7 @@ import Database from 'better-sqlite3';
 import { createActorToken, createDpopProof, generateAgentIdentity, type AgentIdentity } from '@credninja/sdk';
 import { canonicalJson, didKeyConfirmation } from '@credninja/attenuation';
 import { createServer } from '../server.js';
+import { loadConfig } from '../config.js';
 import { dpopAth, normalizeHtu, verifyDpopProof } from '../dpop.js';
 import type { ServerConfig } from '../config.js';
 
@@ -445,19 +445,20 @@ describe('DPoP across sub-delegation', () => {
   });
 });
 
-describe('CRED_REQUIRE_DPOP=false (deprecated)', () => {
-  it('binds agent delegations to the key even with CRED_REQUIRE_DPOP=false, and warns', async () => {
+describe('CRED_REQUIRE_DPOP (removed)', () => {
+  it('is ignored with a warning: every delegation is DPoP-bound', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const agent = await generateAgentIdentity();
-    const { app } = await setup({ requireDpop: false });
-    expect(warn.mock.calls.some(([m]) => String(m).includes('CRED_REQUIRE_DPOP=false'))).toBe(true);
-    expect((await delegate(app, agent.did)).status).toBe(401);
-    const res = await delegateAs(app, agent);
-    expect(res.status).toBe(200);
-    expect(res.body.cnf).toEqual({ jkt: didKeyConfirmation(agent.did)!.jkt });
-    mockUpstream();
-    expect((await use(app, res.body.access_token)).status).toBe(401);
-    expect((await useAs(app, agent, res.body.access_token)).status).toBe(200);
+    vi.stubEnv('VAULT_PASSPHRASE', 'test-passphrase-not-for-production');
+    vi.stubEnv('AGENT_TOKEN', `cred_at_${'a'.repeat(64)}`);
+    vi.stubEnv('ADMIN_TOKEN', `cred_admin_${'b'.repeat(64)}`);
+    vi.stubEnv('CRED_REQUIRE_DPOP', 'false');
+    try {
+      const config = loadConfig();
+      expect('requireDpop' in config).toBe(false);
+      expect(warn.mock.calls.some(([m]) => String(m).includes('CRED_REQUIRE_DPOP is ignored'))).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

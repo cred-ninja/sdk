@@ -39,7 +39,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
-    requireDpop: false,
+   
     providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: ['openid'] }],
     redirectBaseUri: BASE,
     ...overrides,
@@ -308,20 +308,23 @@ describe('opaque constraints across delegation paths', () => {
 describe('cumulative ledger across hops', () => {
   it('debits every ancestor max_subtree, so siblings share the root budget', async () => {
     const { app } = await setup();
-    const root = await delegateRoot(app, { constraints: [{ key: 'max_spend', max_subtree: 100 }] });
+    // max_calls is metered by the server: one per call.
+    const root = await delegateRoot(app, { constraints: [{ key: 'max_calls', max_subtree: 3 }] });
     expect(root.status).toBe(200);
-    const a = await subdelegate(app, root.body.receipt, CHILD, { constraints: [{ key: 'max_spend', max_subtree: 80 }] });
-    const b = await subdelegate(app, root.body.receipt, SIBLING, { constraints: [{ key: 'max_spend', max_subtree: 80 }] });
+    const a = await subdelegate(app, root.body.receipt, CHILD, { constraints: [{ key: 'max_calls', max_subtree: 2 }] });
+    const b = await subdelegate(app, root.body.receipt, SIBLING, { constraints: [{ key: 'max_calls', max_subtree: 2 }] });
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }));
-    expect((await use(app, CHILD, a.body.access_token, { max_spend: 60 })).status).toBe(200);
-    const over = await use(app, SIBLING, b.body.access_token, { max_spend: 50 });
+    expect((await use(app, CHILD, a.body.access_token)).status).toBe(200);
+    expect((await use(app, CHILD, a.body.access_token)).status).toBe(200);
+    expect((await use(app, SIBLING, b.body.access_token)).status).toBe(200);
+    // The sibling is within its own bound (1 of 2) but the root's is spent (3 of 3).
+    const over = await use(app, SIBLING, b.body.access_token);
     expect(over.status).toBe(403);
     expect(over.body).toMatchObject({ error: 'cumulative_constraint_exceeded', type: 'max_subtree' });
     expect(over.body.message).toContain(root.body.delegation_id);
-    expect((await use(app, SIBLING, b.body.access_token, { max_spend: 40 })).status).toBe(200);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
     fetchSpy.mockRestore();
   });
 });

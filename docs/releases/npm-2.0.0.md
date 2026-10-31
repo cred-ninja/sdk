@@ -90,9 +90,16 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    for raw tokens, fail until callers move to `delegateHandle()` and `use()`.
    `CRED_ALLOW_RAW_TOKENS=true` restores them (deprecated); local mode, where
    the vault runs in the agent's own process, is unchanged.
-14. Cred Link: with DPoP on, a Link handle is issued only to an agent bound to
-   a key (a TOFU agent signing with Web Bot Auth, or a verified principal),
-   not to the shared static Bearer identity (`server-agent`).
+14. Cred Link delegations are Delegation Tokens. A Link delegate call
+   (`connection_id`) sends `agent_did` as a did:key and a DPoP proof by that
+   key, and gets `access_token`, `token_type: "DPoP"` and `cnf.jkt`, plus
+   `connection_id`, `grant_id` and `grant_version`. The token is issued only
+   to an identified agent (a TOFU agent signing with Web Bot Auth, or a
+   verified principal), not to the shared static Bearer identity
+   (`server-agent`), and is exercised like any other: `Authorization: DPoP`
+   at `/api/v1/use`. `delegation_id` with `Authorization: Bearer` no longer
+   works for a Link delegation. Link delegations are recorded, survive a
+   restart, and are still checked against the Link grant at every call.
 15. Delegations are shorter-lived: receipts default to 15 minutes, and
    `RECEIPT_TTL_SECONDS` may not exceed 3600. Callers that held handles for
    longer must request new ones; legacy receipts without `exp` also expire
@@ -113,15 +120,39 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    - Sub-delegation hands off with `subDelegateGrant()` (delegating agent) and
      `redeemDelegationGrant()` (receiving agent); `/api/v1/subdelegate` always
      requires the delegator's `actor_token`.
-   - `CRED_REQUIRE_DPOP=false` now affects Cred Link only, and
-     `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored. Neither relaxes agent
-     delegations any more.
+   - `CRED_REQUIRE_DPOP` is removed (ignored, with a warning), and
+     `CRED_REQUIRE_AGENT_IDENTITY=false` is ignored. Neither relaxes any
+     delegation.
    - `@credninja/mcp` in brokered mode needs `CRED_AGENT_DID` and
      `CRED_AGENT_PRIVATE_KEY_HEX`.
    - Python (`cred-auth`): `delegate_handle()` needs `agent_identity` and
      returns the token, and `use()` takes the token plus `agent_identity`,
      the same way.
-18. Exercise a full consent, delegation, brokered-use, and revocation flow on a
+18. Ceilings are decided from what the server measures. `quantities` in the
+   `/api/v1/use` body is no longer read. A delegation carrying a constraint on
+   a key the server does not meter is refused at exercise
+   (`403 unmetered_constraint`): re-issue it under a metered key (`calls`,
+   `method`, `destination`, `request_bytes`, `response_bytes`, `items` and
+   its aliases). A response over a bound is withheld (`withheld: true`,
+   `upstream_status`), not truncated, so check `upstream_status` before
+   retrying a write.
+19. A Permission with `requiresApproval` is enforced, not refused. A did:key
+   agent asks at `POST /bc-authorize` (OpenID CIBA, poll mode) and polls
+   `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba`. Set
+   who approves per Permission (`approver`: `subject`, `admin` or `both`),
+   and give the subject a channel: `CRED_APPROVAL_WEBHOOK_URL` for the
+   built-in page, or an external OpenID Provider (`CRED_CIBA_*`). Without a
+   channel only admin approval works (`/admin/approvals`).
+20. Every Delegation Token names a consent record (`consent_id`), kept
+   `CONSENT_RETENTION_DAYS` (at least 90, the default) and purged daily. A
+   security event (`POST /admin/consents/revoke`) refuses the tokens under
+   the revoked consents (`401 consent_revoked`). Plan storage for the
+   retained records.
+21. Delegations may ask for RFC 9396 `authorization_details` of type
+   `cred_delegation`: granted scopes as operations, or catalogue operations
+   with resources for GitHub and Google Drive. Optional: without it, a token
+   carries its granted scopes as operations.
+22. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities
