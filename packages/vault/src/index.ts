@@ -26,6 +26,7 @@ export {
   DelegationRevokedError,
   DEFAULT_MAX_REVOCATION_DEPTH,
 } from './delegation-revocation.js';
+export type { PermissionApprover } from './types.js';
 export type {
   DelegationGrant,
   DelegationRecord,
@@ -156,4 +157,4 @@ export type {
   FrozenBudgetOperation,
 } from './durable-budget-admission.js';
 export { MemoryConsentStore } from './consent.js';
-export type { ConsentRecord, ConsentSource, RecordConsentInput } from './consent.js';
+export type { ConsentRecord, ConsentSource, RecordConsentInput, ConsentRevocation, ConsentRevocationFilter } from './consent.js';

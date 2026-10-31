@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import type { StorageBackend } from './storage/interface.js';
-import type { Permission, PermissionRateLimit, PermissionRow, PermissionRowUpdate, UpdatePermissionInput } from './types.js';
+import type { Permission, PermissionApprover, PermissionRateLimit, PermissionRow, PermissionRowUpdate, UpdatePermissionInput } from './types.js';
 
 export interface CreatePermissionInput {
   agentId: string;
@@ -9,10 +9,22 @@ export interface CreatePermissionInput {
   rateLimit?: PermissionRateLimit;
   ttlOverride?: number;
   requiresApproval: boolean;
+  approver?: PermissionApprover;
   delegatable: boolean;
   maxDelegationDepth: number;
   expiresAt?: Date;
   createdBy: string;
+}
+
+/**
+ * requires_approval holds the approver too, so no column is added: 0 no
+ * approval, 1 the subject (every row written before approvers existed),
+ * 2 an admin, 3 both.
+ */
+const APPROVAL_CODES: Record<PermissionApprover, number> = { subject: 1, admin: 2, both: 3 };
+
+function approvalCode(requiresApproval: boolean, approver: PermissionApprover | undefined): number {
+  return requiresApproval ? APPROVAL_CODES[approver ?? 'subject'] : 0;
 }
 
 export class PermissionStore {
@@ -43,6 +55,13 @@ export class PermissionStore {
       throw new Error('Permission storage not supported by this backend');
     }
 
+    // requiresApproval and the approver share a column: turning approval on
+    // without naming an approver keeps the one already set, never resetting
+    // 'admin' or 'both' to 'subject'. An empty update reads the row.
+    if (input.requiresApproval === true && input.approver === undefined) {
+      const current = this.rowToPermission(await this.backend.updatePermission(id, {}));
+      if (current.requiresApproval && current.approver) input = { ...input, approver: current.approver };
+    }
     const row = await this.backend.updatePermission(id, this.updateInputToRow(input));
     return this.rowToPermission(row);
   }
@@ -142,7 +161,7 @@ export class PermissionStore {
       rate_limit_max: permission.rateLimit?.maxRequests ?? null,
       rate_limit_window_ms: permission.rateLimit?.windowMs ?? null,
       ttl_override: permission.ttlOverride ?? null,
-      requires_approval: permission.requiresApproval ? 1 : 0,
+      requires_approval: approvalCode(permission.requiresApproval, permission.approver),
       delegatable: permission.delegatable ? 1 : 0,
       max_delegation_depth: permission.maxDelegationDepth,
       expires_at: permission.expiresAt?.toISOString() ?? null,
@@ -172,7 +191,7 @@ export class PermissionStore {
       updates.ttl_override = input.ttlOverride ?? null;
     }
     if ('requiresApproval' in input && input.requiresApproval !== undefined) {
-      updates.requires_approval = input.requiresApproval ? 1 : 0;
+      updates.requires_approval = approvalCode(input.requiresApproval, input.approver);
     }
     if ('delegatable' in input && input.delegatable !== undefined) {
       updates.delegatable = input.delegatable ? 1 : 0;
@@ -202,7 +221,11 @@ export class PermissionStore {
           }
         : undefined,
       ttlOverride: row.ttl_override ?? undefined,
-      requiresApproval: row.requires_approval === 1,
+      // Any non-zero code requires approval; an unknown code fails closed to both.
+      requiresApproval: row.requires_approval !== 0,
+      ...(row.requires_approval !== 0
+        ? { approver: (Object.entries(APPROVAL_CODES).find(([, code]) => code === row.requires_approval)?.[0] ?? 'both') as PermissionApprover }
+        : {}),
       delegatable: row.delegatable === 1,
       maxDelegationDepth: row.max_delegation_depth,
       createdAt: new Date(row.created_at),

@@ -2,6 +2,127 @@
 
 ## [Unreleased]
 
+### Changed: Cred Link on Delegation Tokens
+
+- `@credninja/server`: a Cred Link delegation (`connection_id`) is a
+  Delegation Token like any other. The agent sends `agent_did` (a did:key)
+  and a DPoP proof by that key, and gets `token_type: "DPoP"` with
+  `cnf.jkt`, alongside `connection_id`, `grant_id` and `grant_version`. The
+  token is recorded with the Link grant it was issued under, so it survives
+  a restart and is still checked against the grant at every call (revoked,
+  narrowed or `needs_reauth` connections are refused); revoking the did:key
+  agent revokes it too, but one Link token cannot yet be revoked by id. It
+  lasts no longer than a receipt, and the did:key agent checks (suspended,
+  scope ceiling) apply. It is exercised with `Authorization: DPoP` at
+  `/api/v1/use`; a `delegation_id` with `Authorization: Bearer` no longer
+  authorizes anything. Link tokens are never issued to the shared static
+  Bearer identity (`server-agent`); a TOFU proof on a Link call must name
+  the `agent_did` the token is bound to (`agent_did` in the signed payload),
+  so a replayed proof cannot bind another key. Guard rate limits at use key
+  on the Link agent. Link tokens carry no ceilings yet.
+- `CRED_REQUIRE_DPOP` (`requireDpop`) is removed; setting it logs that it
+  is ignored.
+
+### Added: consent records, approvals and CIBA
+
+- `@credninja/server`: a did:key agent's Permission is now checked at
+  `/api/v1/delegate`. A Permission that requires approval names its
+  approver (`approver`: `subject`, the default, `admin`, or `both`). Such a
+  delegation is asked for at `POST /bc-authorize` (OpenID CIBA, poll mode;
+  the request is bound to the agent's DPoP key) and redeemed at
+  `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba`. The
+  subject is asked through the built-in approval page, a signed single-use
+  link posted to `CRED_APPROVAL_WEBHOOK_URL`, or through an external
+  OpenID Provider's CIBA endpoints (`CRED_CIBA_*`); admins decide at
+  `/admin/approvals`. An approved consent (`source: "ciba"`) is reused for
+  later requests it covers for `CRED_CIBA_CONSENT_TTL_SECONDS` (default one
+  day); a broader request, an expired consent or a security event
+  (`POST /admin/consents/revoke`) means asking again, and tokens under a
+  revoked consent are refused at exercise (`401 consent_revoked`).
+  Approval requests are held in process memory.
+- The approval flow applies the checks `/api/v1/delegate` does: the
+  subject in `login_hint` is resolved like `user_id`, the agent's record
+  (revoked, suspended, scope ceiling) and its Permission's `allowedScopes`
+  bound the request, and the ceilings are validated. They are checked
+  again at redemption: an approval whose agent, Permission or connection
+  changed is refused (`invalid_grant`), as is one not redeemed before the
+  request expires (`expired_token`). A consent is reused only for the same
+  app client, ceilings at least as tight, and a Permission whose approver
+  needs no role that did not approve. A security event also ends approvals
+  not yet redeemed. A webhook that answers with an error ends the request
+  (`502`). A did:key agent's Permission is applied even when TOFU fields
+  accompany the request, and its rate limit counts approval-gated requests.
+  Guard policy applies at `/bc-authorize` as at `/api/v1/delegate`. Live
+  approval requests are capped overall (10,000), per agent (20), per
+  subject (50) and per agent for one subject (5); the cap is checked as the
+  request is stored. Finished requests are dropped a minute after.
+- `@credninja/server`: under a Guard, a request naming no scopes (meaning
+  every stored scope) now shows Guard the stored scopes, on
+  `/api/v1/delegate`, `/bc-authorize` and `GET /api/token/:provider`, so
+  scope policies decide on what would be granted; a decision that allows
+  no scope is refused (`403 invalid_scope`), never read as "everything".
+- `@credninja/vault`: updating a Permission with `requiresApproval: true`
+  and no `approver` keeps the approver already set.
+- Consent records are kept `CONSENT_RETENTION_DAYS` (at least 90, the
+  default) after the later of grant and expiry, then purged daily; the
+  purge is recorded in the audit chain. Consent revocations are a
+  separate append-only table; records are never edited.
+- `@credninja/vault`: `Permission.approver`; `revokeConsents`,
+  `getConsentRevocation`, `findConsents`, `purgeConsents`.
+
+### Changed: per-exercise ceilings, measured by the server
+
+- `@credninja/server`: every constraint is decided from what the server
+  measures; `quantities` in the `/api/v1/use` body is no longer read.
+  Metered keys: `calls`/`max_calls`, `method`, `destination`,
+  `request_bytes` (before the upstream call) and `response_bytes`,
+  `items`/`rows`/`max_rows`/`max_results` (from the response). The
+  per-exercise types `max`, `min`, `one_of`, `not_one_of`, `prefix` and
+  `rank` are now enforced at exercise (`403 ceiling_exceeded`); a response
+  over a bound is withheld (`withheld: true`, with the `upstream_status`
+  of the call that ran, so a completed write is not retried) and audited
+  with its measurement, never truncated; records are counted on the whole
+  response body, in every array reachable through objects whatever the
+  provider names it, not inside the records; a response whose records
+  cannot be counted is withheld (`unmeasurable_response`); a request-side
+  debit is given back when the upstream cannot be reached; a
+  `destination` prefix holds only at a URL boundary; methods compare in
+  upper case; a catalogue listing with a page-size parameter
+  (`per_page`, `pageSize`) is capped at an item bound up front. A
+  constraint on a key with no meter cannot be decided, so an exercise
+  under it is refused (`403 unmetered_constraint`); it is still carried
+  and narrowed across hops. `calls` is a running count, so a per-call
+  `max` on it is refused at issuance. Method-override query parameters
+  are refused in any spelling (`$httpMethod`, `_HttpMethod`, `_method`,
+  `method`, ...).
+
+### Added: capabilities and the operation catalogue
+
+- `@credninja/server`: `/api/v1/delegate` and `/api/v1/subdelegate` accept
+  `authorization_details` (RFC 9396, type `cred_delegation`). An operation
+  is a granted OAuth scope, which allows what that scope allows, or a
+  catalogue operation, which allows one method and URL template: GitHub
+  (`github.user.get`, `github.repos.get`, `github.contents.get`,
+  `github.issues.{list,get,create,comment}`, `github.pulls.{list,get}`)
+  and Google Drive (`drive.files.{list,get,export,create}`). Resources
+  narrow a catalogue operation: `repo:owner/name` (case-insensitive) or
+  `file:<id>`. Unknown operations and resource kinds are refused at
+  issuance (`400 invalid_authorization_details`) and calls outside the
+  capabilities are refused at exercise (`403 capability_denied`). A child
+  is held within its parent's capabilities (`403
+  capability_escalation_denied`); a child that names none inherits a
+  narrowed parent's. Without `authorization_details`, a token's
+  capabilities are its granted scopes, as before. A token names scopes or
+  catalogue operations, never both: a scope operation allows what the
+  broker lets that scope do (for GitHub, the whole API), so beside a
+  narrowed entry it would silently widen it. `authorization_details` is
+  refused on raw-token and Cred Link requests. Brokered calls never
+  forward a method override (`X-HTTP-Method-Override`, `$httpMethod`).
+  Drive folder resources are not offered: holding a listing to a folder
+  would mean parsing Drive's query language.
+- `@credninja/sdk`: `authorizationDetails` on `delegateHandle()`,
+  `subDelegateHandle()` and `subDelegateGrant()`.
+
 ### BREAKING: Delegation Tokens replace brokered handles
 
 - `@credninja/server`: `/api/v1/delegate`, `/api/v1/subdelegate` and the
@@ -35,8 +156,8 @@
   returns `token`; `use()` takes `token` and `agentIdentity`; new
   `subDelegateGrant()` and `redeemDelegationGrant()`. MCP and
   `@credninja/ai` keep the token in-process and show the model only an id.
-- Cred Link handles are unchanged in this release step; Link moves to
-  Delegation Tokens next.
+- Cred Link moves to Delegation Tokens too (see "Cred Link on Delegation
+  Tokens" above).
 
 ### Added: tamper-evident audit log; receipts name their issuer
 
@@ -218,8 +339,9 @@ brokered handle. Now, by default (`CRED_REQUIRE_DPOP=true`):
   gone, including after a revocation in another process.
 - Permission `expiresAt`, `rateLimit` and `requiresApproval` are enforced on
   `/api/v1/delegate` (TOFU principals) and `/api/v1/subdelegate`.
-  The server has no approval flow yet, so `requiresApproval: true` answers
-  `403 approval_required`. `rateLimit` answers `429 rate_limited`, an expired
+  `requiresApproval: true` answers `403 approval_required` there (a did:key
+  agent's root delegation is approved through CIBA instead: see "consent
+  records, approvals and CIBA" above). `rateLimit` answers `429 rate_limited`, an expired
   permission `403 permission_expired`.
 
 ### Fixed: local mode revocation in `cred_use` (`@credninja/mcp`, `@credninja/sdk`)

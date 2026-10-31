@@ -407,7 +407,7 @@ export function createActorToken(identity: Pick<AgentIdentity, 'did' | 'privateK
  * be replayed against another handle. With `requestBody`, it also commits to
  * that exact request (`cred_req`, base64url SHA-256 of its RFC 8785 form):
  * a /api/v1/use proof authorizes one upstream call, with this URL, method,
- * body, headers and quantities. The server rejects a proof older than two
+ * body and headers. The server rejects a proof older than two
  * minutes or a replayed `jti`; make a new one per request.
  */
 export function createDpopProof(

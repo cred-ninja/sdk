@@ -161,6 +161,13 @@ export interface DelegateParams {
   receiptClaims?: string[];
   /** Wire constraint objects. Unknown types cannot authorize raw-token issuance. */
   constraints?: unknown[];
+  /**
+   * RFC 9396 capabilities for a Delegation Token, type `cred_delegation`:
+   * operations are granted scopes or catalogue operations (such as
+   * `github.issues.create`), and resources narrow them (such as
+   * `repo:owner/name`). Default: the granted scopes.
+   */
+  authorizationDetails?: Array<{ type: 'cred_delegation'; provider: string; operations: string[]; resources?: string[] }>;
 }
 
 export interface TofuDelegateParams {

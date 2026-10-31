@@ -148,11 +148,13 @@ describe('Cred Link end to end (redirect mode)', () => {
     expect(act.body.status).toBe('active');
     expect(act.body.grant.scopes).toEqual(['calendar.readonly', 'gmail.send']);
 
-    // Delegate with connection_id: a handle by default, exactly the effective scopes.
+    // Delegate with connection_id: a Delegation Token by default, bound to
+    // the agent's key, for exactly the effective scopes.
     const del = await delegate(h.app, { connection_id: result.connection_id, scopes: ['calendar.readonly'] });
     expect(del.status).toBe(200);
-    expect(del.body.token_type).toBe('Delegation');
-    expect(del.body.access_token).toBeUndefined();
+    expect(del.body.token_type).toBe('DPoP');
+    expect(del.body.cnf.jkt).toEqual(expect.any(String));
+    expect(del.body.user_id).toBeUndefined();
     expect(del.body.scopes).toEqual(['calendar.readonly']);
     expect(del.body.grant_id).toBe(result.grant_id);
     expect(JSON.stringify(del.body)).not.toContain('ya29');

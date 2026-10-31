@@ -126,9 +126,14 @@ npm run dev
 > **Cumulative constraints.** `max_lifetime` and `max_subtree` are enforced by this server as
 > the single writer of their running totals. `/api/v1/use` debits, in one SQLite transaction, the
 > delegation's own `max_lifetime` and every `max_subtree` held by it or an ancestor, right before
-> the upstream call. `max_calls` is metered at one per call; any other cumulative key needs the
-> exercise's quantity in `quantities` (`{"max_spend": 12}`), and a call without it is refused with
-> `403 cumulative_quantity_required`. Past a bound: `403 cumulative_constraint_exceeded`. A
+> the upstream call, or right after it for a quantity read from the response. The server measures
+> every quantity itself; an agent never declares one. Metered keys: `calls` and `max_calls` (one
+> per call), `method`, `destination` (the upstream URL), `request_bytes`, `response_bytes`, and
+> `items`, `rows`, `max_rows`, `max_results` (records in the response). A constraint on any other
+> key cannot be decided, so a call under it is refused with `403 unmetered_constraint`. Past a
+> per-call bound: `403 ceiling_exceeded`; a response over a bound is withheld (`withheld: true`).
+> A catalogue listing with a page-size parameter is capped at an item bound up front.
+> Past a cumulative bound: `403 cumulative_constraint_exceeded`. A
 > delegation whose ancestors the ledger does not hold (for example after a restart with the
 > in-memory default) is refused with `403 cumulative_constraint_unenforceable`, never given a
 > fresh budget. Set `CUMULATIVE_LEDGER_PATH` to keep the totals across restarts.
@@ -153,7 +158,7 @@ npm run dev
 > key. Every `POST /api/v1/use` sends `Authorization: DPoP <token>` and a new proof by the same
 > key with `htu` `<REDIRECT_BASE_URI>/api/v1/use`, `ath` = base64url SHA-256 of the token, and
 > `cred_req` = base64url SHA-256 of the RFC 8785 (JCS) form of the whole JSON request body
-> (`url`, `method`, `body`, `extra_headers`, `quantities`; there is no `delegation_id`). The
+> (`url`, `method`, `body`, `extra_headers`; there is no `delegation_id`). The
 > server recomputes `cred_req` from the request it received, so a proof authorizes exactly that
 > one upstream call. A missing, stale (over 120 seconds), replayed, or mismatched proof gets
 > `401 invalid_dpop_proof` with a `WWW-Authenticate: DPoP` header, before any upstream call. A
@@ -162,14 +167,14 @@ npm run dev
 > receiving agent's key, so the delegating agent that relays one cannot use it; the receiving
 > agent must be a did:key. The SDK signs proofs when `delegateHandle()` and `use()` get
 > `agentIdentity`; the MCP server when `CRED_AGENT_DID` and `CRED_AGENT_PRIVATE_KEY_HEX` are set.
-> Raw-token delegation is off by default (`CRED_ALLOW_RAW_TOKENS`). Cred Link handles keep their
-> own binding. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
+> Raw-token delegation is off by default (`CRED_ALLOW_RAW_TOKENS`). Cred Link delegations are
+> Delegation Tokens too, bound to the agent's key and to the Link grant. `htu` is compared with `REDIRECT_BASE_URI` by scheme, host, port and path
 > (case-insensitive scheme and host, default port ignored), so the client's base URL must be the
 > same origin and path as `REDIRECT_BASE_URI`: `localhost` and `127.0.0.1` are different, and so
 > are `http` and `https` or two ports. At `/api/v1/use` the response does not say why a proof
 > failed; the audit log does. `/api/v1/subdelegate` always requires the delegating agent's
 > `actor_token`, so a leaked receipt cannot mint a token bound to another key.
-> `CRED_REQUIRE_DPOP=false` now affects Cred Link only; `CRED_REQUIRE_AGENT_IDENTITY=false` is
+> `CRED_REQUIRE_DPOP` is removed (ignored, with a warning); `CRED_REQUIRE_AGENT_IDENTITY=false` is
 > ignored.
 
 > **Sub-Delegation Exchange.** With `"exchange": "grant"`, `/api/v1/subdelegate` runs every hop
@@ -223,7 +228,7 @@ curl -X DELETE "https://cred.example.com/api/v1/delegations/del_abc?user_id=alic
   `DELETE /api/token/:provider`, `DELETE /connect/:provider`) revokes every
   delegation issued from it and revokes the grant at the provider in the
   background, best effort. `/api/v1/use` also checks, right before the
-  upstream call, that the connection behind a non-Link handle still exists,
+  upstream call, that the connection behind a non-Link delegation still exists,
   so a revocation in another process or one that raced the handle's
   issuance answers `401 connection_revoked`.
 - Revoking an agent (`DELETE /admin/agents/:agentId`,
@@ -592,8 +597,12 @@ All configuration via environment variables (or `.env` file):
 | `RECEIPT_ACCEPTED_ALGS` | No | Comma-separated receipt algorithms this server accepts (default: `EdDSA,ES256`) |
 | `RECEIPT_CLAIM_LAYOUT` | No | `draft-02` (default: principal in `sub`, agent in `client_id` and `act.sub`) or `legacy` (agent in `sub`) |
 | `CUMULATIVE_LEDGER_PATH` | No | SQLite file for cumulative-constraint running totals (default: in memory) |
+| `CONSENT_RETENTION_DAYS` | No | Days a consent record is kept after the later of its grant and expiry, then purged daily (default and minimum `90`) |
+| `CRED_APPROVAL_WEBHOOK_URL` | No | Where an approval request for the subject is posted (`cred.approval_requested`, with a signed single-use `approve_url` for the built-in page). An error or redirect from it ends the request |
+| `CRED_CIBA_BACKCHANNEL_ENDPOINT`, `CRED_CIBA_TOKEN_ENDPOINT`, `CRED_CIBA_CLIENT_ID`, `CRED_CIBA_CLIENT_SECRET` | No | Ask the subject through an external OpenID Provider's CIBA endpoints instead, as its client (all four together) |
+| `CRED_CIBA_CONSENT_TTL_SECONDS` | No | How long an approved CIBA consent is reused for later requests it covers (default `86400`) |
 | `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
-| `CRED_REQUIRE_DPOP` | No | Affects Cred Link only (until Link agents get keys): `true` (default) issues no Link handle to the key-less static Bearer identity. Agent delegations are always DPoP-bound and ignore this setting |
+| `CRED_REQUIRE_DPOP` | No | Removed: ignored, with a warning at startup. Every delegation, Cred Link's included, is a DPoP-bound Delegation Token, and a Link token is never issued to the shared static Bearer identity |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | Ignored and deprecated: `/api/v1/subdelegate` always requires an `actor_token` proving the caller is the agent the parent receipt names |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
 | `WEB_BOT_AUTH_NONCE_STORE` | No | `memory` (default) or `sqlite` for replay defense state |

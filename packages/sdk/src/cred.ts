@@ -512,6 +512,7 @@ export class Cred {
       body.scopes = params.scopes;
     }
     if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
 
     const data = await this.post<{
       access_token: string;
@@ -572,6 +573,7 @@ export class Cred {
       body.scopes = params.scopes;
     }
     if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
 
     const data = await this.post<DelegationTokenWire & { chain_depth: number; parent_delegation_id: string }>('/api/v1/subdelegate', body);
     return {
@@ -1418,6 +1420,7 @@ export class Cred {
       body.scopes = params.scopes;
     }
     if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
     if (params.agentIdentity && params.agentDid && params.agentDid !== params.agentIdentity.did) {
       throw new CredError('agentDid and agentIdentity.did name different agents', 'invalid_config', 0);
     }

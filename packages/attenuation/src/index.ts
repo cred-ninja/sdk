@@ -21,6 +21,7 @@ export type { DelegationChainHop, ChainVerifyReason, ChainVerifyResult, VerifyDe
 export {
   parseConstraints,
   constraintsSubsume,
+  exerciseConstraintViolation,
   constraintTypeOf,
   unknownConstraints,
   UNKNOWN_CONSTRAINT,

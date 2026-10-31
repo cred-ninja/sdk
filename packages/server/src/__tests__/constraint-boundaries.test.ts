@@ -22,7 +22,7 @@ async function setup() {
     port: 0, host: '127.0.0.1', vaultPassphrase: 'constraint-fixture-only',
     vaultStorage: 'sqlite', vaultPath: join(directory, 'vault.sqlite'),
     tofuStorage: 'sqlite', tofuPath: join(directory, 'tofu.sqlite'),
-    adminToken: 'cred_admin_constraint_fixture', agentToken: token, requireDpop: false,
+    adminToken: 'cred_admin_constraint_fixture', agentToken: token,
     providers: [{ slug: 'github', clientId: 'fixture', clientSecret: 'fixture', defaultScopes: ['repo'] }],
     redirectBaseUri: 'http://localhost:3456',
   });

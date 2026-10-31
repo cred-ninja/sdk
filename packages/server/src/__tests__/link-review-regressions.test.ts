@@ -476,7 +476,7 @@ describe('small hardening items (review item 8)', () => {
   it('refuses a Link base URL with a path, query or fragment at startup', () => {
     const base = {
       port: 0, host: '127.0.0.1', vaultPassphrase: 'x', vaultStorage: 'sqlite' as const, vaultPath: '/tmp/x-vault.sqlite',
-      tofuStorage: 'file' as const, tofuPath: '/tmp/x-tofu.json', adminToken: ADMIN_TOKEN, agentToken: AGENT_TOKEN, requireDpop: false, allowRawTokens: true, providers: [],
+      tofuStorage: 'file' as const, tofuPath: '/tmp/x-tofu.json', adminToken: ADMIN_TOKEN, agentToken: AGENT_TOKEN, allowRawTokens: true, providers: [],
       redirectBaseUri: BASE, linkEnabled: true,
     };
     for (const linkBaseUrl of ['https://cred.example.com/link', 'https://cred.example.com/?x=1', 'https://cred.example.com/#f']) {

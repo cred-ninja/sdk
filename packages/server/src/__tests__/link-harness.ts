@@ -15,8 +15,12 @@ import { parseLinkRedirectResult } from '@credninja/protocol';
 import type { LinkResult } from '@credninja/protocol';
 import { createServer } from '../server.js';
 import type { ServerConfig } from '../config.js';
+import { newAgent, exerciseAs, type AgentIdentity } from './token-helpers.js';
+import { createDpopProof } from '@credninja/sdk';
 
 export const AGENT_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
+/** The Link agent the harness Bearer authenticates as. */
+export const LINK_AGENT_ID = 'server-agent';
 export const ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 export const BASE = 'http://localhost:3456';
 export const APP_ORIGIN = 'https://app.example.com';
@@ -58,7 +62,12 @@ export async function makeHarness(overrides: Partial<ServerConfig> = {}): Promis
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN_TOKEN,
     agentToken: AGENT_TOKEN,
-    requireDpop: false, allowRawTokens: true,
+    // The Link agent is an identified principal: a Delegation Token is not
+    // issued to the shared static Bearer identity.
+    agentRequestVerifier: (req) => req.headers.authorization === `Bearer ${AGENT_TOKEN}`
+      ? { ok: true as const, principal: { type: 'custom', principalId: LINK_AGENT_ID } }
+      : { ok: false as const, status: 401, body: { error: 'unauthorized' } },
+    allowRawTokens: true,
     providers: PROVIDERS,
     redirectBaseUri: BASE,
     webBotAuthNonceStore: 'memory',
@@ -439,12 +448,39 @@ export async function connectAndActivate(app: Server['app'], client: RegisteredC
   return result.connection_id;
 }
 
-export function delegate(app: Server['app'], body: Record<string, unknown>) {
-  return request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`).send(body);
+/** The did:key agent each app's Link delegations are bound to, and the tokens it holds. */
+const keyedAgents = new WeakMap<object, Promise<AgentIdentity>>();
+const issuedTokens = new Map<string, { agent: AgentIdentity; token: string }>();
+
+export function agentFor(app: Server['app']): Promise<AgentIdentity> {
+  let agent = keyedAgents.get(app);
+  if (!agent) {
+    agent = newAgent();
+    keyedAgents.set(app, agent);
+  }
+  return agent;
 }
 
+/**
+ * POST /api/v1/delegate as the Link agent. A token-format call carries the
+ * agent's did:key and a DPoP proof; the Delegation Token it gets is kept
+ * for use() by delegation id.
+ */
+export async function delegate(app: Server['app'], body: Record<string, unknown>) {
+  const raw = body.token_format === 'raw';
+  const agent = await agentFor(app);
+  const req = request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`);
+  if (!raw) req.set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate`));
+  const res = await req.send(raw ? body : { agent_did: agent.did, ...body });
+  if (res.status === 200 && res.body.token_type === 'DPoP') issuedTokens.set(res.body.delegation_id, { agent, token: res.body.access_token });
+  return res;
+}
+
+/** POST /api/v1/use with the Delegation Token delegate() got for this delegation id. */
 export function use(app: Server['app'], body: Record<string, unknown>) {
-  return request(app).post('/api/v1/use').set('Authorization', `Bearer ${AGENT_TOKEN}`).send(body);
+  const issued = typeof body.delegation_id === 'string' ? issuedTokens.get(body.delegation_id) : undefined;
+  if (!issued) return request(app).post('/api/v1/use').set('Authorization', `Bearer ${AGENT_TOKEN}`).send(body);
+  return exerciseAs(app, issued.agent, issued.token, body, { base: BASE });
 }
 
 export const CALENDAR_URL = 'https://www.googleapis.com/calendar/v3/users/me/calendarList';
