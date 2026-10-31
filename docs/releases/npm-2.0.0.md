@@ -3,15 +3,19 @@
 Status: prepared, not published. First prepared at `ff00421` on 2026-09-24;
 refreshed on 2026-10-13 at `09f9488` to cover Cred Link Phase 1 (#46, #48) and
 the explicit-user-id break on the legacy routes (#47).
+Release preparation refreshed on 2026-10-30 for the Delegation Token stack
+and installed-package compatibility fixes. npm publication is independent
+of the Python packages; this release does not publish to PyPI.
 
 ## Registry inventory
 
-Checked against the public npm registry on 2026-10-13 (unchanged since
-2026-09-24 for the original ten; nothing at 2.0.0 is published):
+Checked against the public npm registry on 2026-10-30: none of the thirteen
+packages has a published 2.0.0 version.
 
 | Package | Public latest | Prepared |
 | --- | --- | --- |
 | @credninja/protocol | Not found | 2.0.0 |
+| @credninja/attenuation | Not found | 2.0.0 |
 | @credninja/link | Not found | 2.0.0 |
 | @credninja/link-react | Not found | 2.0.0 |
 | @credninja/oauth | 1.0.0 | 2.0.0 |
@@ -154,6 +158,11 @@ and integrations together. The npm version is separate from protocol `0.1.0`.
    carries its granted scopes as operations.
 22. Exercise a full consent, delegation, brokered-use, and revocation flow on a
    test account before moving production traffic.
+23. Node 22 or newer is required. CI also exercises Node 26. Both ESM import
+   and CommonJS require of `@credninja/vault` and `@credninja/ai` load the same
+   CommonJS implementation, so vault authenticity and AI delegation state
+   remain consistent when a process mixes module formats. The private vault
+   brand and agent/server binding checks remain enforced.
 
 The [conformance map](../protocol-conformance.md) documents partial capabilities
 and standards gaps. Do not describe this release as a complete implementation
@@ -161,7 +170,7 @@ of all RFCs profiled by the Internet-Draft.
 
 ## Local validation
 
-Use a supported Node runtime (Node 22 is used for this release preparation).
+Use Node 26 for the full checks and Node 22 for the minimum-major package smoke.
 
 ```sh
 npm ci
@@ -174,10 +183,13 @@ npm audit --omit=dev --audit-level=high
 npm run smoke:npm
 ```
 
-The package smoke test packs all twelve workspaces, installs their tarballs in a
+The package smoke test packs all thirteen workspaces, installs their tarballs in a
 clean temporary consumer, exercises a brokered SDK call against a local server
 with a mocked upstream API, and starts a generated scaffold. This is packaging
 and local integration validation, not a real-provider OAuth acceptance test.
+It also compiles strict NodeNext ESM/CommonJS and browser Bundler consumers
+without `skipLibCheck`, checks Link imports during SSR, and verifies mixed-format
+vault/AI use while rejecting forged vaults and incorrectly bound delegations.
 
 Validation on 2026-09-24 (WSL Ubuntu, Node 22.23.3): release hygiene, lint, build,
 workspace type checks, and 952 tests passed. One opt-in live Web Bot Auth test was
@@ -203,6 +215,7 @@ Stage the release under `next` in dependency order:
 
 ```sh
 npm publish --workspace packages/protocol --access public --tag next
+npm publish --workspace packages/attenuation --access public --tag next
 npm publish --workspace packages/link --access public --tag next
 npm publish --workspace packages/link-react --access public --tag next
 npm publish --workspace packages/oauth --access public --tag next
@@ -231,7 +244,14 @@ npm start
 
 Confirm `/health`, log into `/admin/login`, configure a test provider, complete
 OAuth consent, then exercise delegation and revocation with the published SDK.
-Only after these checks, promote each of the twelve packages with
+Run the same installed-package checks against the registry (without packing
+local source) before promotion:
+
+```sh
+npm run smoke:npm -- --registry-version 2.0.0
+```
+
+Only after these checks, promote each of the thirteen packages with
 `npm dist-tag add <package>@2.0.0 latest`. Update website quickstarts and publish
 the announcement after the complete package set is available.
 

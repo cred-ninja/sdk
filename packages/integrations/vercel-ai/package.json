@@ -3,13 +3,12 @@
   "version": "2.0.0",
   "description": "Cred Vercel AI SDK integration — credential delegation tool for Vercel AI agents",
   "main": "dist/cjs/index.js",
-  "module": "dist/esm/index.js",
   "types": "dist/cjs/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.js",
-      "types": "./dist/cjs/index.d.ts"
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/cjs/index.js",
+      "require": "./dist/cjs/index.js"
     }
   },
   "files": [
@@ -44,6 +43,9 @@
     "@credninja/sdk": "^2.0.0",
     "ai": ">=5.0.52",
     "zod": ">=3.0.0"
+  },
+  "dependencies": {
+    "@types/json-schema": "^7.0.15"
   },
   "devDependencies": {
     "@credninja/sdk": "^2.0.0",

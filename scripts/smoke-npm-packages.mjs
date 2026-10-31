@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2);
+const registryVersion = args[0] === '--registry-version' && args.length === 2 ? args[1] : undefined;
+if (args.length > 0 && (!registryVersion || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(registryVersion))) {
+  throw new Error('Usage: smoke-npm-packages.mjs [--registry-version VERSION]');
+}
 const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
@@ -172,12 +177,45 @@ console.log('cloud-only ESM/CJS SDK constraint validation smoke ok (no vault/oau
   run('node', [smokeFile], { cwd: cloudDir });
 }
 
+function runInstalledTypeSmoke(consumerDir) {
+  // Only normal Node/React consumer types are supplied here. Public declarations
+  // must bring their own Express/SQLite dependencies through the packed packages.
+  const tsVersion = JSON.parse(readFileSync(join(repoRoot, 'node_modules/typescript/package.json'), 'utf8')).version;
+  run('npm', ['install', '--save-dev', '--no-audit', '--no-fund',
+    `typescript@${tsVersion}`, '@types/node@22', '@types/react@19'], { cwd: consumerDir });
+  const packages = ['protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'sdk', 'ai', 'guard', 'server', 'mcp', 'link', 'link-react'];
+  const imports = packages.map((name, i) => `import * as pkg${i} from '@credninja/${name}';`).join('\n');
+  const body = `${imports}\nexport const packages = [${packages.map((_, i) => `pkg${i}`).join(', ')}];\n`;
+  writeFileSync(join(consumerDir, 'consumer.mts'), body);
+  const dualPackages = ['protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'sdk', 'ai', 'link', 'link-react'];
+  writeFileSync(join(consumerDir, 'consumer.cts'), dualPackages.map((name, i) =>
+    `import pkg${i} = require('@credninja/${name}');\nexport { pkg${i} };`).join('\n'));
+  const options = { strict: true, skipLibCheck: false, noEmit: true, target: 'ES2022', types: ['node', 'react'] };
+  writeFileSync(join(consumerDir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { ...options, module: 'NodeNext', moduleResolution: 'NodeNext' },
+    files: ['consumer.mts', 'consumer.cts'],
+  }));
+  const tsc = join(consumerDir, 'node_modules/typescript/bin/tsc');
+  run('node', [tsc, '-p', 'tsconfig.json'], { cwd: consumerDir });
+  writeFileSync(join(consumerDir, 'browser.ts'), "export { link } from '@credninja/link';\nexport { CredConnect, useCredLink } from '@credninja/link-react';\n");
+  writeFileSync(join(consumerDir, 'tsconfig.browser.json'), JSON.stringify({
+    compilerOptions: { ...options, module: 'ESNext', moduleResolution: 'Bundler', types: ['react'], lib: ['ES2022', 'DOM'] },
+    files: ['browser.ts'],
+  }));
+  run('node', [tsc, '-p', 'tsconfig.browser.json'], { cwd: consumerDir });
+  console.log('strict installed NodeNext ESM/CJS and browser Bundler types ok');
+}
+
 async function runFreshInstallSmoke(tarballsByWorkspace) {
   const consumerDir = join(tmp, 'consumer');
   run('npm', ['init', '-y'], { cwd: tmp, stdio: 'pipe' });
   run('npm', ['install', '--no-audit', '--no-fund', ...Object.values(tarballsByWorkspace)], {
     cwd: tmp,
   });
+  runInstalledTypeSmoke(tmp);
+  const mixedModuleFile = join(tmp, 'mixed-modules.mjs');
+  copyFileSync(join(repoRoot, 'scripts/fixtures/mixed-modules.mjs'), mixedModuleFile);
+  run('node', [mixedModuleFile], { cwd: tmp });
 
   const smokeFile = join(consumerDir, 'smoke.mjs');
   mkdirSync(consumerDir, { recursive: true });
@@ -190,7 +228,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
-for (const pkg of ['@credninja/attenuation', '@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai']) {
+for (const pkg of ['@credninja/protocol', '@credninja/attenuation', '@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai', '@credninja/link', '@credninja/link-react']) {
   const mod = await import(pkg);
   if (!mod || Object.keys(mod).length === 0) throw new Error(pkg + ' ESM import exported nothing');
   const cjs = require(pkg);
@@ -333,13 +371,10 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   const packageJsonPath = join(generatedDir, 'package.json');
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
   packageJson.dependencies = {
-    '@credninja/server': `file:${tarballsByWorkspace['packages/server']}`,
-    '@credninja/protocol': `file:${tarballsByWorkspace['packages/protocol']}`,
-    '@credninja/attenuation': `file:${tarballsByWorkspace['packages/attenuation']}`,
-    '@credninja/oauth': `file:${tarballsByWorkspace['packages/oauth']}`,
-    '@credninja/tofu': `file:${tarballsByWorkspace['packages/tofu']}`,
-    '@credninja/vault': `file:${tarballsByWorkspace['packages/vault']}`,
-    '@credninja/guard': `file:${tarballsByWorkspace['packages/guard']}`,
+    ...Object.fromEntries(['server', 'protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'guard'].map((name) => {
+      const artifact = tarballsByWorkspace[`packages/${name}`];
+      return [`@credninja/${name}`, isAbsolute(artifact) ? `file:${artifact}` : registryVersion];
+    })),
   };
   writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
   run('npm', ['install', '--no-audit', '--no-fund'], { cwd: generatedDir });
@@ -372,9 +407,12 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
 }
 
 try {
-  run('npm', ['run', 'build']);
+  if (!registryVersion) run('npm', ['run', 'build']);
   const tarballsByWorkspace = Object.fromEntries(
-    workspaces.map((workspace) => [workspace, packWorkspace(workspace)]),
+    workspaces.map((workspace) => {
+      const name = JSON.parse(readFileSync(join(repoRoot, workspace, 'package.json'), 'utf8')).name;
+      return [workspace, registryVersion ? `${name}@${registryVersion}` : packWorkspace(workspace)];
+    }),
   );
   await runCloudOnlySdkSmoke(tarballsByWorkspace);
   await runFreshInstallSmoke(tarballsByWorkspace);
