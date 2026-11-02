@@ -255,6 +255,11 @@ const BROKER_BLOCKED_ENDPOINTS: Record<string, string[]> = {
   slack: ['https://slack.com/api/auth.revoke', 'https://slack.com/api/apps.uninstall'],
 };
 
+/** The fixed origins the broker can call. Salesforce instance hosts follow a pattern instead. */
+const KNOWN_PROVIDER_ORIGINS: ReadonlySet<string> = new Set(
+  [...Object.values(SERVICE_ALLOWLIST), ...Object.values(SERVICE_EXACT_ENDPOINTS)].flat().map((url) => new URL(url).origin),
+);
+
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'authorization',
   'connection',
@@ -1607,12 +1612,20 @@ export function createServer(config: ServerConfig) {
     };
   }
 
+  /** Whether an origin is a host this server brokers to. Anything else is not recorded. */
+  function isKnownProviderOrigin(origin: string): boolean {
+    if (KNOWN_PROVIDER_ORIGINS.has(origin)) return true;
+    if (!origin.startsWith('https://')) return false;
+    const host = origin.slice('https://'.length);
+    return SALESFORCE_HOST_PATTERN.test(host) && !/^(\d{1,3}\.){3}\d{1,3}\./.test(host);
+  }
+
   /** What every /api/v1/use event says about the call. Never the query string. */
   function brokeredCallMetadata(delegationId: string, delegation: BrokeredDelegation, url?: string): Record<string, unknown> {
     return {
       delegationId,
       ...(delegation.link ? { linkAgentId: delegation.link.agentId } : {}),
-      ...(url !== undefined ? auditOriginAndRoute(url) : {}),
+      ...(url !== undefined ? auditOriginAndRoute(url, isKnownProviderOrigin) : {}),
     };
   }
 
@@ -3180,32 +3193,44 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return [];
   }
   /**
-   * Audit a Guard denial on a route's middleware, which runs before the
-   * agent proves its key: `agent_did` in the body is recorded as a claim,
-   * never as the actor.
+   * Audit a Guard denial on a route's middleware, which runs before anything
+   * in the request is authorized. The provider is recorded only if configured.
+   * The event sits in a user's feed only when that user is known: a verifier
+   * bound the caller to it, or this is a single-user server and none was named.
+   * A named `user_id` or `agent_did` is a claim in the metadata, under a resource
+   * with no user in it (the feed splits resource ids on '/').
    */
   function recordGuardRouteDenial(req: Request, decision: GuardDecision): void {
-    const printable = (value: unknown, max: number): string | undefined => (
+    const claim = (value: unknown, max: number): string | undefined => (
       typeof value === 'string' && value.length <= max && /^[\x21-\x7e]+$/.test(value) ? value : undefined
     );
     const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
     const identity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
-    const provider = printable(routeParam(req.params.provider), 64) ?? 'unknown';
-    const user = printable(principalBoundUserId(req) ?? explicitRequestUserId(req), 128) ?? (singleUserMode ? 'default' : 'unknown');
-    const claimed = printable(req.body?.agent_did, 256);
+    const named = routeParam(req.params.provider);
+    const provider = named !== undefined && providerMap.has(named) ? named : 'unknown';
+    const explicitUser = explicitRequestUserId(req);
+    const boundUser = principalBoundUserId(req);
+    const knownUser = boundUser ?? (singleUserMode && explicitUser === undefined ? 'default' : undefined);
+    const claimedUserId = explicitUser !== undefined && explicitUser !== knownUser ? claim(explicitUser, 128) : undefined;
+    const claimedAgentDid = claim(req.body?.agent_did, 256);
     refusals.record({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
       actor: { type: 'agent', id: identity?.agentId ?? principal?.principalId ?? 'server-agent' },
       action: 'deny',
-      resource: { type: 'token', id: `${provider}/${user}` },
+      resource: {
+        type: 'token',
+        id: knownUser !== undefined && !knownUser.includes('/') ? `${provider}/${knownUser}` : `guard-denial:${provider}`,
+      },
       outcome: 'denied',
       correlationId: crypto.randomUUID(),
       errorMessage: 'guard_denied',
       metadata: {
         policy: decision.deniedBy?.policy,
-        path: req.path.slice(0, 128),
-        ...(claimed ? { claimedAgentDid: claimed } : {}),
+        // The route's template, not the request's path, which holds the provider it named.
+        path: typeof req.route?.path === 'string' ? req.route.path : 'unknown',
+        ...(claimedUserId ? { claimedUserId } : {}),
+        ...(claimedAgentDid ? { claimedAgentDid } : {}),
       },
     });
   }
@@ -4678,7 +4703,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         upstreamUrl,
         (ops) => resolveBrokerUrl(delegation.service, url, ops.filter((op) => guardResult.effectiveScopes.includes(op))) !== null,
       )) {
-        refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'capability_denied', { method: normalizedMethod });
+        // Written each time: which operation was tried outside the capability is the point of the record.
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: brokeredActor(delegation),
+          action: 'deny',
+          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: 'capability_denied',
+          metadata: { ...brokeredCallMetadata(delegationId, delegation, upstreamUrl), method: normalizedMethod },
+        });
         res.status(403).json({ error: 'capability_denied', message: 'This call is outside the delegation\'s capabilities' });
         return;
       }

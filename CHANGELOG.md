@@ -12,15 +12,20 @@
   agent in `metadata.linkAgentId`.
 - Those events also carry `delegationId`, `origin` and a `route` with identifiers
   redacted (`/repos/{id}/{id}/issues/{id}`), capped at 256 characters. A route
-  keeps only known API path words, and never holds a query string.
+  keeps only known API path words and listed Slack method names, and never holds
+  a query string. `origin` is recorded only for a known provider host, else as
+  `refused`.
 - New events: Guard denials (`guard_denied`, on `/api/v1/use` and on routes under
-  the Guard middleware, where an unproven `agent_did` is recorded as
-  `claimedAgentDid`), Guard failures at `/api/v1/use` (`guard_failed`), refused URLs
+  the Guard middleware, where an unproven `agent_did` or `user_id` is recorded as
+  `claimedAgentDid` or `claimedUserId` under a resource in no user's feed; admins
+  read those at `/admin/audit`), Guard failures at `/api/v1/use` (`guard_failed`), refused URLs
   (`url_refused`), method overrides (`method_override_refused`) and unreachable
-  upstreams (`upstream_unreachable`). Repeats of one refusal by one agent within
-  a minute are one event and then one summary (`aggregated`, `repeats`). The
-  running count is in process memory, so a crash can lose a window's count,
-  though not its first event.
+  upstreams (`upstream_unreachable`). Repeats of one refusal within a minute (same
+  agent, delegation, method, origin, route and policy) are one event and then one
+  summary (`aggregated`, `repeats`); `cred-server` writes held summaries on SIGTERM
+  and SIGINT. Capability denials are written each time. The running count is in
+  process memory, so a crash can lose a window's count, though not its first
+  event.
 - Existing audit rows are not changed, so rows written earlier still say
   `server-agent`. The hash chain verifies across old and new rows.
 

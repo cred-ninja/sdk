@@ -31,6 +31,7 @@ if (fs.existsSync(envPath)) {
 
 import { loadConfig, resolveLinkStorePath } from './config.js';
 import { createServer } from './server.js';
+import { flushOnShutdown } from './audit-route.js';
 
 async function main() {
   console.log('🔐 Cred Server — credential delegation for AI agents');
@@ -52,9 +53,10 @@ async function main() {
   }
 
   // Create server and initialize vault
-  const { app, vault, tofu } = createServer(config);
+  const { app, vault, tofu, flushAuditAggregates } = createServer(config);
   await vault.init();
   await tofu.init();
+  flushOnShutdown(flushAuditAggregates);
 
   // Start listening
   app.listen(config.port, config.host, () => {

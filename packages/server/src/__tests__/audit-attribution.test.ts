@@ -8,7 +8,9 @@ import crypto from 'crypto';
 import request from 'supertest';
 import { CredGuard, type CredPolicy } from '@credninja/guard';
 import { createServer } from '../server.js';
-import { auditOriginAndRoute } from '../audit-route.js';
+import { EventEmitter } from 'node:events';
+import { REFUSED_ORIGIN, auditOriginAndRoute, createRefusalAggregator, flushOnShutdown } from '../audit-route.js';
+import type { AuditEvent } from '@credninja/vault';
 import { delegateAs, exerciseAs, newAgent, type AgentIdentity, type App } from './token-helpers.js';
 import type { ServerConfig } from '../config.js';
 
@@ -82,23 +84,39 @@ function use(app: App, agent: AgentIdentity, token: string, url = CAL, method = 
 
 const eventsOf = async (vault: Awaited<ReturnType<typeof setup>>['vault']) => vault.queryAuditEvents({ limit: 200 });
 
+const KNOWN = (origin: string) => ['https://api.github.com', 'https://gmail.googleapis.com', 'https://slack.com'].includes(origin) || origin.endsWith('.salesforce.com');
+
 describe('auditOriginAndRoute', () => {
   it('keeps the provider\'s path words and hides identifiers', () => {
-    expect(auditOriginAndRoute('https://api.github.com/repos/octocat/hello-world/issues/12')).toEqual({
+    expect(auditOriginAndRoute('https://api.github.com/repos/octocat/hello-world/issues/12', KNOWN)).toEqual({
       origin: 'https://api.github.com',
       route: '/repos/{id}/{id}/issues/{id}',
     });
-    expect(auditOriginAndRoute('https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2a/trash').route).toBe('/gmail/v1/users/me/messages/{id}/trash');
-    expect(auditOriginAndRoute('https://acme.my.salesforce.com/services/data/v60.0/sobjects/Account/001').route).toBe('/services/data/v60.0/sobjects/{id}/{id}');
+    expect(auditOriginAndRoute('https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2a/trash', KNOWN).route).toBe('/gmail/v1/users/me/messages/{id}/trash');
+    expect(auditOriginAndRoute('https://acme.my.salesforce.com/services/data/v60.0/sobjects/Account/001', KNOWN).route).toBe('/services/data/v60.0/sobjects/{id}/{id}');
   });
 
-  it('keeps a Slack method name, and only on Slack', () => {
-    expect(auditOriginAndRoute('https://slack.com/api/chat.postMessage').route).toBe('/api/chat.postMessage');
-    expect(auditOriginAndRoute('https://api.example.com/api/chat.postMessage').route).toBe('/api/{id}');
+  it('keeps a listed Slack method name, and only on Slack', () => {
+    expect(auditOriginAndRoute('https://slack.com/api/chat.postMessage', KNOWN).route).toBe('/api/chat.postMessage');
+    expect(auditOriginAndRoute('https://api.example.com/api/chat.postMessage', KNOWN).route).toBe('/api/{id}');
+  });
+
+  it('hides a Slack path segment that only looks like a method name', () => {
+    for (const lookalike of ['secret.token', 'customer.Acme', 'alice.smith.example', 'chat.postMessageX']) {
+      expect(auditOriginAndRoute(`https://slack.com/api/${lookalike}`, KNOWN).route).toBe('/api/{id}');
+    }
+  });
+
+  it('records an origin verbatim only when it is a known provider host', () => {
+    expect(auditOriginAndRoute('https://api.github.com/repos', KNOWN).origin).toBe('https://api.github.com');
+    expect(auditOriginAndRoute('https://tok-secret.attacker.example/x', KNOWN).origin).toBe(REFUSED_ORIGIN);
+    expect(auditOriginAndRoute('https://api.github.com.attacker.example/x', KNOWN).origin).toBe(REFUSED_ORIGIN);
+    expect(auditOriginAndRoute('https://api.github.com:8443/x', KNOWN).origin).toBe(REFUSED_ORIGIN);
+    expect(auditOriginAndRoute('http://api.github.com/x', KNOWN).origin).toBe(REFUSED_ORIGIN);
   });
 
   it('records no query string, fragment or credentials', () => {
-    const { origin, route } = auditOriginAndRoute('https://user:hunter2@api.github.com/repos?access_token=ghp_secret#frag');
+    const { origin, route } = auditOriginAndRoute('https://user:hunter2@api.github.com/repos?access_token=ghp_secret#frag', KNOWN);
     expect(origin).toBe('https://api.github.com');
     expect(route).toBe('/repos');
     expect(`${origin}${route}`).not.toMatch(/ghp_secret|hunter2|frag|\?/);
@@ -106,22 +124,21 @@ describe('auditOriginAndRoute', () => {
 
   it('hides a token carried in the path', () => {
     for (const secret of ['ya29.a0AfH6SMBx-secretvalue', 'xoxb-1234-5678-abcdefg', 'ghp_16C7e42F292c6912E7710c838347Ae178B4a', 'lowercasesecretwithnodigits']) {
-      expect(auditOriginAndRoute(`https://api.github.com/repos/${secret}/issues`).route).toBe('/repos/{id}/issues');
+      expect(auditOriginAndRoute(`https://api.github.com/repos/${secret}/issues`, KNOWN).route).toBe('/repos/{id}/issues');
     }
   });
 
   it('caps an oversized path and escapes non-printable input', () => {
-    const { route } = auditOriginAndRoute(`https://api.github.com/${'a/'.repeat(5000)}`);
+    const { route } = auditOriginAndRoute(`https://api.github.com/${'a/'.repeat(5000)}`, KNOWN);
     expect(route!.length).toBeLessThanOrEqual(256);
     expect(route!.endsWith('/...')).toBe(true);
-    const odd = auditOriginAndRoute('https://api.github.com/repos/\u0001‮%0a%00/😀/issues').route!;
+    const odd = auditOriginAndRoute('https://api.github.com/repos/\u0001‮%0a%00/😀/issues', KNOWN).route!;
     expect(odd).toBe('/repos/{id}/{id}/issues');
   });
 
-  it('answers null for what is not a URL, and caps a long host', () => {
-    expect(auditOriginAndRoute('not a url')).toEqual({ origin: null, route: null });
-    expect(auditOriginAndRoute(`https://${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.example.com/x`).origin).toBeNull();
-    expect(auditOriginAndRoute('javascript:alert(1)')).toEqual({ origin: null, route: null });
+  it('answers the marker and no route for what is not an http URL', () => {
+    expect(auditOriginAndRoute('not a url', KNOWN)).toEqual({ origin: REFUSED_ORIGIN, route: null });
+    expect(auditOriginAndRoute('javascript:alert(1)', KNOWN)).toEqual({ origin: REFUSED_ORIGIN, route: null });
   });
 });
 
@@ -186,11 +203,51 @@ describe('refusals are events', () => {
     const res = await delegateAs(app, agent, { service: 'google', user_id: 'alice' }, { bearer: BEARER });
     expect(res.status).toBe(403);
     const event = (await eventsOf(vault)).find((e) => e.action === 'deny' && e.errorMessage === 'guard_denied');
-    expect(event?.metadata).toMatchObject({ policy: 'deny-all', path: '/api/v1/delegate' });
-    expect(event?.resource.id).toBe('google/alice');
+    expect(event?.metadata).toMatchObject({ policy: 'deny-all', path: '/api/v1/delegate', claimedUserId: 'alice' });
+    // user_id is not authorized here either: a claim, under a resource in no user's feed.
+    expect(event?.resource.id).toBe('guard-denial:google');
     // The agent_did in the body is not yet proven here: it is recorded as a claim, never as the actor.
     expect(event?.actor.id).not.toBe(agent.did);
     expect(event?.metadata?.claimedAgentDid).toBe(agent.did);
+  });
+
+  it('a Guard denial cannot forge an event into another user\'s feed', async () => {
+    const deny: CredPolicy = { name: 'deny-all', evaluate: () => ({ decision: 'DENY', policy: 'deny-all', reason: 'no' }) };
+    const { app, vault } = await setup({ guard: new CredGuard({ policies: [deny] }) });
+    const agent = await newAgent();
+    for (const body of [
+      { service: 'google/victim', user_id: 'x' },
+      { service: 'google', user_id: 'victim/extra' },
+      { service: 'google', user_id: 'victim' },
+      { service: 'not-configured', user_id: 'victim' },
+    ]) {
+      expect((await delegateAs(app, agent, body, { bearer: BEARER })).status).toBe(403);
+    }
+    const denials = (await eventsOf(vault)).filter((e) => e.errorMessage === 'guard_denied');
+    expect(denials).toHaveLength(4);
+    for (const event of denials) {
+      expect(event.resource.id).not.toContain('/');
+      expect(event.resource.id).not.toContain('victim');
+    }
+    expect(denials.map((e) => e.resource.id).sort()).toEqual(['guard-denial:google', 'guard-denial:google', 'guard-denial:unknown', 'guard-denial:unknown']);
+    const feed = await request(app).get('/api/v1/audit').set('Authorization', `Bearer ${BEARER}`).query({ user_id: 'victim' });
+    expect(feed.status).toBe(200);
+    expect(JSON.stringify(feed.body)).not.toContain('guard_denied');
+  });
+
+  it('a Guard denial for a bound user is in that user\'s feed; a single-user server files it under default', async () => {
+    const deny: CredPolicy = { name: 'deny-all', evaluate: () => ({ decision: 'DENY', policy: 'deny-all', reason: 'no' }) };
+    const bound = await setup({
+      agentToken: undefined,
+      agentRequestVerifier: () => ({ ok: true, principal: { type: 'external-runtime', principalId: 'agt_bound', userId: 'alice' } }),
+      guard: new CredGuard({ policies: [deny] }),
+    });
+    await delegateAs(bound.app, await newAgent(), { service: 'google' }, { bearer: BEARER });
+    expect((await eventsOf(bound.vault)).find((e) => e.errorMessage === 'guard_denied')?.resource.id).toBe('google/alice');
+
+    const single = await setup({ singleUserMode: true, guard: new CredGuard({ policies: [deny] }) });
+    await delegateAs(single.app, await newAgent(), { service: 'google' }, { bearer: BEARER });
+    expect((await eventsOf(single.vault)).find((e) => e.errorMessage === 'guard_denied')?.resource.id).toBe('google/default');
   });
 
   it('a refused URL writes an event with no path or query from the request', async () => {
@@ -202,8 +259,8 @@ describe('refusals are events', () => {
     expect(upstream).not.toHaveBeenCalled();
     const event = (await eventsOf(vault)).find((e) => e.action === 'deny' && e.errorMessage === 'url_refused');
     expect(event?.actor.id).toBe(agent.did);
-    expect(event?.metadata).toMatchObject({ delegationId, origin: 'https://evil.example.com', route: '/{id}/{id}' });
-    expect(JSON.stringify(event)).not.toMatch(/tok_secret|tok_query/);
+    expect(event?.metadata).toMatchObject({ delegationId, origin: REFUSED_ORIGIN, route: '/{id}/{id}' });
+    expect(JSON.stringify(event)).not.toMatch(/tok_secret|tok_query|evil\.example/);
   });
 
   it('a method override writes an event', async () => {
@@ -255,6 +312,97 @@ describe('refusals are events', () => {
     await use(app, two.agent, two.token, 'https://evil.example.com/c');
     const events = (await eventsOf(vault)).filter((e) => e.errorMessage === 'url_refused');
     expect(events.map((e) => e.actor.id).sort()).toEqual([one.agent.did, two.agent.did].sort());
+  });
+
+  it('a noisy refusal does not hide a different one', async () => {
+    const { app, vault, flushAuditAggregates } = await setup();
+    stubUpstream();
+    const { agent, token } = await issued(app, vault);
+    await use(app, agent, token, 'https://evil.example.com/1');
+    await use(app, agent, token, 'https://evil.example.com/2');
+    await use(app, agent, token, 'https://evil.example.com/repos/x', 'GET');
+    await use(app, agent, token, 'https://evil.example.com/1', 'POST', { a: 1 });
+    const second = await issued(app, vault);
+    await use(app, second.agent, second.token, 'https://evil.example.com/1');
+    flushAuditAggregates();
+    const events = (await eventsOf(vault)).filter((e) => e.errorMessage === 'url_refused');
+    const firsts = events.filter((e) => e.metadata?.aggregated !== true);
+    expect(firsts.map((e) => `${e.metadata?.method} ${e.metadata?.route}`).sort()).toEqual(['GET /repos/{id}', 'GET /{id}', 'GET /{id}', 'POST /{id}']);
+    expect(events.filter((e) => e.metadata?.aggregated === true)).toHaveLength(1);
+  });
+
+  it('two delegations of one agent are counted apart', () => {
+    const written: AuditEvent[] = [];
+    const aggregator = createRefusalAggregator({ write: (event) => written.push(event) });
+    const event = (delegationId: string): AuditEvent => ({
+      id: crypto.randomUUID(),
+      timestamp: new Date(),
+      actor: { type: 'agent', id: 'did:key:zA' },
+      action: 'deny',
+      resource: { type: 'token', id: 'google/alice' },
+      outcome: 'denied',
+      correlationId: 'c',
+      errorMessage: 'url_refused',
+      metadata: { delegationId, method: 'GET', origin: 'refused', route: '/{id}' },
+    });
+    aggregator.record(event('del_1'));
+    aggregator.record(event('del_1'));
+    aggregator.record(event('del_2'));
+    expect(written.map((e) => e.metadata?.delegationId)).toEqual(['del_1', 'del_2']);
+  });
+
+  it('keeps its bound: distinct refusals past maxKeys write summaries, never grow the map', () => {
+    const written: AuditEvent[] = [];
+    const aggregator = createRefusalAggregator({ write: (event) => written.push(event), maxKeys: 2 });
+    const event = (route: string): AuditEvent => ({
+      id: crypto.randomUUID(), timestamp: new Date(), actor: { type: 'agent', id: 'a' }, action: 'deny',
+      resource: { type: 'token', id: 'g/u' }, outcome: 'denied', correlationId: 'c', errorMessage: 'e', metadata: { route },
+    });
+    aggregator.record(event('/1'));
+    aggregator.record(event('/1'));
+    aggregator.record(event('/2'));
+    aggregator.record(event('/3'));
+    expect(written.filter((e) => e.metadata?.aggregated === true).map((e) => e.metadata?.route)).toEqual(['/1']);
+    aggregator.record(event('/1'));
+    expect(written.filter((e) => e.metadata?.route === '/1' && e.metadata?.aggregated !== true)).toHaveLength(2);
+  });
+
+  it('flushes on SIGTERM and SIGINT, then exits with the signal status', () => {
+    for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+      const proc = Object.assign(new EventEmitter(), { exit: vi.fn() });
+      const flush = vi.fn();
+      flushOnShutdown(flush, proc as never);
+      proc.emit(signal);
+      expect(flush).toHaveBeenCalledTimes(1);
+      expect(proc.exit).toHaveBeenCalledWith(code);
+    }
+    const proc = Object.assign(new EventEmitter(), { exit: vi.fn() });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    flushOnShutdown(() => { throw new Error('disk full'); }, proc as never);
+    proc.emit('SIGTERM');
+    expect(proc.exit).toHaveBeenCalledWith(143);
+  });
+
+  it('writes every capability denial, with its details', async () => {
+    const { app, vault } = await setup();
+    await vault.store({ provider: 'google', userId: 'alice', accessToken: 'ya29.drive', expiresAt: new Date(Date.now() + 3600_000), scopes: ['drive.readonly'] });
+    stubUpstream();
+    const agent = await newAgent();
+    await vault.createPermission!({ agentId: agent.did, connectionId: 'google', allowedScopes: ['drive.readonly'], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' });
+    const minted = await delegateAs(app, agent, {
+      service: 'google',
+      user_id: 'alice',
+      authorization_details: [{ type: 'cred_delegation', provider: 'google', operations: ['drive.files.get'], resources: ['file:abc'] }],
+    }, { bearer: BEARER });
+    expect(minted.status).toBe(200);
+    const token = minted.body.access_token as string;
+    const refused = await Promise.all(['https://www.googleapis.com/drive/v3/files/other', 'https://www.googleapis.com/drive/v3/files'].map((url) => use(app, agent, token, url)));
+    expect(refused.map((r) => r.status)).toEqual([403, 403]);
+    await use(app, agent, token, 'https://www.googleapis.com/drive/v3/files/other');
+    const events = (await eventsOf(vault)).filter((e) => e.errorMessage === 'capability_denied');
+    expect(events).toHaveLength(3);
+    expect(events.map((e) => e.metadata?.route).sort()).toEqual(['/drive/v3/files', '/drive/v3/files/{id}', '/drive/v3/files/{id}']);
+    expect(events.every((e) => e.actor.id === agent.did && e.metadata?.origin === 'https://www.googleapis.com')).toBe(true);
   });
 
   it('a successful call is never aggregated', async () => {

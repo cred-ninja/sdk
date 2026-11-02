@@ -13,6 +13,9 @@ import type { AuditEvent } from '@credninja/vault';
 
 const MAX_ROUTE_LENGTH = 256;
 const MAX_ORIGIN_LENGTH = 128;
+
+/** Recorded instead of an origin that is not a known provider host: a host can carry a secret too. */
+export const REFUSED_ORIGIN = 'refused';
 const TRUNCATED_SUFFIX = '/...';
 
 const ROUTE_WORDS: ReadonlySet<string> = new Set([
@@ -36,28 +39,41 @@ const ROUTE_WORDS: ReadonlySet<string> = new Set([
   'services', 'data', 'sobjects', 'describe', 'composite', 'tooling', 'limits', 'parameterizedSearch',
 ]);
 
+// Slack names its methods in the path, so a shape cannot tell a method from
+// an identifier: only names listed here are kept.
+const SLACK_METHOD_NAMES: ReadonlySet<string> = new Set([
+  'api.test', 'auth.test', 'auth.revoke', 'apps.uninstall',
+  'chat.postMessage', 'chat.postEphemeral', 'chat.update', 'chat.delete', 'chat.scheduleMessage',
+  'conversations.list', 'conversations.info', 'conversations.history', 'conversations.replies', 'conversations.members',
+  'conversations.create', 'conversations.join', 'conversations.invite', 'conversations.leave', 'conversations.open', 'conversations.archive',
+  'users.list', 'users.info', 'users.lookupByEmail', 'users.conversations',
+  'files.list', 'files.info', 'files.delete', 'files.upload', 'files.getUploadURLExternal', 'files.completeUploadExternal',
+  'reactions.add', 'reactions.remove', 'reactions.get', 'search.messages', 'team.info',
+]);
+
 function routeSegment(segment: string, slackMethodPosition: boolean): string {
   if (ROUTE_WORDS.has(segment)) return segment;
   // An API version: v1, v60.0.
   if (/^v\d{1,2}(\.\d{1,2})?$/.test(segment)) return segment;
-  if (slackMethodPosition && segment.length <= 64 && /^[a-z]+(\.[a-zA-Z]+){1,3}$/.test(segment)) return segment;
+  if (slackMethodPosition && SLACK_METHOD_NAMES.has(segment)) return segment;
   return '{id}';
 }
 
 /**
  * The origin and redacted route of a URL, for an audit event. Never the query,
- * fragment or credentials. Null for what is not an http(s) URL, or an origin
- * too long to be a real API host.
+ * fragment or credentials. The origin is recorded only when `isKnownOrigin`
+ * says it is a provider host, else the fixed marker; the route is null for
+ * what is not an http(s) URL.
  */
-export function auditOriginAndRoute(url: string): { origin: string | null; route: string | null } {
+export function auditOriginAndRoute(url: string, isKnownOrigin: (origin: string) => boolean): { origin: string; route: string | null } {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { origin: null, route: null };
+    return { origin: REFUSED_ORIGIN, route: null };
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return { origin: null, route: null };
-  const origin = parsed.origin.length <= MAX_ORIGIN_LENGTH ? parsed.origin : null;
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return { origin: REFUSED_ORIGIN, route: null };
+  const origin = parsed.origin.length <= MAX_ORIGIN_LENGTH && isKnownOrigin(parsed.origin) ? parsed.origin : REFUSED_ORIGIN;
   const segments = parsed.pathname.split('/').slice(1);
   const onSlack = parsed.origin === 'https://slack.com';
   let route = segments.map((segment, index) => (segment === ''
@@ -84,12 +100,26 @@ interface HeldRefusal {
   repeats: number;
 }
 
+/** The event fields that make two refusals the same refusal, beside actor, resource and error. */
+const REFUSAL_KEY_FIELDS = ['delegationId', 'method', 'origin', 'route', 'policy', 'path', 'claimedAgentDid', 'claimedUserId'] as const;
+
+function refusalKey(event: AuditEvent): string {
+  return JSON.stringify([
+    event.actor.id,
+    event.resource.id,
+    event.errorMessage,
+    ...REFUSAL_KEY_FIELDS.map((field) => event.metadata?.[field] ?? null),
+  ]);
+}
+
 /**
  * Holds down a flood of one refusal by one agent, in a log that is written
  * once and chained. The first refusal in a window is written at once. Repeats
- * are counted, then written as one summary when the window ends. The running
- * count lives in process memory, so a crash loses at most one window's count,
- * never the first event.
+ * are counted, then written as one summary when the window ends. Refusals of
+ * a different delegation, method, destination or policy are different refusals,
+ * so a noisy one cannot hide another. `maxKeys` bounds the memory held. The
+ * running count lives in process memory, so a crash loses at most one window's
+ * count, never the first event.
  */
 export function createRefusalAggregator(options: RefusalAggregatorOptions) {
   const windowMs = options.windowMs ?? 60_000;
@@ -125,7 +155,7 @@ export function createRefusalAggregator(options: RefusalAggregatorOptions) {
   return {
     /** Write this refusal, or count it as a repeat of one written in this window. */
     record(event: AuditEvent): void {
-      const key = JSON.stringify([event.actor.id, event.resource.id, event.errorMessage]);
+      const key = refusalKey(event);
       const at = now();
       const entry = held.get(key);
       if (entry && at - entry.startedAt < windowMs) {
@@ -153,4 +183,25 @@ export function createRefusalAggregator(options: RefusalAggregatorOptions) {
       }
     },
   };
+}
+
+/**
+ * Write held summaries when the process is told to stop. SQLite writes are
+ * synchronous, so the summaries are on disk before the process exits. A failed
+ * flush is logged and never keeps the process alive.
+ */
+export function flushOnShutdown(
+  flush: () => void,
+  proc: Pick<NodeJS.Process, 'once' | 'exit'> = process,
+): void {
+  for (const [signal, status] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+    proc.once(signal, () => {
+      try {
+        flush();
+      } catch (err) {
+        console.error('[audit] Failed to write refusal summaries at shutdown:', err instanceof Error ? err.message : err);
+      }
+      proc.exit(status);
+    });
+  }
 }
