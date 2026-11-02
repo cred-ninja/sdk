@@ -126,9 +126,16 @@ TOFU_PATH=./data/tofu.sqlite
 ADMIN_TOKEN=${adminToken}
 
 # Agent token (agents use this to request credentials)
+# user_id is NOT an authorization boundary for this token. Whoever holds it can
+# name any user_id and act on that user's connections, within what the named
+# agent's Permission allows, and a Permission is per agent and service, not per
+# user. Give it only to agents you trust with every user of this server. To bind
+# callers to one user each, configure a custom agentRequestVerifier.
 AGENT_TOKEN=${agentToken}
 
-# Every request names the user it acts for (user_id). Set to true only when
+# Every request names the user it acts for (user_id). This stops a request
+# acting on a shared user by accident; it does not limit who a caller may name
+# (see AGENT_TOKEN above). Set to true only when
 # this server holds one person's accounts: a request without user_id then acts
 # on the shared user "default".
 SINGLE_USER_MODE=false

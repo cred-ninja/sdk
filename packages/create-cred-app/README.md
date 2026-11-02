@@ -18,7 +18,7 @@ Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.e
 - **SQLite vault** — zero config, audit-capable, no external database needed
 - **Admin UI** at `/connect` for managing OAuth provider connections
 - **Auto-generated credentials** — vault passphrase, admin token, agent token, and an agent identity in `agent.env`
-- **Multi-user by default** — every request names the user it acts for
+- **Multi-user by default** — every request names the user it acts for. This is not an authorization boundary: the shared agent token can name any user, and a Permission is per agent and service, not per user
 - **A grant script** — an agent with no Permission is issued nothing
 - **Pre-configured** for Google, GitHub, and Slack
 

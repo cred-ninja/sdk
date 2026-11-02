@@ -20,6 +20,8 @@ Then:
 
 4. Give your agent `agent.env`: the server URL, the agent token and a new agent identity, generated for this app.
 
+**`user_id` is not an authorization boundary for `AGENT_TOKEN`.** Requiring `user_id` stops a request acting on a shared user by accident. It does not limit who a caller may name: whoever holds the token can name any user and act on that user's connections, within what the named agent's Permission allows. A Permission is per agent and service, not per user, so `npm run grant` grants across every user of this server. Give the token only to agents you trust with all of them. To bind callers to one user each, configure a custom [`agentRequestVerifier`](https://github.com/cred-ninja/sdk/tree/main/packages/server#user-ids).
+
 Agents get what they are granted, and each brokered call is checked against it: under `github.read` a read reaches GitHub and a write is refused. See [operation enforcement](https://github.com/cred-ninja/sdk/tree/main/packages/server#operation-enforcement).
 
 ## Configuration
@@ -33,6 +35,8 @@ Edit `.env` to configure:
 - **Provider credentials** — OAuth client ID/secret for each provider
 
 `agent.env` holds what your agent needs and the server does not, including the agent's private key. Keep it with the agent.
+
+`npm run grant` reads the admin token and server address only from the `.env` beside it, and sends the token only over loopback, or over https to `REDIRECT_BASE_URI` when `HOST` is remote.
 
 ## Endpoints
 

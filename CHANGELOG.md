@@ -8,8 +8,13 @@
   request names `user_id`. It also generates an agent identity in `agent.env` (mode
   0600, not read by the server) and a `grant-agent.mjs` script, run as
   `npm run grant -- github github.read`, which creates the Permission an agent now
-  needs. Apps generated earlier keep their settings, but their agents need a
-  Permission once they upgrade.
+  needs. It reads the admin token and server address only from the `.env` beside
+  it, and sends the token only over loopback or https, following no redirect. Apps
+  generated earlier keep their settings, but their agents need a Permission once
+  they upgrade.
+- A generated `.env` and README state that `user_id` is not an authorization
+  boundary for the static agent token, and that a Permission is per agent and
+  service, not per user.
 
 ### Changed: docs match the code
 
@@ -35,7 +40,9 @@
   the grant does not cover gets `403 scope_insufficient`. Both are audited.
 - Calls that worked and are now refused: any provider API the tables do not map,
   HubSpot `/cms/`, `/content/` and `/automation/`, Salesforce composite, tooling
-  and Apex REST, Google uploads and batch, GitHub GraphQL over GET, and any call
+  and Apex REST, Google uploads and batch, GitHub GraphQL over GET, every GitHub
+  GraphQL mutation except `createIssue`, `closeIssue` and `addComment`, GitHub
+  GraphQL queries under only an identity scope, and any call
   whose scope does not cover it. A token whose scopes do not match a call's now
   fails here instead of at the provider. See the README for what is mapped.
 - A method override in a header or JSON body is refused with `400 invalid_request`
@@ -47,9 +54,11 @@
   capabilities. A derived scope is never issued as a raw token. A Notion
   connection with no stored scopes now covers `content`, so a Permission naming
   `content` or `notion.read` can be delegated.
-- Cred Link: narrowing now answers `enforcement: "broker"` for every provider,
-  and a call only the removed scopes covered is refused, also through a handle
-  issued before the narrow.
+- Cred Link: narrowing now answers `enforcement: "broker"`, and a call only the
+  removed scopes covered is refused, also through a handle issued before the
+  narrow. GitHub still answers `record`, because its table does not separate every
+  scope (a removed `workflow` under a remaining `repo`), though its calls are
+  classified too.
 - `@credninja/mcp` local mode applies the same refusals, forwards the canonical
   URL and no longer follows upstream redirects. Refusals are audited through the
   new `Cred.recordLocalRefusal`.

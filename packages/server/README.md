@@ -215,10 +215,10 @@ queries and no mutation, however the document is arranged.
 
 | Provider | Mapped | Not mapped, so refused |
 |---|---|---|
-| Google | Gmail messages, threads, labels, drafts and profile; Calendar events, calendars and `freeBusy`; Drive files; Sheets values; Docs; People; Directory users and groups; userinfo | HTTP batch, uploads (`/upload/`, `uploadType`), Gmail `batchDelete` and `batchModify`, anything else |
+| Google | Gmail (messages, threads, labels, drafts, profile); Calendar events, calendars and `freeBusy`; Drive files; Sheets values; Docs; People; Directory users and groups; userinfo | HTTP batch, uploads (`/upload/`, `uploadType`), Gmail `batchDelete` and `batchModify`, anything else |
 | Slack | The methods in `SLACK_READ_METHODS` and `SLACK_WRITE_METHODS` | Every other method, and a write method over GET |
 | Linear | GraphQL queries (`read`, `write`, `admin`); mutations (`write`); `issueCreate` and `attachmentCreate` (`issues:create`); `commentCreate` (`comments:create`) | Subscriptions, batches, persisted queries, unparseable documents, and a mutation under `admin` alone |
-| GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries and mutations | Anything else, including enterprise routes and GraphQL over GET |
+| GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries (`github.read`, `repo`, `public_repo`, not an identity scope); the GraphQL mutations `createIssue`, `closeIssue` and `addComment` (`repo`, `public_repo`) | Every other GraphQL mutation, enterprise routes, GraphQL over GET, anything else |
 | HubSpot | Contacts, companies, deals, tickets, line items and quotes: read, search, create, update and delete; owners; properties | Batch endpoints, `/cms/`, `/content/`, `/automation/` |
 | Notion | Pages, blocks, databases, data sources, comments, users, search | File uploads |
 | Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects` | Composite, tooling, jobs and Apex REST |
@@ -310,6 +310,12 @@ A revocation holds until an operator grants access again:
 While held out, the agent gets `403 agent_access_revoked` at `/api/v1/delegate`,
 `/bc-authorize`, `/api/v1/subdelegate` and `/api/v1/token`, and approved CIBA
 requests cannot be redeemed. On a SQLite vault the hold survives a restart.
+
+A Permission is per agent and service, not per user, and `user_id` is not an
+authorization boundary for the static agent token: whoever holds the token can name
+any user and act on that user's connections, within the named agent's Permission.
+To bind callers to one user each, configure a custom `agentRequestVerifier` (see
+[User ids](#user-ids)).
 
 Known limits: a raw-token request (the deprecated `CRED_ALLOW_RAW_TOKENS=true`)
 that names no `agent_did` is outside these checks, since it identifies no
@@ -597,13 +603,16 @@ granted.
   longer request or be issued the removed scopes (`/api/v1/delegate` refuses
   them, and new handles never carry them). Raw tokens are no longer issued
   for the connection (see below).
-- Brokered calls: the response says `enforcement: "broker"`. Every call is
+- Brokered calls, except GitHub: the response says `enforcement: "broker"`. Every call is
   classified against the grant as it now stands (see
   [Operation enforcement](#operation-enforcement)), so a call only the removed
   scopes covered is refused before it reaches the provider, also through a
   handle issued before the narrowing. A scope that stays can still cover the
   same call: narrowing `[gmail.modify, gmail.send]` to `[gmail.modify]` still
   lets a handle send mail, because `gmail.modify` allows it.
+- GitHub answers `enforcement: "record"`. Calls are still classified against the
+  grant, but the table does not separate every GitHub scope: remove `workflow`,
+  keep `repo`, and the broker cannot tell a workflow file from any other.
 - With `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true` (deprecated) the broker tells
   only Google API families apart. It answers `broker` when every removed scope
   belongs to a family no remaining scope unlocks, and otherwise `record`, which

@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { Server } from 'node:http';
+import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import request from 'supertest';
 import { importAgentIdentity } from '@credninja/sdk';
 import { createServer } from '../server.js';
@@ -59,10 +59,31 @@ async function serve(env: Record<string, string>, dir: string) {
   return { ...server, port };
 }
 
-const grant = (dir: string, port: number, ...args: string[]) => run('node', ['grant-agent.mjs', ...args], {
-  cwd: dir,
-  env: { ...process.env, PORT: String(port), HOST: '127.0.0.1' },
-});
+function setEnvValues(dir: string, values: Record<string, string>) {
+  const file = path.join(dir, '.env');
+  let text = fs.readFileSync(file, 'utf8');
+  for (const [key, value] of Object.entries(values)) {
+    text = new RegExp(`^${key}=`, 'm').test(text) ? text.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${value}`) : `${text}\n${key}=${value}\n`;
+  }
+  fs.writeFileSync(file, text);
+}
+
+const grant = (dir: string, port: number, ...args: string[]) => {
+  setEnvValues(dir, { PORT: String(port), HOST: '127.0.0.1' });
+  return run('node', ['grant-agent.mjs', ...args], { cwd: dir });
+};
+
+/** A local listener that records what reaches it. */
+async function recorder(respond: (req: IncomingMessage, res: ServerResponse) => void = (_req, res) => res.writeHead(201).end('{}')) {
+  const seen: Array<{ url: string | undefined; authorization: string | undefined }> = [];
+  const listener = createHttpServer((req, res) => {
+    seen.push({ url: req.url, authorization: req.headers.authorization });
+    respond(req, res);
+  });
+  await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
+  servers.push(listener);
+  return { seen, port: (listener.address() as { port: number }).port };
+}
 
 describe('create-cred-app', () => {
   it('generates a multi-user app and an agent identity, keeping the key out of the server config and the output', async () => {
@@ -123,11 +144,78 @@ describe('create-cred-app', () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
-  it('the grant script explains its usage and reports a refusal', async () => {
+  it('the grant script explains its usage and reports a server it cannot reach', async () => {
+    const { dir } = await generate();
+    await expect(run('node', ['grant-agent.mjs'], { cwd: dir })).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('Usage') });
+    setEnvValues(dir, { PORT: '1', HOST: '127.0.0.1' });
+    await expect(run('node', ['grant-agent.mjs', 'github', 'repo'], { cwd: dir })).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('npm start') });
+  });
+
+  it('the grant script takes the token and address from its own .env, not the environment or the working directory', async () => {
     const { dir, env } = await generate();
-    const { port } = await serve(env, dir);
-    await expect(grant(dir, port)).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('Usage') });
-    await expect(run('node', ['grant-agent.mjs', 'github', 'repo'], { cwd: dir, env: { ...process.env, PORT: '1', HOST: '127.0.0.1' } }))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('npm start') });
+    const real = await recorder();
+    const decoy = await recorder();
+    setEnvValues(dir, { PORT: String(real.port), HOST: '127.0.0.1' });
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-elsewhere-'));
+    tmpDirs.push(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, '.env'), `ADMIN_TOKEN=cwd-token\nPORT=${decoy.port}\nHOST=127.0.0.1\n`);
+    await run('node', [path.join(dir, 'grant-agent.mjs'), 'github', 'repo'], {
+      cwd: elsewhere,
+      env: { ...process.env, ADMIN_TOKEN: 'env-token', HOST: 'evil.example.com', PORT: String(decoy.port), REDIRECT_BASE_URI: 'https://evil.example.com' },
+    });
+    expect(real.seen).toEqual([{ url: '/admin/permissions', authorization: `Bearer ${env.ADMIN_TOKEN}` }]);
+    expect(decoy.seen).toEqual([]);
+  });
+
+  it('the grant script refuses to send the admin token over http to a host that is not loopback', async () => {
+    const { dir, env } = await generate();
+    for (const values of [
+      { HOST: 'cred.internal', REDIRECT_BASE_URI: 'http://cred.internal:3456' },
+      { HOST: '10.0.0.5', REDIRECT_BASE_URI: 'http://10.0.0.5:3456' },
+      { HOST: '127.0.0.1.evil.example', REDIRECT_BASE_URI: 'http://127.0.0.1.evil.example' },
+      { HOST: 'localhost.evil.example', REDIRECT_BASE_URI: 'not a url' },
+    ]) {
+      setEnvValues(dir, values);
+      const failed = await run('node', ['grant-agent.mjs', 'github', 'repo'], { cwd: dir }).then(() => null, (err: { code: number; stderr: string }) => err);
+      expect(failed?.code, values.HOST).toBe(1);
+      expect(failed?.stderr).toContain('Refusing to send the admin token');
+      expect(failed?.stderr).not.toContain(env.ADMIN_TOKEN);
+    }
+  });
+
+  it('a remote server is reached only at its https address', async () => {
+    const { dir } = await generate();
+    setEnvValues(dir, { HOST: 'cred.invalid', REDIRECT_BASE_URI: 'https://cred.invalid' });
+    await expect(run('node', ['grant-agent.mjs', 'github', 'repo'], { cwd: dir })).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('https://cred.invalid') });
+  });
+
+  it('the grant script does not follow a redirect with the admin token', async () => {
+    const { dir } = await generate();
+    const target = await recorder();
+    const redirector = await recorder((_req, res) => res.writeHead(307, { location: `http://127.0.0.1:${target.port}/admin/permissions` }).end());
+    setEnvValues(dir, { PORT: String(redirector.port), HOST: '127.0.0.1' });
+    await expect(run('node', ['grant-agent.mjs', 'github', 'repo'], { cwd: dir })).rejects.toMatchObject({ code: 1 });
+    expect(redirector.seen).toHaveLength(1);
+    expect(target.seen).toEqual([]);
+  });
+
+  it('says plainly that user_id is not an authorization boundary for the agent token', async () => {
+    const { dir } = await generate();
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toContain('user_id is NOT an authorization boundary');
+    expect(fs.readFileSync(path.join(dir, 'README.md'), 'utf8')).toContain('is not an authorization boundary');
+  });
+
+  it('demonstrates that boundary: one agent token and Permission reach every user', async () => {
+    const { dir, env, agentEnv } = await generate();
+    const { app, vault, port } = await serve(env, dir);
+    for (const userId of ['alice', 'bob']) {
+      await vault.store({ provider: 'github', userId, accessToken: `gho_${userId}`, expiresAt: new Date(Date.now() + 3600_000), scopes: ['repo'] });
+    }
+    await grant(dir, port, 'github', 'github.read');
+    const identity = await importAgentIdentity({ did: agentEnv.CRED_AGENT_DID!, privateKeyHex: agentEnv.CRED_AGENT_PRIVATE_KEY_HEX! });
+    for (const userId of ['alice', 'bob']) {
+      const res = await delegateAs(app, identity, { service: 'github', user_id: userId }, { bearer: env.AGENT_TOKEN!, base: env.REDIRECT_BASE_URI });
+      expect(res.status, userId).toBe(200);
+    }
   });
 });

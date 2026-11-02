@@ -418,11 +418,9 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
     const health = await waitForHealth(port, child);
     if (health.status !== 'ok') throw new Error('bad generated app health: ' + JSON.stringify(health));
     // The generated grant script reaches the generated server.
-    run('node', ['grant-agent.mjs', 'github', 'github.read'], {
-      cwd: generatedDir,
-      env: { PORT: String(port), HOST: '127.0.0.1' },
-      stdio: 'pipe',
-    });
+    const generatedEnv = join(generatedDir, '.env');
+    writeFileSync(generatedEnv, readFileSync(generatedEnv, 'utf8').replace(/^PORT=.*$/m, `PORT=${port}`));
+    run('node', ['grant-agent.mjs', 'github', 'github.read'], { cwd: generatedDir, stdio: 'pipe' });
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${output}`);
   } finally {
