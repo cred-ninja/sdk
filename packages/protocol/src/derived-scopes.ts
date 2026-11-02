@@ -57,3 +57,14 @@ export function withoutRedundantDerivedScopes(service: string, scopes: readonly 
 export function isBrokerOnlyScope(service: string, scope: string): boolean {
   return derivedFor(service)?.scope === scope;
 }
+
+/**
+ * What to ask a provider for at consent. A derived scope is Cred's name, so a
+ * provider gets the real scope it depends on. Notion takes no scopes at all: its
+ * capabilities are set on the integration.
+ */
+export function providerScopesFor(service: string, scopes: readonly string[]): string[] {
+  if (service === 'notion') return [];
+  const derived = derivedFor(service);
+  return [...new Set(scopes.map((scope) => (derived?.scope === scope ? derived.from[0]! : scope)))];
+}

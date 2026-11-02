@@ -96,7 +96,7 @@ it('exposes unknown-constraint exercise denial only in the owning user audit fee
   expect(denials[0]).toMatchObject({
     service: 'github', userId: 'owner', metadata: {
       errorMessage: 'unknown_constraint', outcome: 'denied',
-      webBotAuth: { delegationId: issued.body.delegation_id },
+      details: { delegationId: issued.body.delegation_id },
     },
   });
   expect((await audit('other')).body.entries).toEqual([]);

@@ -59,7 +59,7 @@ Edit `.env` to configure:
 
 ## Docker Deployment
 
-See [@credninja/server docs](https://github.com/cred-ninja/sdk/tree/main/packages/server#docker) for Docker + Caddy deployment.
+See [@credninja/server docs](https://github.com/cred-ninja/sdk/tree/main/packages/server#docker-deployment-production) for Docker + Caddy deployment.
 
 ## Docs
 

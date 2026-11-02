@@ -43,7 +43,7 @@ export {
   SLACK_MAPPED_METHODS,
 } from './operations.js';
 export type { OperationAccess, OperationRequest, OperationVerdict } from './operations.js';
-export { withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, isBrokerOnlyScope } from '@credninja/protocol';
+export { withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, isBrokerOnlyScope, providerScopesFor } from '@credninja/protocol';
 
 // Types
 export type {

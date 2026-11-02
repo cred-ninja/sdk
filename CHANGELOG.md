@@ -92,6 +92,8 @@
 - Salesforce REST resources also map with a trailing slash, forwarded as asked.
 - `drive.googleapis.com` is mapped like the Drive API, and HubSpot's legacy
   `tickets` scope covers ticket reads, writes and properties.
+- A consent link asks the provider for the real scope a derived one depends on
+  (`repo`, `api`), never a Cred name, and asks Notion for none.
 - `/connect` offers `notion.read` and `content` for Notion, in place of names the
   tables did not know. Rows stored under the old names keep what they said:
   `read_content` reads, `insert_content` creates and appends, and `update_content`
@@ -110,6 +112,14 @@
   and the provider token still holds a wider or sibling scope.
 - Deprecated opt-out: `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS`, which warns at
   startup and marks every affected audit event. The URL allowlist still applies.
+
+### Changed: the audit feed's shape
+
+- `GET /api/v1/audit` and `getAuditLog()` return `actor`, except on a failed DPoP proof.
+  An event's own fields moved from `metadata.webBotAuth` to `metadata.details`, and
+  `metadata.webBotAuth` now appears only for what a Web Bot Auth signature said. A
+  reader of `metadata.webBotAuth.delegationId` must change. Stored rows and the hash
+  chain are not affected.
 
 ### Fixed: the audit log names the agent behind a brokered call
 
@@ -158,22 +168,40 @@
   again.
 - Revoking a delegation holds out each agent the cascade reached, for that user
   and service, instead of letting it ask again at once. This also applies at
-  `/api/v1/subdelegate`, `/bc-authorize` and `/api/v1/token`.
-  `POST /admin/permissions` ends the hold at the limits it names. Disconnecting
-  a connection holds no agent out.
+  `/api/v1/subdelegate`, `/bc-authorize` and `/api/v1/token`, and to a Cred Link
+  agent as well as its key. Holds and consent revocations commit with the
+  revocation, so a retry stays correct. Disconnecting a connection holds no agent out.
+- A revocation also ends the agent's consents on that service (for that user, when
+  it was one delegation), so a re-grant asks for approval again.
+- New `POST /admin/permissions/:id/restore` ends a hold and leaves the Permission as
+  it is, for one user with `user_id` or all. New `GET /admin/agent-holds` lists holds.
+- `POST /admin/permissions` ends every hold at the limits it names, and now refuses
+  with `409 permission_limits_would_drop` rather than silently drop an approval gate
+  or rate limit on the row it replaces.
+- Narrowing a Permission with `PATCH` reaches live delegations: each `/api/v1/use` is
+  held to the Permission as it stands. Delegations record which Permission authorized
+  them, and one whose Permission has gone can do nothing.
+- An agent with a Permission under both its DID and record id gets the limits of both.
+- Raw tokens: a request naming no agent now also needs
+  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, including at `GET /api/token/:provider`.
+  One whose Permission covers nothing on the connection is refused
+  (`403 no_scopes_granted`). Issued ones are marked `raw_tokens` in
+  `enforcementOptOuts`. A raw token does not honor read-only labels.
 - `POST /api/v1/delegate` now honours a Permission stored under the agent's
   record id, as `/api/v1/subdelegate` already did. It used to look only under
   the DID and otherwise issue the whole connection.
 - `@credninja/vault`: `revokePermission` returns the Permission removed and
   records an agent revocation; `createPermission` ends one. New
-  `recordAgentRevocations`, `getAgentRevocation` and `clearAgentRevocations`,
+  `recordAgentRevocations`, `getAgentRevocation`, `listAgentRevocations`,
+  `clearAgentRevocations` and `getPermissionById`, a `hold` option on revocations,
   and a `vault_agent_revocations` table created on start. Existing rows are not
   changed, and a Permission revoked before this version left no record.
 - Deprecated opt-outs, each logging a warning at startup and marking affected
   audit events in `metadata.enforcementOptOuts`:
   `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` and
   `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION`. Setting both restores the old
-  behavior, widening included. They will be removed.
+  behavior, widening included. With only the first set, a did:key with no agent record
+  is still refused on a service and user with any hold. They will be removed.
 
 ### Changed: Cred Link on Delegation Tokens
 

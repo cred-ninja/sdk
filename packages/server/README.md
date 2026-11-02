@@ -61,6 +61,8 @@ npm run dev
 | POST | `/api/v1/use` | `Authorization: DPoP <token>` + DPoP | Broker an upstream API call with a Delegation Token, with a `DPoP` proof by the key the token is bound to (no `delegation_id` in the body). Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
 | DELETE | `/api/v1/delegations/:delegationId`, `/delegation/:delegationId` | Bearer | Revoke a delegation and every delegation derived from it, see [Cascading revocation](#cascading-revocation). The second path is the one the Internet-Draft names; the id is the receipt `jti` |
+| POST | `/admin/permissions/:id/restore` | Admin | End the holds on this Permission's agent and keep its limits, see [Agent access](#agent-access) |
+| GET | `/admin/agent-holds` | Admin | List the revocations holding agents out |
 | GET | `/api/v1/connections` | Bearer | List stored connections for SDK compatibility |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke stored credentials for SDK compatibility |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
@@ -295,6 +297,13 @@ user's feed unless a verifier bound the caller to that user. `GET /admin/audit`
 still finds it by `service`. Rows written before
 this version are unchanged and still say `server-agent`.
 
+`GET /api/v1/audit` and `getAuditLog()` return `actor`, except on a failed DPoP proof,
+which would tell a Bearer caller who a token it does not hold is bound to.
+`GET /admin/audit` shows it. An event's own fields are under `metadata.details`
+(`delegationId`, `origin`, `route`, ...), and `metadata.webBotAuth` holds only what a
+Web Bot Auth signature said. This is the response's shape; stored rows and the hash
+chain are unchanged.
+
 ## Agent access
 
 An agent gets what it was granted. A request naming `agent_did` needs a
@@ -313,6 +322,10 @@ warns at startup. Moving means connecting providers again on the new vault; ther
 no migration command. Cred Link
 connections use their own Permissions and are not affected.
 
+Narrowing a Permission with `PATCH /admin/permissions/:id` reaches live delegations:
+each `/api/v1/use` is held to the Permission as it stands, so a token loses at once
+what the Permission no longer allows (`403 scope_insufficient`).
+
 A revocation holds until an operator grants access again:
 
 - `DELETE /admin/permissions/:id` revokes the agent's live delegations on that
@@ -321,8 +334,16 @@ A revocation holds until an operator grants access again:
   for that user and service. Any holder of the agent token can make this call,
   and only an operator can undo it.
 - Revoking an agent record is permanent for that record.
-- `POST /admin/permissions` ends the hold, for that agent and connection, at
-  the limits it names. It replaces a Permission that already exists.
+- `POST /admin/permissions/:id/restore` ends the hold and leaves the Permission as
+  it is. With `user_id` it ends only that user's.
+- `POST /admin/permissions` ends every hold, for that agent and connection, at the
+  limits it names. It replaces a Permission that already exists, and refuses with
+  `409 permission_limits_would_drop` if that would silently drop an approval gate or
+  rate limit: name them in the body, or restore instead.
+- `GET /admin/agent-holds` lists holds (`agent_id`, `service`, `user_id`).
+- A revocation also ends the agent's consents there, so a re-grant asks for approval
+  again where the Permission requires it. A hold reaches the Cred Link agent as well
+  as its key, and `POST /link/v1/connections/:id/permissions` ends it.
 - Disconnecting a connection revokes its delegations but holds no agent out:
   they may be delegated to again once the user reconnects.
 
@@ -336,9 +357,21 @@ any user and act on that user's connections, within the named agent's Permission
 To bind callers to one user each, configure a custom `agentRequestVerifier` (see
 [User ids](#user-ids)).
 
-Known limits: a raw-token request (the deprecated `CRED_ALLOW_RAW_TOKENS=true`)
-that names no `agent_did` is outside these checks, since it identifies no
-agent. `POST /api/v1/agents/:agentId/revoke-all` and `DELETE
+Raw tokens (the deprecated `CRED_ALLOW_RAW_TOKENS=true`) do not honor read-only
+labels: a provider token holds the connection's whole scope whatever the Permission
+says. One is refused when the Permission covers nothing on the connection, and when
+the request names no agent unless `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true` is set
+too. Each is marked in the audit log (`enforcementOptOuts`).
+
+With only `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, a did:key with no agent record
+is refused on a service and user with any hold, so a new key cannot walk around a
+revocation. A registered key with no Permission is not refused there: that is the
+limit of this opt-out, and its startup warning says so.
+
+If an agent has a Permission under both its DID and its record id, it gets the
+limits of both.
+
+Known limits: `POST /api/v1/agents/:agentId/revoke-all` and `DELETE
 /admin/agents/:agentId` still need an agent record; revoke the Permission of a
 did:key that has none. `POST /admin/consents/revoke` ends consents, not an
 agent's standing, so an agent with a Permission that needs no approval can be
@@ -844,20 +877,25 @@ npm install && npm start
 ### 2. Agent (Machine B)
 
 ```typescript
-import { Cred, generateAgentIdentity } from '@credninja/sdk';
+import { Cred, importAgentIdentity } from '@credninja/sdk';
 
 const cred = new Cred({
   agentToken: process.env.CRED_AGENT_TOKEN!,
   baseUrl: 'https://cred.yourdomain.com',
 });
 
-// The Delegation Token is bound to this agent key.
-const agentIdentity = await generateAgentIdentity();
+// The Delegation Token is bound to this agent key, which an operator has granted a
+// Permission (step 3). Keep it stable: a new key holds no Permission.
+const agentIdentity = await importAgentIdentity({
+  did: process.env.CRED_AGENT_DID!,
+  privateKeyHex: process.env.CRED_AGENT_PRIVATE_KEY_HEX!,
+});
 
 const google = await cred.delegateHandle({
   service: 'google',
-  userId: 'default',
+  userId: 'user_123',
   appClientId: 'local',
+  scopes: ['calendar.readonly'],
   agentIdentity,
 });
 
@@ -878,7 +916,7 @@ curl https://cred.yourdomain.com/api/v1/delegate \
   -H "Authorization: Bearer $CRED_AGENT_TOKEN" \
   -H "DPoP: $DELEGATE_PROOF" \
   -H "Content-Type: application/json" \
-  -d '{"service":"google","user_id":"default","appClientId":"local","agent_did":"did:key:z6Mk..."}'
+  -d '{"service":"google","user_id":"user_123","appClientId":"local","agent_did":"did:key:z6Mk..."}'
 # {"access_token":"<token>","token_type":"DPoP","cnf":{"jkt":"..."},...}
 
 curl https://cred.yourdomain.com/api/v1/use \
@@ -886,6 +924,19 @@ curl https://cred.yourdomain.com/api/v1/use \
   -H "DPoP: $USE_PROOF" \
   -H "Content-Type: application/json" \
   -d '{"url":"https://www.googleapis.com/calendar/v3/calendars/primary/events","method":"GET"}'
+```
+
+### 3. Grant the agent (Machine A)
+
+An agent is issued nothing without a Permission. Generate its identity once on Machine B,
+with `generateAgentIdentity()` from `@credninja/sdk`, and keep the key there. Grant its DID
+on Machine A, where `ADMIN_TOKEN` stays:
+
+```bash
+curl https://cred.yourdomain.com/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agentId":"did:key:z6Mk...","connectionId":"google","allowedScopes":["calendar.readonly"]}'
 ```
 
 ## Security

@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -276,6 +276,10 @@ function auditEventService(resourceId: string): string {
     ? resourceId.slice(GUARD_DENIAL_RESOURCE_PREFIX.length)
     : resourceId.split('/')[0]!;
 }
+
+/** The fields of an audit event that say a Web Bot Auth signature identified the caller. */
+const WEB_BOT_AUTH_SIGNS: readonly string[] = ['webBotAuthKeyId', 'signatureAgent'];
+const WEB_BOT_AUTH_FIELDS: readonly string[] = [...WEB_BOT_AUTH_SIGNS, 'identitySource'];
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'authorization',
@@ -2395,11 +2399,8 @@ export function createServer(config: ServerConfig) {
    * PATCH /admin/permissions/:id — update an existing Permission record
    * (admin-authenticated).
    *
-   * Prospective-only: narrowing allowedScopes here constrains future
-   * delegate()/subdelegate() calls, but does not affect a delegation handle
-   * already brokered through POST /api/v1/use — that route resolves scopes
-   * from an in-memory snapshot taken at issuance and never re-reads the
-   * Permission row.
+   * Narrowing allowedScopes constrains future delegations, and POST /api/v1/use
+   * re-reads the Permission on each exercise, so it reaches live ones too.
    */
   app.patch('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
     try {
@@ -3052,12 +3053,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const client = makeOAuthClient(providerConfig);
     // Requested scopes, else the provider's default scopes from config.
     const scopes = requestedScopes.length > 0 ? requestedScopes : providerConfig.defaultScopes;
-    const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes });
+    // The provider is asked for its own scopes, never a name only Cred knows.
+    const providerScopes = providerScopesFor(providerConfig.slug, scopes);
+    const { url, state, codeVerifier } = await client.getAuthorizationUrl({ scopes: providerScopes });
     cleanPendingOAuth();
     pendingOAuth.set(state, {
       provider: providerConfig.slug,
       userId,
-      scopes,
+      // Stored if the provider's answer names none. Notion never does, so what was
+      // chosen here is all that records a read-only connection.
+      scopes: providerConfig.slug === 'notion' ? scopes : providerScopes,
       state,
       codeVerifier,
       createdAt: Date.now(),
@@ -3913,6 +3918,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     link?: LinkHandleBinding;
     /** The stored connection's instance, for a Salesforce delegation. */
     instanceUrl?: string;
+    /** The Permission that authorized it. */
+    permissionId?: string;
   }): DelegationGrant | null {
     const jkt = dpopBindingFor(input.agentDid);
     if (!jkt) return null;
@@ -3928,6 +3935,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       prf: input.prf,
       ...(input.link ? { link: { ...input.link } } : {}),
       ...(input.service === 'salesforce' && input.instanceUrl ? { instanceOrigin: new URL(input.instanceUrl).origin } : {}),
+      ...(input.permissionId ? { permissionId: input.permissionId } : {}),
     };
   }
 
@@ -4246,10 +4254,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   function scopesForDidAgent(service: string, stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
     if (!permission && !allowAgentsWithoutPermission) return [];
-    const allowed = permission ? withDerivedScopes(service, permission.allowedScopes) : null;
     return withStoredDerivedScopes(service, stored)
       .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope))
-      .filter((scope) => !allowed || allowed.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(allowed, scope));
+      .filter((scope) => !permission || permissionCovers(service, permission.allowedScopes, scope));
   }
 
   /** A ceiling covers a scope, or the wider scope a derived read scope comes from. Never the reverse. */
@@ -4276,12 +4283,35 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return tightestOf(service, byRecord, byDid);
   }
 
+  function permissionCovers(service: string, allowed: string[], scope: string): boolean {
+    const expanded = withDerivedScopes(service, allowed);
+    return expanded.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(expanded, scope);
+  }
+
+  /**
+   * What a live delegation may do now: its scopes, within the Permission that
+   * authorized it and the agent's Permission as they stand. A Permission narrowed
+   * after issuance takes effect at once, like a revocation. A row that has gone
+   * covers nothing.
+   */
+  async function scopesAllowedNow(delegationId: string, delegation: BrokeredDelegation): Promise<string[]> {
+    const { service } = delegation;
+    const permissionId = (await vault.getDelegation(delegationId))?.grant?.permissionId;
+    const authorizing = permissionId ? await vault.getPermissionById(permissionId) : null;
+    if (permissionId && !authorizing) return [];
+    const agentDid = delegation.agentDid;
+    const current = agentDid
+      ? await permissionForDidAgent(agentDid, await vault.getAgentByDid?.(agentDid) ?? null, service)
+      : null;
+    const limits = [authorizing, current].filter((limit): limit is Permission => limit !== null);
+    if (limits.length === 0) return allowAgentsWithoutPermission ? delegation.scopes : [];
+    return withoutRedundantDerivedScopes(service, withDerivedScopes(service, delegation.scopes)
+      .filter((scope) => limits.every((limit) => permissionCovers(service, limit.allowedScopes, scope))));
+  }
+
   /** Two Permissions for one agent: neither can widen the other, so it gets the limits of both. */
   function tightestOf(service: string, a: Permission, b: Permission): Permission {
-    const covered = (list: string[], scope: string) => {
-      const expanded = withDerivedScopes(service, list);
-      return expanded.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(expanded, scope);
-    };
+    const covered = (list: string[], scope: string) => permissionCovers(service, list, scope);
     const rate = (limit: Permission['rateLimit']) => (limit ? limit.maxRequests / limit.windowMs : Infinity);
     // The rate limit counts against the row whose limit is tighter.
     const tighterRate = rate(a.rateLimit) <= rate(b.rateLimit) ? a : b;
@@ -4851,12 +4881,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           ? new URL(linkAccess.connection.instance_url).origin
           : undefined;
       }
+      // A Link delegation was just re-checked against its grant and Permission above.
+      const scopesNow = linkAccess ? linkAccess.effective_scopes : await scopesAllowedNow(delegationId, delegation);
+      if (scopesNow.length === 0) {
+        refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_narrowed' });
+        res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers any of its scopes' });
+        return;
+      }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
         delegationId,
         url,
         method: normalizedMethod,
         delegation,
-        ...(linkAccess ? { scopes: linkAccess.effective_scopes } : {}),
+        scopes: scopesNow,
       });
       if (!guardResult.allowed) return;
 
@@ -4927,8 +4964,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         upstreamUrl,
         (ops) => {
           // The scope operations this token names, held to what it may do now.
-          const allowedNow = withDerivedScopes(delegation.service, guardResult.effectiveScopes);
-          const named = ops.filter((op) => allowedNow.includes(op));
+          // Through coverage on both sides: `repo` operations under a Permission since
+          // narrowed to github.read still reach reads, and github.read operations
+          // under a `repo` token never reach more.
+          const named = withDerivedScopes(delegation.service, guardResult.effectiveScopes)
+            .filter((scope) => withDerivedScopes(delegation.service, ops).includes(scope));
           if (named.length === 0) return false;
           return classifyBrokerCalls
             ? evaluateOperation({ service: delegation.service, method: normalizedMethod, url: upstreamUrl, body }, named).outcome === 'allowed'
@@ -5613,6 +5653,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         });
         grant = newDelegationGrant({
           ...(entry.instanceUrl ? { instanceUrl: entry.instanceUrl } : {}),
+          ...(authorizingPermission ? { permissionId: authorizingPermission.id } : {}),
           agentDid,
           service,
           scopes: grantedScopes,
@@ -6022,16 +6063,31 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * out once so a future field addition doesn't need to be applied in 3+ places.
    */
   function buildAuditEntryMetadata(event: AuditEvent) {
+    const stored = event.metadata ?? {};
+    const isWebBotAuth = WEB_BOT_AUTH_SIGNS.some((key) => stored[key] !== undefined);
+    const webBotAuth = isWebBotAuth ? Object.fromEntries(Object.entries(stored).filter(([key]) => WEB_BOT_AUTH_FIELDS.includes(key))) : {};
+    const details = Object.fromEntries(Object.entries(stored).filter(([key]) => !(key in webBotAuth)));
     return {
       outcome: event.outcome,
       scopesRequested: event.scopesRequested,
       scopesGranted: event.scopesGranted,
       correlationId: event.correlationId,
       errorMessage: event.errorMessage,
-      ...(event.metadata ? { webBotAuth: event.metadata } : {}),
+      ...(Object.keys(details).length > 0 ? { details } : {}),
+      ...(isWebBotAuth ? { webBotAuth } : {}),
     };
   }
 
+  /**
+   * Who an entry names, for a caller holding only the agent token. A failed proof
+   * came from someone who could not prove the key, so naming the agent would tell
+   * them who a token they do not hold is bound to. /admin/audit shows it.
+   */
+  function auditEntryActor(event: AuditEvent): AuditActor {
+    return event.errorMessage === 'invalid_dpop_proof' ? { type: event.actor.type, id: 'unverified' } : event.actor;
+  }
+
+  /** Shapes a raw `AuditEvent` into the response entry used by both audit routes above. */
   function auditEventToEntry(event: AuditEvent, userId: string) {
     if (event.resource.type === 'agent') {
       return {
@@ -6039,6 +6095,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         action: event.action,
         service: 'agent',
         userId,
+        actor: auditEntryActor(event),
         timestamp: event.timestamp.toISOString(),
         metadata: buildAuditEntryMetadata(event),
       };
@@ -6049,6 +6106,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       action: event.action,
       service: eventService ?? '',
       userId: eventUserId ?? 'default',
+      actor: auditEntryActor(event),
       timestamp: event.timestamp.toISOString(),
       metadata: buildAuditEntryMetadata(event),
     };
@@ -6902,6 +6960,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       })).id;
       const grantState = newDelegationGrant({
         ...(entry.instanceUrl ? { instanceUrl: entry.instanceUrl } : {}),
+        permissionId: permission.id,
         agentDid,
         service,
         scopes: validation.grantedScopes,
@@ -7382,6 +7441,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const consentId = `consent_${crypto.randomBytes(16).toString('hex')}`;
     const grant = newDelegationGrant({
       ...(vaultEntry.entry.instanceUrl ? { instanceUrl: vaultEntry.entry.instanceUrl } : {}),
+      permissionId: permission.id,
       agentDid: request.agentDid,
       service: request.service,
       scopes: request.scopes,

@@ -4040,9 +4040,8 @@ describe('@credninja/server', () => {
         headers: { 'content-type': 'application/json' },
       }));
 
-      // Narrow the permission to an empty scope set through the new admin
-      // route — if /api/v1/use re-checked the Permission row live, the
-      // second call below would now be denied.
+      // Narrow the permission to an empty scope set: /api/v1/use re-reads it, so
+      // the live delegation it authorized stops too.
       const narrowRes = await request(app)
         .patch(`/admin/permissions/${permission.id}`)
         .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
@@ -4055,8 +4054,9 @@ describe('@credninja/server', () => {
         method: 'GET',
       });
 
-      expect(useRes.status).toBe(200);
-      expect(useRes.body.body).toEqual({ items: [] });
+      expect(useRes.status).toBe(403);
+      expect(useRes.body.error).toBe('scope_insufficient');
+      expect(fetchSpy).not.toHaveBeenCalled();
       fetchSpy.mockRestore();
     });
   });

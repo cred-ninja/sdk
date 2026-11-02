@@ -59,6 +59,8 @@ export interface DelegationGrant {
   prf?: string[];
   /** Cred Link binding, for delegations of a Link connection. */
   link?: Record<string, unknown>;
+  /** The Permission that authorized this delegation: it limits every exercise, as it stands then. */
+  permissionId?: string;
   /** Salesforce: the instance this delegation was issued for. Its token is good nowhere else. */
   instanceOrigin?: string;
 }

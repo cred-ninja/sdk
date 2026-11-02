@@ -92,9 +92,11 @@ back to `default` on its own.
 | GET | `/admin/login` | None | Admin login form |
 | POST | `/admin/login` | None | Create admin session cookie |
 | GET | `/providers` | Admin | List configured providers |
-| POST | `/admin/permissions` | Admin | Create or replace a Permission record. A did:key agent is issued nothing without one (`403 permission_required`), and this ends a revocation that holds it out (`403 agent_access_revoked`) |
+| POST | `/admin/permissions` | Admin | Create or replace a Permission record. A did:key agent is issued nothing without one (`403 permission_required`), and this ends a revocation that holds it out (`403 agent_access_revoked`). `409 permission_limits_would_drop` rather than silently drop an approval gate or rate limit |
+| POST | `/admin/permissions/:id/restore` | Admin | End the holds on this Permission's agent, for one user (`user_id`) or all, leaving the Permission as it is |
+| GET | `/admin/agent-holds` | Admin | List the revocations holding agents out (`agent_id`, `service`, `user_id`) |
 | GET | `/admin/permissions` | Admin | List/fetch Permission records |
-| PATCH | `/admin/permissions/:id` | Admin | Update a Permission record |
+| PATCH | `/admin/permissions/:id` | Admin | Update a Permission record. Narrowing reaches live delegations at their next `/api/v1/use` |
 | DELETE | `/admin/permissions/:id` | Admin | Revoke a Permission: the agent's live delegations on the service end, and it is issued nothing new until granted again |
 | GET | `/admin/audit` | Admin | Audit events across all agents (not scoped to one user) |
 | POST | `/bc-authorize` | Bearer + DPoP | CIBA backchannel authentication request for a delegation whose Permission requires approval; returns `auth_req_id`, `expires_in`, `interval`; the agent polls `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba` and a DPoP proof by the same key |

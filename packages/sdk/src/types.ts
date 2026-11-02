@@ -241,7 +241,10 @@ export interface AuditEntry {
   action: string;
   service: string;
   userId: string;
+  /** Who acted: an agent's DID where one is known. */
+  actor?: { type: string; id: string; fingerprint?: string };
   timestamp: string;
+  /** `details` holds the event's own fields, such as `delegationId` and `route`. */
   metadata?: Record<string, unknown>;
 }
 
