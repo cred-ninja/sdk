@@ -209,11 +209,11 @@ describe('Linear', () => {
 describe('GitHub', () => {
   const GH = 'https://api.github.com';
 
-  it('github.read, derived from stored repo, allows GET and refuses writes and GraphQL mutations', async () => {
+  it('github.read, derived from stored repo, allows REST reads and refuses writes and all GraphQL', async () => {
     const ctx = await connected('github', ['repo'], ['github.read']);
     expect(ctx.minted.body.scopes).toEqual(['github.read']);
     await expectAllowed(ctx, `${GH}/repos/o/r/issues`);
-    await expectAllowed(ctx, `${GH}/graphql`, 'POST', { query: '{ viewer { login } }' });
+    await expectRefused(ctx, `${GH}/graphql`, 'POST', { query: '{ viewer { login } }' }, 'scope_insufficient');
     await expectRefused(ctx, `${GH}/repos/o/r/contents/a.txt`, 'PUT', { message: 'm', content: 'eA' }, 'scope_insufficient');
     await expectRefused(ctx, `${GH}/repos/o/r/issues`, 'POST', { title: 't' }, 'scope_insufficient');
     await expectRefused(ctx, `${GH}/graphql`, 'POST', { query: 'mutation { createIssue(input: {}) { clientMutationId } }' }, 'scope_insufficient');

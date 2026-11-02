@@ -257,9 +257,12 @@ const HUBSPOT_RULES: Rule[] = [
 // ── Notion and Salesforce: reads named by Cred ──────────────────────────────
 
 // read_content, update_content and insert_content are names /connect used to
-// offer. Notion never saw them, but rows stored under them keep their meaning.
+// offer. Notion never saw them, but rows stored under them keep what they said:
+// insert creates and appends, update changes what exists, and only `content` deletes.
 const NOTION_READ = ['notion.read', 'content', 'read_content'];
-const NOTION_WRITE = ['content', 'update_content', 'insert_content'];
+const NOTION_INSERT = ['content', 'insert_content'];
+const NOTION_UPDATE = ['content', 'update_content'];
+const NOTION_WHOLE = ['content'];
 const SALESFORCE_READ = ['salesforce.read', 'api', 'full'];
 const SALESFORCE_WRITE = ['api', 'full'];
 const SALESFORCE_HOST = /^https:\/\/[a-z0-9.-]+\.(?:salesforce\.com|force\.com)$/;
@@ -310,16 +313,16 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
       rule('POST', '/v1/search', NOTION_READ, 'read'),
       rule('POST', '/v1/data_sources/*/query', NOTION_READ, 'read'),
       rule('POST', '/v1/databases/*/query', NOTION_READ, 'read'),
-      write('POST', '/v1/pages', NOTION_WRITE),
-      write('POST', '/v1/databases', NOTION_WRITE),
-      write('POST', '/v1/data_sources', NOTION_WRITE),
-      write('POST', '/v1/comments', NOTION_WRITE),
-      write('PATCH', '/v1/pages/*', NOTION_WRITE),
-      write('PATCH', '/v1/blocks/*', NOTION_WRITE),
-      write('PATCH', '/v1/blocks/*/children', NOTION_WRITE),
-      write('PATCH', '/v1/databases/*', NOTION_WRITE),
-      write('PATCH', '/v1/data_sources/*', NOTION_WRITE),
-      write('DELETE', '/v1/blocks/*', NOTION_WRITE),
+      write('POST', '/v1/pages', NOTION_INSERT),
+      write('POST', '/v1/databases', NOTION_INSERT),
+      write('POST', '/v1/data_sources', NOTION_INSERT),
+      write('POST', '/v1/comments', NOTION_INSERT),
+      write('PATCH', '/v1/pages/*', NOTION_UPDATE),
+      write('PATCH', '/v1/blocks/*', NOTION_UPDATE),
+      write('PATCH', '/v1/blocks/*/children', NOTION_INSERT),
+      write('PATCH', '/v1/databases/*', NOTION_UPDATE),
+      write('PATCH', '/v1/data_sources/*', NOTION_UPDATE),
+      write('DELETE', '/v1/blocks/*', NOTION_WHOLE),
     ],
   },
   salesforce: {
@@ -347,8 +350,12 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
 
 const LINEAR_ORIGIN = 'https://api.linear.app';
 const GITHUB_ORIGIN = 'https://api.github.com';
-/** What a GitHub GraphQL query needs. A query can reach any repository data, so an identity scope is not enough. */
-const GITHUB_GRAPHQL_READ = ['github.read', 'repo', 'public_repo'];
+/**
+ * What a GitHub GraphQL query needs: the provider scope itself. A query can reach
+ * deploy keys, collaborators and a user's keys and gists, so neither an identity
+ * scope nor github.read, which is held to an allowlist of REST reads, is enough.
+ */
+const GITHUB_GRAPHQL_READ = ['repo', 'public_repo'];
 /**
  * The GitHub GraphQL mutations the broker forwards, each with the scopes that
  * cover it. Any other is refused: `repo` also covers mutations that administer a

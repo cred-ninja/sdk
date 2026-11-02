@@ -218,7 +218,7 @@ queries and no mutation, however the document is arranged.
 | Google | Gmail (messages, threads, labels, drafts, profile); Calendar events, calendars and `freeBusy`; Drive files; Sheets values; Docs; People; Directory users and groups; userinfo | HTTP batch, uploads (`/upload/`, `uploadType`), Gmail `batchDelete` and `batchModify`, anything else |
 | Slack | The methods in `SLACK_READ_METHODS` and `SLACK_WRITE_METHODS` | Every other method, and a write method over GET |
 | Linear | GraphQL queries (`read`, `write`, `admin`); mutations (`write`); `issueCreate` and `attachmentCreate` (`issues:create`); `commentCreate` (`comments:create`) | Subscriptions, batches, persisted queries, unparseable documents, and a mutation under `admin` alone |
-| GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries (`github.read`, `repo`, `public_repo`, not an identity scope); the GraphQL mutations `createIssue`, `closeIssue` and `addComment` (`repo`, `public_repo`) | Every other GraphQL mutation, enterprise routes, GraphQL over GET, anything else |
+| GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries (`repo`, `public_repo`); the GraphQL mutations `createIssue`, `closeIssue` and `addComment` (`repo`, `public_repo`) | Every other GraphQL mutation, enterprise routes, GraphQL over GET, anything else |
 | HubSpot | Contacts, companies, deals, tickets, line items and quotes: read, search, create, update and delete; owners; properties. HubSpot's legacy `tickets` scope, which token responses can still name, covers ticket reads and writes | Batch endpoints, `/cms/`, `/content/`, `/automation/` |
 | Notion | Pages, blocks, databases, data sources, comments, users, search | File uploads |
 | Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects`, at the connection's own instance | Composite, tooling, jobs, Apex REST, and any other host |
@@ -238,19 +238,23 @@ The provider token is unchanged, so a derived scope is never issued as a raw tok
 (`400 invalid_scope`). A Notion connection stores what `/connect` asked for, or no
 scopes at all, and `content` then names all it can do. `/connect` used to offer
 `read_content`, `update_content` and `insert_content`: rows stored under them keep
-that meaning.
+what they said. `read_content` reads; `insert_content` creates and appends;
+`update_content` changes what exists. Neither of the last two reads or deletes, and
+neither is `content`.
 
 `github.read` reaches code, issues, pull requests and search. It does not reach a
 repository's secrets, variables, hooks, keys, collaborators, branch protection or
 alerts, or account and org settings, which need the provider scope itself. It does
-cover GraphQL queries, whose root fields are not mapped, so a GraphQL query under
-`github.read` is not held to that list.
+not cover GraphQL at all: a query can reach deploy keys, collaborators and a user's
+keys and gists, so GraphQL needs `repo` or `public_repo`.
 
 A Salesforce token goes only to the instance stored for its connection, which the
-OAuth callback records from Salesforce's answer: `400 salesforce_instance_mismatch`
-for any other host, and `400 salesforce_instance_unknown` when none is stored, with
-no opt-out. A Salesforce connection made before this version has none and must be
-reconnected. An instance change at Salesforce needs a reconnect too.
+OAuth callback records from Salesforce's answer, and which each delegation records
+when it is issued: `400 salesforce_instance_mismatch` for any other host or when the
+two differ, and `400 salesforce_instance_unknown` when none is stored, with no
+opt-out. A Salesforce connection made before this version has none and must be
+reconnected. Reconnecting to another org revokes the delegations issued for the old
+one; their agents can ask again.
 
 The request classified is the request sent. Encoded separators (`%2F`, `%2E` in a
 segment, `%5C`, `%25`), doubled slashes, trailing-dot hosts, and a percent-encoded

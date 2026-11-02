@@ -170,10 +170,11 @@ describe('Notion scopes at /connect', () => {
     expect(await ask(reader, 'notion.read')).toEqual(['notion.read']);
     expect(await ask(reader, 'content')).not.toContain('content');
     const writer = await connectNotion(['update_content']);
-    expect(await ask(writer, 'content')).toContain('content');
+    expect(await ask(writer, 'update_content')).toEqual(['update_content']);
+    expect(await ask(writer, 'content')).toBeUndefined();
   });
 
-  it('a row stored under the old names keeps its meaning: read_content reads, update_content writes', async () => {
+  it('a row stored under the old names keeps its meaning: read_content reads, update_content updates, insert_content creates', async () => {
     const page = 'https://api.notion.com/v1/pages/abc';
     const pages = 'https://api.notion.com/v1/pages';
     expect(evaluateOperation({ service: 'notion', method: 'GET', url: page }, ['read_content']).outcome).toBe('allowed');

@@ -59,6 +59,8 @@ export interface DelegationGrant {
   prf?: string[];
   /** Cred Link binding, for delegations of a Link connection. */
   link?: Record<string, unknown>;
+  /** Salesforce: the instance this delegation was issued for. Its token is good nowhere else. */
+  instanceOrigin?: string;
 }
 
 /** Input for recording a new delegation. Status is always 'active' at issue. */

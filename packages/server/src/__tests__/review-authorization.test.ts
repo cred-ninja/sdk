@@ -52,7 +52,7 @@ describe('the whole-connection rule applies only to stored connection scopes', (
     expect(withDerivedScopes('notion', [])).toEqual([]);
     expect(withStoredDerivedScopes('notion', [])).toEqual(expect.arrayContaining(['notion.read', 'content']));
     expect(withDerivedScopes('notion', ['update_content'])).not.toContain('content');
-    expect(withStoredDerivedScopes('notion', ['update_content'])).toContain('content');
+    expect(withStoredDerivedScopes('notion', ['update_content'])).not.toContain('content');
     expect(withStoredDerivedScopes('notion', ['read_content'])).not.toContain('content');
     expect(withDerivedScopes('notion', ['content'])).toContain('notion.read');
     expect(withDerivedScopes('github', [])).toEqual([]);

@@ -305,6 +305,7 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
           createdAt: new Date(row.createdAt),
           updatedAt: new Date(),
         };
@@ -326,6 +327,7 @@ export class CredVault {
       refreshToken,
       expiresAt,
       scopes,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };

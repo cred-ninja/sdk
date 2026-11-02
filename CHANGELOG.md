@@ -31,10 +31,11 @@
 - `@credninja/server`: outside Cred Link, `/api/v1/use` forwarded a Salesforce
   connection's bearer token to any `*.salesforce.com` or `*.force.com` host the
   caller named, and such a host can belong to anyone. The token now goes only to
-  the instance stored for the connection: `400 salesforce_instance_mismatch` for any
-  other host, `400 salesforce_instance_unknown` when none is stored. There is no
-  opt-out. Salesforce connections made before this version store no instance and
-  must be reconnected.
+  the instance stored for the connection, which each delegation also records at
+  issuance: `400 salesforce_instance_mismatch` for any other host or when the two
+  differ, `400 salesforce_instance_unknown` when none is stored. There is no opt-out.
+  Salesforce connections made before this version store no instance and must be
+  reconnected, and reconnecting to another org revokes delegations for the old one.
 - `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
   across a refresh. New `instance_url` column, added on start; existing rows are
   not changed. The OAuth callback stores Salesforce's `instance_url` and stores
@@ -79,12 +80,14 @@
   new `Cred.recordLocalRefusal`.
 - `github.read` covers code, issues, pull requests and search, not a repository's
   secrets, hooks, keys, collaborators, protection or alerts, or account and org
-  settings. `repo` still reaches those. GraphQL queries are not held to this list.
+  settings, and not GraphQL, whose queries can reach deploy keys and collaborators.
+  `repo` still reaches those.
 - `drive.googleapis.com` is mapped like the Drive API, and HubSpot's legacy
   `tickets` scope covers ticket reads, writes and properties.
 - `/connect` offers `notion.read` and `content` for Notion, in place of names the
-  tables did not know. Rows stored under the old names keep their meaning:
-  `read_content` reads, and `update_content` and `insert_content` write.
+  tables did not know. Rows stored under the old names keep what they said:
+  `read_content` reads, `insert_content` creates and appends, and `update_content`
+  changes what exists. Only `content` deletes.
 - A Permission, ceiling or parent covers the read scope its scopes derive: Permission
   `[repo]` plus a request for `github.read` returns `github.read`. The receipt chain
   verifier uses the same helper. Wildcard Permissions now reach matching stored

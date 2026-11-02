@@ -3234,6 +3234,21 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // A reconnect to another org ends what was issued for the old one: those
+      // delegations were consented to for that org. The agents did nothing wrong,
+      // so they may ask again.
+      if (slug === 'salesforce') {
+        const prior = await vault.getStored({ provider: slug, userId: pending.userId });
+        if (prior && prior.instanceUrl !== instanceUrl) {
+          await applyRevocation(await vault.revokeDelegations({ connection: { service: slug, userId: pending.userId } }), performance.now(), {
+            actor: { type: 'system', id: 'connect' },
+            correlationId: crypto.randomUUID(),
+            cause: `reconnect:${slug}/${pending.userId}`,
+            agentsMayAskAgain: true,
+          });
+        }
+      }
+
       await vault.store({
         provider: slug,
         userId: pending.userId,
@@ -3893,6 +3908,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     capabilities?: CredDelegationDetail[];
     /** The Cred Link binding, for a delegation of a Link connection. */
     link?: LinkHandleBinding;
+    /** The stored connection's instance, for a Salesforce delegation. */
+    instanceUrl?: string;
   }): DelegationGrant | null {
     const jkt = dpopBindingFor(input.agentDid);
     if (!jkt) return null;
@@ -3907,6 +3924,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       authorizationDetails: input.capabilities ?? capabilitiesFor(input.service, input.scopes),
       prf: input.prf,
       ...(input.link ? { link: { ...input.link } } : {}),
+      ...(input.service === 'salesforce' && input.instanceUrl ? { instanceOrigin: new URL(input.instanceUrl).origin } : {}),
     };
   }
 
@@ -4861,14 +4879,19 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // held to theirs by upstreamAllowed.)
       if (delegation.service === 'salesforce' && !delegation.link) {
         const stored = await vault.getStored({ provider: delegation.service, userId: delegation.userId });
-        delegation.instanceOrigin = stored?.instanceUrl ? new URL(stored.instanceUrl).origin : undefined;
+        const storedOrigin = stored?.instanceUrl ? new URL(stored.instanceUrl).origin : undefined;
+        // The handle holds the token of the org it was issued for: a reconnect to
+        // another org must not send that token to the new host, or the new org's
+        // token to anyone holding the old delegation.
+        const issuedFor = (await vault.getDelegation(delegationId))?.grant?.instanceOrigin;
+        delegation.instanceOrigin = issuedFor !== undefined && issuedFor === storedOrigin ? storedOrigin : undefined;
         if (!delegation.instanceOrigin || new URL(upstreamUrl).origin !== delegation.instanceOrigin) {
-          const error = delegation.instanceOrigin ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
+          const error = storedOrigin ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
           refuseBrokeredCall(delegationId, delegation, url, error, { method: normalizedMethod });
           res.status(400).json({
             error,
-            message: delegation.instanceOrigin
-              ? 'This Salesforce connection belongs to another instance'
+            message: storedOrigin
+              ? 'This delegation is not for that Salesforce instance. Ask for a new delegation if the connection has moved.'
               : 'This Salesforce connection has no stored instance, so no host can be trusted with its token. Reconnect it.',
           });
           return;
@@ -5574,6 +5597,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           ...(capabilities ? { capabilities } : {}),
         });
         grant = newDelegationGrant({
+          ...(entry.instanceUrl ? { instanceUrl: entry.instanceUrl } : {}),
           agentDid,
           service,
           scopes: grantedScopes,
@@ -6862,6 +6886,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         chainContext: { delegationId, parentDelegationId: parent.delegationId, chainDepth: validation.chainDepth },
       })).id;
       const grantState = newDelegationGrant({
+        ...(entry.instanceUrl ? { instanceUrl: entry.instanceUrl } : {}),
         agentDid,
         service,
         scopes: validation.grantedScopes,
@@ -7341,6 +7366,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
     const consentId = `consent_${crypto.randomBytes(16).toString('hex')}`;
     const grant = newDelegationGrant({
+      ...(vaultEntry.entry.instanceUrl ? { instanceUrl: vaultEntry.entry.instanceUrl } : {}),
       agentDid: request.agentDid,
       service: request.service,
       scopes: request.scopes,

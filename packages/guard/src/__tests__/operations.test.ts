@@ -75,9 +75,9 @@ describe('evaluateOperation', () => {
     const mutation = (fields: string) => ({ query: `mutation { ${fields} }` });
     const create = 'createIssue(input: {}) { clientMutationId }';
 
-    it('a query needs a repository read scope, not an identity scope', () => {
-      for (const scope of ['github.read', 'repo', 'public_repo']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('allowed');
-      for (const scope of ['read:user', 'user', 'read:org', 'gist']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('insufficient');
+    it('a query needs the repository scope itself, not an identity scope or github.read', () => {
+      for (const scope of ['repo', 'public_repo']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('allowed');
+      for (const scope of ['github.read', 'read:user', 'user', 'read:org', 'gist']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('insufficient');
       expect(outcome('github', 'POST', url, ['read:user'], { query: '{ viewer { login } }' })).toBe('insufficient');
     });
 

@@ -27,8 +27,6 @@ const DERIVED_READ_SCOPES: Readonly<Record<string, DerivedReadScope>> = {
 
 /** Cred's name for all a Notion connection can do. */
 const NOTION_WHOLE_CONNECTION = 'content';
-/** Names /connect used to offer. Rows stored under them keep their meaning. */
-const NOTION_LEGACY_WRITE: readonly string[] = ['update_content', 'insert_content'];
 
 function derivedFor(service: string): DerivedReadScope | undefined {
   return Object.prototype.hasOwnProperty.call(DERIVED_READ_SCOPES, service) ? DERIVED_READ_SCOPES[service] : undefined;
@@ -43,12 +41,8 @@ export function withDerivedScopes(service: string, scopes: readonly string[]): s
 
 /** What a stored connection covers: its scopes, what they derive, and Notion's whole-connection rule. */
 export function withStoredDerivedScopes(service: string, stored: readonly string[]): string[] {
-  if (service !== 'notion') return withDerivedScopes(service, stored);
-  const out = [...stored];
-  if (!out.includes('notion.read')) out.push('notion.read');
-  const whole = stored.length === 0 || stored.some((scope) => NOTION_LEGACY_WRITE.includes(scope));
-  if (whole && !out.includes(NOTION_WHOLE_CONNECTION)) out.push(NOTION_WHOLE_CONNECTION);
-  return out;
+  if (service === 'notion' && stored.length === 0) return ['notion.read', NOTION_WHOLE_CONNECTION];
+  return withDerivedScopes(service, stored);
 }
 
 /** Drop a derived scope whose source is also in the list: what was stored is issued, not both names. */
