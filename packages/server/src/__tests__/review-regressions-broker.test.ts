@@ -73,7 +73,8 @@ describe('a Salesforce token goes only to the connection\'s own instance', () =>
   });
 
   it('refuses every host when no instance is stored, and says to reconnect', async () => {
-    const { app, agent, token } = await salesforce({});
+    const { app, vault, agent, token } = await salesforce({ instanceUrl: 'https://acme.my.salesforce.com' });
+    await vault.store({ provider: 'salesforce', userId: 'alice', accessToken: 'sf-bearer-token', expiresAt: new Date(Date.now() + 3600_000), scopes: ['api'] });
     const upstream = stubUpstream();
     const res = await exerciseAs(app, agent, token, { url: `https://acme.my.salesforce.com${LIMITS}`, method: 'GET' });
     expect(res.status).toBe(400);

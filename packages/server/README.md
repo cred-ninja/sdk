@@ -308,7 +308,9 @@ record id. Create one with `POST /admin/permissions`:
 `connectionId` is the service slug on these routes. Without a Permission the
 agent gets `403 permission_required`, so a new key presented with the agent
 token gets nothing. Permissions need `VAULT_STORAGE=sqlite`, the default: on a
-file vault no agent can be granted one, so every agent is refused. Cred Link
+file vault no agent can be granted one, so every agent is refused and the server
+warns at startup. Moving means connecting providers again on the new vault; there is
+no migration command. Cred Link
 connections use their own Permissions and are not affected.
 
 A revocation holds until an operator grants access again:
@@ -943,8 +945,8 @@ const { app, vault } = createServer({
   port: 3456,
   host: '127.0.0.1',
   vaultPassphrase: process.env.VAULT_PASSPHRASE!,
-  vaultStorage: 'file',
-  vaultPath: './data/vault.json',
+  vaultStorage: 'sqlite',
+  vaultPath: './data/vault.sqlite',
   tofuStorage: 'file',
   tofuPath: './data/tofu.json',
   adminToken: process.env.CRED_ADMIN_TOKEN!,

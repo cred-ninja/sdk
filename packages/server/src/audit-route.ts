@@ -166,6 +166,16 @@ export function createRefusalAggregator(options: RefusalAggregatorOptions) {
 
   function writeSummary(entry: HeldRefusal, marker: Record<string, unknown> = {}): void {
     if (entry.repeats === 0) return;
+    // A summary that cannot be written is logged and given up: it must not stop the
+    // others, or the refusal being recorded when it was evicted.
+    try {
+      writeSummaryRow(entry, marker);
+    } catch (err) {
+      console.error('[audit] Failed to write a refusal summary:', err instanceof Error ? err.name : 'unknown');
+    }
+  }
+
+  function writeSummaryRow(entry: HeldRefusal, marker: Record<string, unknown>): void {
     const distinct = Object.fromEntries([...entry.claims].filter(([, seen]) => seen.size > 1).map(([field, seen]) => [field, seen.size]));
     const capped = [...entry.claims.values()].some((seen) => seen.size >= MAX_TRACKED_CLAIMS);
     options.write({
@@ -226,14 +236,16 @@ export function createRefusalAggregator(options: RefusalAggregatorOptions) {
         noteClaims(window.overflow, event);
         return;
       }
-      window.firstWrites += 1;
       if (held.size >= maxKeys) {
         const [oldestKey, oldest] = held.entries().next().value as [string, HeldRefusal];
         held.delete(oldestKey);
         writeSummary(oldest);
       }
-      held.set(key, hold(event, at));
+      // Held and charged only once written: a failed write must not make later
+      // refusals count as repeats of a row that does not exist.
       options.write(event);
+      held.set(key, hold(event, at));
+      window.firstWrites += 1;
     },
     flushExpired(): void {
       const at = now();

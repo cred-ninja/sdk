@@ -1704,6 +1704,9 @@ export function createServer(config: ServerConfig) {
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
   }
+  if (config.vaultStorage === 'file' && !allowAgentsWithoutPermission) {
+    console.warn('[cred] VAULT_STORAGE=file cannot store Permissions, so every agent is refused a delegation. Move to VAULT_STORAGE=sqlite (connect providers again there), or set the deprecated CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true to keep issuing without them.');
+  }
   if (allowAgentsWithoutPermission) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true issues delegations to agents that hold no Permission, up to the whole connection, so any did:key presented with the agent token can act for the user. A revocation still holds: while one is in force on a service and user, a did:key with no agent record is refused there too, but a revoked agent can otherwise come back under a registered key. Grant each agent a Permission at POST /admin/permissions; this setting will be removed.');
   }
@@ -4304,7 +4307,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   function permissionRequiredMessage(agentDid: string, service: string): string {
     return config.vaultStorage === 'sqlite'
       ? `Agent ${agentDid} holds no Permission for ${service}. An operator grants one at POST /admin/permissions (agentId, connectionId, allowedScopes).`
-      : `Agent ${agentDid} holds no Permission for ${service}, and this vault cannot store one. Run with VAULT_STORAGE=sqlite and grant it at POST /admin/permissions.`;
+      : `Agent ${agentDid} holds no Permission for ${service}, and this vault cannot store one. Run with VAULT_STORAGE=sqlite and grant it at POST /admin/permissions, or set the deprecated CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true.`;
   }
 
   /**
@@ -4893,6 +4896,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             message: storedOrigin
               ? 'This delegation is not for that Salesforce instance. Ask for a new delegation if the connection has moved.'
               : 'This Salesforce connection has no stored instance, so no host can be trusted with its token. Reconnect it.',
+            ...(storedOrigin ? {} : { consent_url: buildConsentUrl({ service: delegation.service, userId: delegation.userId, scopes: delegation.scopes }) }),
           });
           return;
         }
@@ -5189,7 +5193,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ...(truncated ? { truncated: true, truncatedAt: MAX_BROKER_RESPONSE_BYTES } : {}),
       });
     } catch (err) {
-      console.error('[/api/v1/use] Error:', err);
+      // The error's text and cause can quote the upstream URL and its query.
+      console.error('[/api/v1/use] Error:', err instanceof Error ? err.name : 'unknown');
       res.status(502).json({ error: 'Brokered upstream request failed' });
     }
   });
@@ -5353,6 +5358,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const { entry } = vaultEntry;
+      // A Salesforce connection made before instances were recorded has nowhere its
+      // token can be sent. Connecting again records one.
+      if (service === 'salesforce' && tokenFormatFromBody(req) === 'handle' && !entry.instanceUrl) {
+        res.status(403).json({
+          error: 'consent_required',
+          message: 'This Salesforce connection has no stored instance. Connect it again.',
+          consent_url: buildConsentUrl({ service, userId, appClientId, scopes: requestedScopes }),
+        });
+        return;
+      }
       const webBotAuthIdentity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
       const effectiveRequestedScopes = guardedRequestedScopes(req, res, requestedScopes);
       if (effectiveRequestedScopes === null) return;

@@ -35,7 +35,9 @@
   issuance: `400 salesforce_instance_mismatch` for any other host or when the two
   differ, `400 salesforce_instance_unknown` when none is stored. There is no opt-out.
   Salesforce connections made before this version store no instance and must be
-  reconnected, and reconnecting to another org revokes delegations for the old one.
+  reconnected: `/api/v1/delegate` answers `consent_required` with a `consent_url`, and
+  a refusal at `/api/v1/use` carries one. Reconnecting to another org revokes
+  delegations for the old one.
 - `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
   across a refresh. New `instance_url` column, added on start; existing rows are
   not changed. The OAuth callback stores Salesforce's `instance_url` and stores
@@ -82,6 +84,12 @@
   secrets, hooks, keys, collaborators, protection or alerts, or account and org
   settings, and not GraphQL, whose queries can reach deploy keys and collaborators.
   `repo` still reaches those.
+- A semicolon-separated method override in a query is refused. Percent-encoded
+  non-ASCII in a path is refused, except on GitHub repository paths and branches and
+  Sheets ranges, where real names use it; even there an encoding that normalizes into
+  something else, or holds a control or format character, is refused.
+- An identity scope reads a GitHub user's public profile and nothing below it.
+- Salesforce REST resources also map with a trailing slash, forwarded as asked.
 - `drive.googleapis.com` is mapped like the Drive API, and HubSpot's legacy
   `tickets` scope covers ticket reads, writes and properties.
 - `/connect` offers `notion.read` and `content` for Notion, in place of names the
@@ -140,8 +148,9 @@
   (`403 permission_required`, naming the fix). Before this, an agent with no
   Permission was issued the whole connection, so any new did:key presented with
   the agent token got every stored scope. Grant one at `POST /admin/permissions`.
-  A file vault cannot store Permissions, so every agent is refused there; use
-  `VAULT_STORAGE=sqlite`.
+  A file vault cannot store Permissions, so every agent is refused there, and the
+  server warns at startup: use `VAULT_STORAGE=sqlite`. There is no migration command;
+  connect providers again on the new vault.
 - Revoking a Permission no longer widens the agent to the whole connection. It
   used to delete the row, and the agent then counted as having no limit. The
   revocation is now recorded, the agent's live delegations on that service are

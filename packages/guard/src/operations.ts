@@ -267,6 +267,11 @@ const SALESFORCE_READ = ['salesforce.read', 'api', 'full'];
 const SALESFORCE_WRITE = ['api', 'full'];
 const SALESFORCE_HOST = /^https:\/\/[a-z0-9.-]+\.(?:salesforce\.com|force\.com)$/;
 
+/** Salesforce's clients commonly call its REST resources with a trailing slash. Only that table takes one. */
+function withTrailingSlashes(rules: readonly Rule[]): Rule[] {
+  return rules.flatMap((each) => [each, { ...each, pattern: `${each.pattern}/` }]);
+}
+
 const TABLES: Readonly<Record<string, ProviderTable>> = {
   github: {
     origins: new Set(['https://api.github.com']),
@@ -274,7 +279,11 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
     rules: [
       read('/user', ANY_GRANT),
       read('/user/**', ['user', 'read:user', 'user:email', ...GH_WRITE]),
-      read('/users/**', ANY_GRANT),
+      // A public profile is public. Below it, what comes back depends on the whole
+      // token (a user's own events include private ones), so it needs a scope that
+      // says so.
+      read('/users/*', ANY_GRANT),
+      read('/users/**', ['user', ...GH_WRITE]),
       read('/rate_limit', ANY_GRANT),
       ...GH_REPOSITORY_READS,
       read('/repos/**', GH_WRITE),
@@ -328,7 +337,7 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
   salesforce: {
     origins: (origin) => SALESFORCE_HOST.test(origin),
     otherScopes: ['refresh_token', 'offline_access', 'web', 'openid', 'id', 'profile', 'email'],
-    rules: [
+    rules: withTrailingSlashes([
       read('/services/data', SALESFORCE_READ),
       read('/services/data/*', SALESFORCE_READ),
       read('/services/data/*/limits', SALESFORCE_READ),
@@ -344,7 +353,7 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
       write('POST', '/services/data/*/sobjects/*', SALESFORCE_WRITE),
       write(['PATCH', 'DELETE'], '/services/data/*/sobjects/*/*', SALESFORCE_WRITE),
       write(['PATCH', 'DELETE'], '/services/data/*/sobjects/*/*/*', SALESFORCE_WRITE),
-    ],
+    ]),
   },
 };
 
@@ -448,7 +457,9 @@ const OVERRIDE_BODY_KEY = /^(?:[_$]+(?:http)?method|.*method[-_]?override)$/i;
  */
 export function methodOverrideChannel(request: { url: string; headers?: Record<string, unknown>; body?: unknown }): 'query' | 'header' | 'body' | null {
   try {
-    if ([...new URL(request.url).searchParams.keys()].some((key) => OVERRIDE_QUERY_KEY.test(key.replace(/[-_$.\s]/g, '')))) return 'query';
+    // By hand as well as by the parser: some servers also split a query on ';'.
+    const keys = new URL(request.url).search.slice(1).split(/[&;]/).map((pair) => decodeURIComponent(pair.split('=', 1)[0]!.replace(/\+/g, ' ')));
+    if (keys.some((key) => OVERRIDE_QUERY_KEY.test(key.replace(/[-_$.\s]/g, '')))) return 'query';
   } catch {
     return 'query';
   }
@@ -472,7 +483,8 @@ export function contentTypeMismatch(headers: Record<string, unknown> | undefined
 // ── Classifying ─────────────────────────────────────────────────────────────
 
 function segmentMatches(pattern: string, segment: string): boolean {
-  if (segment === '') return false;
+  // An empty segment is a trailing slash, which only a pattern spelled with one takes.
+  if (segment === '') return pattern === '';
   if (pattern === '*') return true;
   if (pattern.startsWith('*:')) return segment.length > pattern.length - 1 && segment.endsWith(pattern.slice(1));
   return pattern === segment;
@@ -492,10 +504,31 @@ function findRule(rules: readonly Rule[], method: string, segments: readonly str
   return rules.find((candidate) => candidate.methods.includes(method) && pathMatches(candidate.pattern, segments));
 }
 
-/** A path a server could read differently: a matrix parameter, or a plain character percent-encoded. */
-function ambiguousPath(pathname: string): boolean {
+/** The routes where real names are not ASCII: paths and branches in a repository, and Sheets tab names. */
+const NON_ASCII_ROUTES: Readonly<Record<string, readonly RegExp[]>> = {
+  github: [/^\/repos\/[^/%]+\/[^/%]+\/(?:contents|branches)\//],
+  google: [/^\/v4\/spreadsheets\/[^/%]+\/values\//],
+};
+
+/**
+ * A path a server could read differently: a matrix parameter, a plain character
+ * percent-encoded, or non-ASCII. Some servers normalize non-ASCII into separators
+ * (an overlong slash, a fullwidth one), so it is refused unless the route has a use
+ * for it, and even there unless it is valid UTF-8 that normalizes to itself and
+ * holds no control or format character.
+ */
+function ambiguousPath(service: string, pathname: string): boolean {
   if (pathname.includes(';')) return true;
-  return [...pathname.matchAll(/%([0-9a-f]{2})/gi)].some((match) => /[A-Za-z0-9\-._~]/.test(String.fromCharCode(parseInt(match[1]!, 16))));
+  if ([...pathname.matchAll(/%([0-9a-f]{2})/gi)].some((match) => /[A-Za-z0-9\-._~]/.test(String.fromCharCode(parseInt(match[1]!, 16))))) return true;
+  if (!/%[89a-f][0-9a-f]/i.test(pathname)) return false;
+  const routes = Object.prototype.hasOwnProperty.call(NON_ASCII_ROUTES, service) ? NON_ASCII_ROUTES[service]! : [];
+  if (!routes.some((route) => route.test(pathname))) return true;
+  try {
+    const decoded = decodeURIComponent(pathname);
+    return decoded.normalize('NFKC') !== decoded || /\p{C}/u.test(decoded);
+  } catch {
+    return true;
+  }
 }
 
 type GraphqlShape =
@@ -567,7 +600,7 @@ function classify(request: OperationRequest): Mapped | { reason: string } {
     return { reason: 'url' };
   }
   const { origin, pathname } = parsed;
-  if (ambiguousPath(pathname)) return { reason: 'ambiguous_path' };
+  if (ambiguousPath(request.service, pathname)) return { reason: 'ambiguous_path' };
   if (parsed.searchParams.has('uploadType')) return { reason: 'multipart_upload' };
   const segments = pathname.split('/').slice(1);
   const { service, method } = request;
