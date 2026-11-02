@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -192,6 +192,14 @@ function signWebBotAuthRequest(input: {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('@credninja/server', () => {
+  // A revocation holds in the vault, so each test starts from a vault of its own.
+  beforeEach(() => {
+    for (const suffix of ['', '.salt', '.check', '-wal', '-shm']) {
+      const p = TEST_SQLITE_VAULT_PATH + suffix;
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  });
+
   afterAll(() => {
     // Cleanup test vault files
     for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH, TEST_SQLITE_NONCE_PATH]) {

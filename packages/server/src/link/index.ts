@@ -98,6 +98,8 @@ export interface CreateLinkServiceOptions {
   allowRawTokens?: boolean;
   /** False under CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS. Default true. */
   classifyBrokerCalls?: boolean;
+  /** CRED_ALLOW_REDELEGATION_AFTER_REVOCATION. Default false. */
+  allowRedelegationAfterRevocation?: boolean;
   /** Lifetime of Link Delegation Tokens, seconds (default 300, capped at 900). */
   handleTtlSeconds?: number;
   makeRateLimiter: (max: number) => RequestHandler;
@@ -207,6 +209,7 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
     checkAgentKey: options.checkAgentKey,
     issueToken: options.issueToken,
     allowRawTokens: options.allowRawTokens ?? false,
+    allowRedelegationAfterRevocation: options.allowRedelegationAfterRevocation ?? false,
     handleTtlSeconds: Math.min(Math.max(1, Math.floor(options.handleTtlSeconds ?? LINK_HANDLE_TTL_DEFAULT_SECONDS)), LINK_HANDLE_TTL_MAX_SECONDS),
   };
 

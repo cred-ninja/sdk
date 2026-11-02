@@ -91,6 +91,13 @@ export interface DelegationRevocationSeed {
   agentOnService?: { agentDid: string; service: string };
 }
 
+/** Which holds to read. Absent fields match any; a user also matches holds for every user. */
+export interface AgentRevocationFilter {
+  agentIds?: readonly string[];
+  service?: string;
+  userId?: string;
+}
+
 /** `userId` of an agent revocation that holds for every user of the service. */
 export const AGENT_REVOCATION_ALL_USERS = '*';
 
@@ -136,6 +143,12 @@ export interface DelegationRevocationResult {
 export interface DelegationRevocationOptions {
   /** Hops below a seed the walk may follow. Defaults to DEFAULT_MAX_REVOCATION_DEPTH. */
   maxDepth?: number;
+  /**
+   * Hold each agent reached out of that user's service, and revoke its consents
+   * there, in the same commit as the revocation. Delegations already revoked are
+   * included, so a retry, or a revocation after a disconnect, still takes effect.
+   */
+  hold?: { cause: string };
 }
 
 /**
@@ -334,10 +347,16 @@ export class MemoryAgentRevocationStore {
     return found.sort((a, b) => b.revokedAt.localeCompare(a.revokedAt))[0] ?? null;
   }
 
-  clearAgentRevocations(agentIds: readonly string[], service: string): number {
+  listAgentRevocations(filter: AgentRevocationFilter): AgentRevocation[] {
+    return [...this.rows.values()].filter((row) => (!filter.agentIds || filter.agentIds.includes(row.agentId))
+      && (!filter.service || row.service === filter.service)
+      && (!filter.userId || row.userId === filter.userId || row.userId === AGENT_REVOCATION_ALL_USERS));
+  }
+
+  clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): number {
     let cleared = 0;
     for (const [key, row] of this.rows) {
-      if (agentIds.includes(row.agentId) && row.service === service) {
+      if (agentIds.includes(row.agentId) && row.service === service && (!options.userId || row.userId === options.userId)) {
         this.rows.delete(key);
         cleared += 1;
       }

@@ -506,7 +506,8 @@ describe('small hardening items (review item 8)', () => {
   });
 
   it('a ReservedVaultUserIdError that reaches the vault is a 400, never a 500', async () => {
-    const hx = await harness({ linkEnabled: false });
+    // The raw route reaches the vault only with this opt-out.
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     vi.spyOn(hx.server.vault, 'get').mockRejectedValue(new ReservedVaultUserIdError('get'));
     vi.spyOn(hx.server.vault, 'delete').mockRejectedValue(new ReservedVaultUserIdError('delete'));
     vi.spyOn(hx.server.vault, 'list').mockRejectedValue(new ReservedVaultUserIdError('list'));

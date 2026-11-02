@@ -7,6 +7,7 @@ import { LINK_OPAQUE_FAILURE_BODY } from '@credninja/protocol';
 import { createServer } from '../server.js';
 import {
   ADMIN_TOKEN,
+  LINK_AGENT_ID,
   AGENT_TOKEN,
   BASE,
   Browser,
@@ -123,6 +124,32 @@ describe('Link delegation enforcement without a Guard', () => {
     const res = await use(app, { delegation_id: handle.body.delegation_id, url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', method: 'POST', body: {} });
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ error: 'insufficient_scope', scope: 'gmail.send' });
+  });
+
+  it('a revocation holds the Link agent against a new key, until it is granted again', async () => {
+    const { app, server } = await harness();
+    const client = await registerClient(app);
+    const connectionId = await connectAndActivate(app, client);
+    const firstKey = await agentFor(app);
+    const first = await delegate(app, { connection_id: connectionId });
+    expect(first.status).toBe(200);
+    const now = new Date().toISOString();
+    await server.vault.registerAgent!({ id: 'agt_key', did: firstKey.did, name: 'k', fingerprint: 'fp_k', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: now, updatedAt: now });
+    const revoked = await request(app).delete('/admin/agents/agt_key').set('Authorization', `Bearer ${ADMIN_TOKEN}`);
+    expect(revoked.status).toBe(204);
+
+    const freshKey = await newAgent();
+    const ask = () => delegateAs(app, freshKey, { connection_id: connectionId }, { bearer: AGENT_TOKEN });
+    const held = await ask();
+    expect(held.status, JSON.stringify(held.body)).toBe(403);
+    expect(held.body.error).toBe('permission_required');
+
+    const set = await request(app).post(`/link/v1/connections/${connectionId}/permissions`).set('Authorization', client.auth)
+      .send({ agent_id: LINK_AGENT_ID, scopes: ['calendar.readonly'] });
+    expect(set.status).toBe(200);
+    const after = await ask();
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(after.body.scopes).toEqual(['calendar.readonly']);
   });
 
   it('is deny-by-default per agent: permission_required until the backend grants the agent', async () => {

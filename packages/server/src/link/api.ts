@@ -1,3 +1,4 @@
+import { linkVaultUserId } from '@credninja/vault';
 /**
  * Cred Link server: the client-authenticated API (PAR and connection
  * management, spec 2 and 4) and the admin client registration routes
@@ -960,7 +961,8 @@ export async function handleSetPermission(ctx: LinkContext, req: Request, res: R
     return;
   }
   // Ownership first, so the audit trail never names foreign connections.
-  if (!(await ctx.store.getClientConnection({ client_id: client.client_id, connection_id: id }))) {
+  const owned = await ctx.store.getClientConnection({ client_id: client.client_id, connection_id: id });
+  if (!owned) {
     sendOpaqueFailure(req, res);
     return;
   }
@@ -989,6 +991,9 @@ export async function handleSetPermission(ctx: LinkContext, req: Request, res: R
   });
   if (result.ok) {
     try {
+      // Granting is what ends a hold on this agent, on this connection only.
+      const connection = await ctx.store.getConnection(id);
+      if (connection) await ctx.vault.clearAgentRevocations([agentId], connection.provider, { userId: linkVaultUserId(id) });
       audit('success', { permission_id: result.permission.id });
     } catch {
       sendLinkError(req, res, 500, 'server_error');

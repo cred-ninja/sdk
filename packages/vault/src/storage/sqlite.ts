@@ -10,6 +10,7 @@ import {
   DelegationRevokedError,
   AGENT_REVOCATION_ALL_USERS,
   type AgentRevocation,
+  type AgentRevocationFilter,
   type DelegationGrant,
   type DelegationRecord,
   type DelegationRevocationOptions,
@@ -583,6 +584,7 @@ export class SQLiteBackend implements StorageBackend {
     }
     if (filter.subject) { conditions.push('subject = ?'); params.push(filter.subject); }
     if (filter.agentDid) { conditions.push('agent_did = ?'); params.push(filter.agentDid); }
+    if (filter.service) { conditions.push('service = ?'); params.push(filter.service); }
     if (conditions.length === 0) return [];
     return db.transaction((): string[] => {
       const ids = db.prepare(`SELECT id FROM vault_consents WHERE ${conditions.join(' AND ')}
@@ -691,7 +693,12 @@ export class SQLiteBackend implements StorageBackend {
     const byAgentStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? ORDER BY created_at, id').pluck();
     const byConnectionStmt = db.prepare('SELECT id FROM vault_delegations WHERE service = ? AND user_id = ? ORDER BY created_at, id').pluck();
     const byAgentOnServiceStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? AND service = ? ORDER BY created_at, id').pluck();
-    const rowStmt = db.prepare('SELECT id, parent_id, agent_did, service, user_id, status FROM vault_delegations WHERE id = ?');
+    const rowStmt = db.prepare('SELECT id, parent_id, agent_did, service, user_id, status, grant_json FROM vault_delegations WHERE id = ?');
+    const holdStmt = db.prepare(`
+      INSERT INTO vault_agent_revocations (agent_id, service, user_id, cause, revoked_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, service, user_id) DO UPDATE SET cause = excluded.cause, revoked_at = excluded.revoked_at
+    `);
     const revokeStmt = db.prepare(`
       UPDATE vault_delegations
       SET status = 'revoked', revoked_at = ?, revoked_ancestor_id = ?
@@ -708,8 +715,17 @@ export class SQLiteBackend implements StorageBackend {
       const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => childrenStmt.all(id) as string[], options);
       const revoked: RevokedDelegation[] = [];
       for (const node of nodes) {
-        const row = rowStmt.get(node.id) as Pick<DelegationDbRow, 'id' | 'parent_id' | 'agent_did' | 'service' | 'user_id' | 'status'> | undefined;
-        if (!row || row.status !== 'active') continue;
+        const row = rowStmt.get(node.id) as Pick<DelegationDbRow, 'id' | 'parent_id' | 'agent_did' | 'service' | 'user_id' | 'status' | 'grant_json'> | undefined;
+        if (!row) continue;
+        if (options.hold) {
+          // A Cred Link delegation also names the Link agent, which a new key can act for.
+          const linkAgentId = row.grant_json ? (JSON.parse(row.grant_json) as DelegationGrant).link?.agentId : undefined;
+          for (const agentId of [row.agent_did, typeof linkAgentId === 'string' ? linkAgentId : null]) {
+            if (agentId) holdStmt.run(agentId, row.service, row.user_id, options.hold.cause, revokedAt);
+          }
+          if (row.agent_did) this.revokeConsents({ agentDid: row.agent_did, service: row.service, subject: row.user_id }, options.hold.cause, revokedAt);
+        }
+        if (row.status !== 'active') continue;
         if (revokeStmt.run(revokedAt, node.rootId, node.id).changes === 0) continue;
         revoked.push(toRevoked({
           id: row.id,
@@ -921,13 +937,38 @@ export class SQLiteBackend implements StorageBackend {
       : null;
   }
 
-  clearAgentRevocations(agentIds: readonly string[], service: string): number {
+  clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): number {
     if (agentIds.length === 0) return 0;
     const db = this.ensureDb();
     return db.prepare(`
       DELETE FROM vault_agent_revocations
-      WHERE agent_id IN (${agentIds.map(() => '?').join(', ')}) AND service = ?
-    `).run(...agentIds, service).changes;
+      WHERE agent_id IN (${agentIds.map(() => '?').join(', ')}) AND service = ?${options.userId ? ' AND user_id = ?' : ''}
+    `).run(...agentIds, service, ...(options.userId ? [options.userId] : [])).changes;
+  }
+
+  listAgentRevocations(filter: AgentRevocationFilter): AgentRevocation[] {
+    const db = this.ensureDb();
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.agentIds) {
+      if (filter.agentIds.length === 0) return [];
+      conditions.push(`agent_id IN (${filter.agentIds.map(() => '?').join(', ')})`);
+      params.push(...filter.agentIds);
+    }
+    if (filter.service) { conditions.push('service = ?'); params.push(filter.service); }
+    if (filter.userId) { conditions.push('user_id IN (?, ?)'); params.push(filter.userId, AGENT_REVOCATION_ALL_USERS); }
+    const rows = db.prepare(`
+      SELECT agent_id, service, user_id, cause, revoked_at FROM vault_agent_revocations
+      ${conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY revoked_at DESC, agent_id, service, user_id
+      LIMIT 500
+    `).all(...params) as Array<{ agent_id: string; service: string; user_id: string; cause: string; revoked_at: string }>;
+    return rows.map((row) => ({ agentId: row.agent_id, service: row.service, userId: row.user_id, cause: row.cause, revokedAt: row.revoked_at }));
+  }
+
+  getPermissionById(id: string): PermissionRow | null {
+    const db = this.ensureDb();
+    return (db.prepare(`SELECT ${PERMISSION_COLUMNS} FROM vault_permissions WHERE id = ?`).get(id) as PermissionRow | undefined) ?? null;
   }
 
   listPermissionsForConnection(connectionId: string): PermissionRow[] {

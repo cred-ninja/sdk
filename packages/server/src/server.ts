@@ -464,6 +464,7 @@ export function createServer(config: ServerConfig) {
         issueToken: (req, res, input) => issueLinkDelegationToken(req, res, input),
         allowRawTokens: config.allowRawTokens ?? false,
         classifyBrokerCalls,
+        allowRedelegationAfterRevocation,
         ...(config.linkHandleTtlSeconds !== undefined ? { handleTtlSeconds: config.linkHandleTtlSeconds } : {}),
         makeRateLimiter: (max) => makeRateLimiter(max),
       })
@@ -1704,7 +1705,7 @@ export function createServer(config: ServerConfig) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
   }
   if (allowAgentsWithoutPermission) {
-    console.warn('[cred] DEPRECATED: CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true issues delegations to agents that hold no Permission, up to the whole connection, so any did:key presented with the agent token can act for the user. Grant each agent a Permission at POST /admin/permissions; this setting will be removed.');
+    console.warn('[cred] DEPRECATED: CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true issues delegations to agents that hold no Permission, up to the whole connection, so any did:key presented with the agent token can act for the user. A revocation still holds: while one is in force on a service and user, a did:key with no agent record is refused there too, but a revoked agent can otherwise come back under a registered key. Grant each agent a Permission at POST /admin/permissions; this setting will be removed.');
   }
   if (!classifyBrokerCalls) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true forwards brokered calls without checking them against the grant, so a read-only scope can reach a write endpoint on an allowed host. Remove it, and map any call that needs mapping; this setting will be removed.');
@@ -2272,7 +2273,7 @@ export function createServer(config: ServerConfig) {
         agentId?: unknown;
         connectionId?: unknown;
         allowedScopes?: unknown;
-        rateLimit?: { maxRequests: number; windowMs: number };
+        rateLimit?: { maxRequests: number; windowMs: number } | null;
         ttlOverride?: number;
         requiresApproval?: boolean;
         approver?: 'subject' | 'admin' | 'both';
@@ -2301,11 +2302,27 @@ export function createServer(config: ServerConfig) {
         return;
       }
 
+      // Replacing a row replaces all of it, so a re-grant that does not mention an
+      // approval gate or rate limit would drop it silently. Restoring keeps them.
+      const replaced = await getPermissionIfSupported(body.agentId, body.connectionId);
+      const wouldDrop = [
+        ...(replaced?.requiresApproval && body.requiresApproval === undefined ? ['requiresApproval'] : []),
+        ...(replaced?.rateLimit && !('rateLimit' in body) ? ['rateLimit'] : []),
+      ];
+      if (wouldDrop.length > 0) {
+        res.status(409).json({
+          error: 'permission_limits_would_drop',
+          message: `This would replace a Permission and drop its ${wouldDrop.join(' and ')}. Name them in the body to change them, or POST /admin/permissions/${replaced!.id}/restore to end a hold and keep them.`,
+          fields: wouldDrop,
+        });
+        return;
+      }
+
       const permission = await vault.createPermission({
         agentId: body.agentId,
         connectionId: body.connectionId,
         allowedScopes: body.allowedScopes,
-        rateLimit: body.rateLimit,
+        rateLimit: body.rateLimit ?? undefined,
         ttlOverride: body.ttlOverride,
         requiresApproval: body.requiresApproval ?? false,
         ...(body.approver ? { approver: body.approver } : {}),
@@ -2451,8 +2468,8 @@ export function createServer(config: ServerConfig) {
   /**
    * DELETE /admin/permissions/:id — revoke a Permission record (admin-authenticated).
    *
-   * The revocation holds: the agent's live delegations on the service are
-   * revoked, and it is issued nothing new there until it is granted a
+   * The revocation holds: the agent's consents and live delegations on the
+   * service are revoked, and it is issued nothing new there until it is granted a
    * Permission again at POST /admin/permissions.
    */
   app.delete('/admin/permissions/:id', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
@@ -2465,22 +2482,26 @@ export function createServer(config: ServerConfig) {
 
       const started = performance.now();
       const correlationId = crypto.randomUUID();
-      const removed = await vault.revokePermission(id);
-      // A Permission that is gone authorizes nothing, including what it
-      // already authorized: the agent's live delegations on the service end
-      // with it (and the delegations derived from them).
+      // A Permission that is gone authorizes nothing, including what it already
+      // authorized: the agent's consents and live delegations on the service end
+      // with it. The row goes last, so a call that fails can simply be repeated.
+      const existing = await vault.getPermissionById(id);
       let delegationsRevoked = 0;
-      if (removed) {
-        const agentDids = (await agentIdsOf(removed.agentId)).filter((agentId) => agentId.startsWith('did:'));
+      if (existing) {
+        const cause = `permission:${id}`;
+        const agentDids = (await agentIdsOf(existing.agentId)).filter((agentId) => agentId.startsWith('did:'));
         for (const agentDid of agentDids) {
-          const cascade = await applyRevocation(await vault.revokeDelegations({ agentOnService: { agentDid, service: removed.connectionId } }), started, {
+          await vault.revokeConsents({ agentDid, service: existing.connectionId }, cause);
+          approvals.cancel({ agentDid, service: existing.connectionId }, 'permission_revoked');
+          const cascade = await applyRevocation(await vault.revokeDelegations({ agentOnService: { agentDid, service: existing.connectionId } }, { hold: { cause } }), started, {
             actor: { type: 'system', id: 'admin' },
             correlationId,
-            cause: `permission:${id}`,
+            cause,
           });
           delegationsRevoked += cascade.count;
         }
       }
+      const removed = await vault.revokePermission(id);
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -2496,6 +2517,59 @@ export function createServer(config: ServerConfig) {
       res.status(204).send();
     } catch (err) {
       mapPermissionErrorResponse(res, err, 'Failed to revoke permission');
+    }
+  });
+
+  /**
+   * POST /admin/permissions/:id/restore — end the holds on this Permission's
+   * agent, for one user (`user_id`) or all, leaving the Permission exactly as it
+   * is. The way back for a revoked delegation. A revoked Permission has no row to
+   * restore: grant it again at POST /admin/permissions.
+   */
+  app.post('/admin/permissions/:id/restore', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = routeParam(req.params.id);
+      const permission = id ? await vault.getPermissionById(id) : null;
+      if (!permission) {
+        res.status(404).json({ error: 'permission_not_found', message: 'No such Permission. A revoked one is granted again at POST /admin/permissions.' });
+        return;
+      }
+      const userId = (req.body as { user_id?: unknown } | undefined)?.user_id;
+      if (userId !== undefined && (typeof userId !== 'string' || !userId)) {
+        res.status(400).json({ error: 'invalid_request', message: 'user_id must be a non-empty string' });
+        return;
+      }
+      const ended = await vault.clearAgentRevocations(await agentIdsOf(permission.agentId), permission.connectionId, userId ? { userId } : {});
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'system', id: 'admin' },
+        action: 'update',
+        resource: { type: 'permission', id: permission.id },
+        outcome: 'success',
+        correlationId: crypto.randomUUID(),
+        metadata: { stage: 'holds_ended', count: ended, ...(userId ? { userId } : {}) },
+      });
+      res.json({ holds_ended: ended, permission });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to restore permission');
+    }
+  });
+
+  /** GET /admin/agent-holds — the revocations holding agents out (agent_id, service, user_id filters). */
+  app.get('/admin/agent-holds', adminPermissionsRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const agentId = queryStringValue(req.query.agent_id);
+      const service = queryStringValue(req.query.service);
+      const userId = queryStringValue(req.query.user_id);
+      const holds = await vault.listAgentRevocations({
+        ...(agentId ? { agentIds: await agentIdsOf(agentId) } : {}),
+        ...(service ? { service } : {}),
+        ...(userId ? { userId } : {}),
+      });
+      res.json({ holds: holds.map((hold) => ({ agent_id: hold.agentId, service: hold.service, user_id: hold.userId, cause: hold.cause, revoked_at: hold.revokedAt })) });
+    } catch (err) {
+      mapPermissionErrorResponse(res, err, 'Failed to list holds');
     }
   });
 
@@ -2632,7 +2706,7 @@ export function createServer(config: ServerConfig) {
       const started = performance.now();
       const correlationId = crypto.randomUUID();
       const actor: AuditActor = { type: 'system', id: 'admin' };
-      const cascade = await applyRevocation(await vault.revokeAgentCascade(agentId), started, {
+      const cascade = await applyRevocation(await vault.revokeAgentCascade(agentId, { hold: { cause: `agent:${agent.id}` } }), started, {
         actor,
         correlationId,
         cause: `agent:${agent.id}`,
@@ -3528,6 +3602,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
   }
 
+  /** A raw request that names no agent identifies nobody a Permission could be for. */
+  function refuseAnonymousRawToken(res: Response): void {
+    res.status(403).json({
+      error: 'permission_required',
+      message: 'A raw token request must name an agent (agent_did) that holds a Permission. CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true allows one that names none.',
+    });
+  }
+
   function refuseDpop(res: Response, status: 400 | 401, error: string, message: string): void {
     if (status === 401) {
       res.set('WWW-Authenticate', `DPoP error="${error === 'agent_key_required' ? 'invalid_request' : 'invalid_dpop_proof'}", algs="${DPOP_ACCEPTED_ALGS.join(' ')}"`);
@@ -3678,14 +3760,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (handle) handle.revoked = { at, revokedAncestorId: revoked.revokedAncestorId };
     }
     const elapsedMs = performance.now() - started;
-    // Each agent the cascade reached stays out of that user's service until
-    // it is granted again, or it could simply ask for a new delegation. A
-    // failure here fails the revocation call: it must not report a revocation
-    // that does not hold.
+    // The holds and consents committed with the revocation (see the hold option);
+    // an approval not yet redeemed must not issue after it.
     if (!ctx.agentsMayAskAgain) {
-      await vault.recordAgentRevocations(result.revoked.flatMap((revoked) => (revoked.agentDid
-        ? [{ agentId: revoked.agentDid, service: revoked.service, userId: revoked.userId, cause: ctx.cause, revokedAt: new Date(at).toISOString() }]
-        : [])));
+      for (const revoked of result.revoked) {
+        if (revoked.agentDid) approvals.cancel({ agentDid: revoked.agentDid, subject: revoked.userId, service: revoked.service }, 'delegation_revoked');
+      }
     }
 
     const revocationTime = new Date(at).toISOString();
@@ -4169,7 +4249,37 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * record id or under the DID itself, on every path.
    */
   async function permissionForDidAgent(agentDid: string, record: AgentRecord | null, service: string): Promise<Permission | null> {
-    return (record ? await getPermissionIfSupported(record.id, service) : null) ?? getPermissionIfSupported(agentDid, service);
+    const byRecord = record ? await getPermissionIfSupported(record.id, service) : null;
+    const byDid = await getPermissionIfSupported(agentDid, service);
+    if (!byRecord || !byDid || byRecord.id === byDid.id) return byRecord ?? byDid;
+    return tightestOf(service, byRecord, byDid);
+  }
+
+  /** Two Permissions for one agent: neither can widen the other, so it gets the limits of both. */
+  function tightestOf(service: string, a: Permission, b: Permission): Permission {
+    const covered = (list: string[], scope: string) => {
+      const expanded = withDerivedScopes(service, list);
+      return expanded.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(expanded, scope);
+    };
+    const rate = (limit: Permission['rateLimit']) => (limit ? limit.maxRequests / limit.windowMs : Infinity);
+    // The rate limit counts against the row whose limit is tighter.
+    const tighterRate = rate(a.rateLimit) <= rate(b.rateLimit) ? a : b;
+    const earliest = [a.expiresAt, b.expiresAt].filter((d): d is Date => d instanceof Date).sort((x, y) => x.getTime() - y.getTime())[0];
+    const ttls = [a.ttlOverride, b.ttlOverride].filter((t): t is number => typeof t === 'number');
+    const approvers = [a, b].filter((p) => p.requiresApproval).map((p) => p.approver ?? 'subject');
+    return {
+      ...tighterRate,
+      allowedScopes: [...new Set([
+        ...a.allowedScopes.filter((scope) => covered(b.allowedScopes, scope)),
+        ...b.allowedScopes.filter((scope) => covered(a.allowedScopes, scope)),
+      ])],
+      requiresApproval: a.requiresApproval || b.requiresApproval,
+      ...(approvers.length > 0 ? { approver: new Set(approvers).size > 1 ? 'both' as const : approvers[0]! } : {}),
+      delegatable: a.delegatable && b.delegatable,
+      maxDelegationDepth: Math.min(a.maxDelegationDepth, b.maxDelegationDepth),
+      expiresAt: earliest,
+      ttlOverride: ttls.length > 0 ? Math.min(...ttls) : undefined,
+    };
   }
 
   /** Why a did:key agent holds no Permission, and what fixes it. */
@@ -4195,7 +4305,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return { refused: true, cause: revocation.cause };
   }
 
-  const AGENT_ACCESS_REVOKED_MESSAGE = 'This agent\'s access to this service was revoked. An operator restores it by granting a Permission at POST /admin/permissions.';
+  const AGENT_ACCESS_REVOKED_MESSAGE = 'This agent\'s access to this service was revoked. An operator restores it at POST /admin/permissions/:id/restore, which keeps its limits, or grants it again at POST /admin/permissions.';
 
   /** Audit a refusal on revoked or absent standing, for the agent named. */
   function denyAgentStanding(agentDid: string, service: string, userId: string, error: string, correlationId: string, metadata?: Record<string, unknown>): void {
@@ -4332,6 +4442,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const userId = requestUserId(req, res, { agent: true });
       if (userId === null) return;
+      if (rejectReservedUserId(res, userId)) return;
+      if (!allowAgentsWithoutPermission) {
+        refuseAnonymousRawToken(res);
+        return;
+      }
       const vaultEntry = await getVaultEntry(slug, userId);
       if ('status' in vaultEntry) {
         res.status(vaultEntry.status).json(vaultEntry.body);
@@ -4363,6 +4478,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         scopesRequested: effectiveRequestedScopes,
         scopesGranted: grantedScopes,
         correlationId: crypto.randomUUID(),
+        metadata: { enforcementOptOuts: ['raw_tokens', 'agents_without_permission'] },
       });
 
       res.json({
@@ -4575,8 +4691,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         };
         // A security event revokes consents (Section 8.3): no token issued
         // under a revoked consent is exercised again.
+        // A delegation revoked by id reports that, as the draft requires, even
+        // though revoking it also ends its consent.
         const consentRevoked = await vault.getConsentRevocation(verified.claims.consent_id);
-        if (consentRevoked) {
+        if (consentRevoked && await delegationRevokedBy(verified.claims.jti) === null) {
           res.status(401).json({ error: 'consent_revoked', message: 'The consent behind this delegation was revoked; ask again', reason: consentRevoked.reason });
           return;
         }
@@ -5115,6 +5233,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseRawToken(res);
         return;
       }
+      if (tokenFormatFromBody(req) === 'raw' && !agentDid && !allowAgentsWithoutPermission) {
+        refuseAnonymousRawToken(res);
+        return;
+      }
       const chainProfile = chainProfileRequest(req.body, agentDid);
       if (!chainProfile.ok) {
         res.status(400).json(chainProfile.body);
@@ -5317,6 +5439,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       let approvalRequired = false;
       let didPermission: Permission | null = null;
       const enforcementOptOuts: string[] = [];
+      if (tokenFormat === 'raw') {
+        enforcementOptOuts.push('raw_tokens');
+        if (!agentDid) enforcementOptOuts.push('agents_without_permission');
+      }
       if (agentDid) {
         const standing = await agentRevocationStatus(agentDid, service, userId);
         if (standing.refused) {
@@ -5336,6 +5462,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             return;
           }
         } else if (allowAgentsWithoutPermission) {
+          // This opt-out is about agents nobody granted, not agents someone
+          // revoked: a new key must not walk around a hold on this user's service.
+          if (!allowRedelegationAfterRevocation && !didAgentRecord && (await vault.listAgentRevocations({ service, userId })).length > 0) {
+            denyAgentStanding(agentDid, service, userId, 'agent_access_revoked', correlationId, { cause: 'hold_on_service' });
+            res.status(403).json({ error: 'agent_access_revoked', message: AGENT_ACCESS_REVOKED_MESSAGE });
+            return;
+          }
           enforcementOptOuts.push('agents_without_permission');
         } else {
           denyAgentStanding(agentDid, service, userId, 'permission_required', correlationId);
@@ -5365,6 +5498,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // A raw token is the whole connection, whatever its label: never hand one to
+      // an agent whose Permission reaches nothing on it.
+      if (tokenFormat === 'raw' && didPermission && grantedScopes.length === 0) {
+        res.status(403).json({ error: 'no_scopes_granted', message: 'This agent\'s Permission covers none of this connection\'s scopes' });
+        return;
+      }
       // A provider token has the connection's whole scope, and a derived scope
       // holds only at the broker: a raw token cannot be what it describes.
       if (tokenFormat === 'raw' && grantedScopes.some((scope) => isBrokerOnlyScope(service, scope))) {
@@ -5784,7 +5923,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const started = performance.now();
       const correlationId = crypto.randomUUID();
       const actor: AuditActor = { type: 'agent', id: agent.id, fingerprint: agent.fingerprint };
-      const cascade = await applyRevocation(await vault.revokeAgentCascade(agentId), started, {
+      const cascade = await applyRevocation(await vault.revokeAgentCascade(agentId, { hold: { cause: `agent:${agent.id}` } }), started, {
         actor,
         correlationId,
         cause: `agent:${agent.id}`,
@@ -7051,6 +7190,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: 'agent_access_revoked', error_description: AGENT_ACCESS_REVOKED_MESSAGE });
         return;
       }
+      const approvalOptOuts = standing.bypassed ? ['redelegation_after_revocation'] : [];
       const permission = await permissionForDidAgent(agentDid, agentCheck.record, service);
       if (!permission && !allowAgentsWithoutPermission) {
         denyAgentStanding(agentDid, service, subject, 'permission_required', crypto.randomUUID());
@@ -7136,7 +7276,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         resource: { type: 'token', id: `${service}/${subject}` },
         outcome: 'success',
         correlationId: crypto.randomUUID(),
-        metadata: { stage: 'approval_requested', authReqId: request.authReqId, approver },
+        metadata: { stage: 'approval_requested', authReqId: request.authReqId, approver, ...(approvalOptOuts.length > 0 ? { enforcementOptOuts: approvalOptOuts } : {}) },
       });
       res.json({
         auth_req_id: request.authReqId,
@@ -7163,7 +7303,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       refuse(`The agent can no longer be delegated to (${agentCheck.error})`);
       return;
     }
-    if ((await agentRevocationStatus(request.agentDid, request.service, request.subject)).refused) {
+    const standing = await agentRevocationStatus(request.agentDid, request.service, request.subject);
+    if (standing.refused) {
       refuse('The agent\'s access to this service was revoked; it needs a new Permission');
       return;
     }
@@ -7239,6 +7380,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         constraints,
         approver: request.approver,
       },
+    });
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: request.agentDid },
+      action: 'delegate',
+      resource: { type: 'token', id: delegationId },
+      outcome: 'success',
+      scopesGranted: request.scopes,
+      correlationId: crypto.randomUUID(),
+      metadata: { stage: 'ciba_redemption', authReqId: request.authReqId, ...(standing.bypassed ? { enforcementOptOuts: ['redelegation_after_revocation'] } : {}) },
     });
     res.json(buildDelegationResponse({
       tokenFormat: 'handle',
@@ -7438,6 +7590,7 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
         return;
       }
 
+      let redemptionBypassedHold = false;
       for (const did of [...grant.lineage, grant.agentDid]) {
         const record = vault.getAgentByDid ? await vault.getAgentByDid(did) : null;
         if (record?.status === 'revoked' || record?.status === 'suspended') {
@@ -7450,6 +7603,7 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
           res.status(403).json({ error: 'agent_access_revoked', message: AGENT_ACCESS_REVOKED_MESSAGE });
           return;
         }
+        if (standing.bypassed) redemptionBypassedHold = true;
       }
 
       const vaultEntry = await getVaultEntry(grant.service, grant.userId);
@@ -7482,7 +7636,7 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
           { delegatorId: grant.delegatorDid, delegateeId: grant.agentDid, scopes: grant.scopes },
         ],
         correlationId,
-        metadata: { stage: 'token_exchange', actorTokenJti: actor.jti },
+        metadata: { stage: 'token_exchange', actorTokenJti: actor.jti, ...(redemptionBypassedHold ? { enforcementOptOuts: ['redelegation_after_revocation'] } : {}) },
       });
 
       const recordedGrant = childRecord?.grant;
@@ -7553,7 +7707,7 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
       }
 
       const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
-      const result = await applyRevocation(await vault.revokeDelegations({ delegationIds: [delegationId] }), started, {
+      const result = await applyRevocation(await vault.revokeDelegations({ delegationIds: [delegationId] }, { hold: { cause: `delegation:${delegationId}` } }), started, {
         actor: { type: 'agent', id: (req as any).webBotAuthIdentity?.agentId ?? principal?.principalId ?? 'server-agent' },
         correlationId: crypto.randomUUID(),
         cause: `delegation:${delegationId}`,

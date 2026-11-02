@@ -654,8 +654,9 @@ describe('raw tokens', () => {
     expect(JSON.stringify(res.body)).not.toContain('gho_full');
   });
 
-  it('a raw request naming no agent is issued what is stored, with no derived scope', async () => {
-    const server: Server = createServer(config({ allowRawTokens: true }));
+  it('a raw request naming no agent, which needs both opt-outs, is issued what is stored, with no derived scope', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const server: Server = createServer(config({ allowRawTokens: true, allowAgentsWithoutPermission: true }));
     await server.vault.init();
     await server.vault.store({ provider: 'github', userId: 'alice', accessToken: 'gho_full', expiresAt: new Date(Date.now() + 3600_000), scopes: ['repo'] });
     const res = await request(server.app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`)

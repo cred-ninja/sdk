@@ -66,6 +66,12 @@ export class PermissionStore {
     return this.rowToPermission(row);
   }
 
+  async getById(id: string): Promise<Permission | null> {
+    if (!this.backend.getPermissionById) return null;
+    const row = await this.backend.getPermissionById(id);
+    return row ? this.rowToPermission(row) : null;
+  }
+
   async get(agentId: string, connectionId: string): Promise<Permission | null> {
     const storage = this.ensureBackend();
     const row = await storage.getPermission(agentId, connectionId);

@@ -290,6 +290,8 @@ export interface LinkDelegateHandlerDeps extends LinkEnforcementDeps {
   handleTtlSeconds: number;
   /** CRED_ALLOW_RAW_TOKENS: a raw provider token needs this and the client's allow_raw_tokens. */
   allowRawTokens: boolean;
+  /** CRED_ALLOW_REDELEGATION_AFTER_REVOCATION. */
+  allowRedelegationAfterRevocation: boolean;
 }
 
 /**
@@ -310,6 +312,13 @@ export async function handleLinkDelegate(deps: LinkDelegateHandlerDeps, req: Req
     : [...state.access.effective_scopes];
   if (scopes.length === 0) {
     sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS.insufficient_scope, 'insufficient_scope');
+    return;
+  }
+  // A revocation holds the Link agent, not just the key it was exercised under:
+  // a new did:key acting for the same agent gets nothing until it is granted again.
+  if (!deps.allowRedelegationAfterRevocation
+    && await ctx.vault.getAgentRevocation([state.agentId], connection.provider, linkVaultUserId(connection.id))) {
+    sendLinkError(req, res, LINK_MACHINE_ERROR_STATUS.permission_required, 'permission_required', { message: 'This agent\'s access to this connection was revoked. Grant it again at POST /link/v1/connections/:id/permissions.' });
     return;
   }
   const format = body.token_format === undefined ? 'handle' : body.token_format;

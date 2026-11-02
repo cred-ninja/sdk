@@ -8,6 +8,7 @@ import type {
   RecordDelegationInput,
   RevokedDelegation,
   AgentRevocation,
+  AgentRevocationFilter,
 } from '../delegation-revocation.js';
 
 /**
@@ -63,6 +64,7 @@ export interface StorageBackend {
 
   storePermission?(row: PermissionRow): void | Promise<void>;
   getPermission?(agentId: string, connectionId: string): PermissionRow | null | Promise<PermissionRow | null>;
+  getPermissionById?(id: string): PermissionRow | null | Promise<PermissionRow | null>;
   listPermissions?(agentId: string): PermissionRow[] | Promise<PermissionRow[]>;
   /**
    * Delete a permission row and, in the same transaction, record that the
@@ -106,7 +108,8 @@ export interface StorageBackend {
   /** The newest revocation holding for any of these agent ids, on this service and user. */
   getAgentRevocation?(agentIds: readonly string[], service: string, userId: string): AgentRevocation | null | Promise<AgentRevocation | null>;
   /** Remove them for a re-grant; returns how many there were. */
-  clearAgentRevocations?(agentIds: readonly string[], service: string): number | Promise<number>;
+  clearAgentRevocations?(agentIds: readonly string[], service: string, options?: { userId?: string }): number | Promise<number>;
+  listAgentRevocations?(filter: AgentRevocationFilter): AgentRevocation[] | Promise<AgentRevocation[]>;
 
   // ── Audit methods (optional — not all backends need these) ─────────────────
 

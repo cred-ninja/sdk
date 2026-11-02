@@ -31,6 +31,7 @@ import {
   type DelegationRevocationSeed,
   type RecordDelegationInput,
   type AgentRevocation,
+  type AgentRevocationFilter,
   MemoryAgentRevocationStore,
 } from './delegation-revocation.js';
 import { MemoryConsentStore } from './consent.js';
@@ -603,7 +604,20 @@ export class CredVault {
     seed: DelegationRevocationSeed,
     options: DelegationRevocationOptions,
   ): Promise<DelegationRevocationResult> {
-    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, new Date().toISOString(), options);
+    const revokedAt = new Date().toISOString();
+    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, revokedAt, options);
+    // A backend with a delegation table does this in its own transaction.
+    if (options.hold && !this.backend.revokeDelegationTree) {
+      const holds: AgentRevocation[] = [];
+      for (const row of revoked) {
+        const link = (await this.delegationStore().getDelegation(row.id))?.grant?.link?.agentId;
+        for (const agentId of [row.agentDid, typeof link === 'string' ? link : null]) {
+          if (agentId) holds.push({ agentId, service: row.service, userId: row.userId, cause: options.hold.cause, revokedAt });
+        }
+        if (row.agentDid) await this.revokeConsents({ agentDid: row.agentDid, service: row.service, subject: row.userId }, options.hold.cause);
+      }
+      await this.recordAgentRevocations(holds);
+    }
     return {
       revoked,
       revokedIds: revoked.map((r) => r.id),
@@ -640,13 +654,20 @@ export class CredVault {
     return this.getPermissionStore().revoke(permissionId);
   }
 
-  private agentRevocationStore(): Required<Pick<StorageBackend, 'storeAgentRevocations' | 'getAgentRevocation' | 'clearAgentRevocations'>> {
+  /** One Permission by its id, or null. */
+  async getPermissionById(id: string): Promise<Permission | null> {
+    await this.ensureInit();
+    return this.getPermissionStore().getById(id);
+  }
+
+  private agentRevocationStore(): Required<Pick<StorageBackend, 'storeAgentRevocations' | 'getAgentRevocation' | 'clearAgentRevocations' | 'listAgentRevocations'>> {
     const backend = this.backend;
-    if (backend.storeAgentRevocations && backend.getAgentRevocation && backend.clearAgentRevocations) {
+    if (backend.storeAgentRevocations && backend.getAgentRevocation && backend.clearAgentRevocations && backend.listAgentRevocations) {
       return {
         storeAgentRevocations: backend.storeAgentRevocations.bind(backend),
         getAgentRevocation: backend.getAgentRevocation.bind(backend),
         clearAgentRevocations: backend.clearAgentRevocations.bind(backend),
+        listAgentRevocations: backend.listAgentRevocations.bind(backend),
       };
     }
     this.memoryAgentRevocations ??= new MemoryAgentRevocationStore();
@@ -655,6 +676,7 @@ export class CredVault {
       storeAgentRevocations: memory.storeAgentRevocations.bind(memory),
       getAgentRevocation: memory.getAgentRevocation.bind(memory),
       clearAgentRevocations: memory.clearAgentRevocations.bind(memory),
+      listAgentRevocations: memory.listAgentRevocations.bind(memory),
     };
   }
 
@@ -670,10 +692,16 @@ export class CredVault {
     return this.agentRevocationStore().getAgentRevocation(agentIds, service, userId);
   }
 
-  /** End an agent's revocations on a service, for a re-grant. Returns how many ended. */
-  async clearAgentRevocations(agentIds: readonly string[], service: string): Promise<number> {
+  /** End an agent's revocations on a service, for one user or all. Returns how many ended. */
+  async clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): Promise<number> {
     await this.ensureInit();
-    return this.agentRevocationStore().clearAgentRevocations(agentIds, service);
+    return this.agentRevocationStore().clearAgentRevocations(agentIds, service, options);
+  }
+
+  /** Current agent revocations, for an operator to review. */
+  async listAgentRevocations(filter: AgentRevocationFilter = {}): Promise<AgentRevocation[]> {
+    await this.ensureInit();
+    return this.agentRevocationStore().listAgentRevocations(filter);
   }
 
   /**

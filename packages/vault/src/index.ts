@@ -30,6 +30,7 @@ export {
 export type { PermissionApprover } from './types.js';
 export type {
   AgentRevocation,
+  AgentRevocationFilter,
   DelegationGrant,
   DelegationRecord,
   DelegationStatus,
