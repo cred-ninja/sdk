@@ -637,3 +637,14 @@ describe('local mode: narrowing a Notion connection', () => {
     expect(result.unnarrowed).toBeUndefined();
   });
 });
+
+describe('local mode: public_repo over a token that holds repo', () => {
+  it('derives no github.read', async () => {
+    mockVault.get.mockResolvedValue({ provider: 'github', userId: 'user-1', accessToken: 'gho', scopes: ['repo'] });
+    mockVault.writeAuditEvent = vi.fn();
+    mockVault.getPermission = vi.fn().mockResolvedValue({ id: 'p', agentId: 'did:key:zA', connectionId: 'github', allowedScopes: ['public_repo'], requiresApproval: false });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({ id: 'agt_a', status: 'active', scopeCeiling: [] });
+    const cred = makeLocalCred({ github: { clientId: 'i', clientSecret: 's' } });
+    await expect(cred.delegate({ service: 'github', userId: 'user-1', appClientId: 'local', agentDid: 'did:key:zA' } as never)).rejects.toMatchObject({ code: 'invalid_scope' });
+  });
+});

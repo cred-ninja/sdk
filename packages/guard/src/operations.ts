@@ -263,6 +263,8 @@ const NOTION_READ = ['notion.read', 'content', 'read_content'];
 const NOTION_INSERT = ['content', 'insert_content'];
 const NOTION_UPDATE = ['content', 'update_content'];
 const NOTION_WHOLE = ['content'];
+const NOTION_TRASHABLE: ReadonlySet<string> = new Set(['/v1/pages/*', '/v1/blocks/*', '/v1/databases/*', '/v1/data_sources/*']);
+const NOTION_TRASH_FIELDS = ['archived', 'in_trash'];
 const SALESFORCE_READ = ['salesforce.read', 'api', 'full'];
 const SALESFORCE_WRITE = ['api', 'full'];
 const SALESFORCE_HOST = /^https:\/\/[a-z0-9.-]+\.(?:salesforce\.com|force\.com)$/;
@@ -651,6 +653,13 @@ function classify(request: OperationRequest): Mapped | { reason: string } {
   if (!rules) return { reason: 'not_in_table' };
   const found = findRule(rules, method, segments);
   if (!found) return { reason: 'not_in_table' };
+  // Notion trashes through an ordinary update, so update_content must not reach it.
+  // Present at any value: this table does not guess what a value does.
+  if (service === 'notion' && method === 'PATCH' && NOTION_TRASHABLE.has(found.pattern)
+    && request.body && typeof request.body === 'object'
+    && NOTION_TRASH_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(request.body, field))) {
+    return { operation: `${method} ${found.pattern}`, access: found.access, needs: NOTION_WHOLE };
+  }
   return { operation: `${method} ${found.pattern}`, access: found.access, needs: found.needs };
 }
 

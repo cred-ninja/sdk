@@ -716,7 +716,8 @@ export class SQLiteBackend implements StorageBackend {
       const revoked: RevokedDelegation[] = [];
       for (const node of nodes) {
         const row = rowStmt.get(node.id) as Pick<DelegationDbRow, 'id' | 'parent_id' | 'agent_did' | 'service' | 'user_id' | 'status' | 'grant_json'> | undefined;
-        if (!row) continue;
+        if (!row || row.status !== 'active') continue;
+        if (revokeStmt.run(revokedAt, node.rootId, node.id).changes === 0) continue;
         if (options.hold) {
           // A Cred Link delegation also names the Link agent, which a new key can act for.
           const linkAgentId = row.grant_json ? (JSON.parse(row.grant_json) as DelegationGrant).link?.agentId : undefined;
@@ -725,8 +726,6 @@ export class SQLiteBackend implements StorageBackend {
           }
           if (row.agent_did) this.revokeConsents({ agentDid: row.agent_did, service: row.service, subject: row.user_id }, options.hold.cause, revokedAt);
         }
-        if (row.status !== 'active') continue;
-        if (revokeStmt.run(revokedAt, node.rootId, node.id).changes === 0) continue;
         revoked.push(toRevoked({
           id: row.id,
           parentId: row.parent_id,

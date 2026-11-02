@@ -39,6 +39,17 @@ export function withDerivedScopes(service: string, scopes: readonly string[]): s
   return [...scopes, derived.scope];
 }
 
+/**
+ * A grant list plus what its scopes derive, over a token that holds `held`. A
+ * derived read reaches whatever the token can, and github.read over a `repo` token
+ * reaches private repositories, so `public_repo` cannot derive it there. Only `repo`
+ * can. Naming github.read itself is what an operator does to allow that.
+ */
+export function withDerivedScopesUnder(service: string, scopes: readonly string[], held: readonly string[]): string[] {
+  if (service === 'github' && held.includes('repo') && !scopes.includes('repo')) return [...scopes];
+  return withDerivedScopes(service, scopes);
+}
+
 /** What a stored connection covers: its scopes, what they derive, and Notion's whole-connection rule. */
 export function withStoredDerivedScopes(service: string, stored: readonly string[]): string[] {
   if (service === 'notion' && stored.length === 0) return ['notion.read', NOTION_WHOLE_CONNECTION];

@@ -265,15 +265,17 @@ describe('a retried revocation stays correct', () => {
     expect((await ask(server, agent)).body.error).toBe('agent_access_revoked');
   });
 
-  it('a delegation already revoked by a disconnect still gets its hold when revoked by id', async () => {
+  it('a delegation already revoked by a disconnect gets no hold from a later revocation by id', async () => {
     const server = await setup();
     const agent = await newAgent();
     await grant(server, agent, {});
     const issued = await ask(server, agent);
     await request(server.app).delete('/api/v1/connections/google').set('Authorization', `Bearer ${BEARER}`).query({ user_id: 'alice' });
     await server.vault.store({ provider: 'google', userId: 'alice', accessToken: 'ya29.again', expiresAt: new Date(Date.now() + 3600_000), scopes: SCOPES });
-    expect((await revokeDelegation(server, issued.body.delegation_id)).status).toBe(200);
-    expect((await ask(server, agent)).body.error).toBe('agent_access_revoked');
+    const res = await revokeDelegation(server, issued.body.delegation_id);
+    expect(res.status).toBe(200);
+    expect(res.body.revoked_count).toBe(0);
+    expect((await ask(server, agent)).status).toBe(200);
   });
 
   it('a failed Permission delete can be retried: delegations are ended before the row goes', async () => {

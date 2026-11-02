@@ -5,7 +5,7 @@
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
-import { withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
+import { withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 import {
   CredConfig,
   CredLocalConfig,
@@ -931,7 +931,7 @@ export class Cred {
       // delegation, and an empty result is a refusal, never the whole connection.
       delegatedScopes = withStoredDerivedScopes(params.service, grantedScopes);
       if (permission) {
-        const allowed = withDerivedScopes(params.service, permission.allowedScopes);
+        const allowed = withDerivedScopesUnder(params.service, permission.allowedScopes, grantedScopes);
         delegatedScopes = delegatedScopes.filter((scope) => allowed.includes(scope));
       }
       if (requested) delegatedScopes = delegatedScopes.filter((scope) => requested.includes(scope));

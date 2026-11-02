@@ -234,15 +234,17 @@ own `issues:create` also updates issues.
 Cred-side read scopes. GitHub, Salesforce and Notion have no read-only scope, so
 a connection with wider consent can give an agent a read-only delegation that
 only the broker enforces: `github.read` (from stored `repo` or `public_repo`),
-`salesforce.read` (from `api` or `full`) and `notion.read` (from any Notion
-connection). Name one in a Permission's `allowedScopes`, a ceiling or a request.
+`salesforce.read` (from `api` or `full`) and `notion.read` (from `content`,
+`read_content` or a Notion connection with no stored scopes). Over a token that holds
+`repo`, only `repo` derives `github.read`, since a `public_repo` Permission must not
+read private repositories through it. Name one in a Permission's `allowedScopes`, a ceiling or a request.
 The provider token is unchanged, so a derived scope is never issued as a raw token
 (`400 invalid_scope`). A Notion connection stores what `/connect` asked for, or no
 scopes at all, and `content` then names all it can do. `/connect` used to offer
 `read_content`, `update_content` and `insert_content`: rows stored under them keep
 what they said. `read_content` reads; `insert_content` creates and appends;
-`update_content` changes what exists. Neither of the last two reads or deletes, and
-neither is `content`.
+`update_content` changes what exists, but not a body naming `archived` or `in_trash`,
+at any value, which needs `content`. Neither of the last two reads or deletes.
 
 `github.read` reaches code, issues, pull requests and search. It does not reach a
 repository's secrets, variables, hooks, keys, collaborators, branch protection or
@@ -255,8 +257,8 @@ OAuth callback records from Salesforce's answer, and which each delegation recor
 when it is issued: `400 salesforce_instance_mismatch` for any other host or when the
 two differ, and `400 salesforce_instance_unknown` when none is stored, with no
 opt-out. A Salesforce connection made before this version has none and must be
-reconnected. Reconnecting to another org revokes the delegations issued for the old
-one; their agents can ask again.
+reconnected. Reconnecting to another org revokes the delegations and approvals given
+for the old one; their agents can ask again.
 
 The request classified is the request sent. Encoded separators (`%2F`, `%2E` in a
 segment, `%5C`, `%25`), doubled slashes, trailing-dot hosts, and a percent-encoded
@@ -324,7 +326,9 @@ connections use their own Permissions and are not affected.
 
 Narrowing a Permission with `PATCH /admin/permissions/:id` reaches live delegations:
 each `/api/v1/use` is held to the Permission as it stands, so a token loses at once
-what the Permission no longer allows (`403 scope_insufficient`).
+what the Permission no longer allows (`403 scope_insufficient`). The same goes for a
+Permission that has expired, and for one replaced by a new grant: a re-grant is a new
+row, so delegations issued under the old one must ask again. Restoring keeps them.
 
 A revocation holds until an operator grants access again:
 
@@ -338,9 +342,12 @@ A revocation holds until an operator grants access again:
   it is. With `user_id` it ends only that user's.
 - `POST /admin/permissions` ends every hold, for that agent and connection, at the
   limits it names. It replaces a Permission that already exists, and refuses with
-  `409 permission_limits_would_drop` if that would silently drop an approval gate or
-  rate limit: name them in the body, or restore instead.
+  `409 permission_limits_would_drop` if that would silently drop an approval gate,
+  rate limit, expiry, TTL override or an `admin` or `both` approver: name them in the
+  body, or restore instead.
 - `GET /admin/agent-holds` lists holds (`agent_id`, `service`, `user_id`).
+- Replaying a revocation changes nothing, so it cannot undo a restore or re-grant. A
+  delegation a disconnect already revoked gets no hold from a later revocation by id.
 - A revocation also ends the agent's consents there, so a re-grant asks for approval
   again where the Permission requires it. A hold reaches the Cred Link agent as well
   as its key, and `POST /link/v1/connections/:id/permissions` ends it.

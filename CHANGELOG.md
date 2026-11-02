@@ -36,8 +36,8 @@
   differ, `400 salesforce_instance_unknown` when none is stored. There is no opt-out.
   Salesforce connections made before this version store no instance and must be
   reconnected: `/api/v1/delegate` answers `consent_required` with a `consent_url`, and
-  a refusal at `/api/v1/use` carries one. Reconnecting to another org revokes
-  delegations for the old one.
+  a refusal at `/api/v1/use` carries one. Reconnecting to another org revokes the
+  delegations and approvals given for the old one.
 - `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
   across a refresh. New `instance_url` column, added on start; existing rows are
   not changed. The OAuth callback stores Salesforce's `instance_url` and stores
@@ -97,9 +97,10 @@
 - `/connect` offers `notion.read` and `content` for Notion, in place of names the
   tables did not know. Rows stored under the old names keep what they said:
   `read_content` reads, `insert_content` creates and appends, and `update_content`
-  changes what exists. Only `content` deletes.
+  changes what exists. Only `content` deletes, or sends `archived` or `in_trash`.
 - A Permission, ceiling or parent covers the read scope its scopes derive: Permission
-  `[repo]` plus a request for `github.read` returns `github.read`. The receipt chain
+  `[repo]` plus a request for `github.read` returns `github.read`. Over a token holding
+  `repo`, `public_repo` derives nothing, so it cannot read private repositories. The receipt chain
   verifier uses the same helper. Wildcard Permissions now reach matching stored
   scopes at `/api/v1/delegate`, as they did at `/api/v1/subdelegate`.
 - Only a stored connection has a whole-connection rule. A Permission, ceiling, parent
@@ -176,11 +177,13 @@
 - New `POST /admin/permissions/:id/restore` ends a hold and leaves the Permission as
   it is, for one user with `user_id` or all. New `GET /admin/agent-holds` lists holds.
 - `POST /admin/permissions` ends every hold at the limits it names, and now refuses
-  with `409 permission_limits_would_drop` rather than silently drop an approval gate
-  or rate limit on the row it replaces.
+  with `409 permission_limits_would_drop` rather than silently drop an approval gate,
+  rate limit, expiry, TTL override or `admin` or `both` approver on the row it replaces.
+  A re-grant is a new row, so live delegations under the old one must ask again.
+- Replaying a revocation changes nothing, so it cannot undo a restore or re-grant.
 - Narrowing a Permission with `PATCH` reaches live delegations: each `/api/v1/use` is
   held to the Permission as it stands. Delegations record which Permission authorized
-  them, and one whose Permission has gone can do nothing.
+  them, and one whose Permission has gone or expired can do nothing.
 - An agent with a Permission under both its DID and record id gets the limits of both.
 - Raw tokens: a request naming no agent now also needs
   `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, including at `GET /api/token/:provider`.

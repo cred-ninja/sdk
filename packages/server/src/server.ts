@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -2281,12 +2281,12 @@ export function createServer(config: ServerConfig) {
         connectionId?: unknown;
         allowedScopes?: unknown;
         rateLimit?: { maxRequests: number; windowMs: number } | null;
-        ttlOverride?: number;
+        ttlOverride?: number | null;
         requiresApproval?: boolean;
         approver?: 'subject' | 'admin' | 'both';
         delegatable?: boolean;
         maxDelegationDepth?: number;
-        expiresAt?: string;
+        expiresAt?: string | null;
         createdBy?: unknown;
       };
 
@@ -2312,14 +2312,17 @@ export function createServer(config: ServerConfig) {
       // Replacing a row replaces all of it, so a re-grant that does not mention an
       // approval gate or rate limit would drop it silently. Restoring keeps them.
       const replaced = await getPermissionIfSupported(body.agentId, body.connectionId);
-      const wouldDrop = [
-        ...(replaced?.requiresApproval && body.requiresApproval === undefined ? ['requiresApproval'] : []),
-        ...(replaced?.rateLimit && !('rateLimit' in body) ? ['rateLimit'] : []),
+      const wouldDrop = !replaced ? [] : [
+        ...(replaced.requiresApproval && body.requiresApproval === undefined ? ['requiresApproval'] : []),
+        ...(replaced.rateLimit && !('rateLimit' in body) ? ['rateLimit'] : []),
+        ...(replaced.expiresAt && !('expiresAt' in body) ? ['expiresAt'] : []),
+        ...(replaced.ttlOverride !== undefined && !('ttlOverride' in body) ? ['ttlOverride'] : []),
+        ...((replaced.approver === 'admin' || replaced.approver === 'both') && body.approver === undefined ? ['approver'] : []),
       ];
       if (wouldDrop.length > 0) {
         res.status(409).json({
           error: 'permission_limits_would_drop',
-          message: `This would replace a Permission and drop its ${wouldDrop.join(' and ')}. Name them in the body to change them, or POST /admin/permissions/${replaced!.id}/restore to end a hold and keep them.`,
+          message: `This would replace a Permission and drop its ${wouldDrop.join(', ')}. Name them in the body to change them. Replacing also ends the live delegations issued under the old row, which must ask again. To end a hold and keep both the limits and those delegations, POST /admin/permissions/${replaced!.id}/restore.`,
           fields: wouldDrop,
         });
         return;
@@ -2330,7 +2333,7 @@ export function createServer(config: ServerConfig) {
         connectionId: body.connectionId,
         allowedScopes: body.allowedScopes,
         rateLimit: body.rateLimit ?? undefined,
-        ttlOverride: body.ttlOverride,
+        ttlOverride: body.ttlOverride ?? undefined,
         requiresApproval: body.requiresApproval ?? false,
         ...(body.approver ? { approver: body.approver } : {}),
         delegatable: body.delegatable ?? false,
@@ -3242,12 +3245,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      // A reconnect to another org ends what was issued for the old one: those
-      // delegations were consented to for that org. The agents did nothing wrong,
-      // so they may ask again.
+      // A reconnect to another org ends what was issued and approved for the old
+      // one. The agents did nothing wrong, so they may ask again.
       if (slug === 'salesforce') {
         const prior = await vault.getStored({ provider: slug, userId: pending.userId });
         if (prior && prior.instanceUrl !== instanceUrl) {
+          // Approvals were given for the old org too: reusing one here would act on
+          // an org nobody approved.
+          await vault.revokeConsents({ subject: pending.userId, service: slug }, `reconnect:${slug}/${pending.userId}`);
+          approvals.cancel({ subject: pending.userId, service: slug }, 'reconnected_to_another_instance');
           await applyRevocation(await vault.revokeDelegations({ connection: { service: slug, userId: pending.userId } }), performance.now(), {
             actor: { type: 'system', id: 'connect' },
             correlationId: crypto.randomUUID(),
@@ -4255,13 +4261,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   function scopesForDidAgent(service: string, stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
     if (!permission && !allowAgentsWithoutPermission) return [];
     return withStoredDerivedScopes(service, stored)
-      .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope))
-      .filter((scope) => !permission || permissionCovers(service, permission.allowedScopes, scope));
+      .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope, stored))
+      .filter((scope) => !permission || permissionCovers(service, permission.allowedScopes, scope, stored));
   }
 
   /** A ceiling covers a scope, or the wider scope a derived read scope comes from. Never the reverse. */
-  function ceilingCovers(service: string, ceiling: string[], scope: string): boolean {
-    return scopeCoveredBy(withDerivedScopes(service, ceiling), scope);
+  function ceilingCovers(service: string, ceiling: string[], scope: string, held: string[] = []): boolean {
+    return scopeCoveredBy(withDerivedScopesUnder(service, ceiling, held), scope);
   }
 
   /** Every id one agent can be named by: the id given, its DID and its record id. */
@@ -4283,16 +4289,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return tightestOf(service, byRecord, byDid);
   }
 
-  function permissionCovers(service: string, allowed: string[], scope: string): boolean {
-    const expanded = withDerivedScopes(service, allowed);
+  /** Whether a Permission covers a scope, over a token holding `held`. */
+  function permissionCovers(service: string, allowed: string[], scope: string, held: string[]): boolean {
+    const expanded = withDerivedScopesUnder(service, allowed, held);
     return expanded.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(expanded, scope);
   }
 
   /**
    * What a live delegation may do now: its scopes, within the Permission that
    * authorized it and the agent's Permission as they stand. A Permission narrowed
-   * after issuance takes effect at once, like a revocation. A row that has gone
-   * covers nothing.
+   * after issuance takes effect at once, like a revocation. A row that has gone or
+   * expired covers nothing, and a re-grant is a new row: a delegation under the
+   * replaced one stops.
    */
   async function scopesAllowedNow(delegationId: string, delegation: BrokeredDelegation): Promise<string[]> {
     const { service } = delegation;
@@ -4305,13 +4313,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       : null;
     const limits = [authorizing, current].filter((limit): limit is Permission => limit !== null);
     if (limits.length === 0) return allowAgentsWithoutPermission ? delegation.scopes : [];
+    if (limits.some((limit) => limit.expiresAt && limit.expiresAt.getTime() <= Date.now())) return [];
+    const stored = await vault.getStored({ provider: service, userId: delegation.userId });
+    const held = [...(stored?.scopes ?? []), ...delegation.scopes];
     return withoutRedundantDerivedScopes(service, withDerivedScopes(service, delegation.scopes)
-      .filter((scope) => limits.every((limit) => permissionCovers(service, limit.allowedScopes, scope))));
+      .filter((scope) => limits.every((limit) => permissionCovers(service, limit.allowedScopes, scope, held))));
   }
 
   /** Two Permissions for one agent: neither can widen the other, so it gets the limits of both. */
   function tightestOf(service: string, a: Permission, b: Permission): Permission {
-    const covered = (list: string[], scope: string) => permissionCovers(service, list, scope);
+    // The token is unknown here, so assume the widest: neither row derives through public_repo.
+    const covered = (list: string[], scope: string) => permissionCovers(service, list, scope, ['repo']);
     const rate = (limit: Permission['rateLimit']) => (limit ? limit.maxRequests / limit.windowMs : Infinity);
     // The rate limit counts against the row whose limit is tighter.
     const tighterRate = rate(a.rateLimit) <= rate(b.rateLimit) ? a : b;
@@ -4885,7 +4897,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const scopesNow = linkAccess ? linkAccess.effective_scopes : await scopesAllowedNow(delegationId, delegation);
       if (scopesNow.length === 0) {
         refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_narrowed' });
-        res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers any of its scopes' });
+        res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers it: it was narrowed, replaced by a new grant, revoked or expired. Ask for a new delegation.' });
         return;
       }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
@@ -6714,7 +6726,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             ? { requestedConstraints: childConstraints.constraints }
             : {}),
           permission: {
-            allowedScopes: withDerivedScopes(service, permission.allowedScopes),
+            allowedScopes: withDerivedScopesUnder(service, permission.allowedScopes, parent.scopes),
             delegatable: permission.delegatable,
             maxDelegationDepth: permission.maxDelegationDepth,
           },
@@ -6745,7 +6757,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // capped to on direct delegation.
       if (agentRecord?.scopeCeiling.length) {
         const withinCeiling = validation.grantedScopes.filter((scope) =>
-          ceilingCovers(service, agentRecord!.scopeCeiling, scope),
+          ceilingCovers(service, agentRecord!.scopeCeiling, scope, parent.scopes),
         );
         if (withinCeiling.length === 0) {
           writeAuditEventIfSupported({

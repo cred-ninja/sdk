@@ -148,9 +148,10 @@ export interface DelegationRevocationOptions {
   /** Hops below a seed the walk may follow. Defaults to DEFAULT_MAX_REVOCATION_DEPTH. */
   maxDepth?: number;
   /**
-   * Hold each agent reached out of that user's service, and revoke its consents
-   * there, in the same commit as the revocation. Delegations already revoked are
-   * included, so a retry, or a revocation after a disconnect, still takes effect.
+   * Hold each agent whose delegation this call revoked out of that user's service,
+   * and revoke its consents there, in the same commit as the revocation. So a retry
+   * finds them already done, and replaying a revocation changes nothing: it cannot
+   * undo a restore or re-grant made since.
    */
   hold?: { cause: string };
 }
