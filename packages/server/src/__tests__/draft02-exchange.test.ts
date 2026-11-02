@@ -39,6 +39,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
+    allowAgentsWithoutPermission: true,
    
     providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: ['openid'] }],
     redirectBaseUri: BASE,
@@ -90,6 +91,8 @@ async function setup(overrides?: Partial<ServerConfig>) {
     expiresAt: new Date(Date.now() + 3600 * 1000),
     scopes: ['openid', 'email', 'profile'],
   });
+  // The vault file is shared across this suite, and a revocation holds.
+  await vault.clearAgentRevocations([ROOT.did], 'google');
   for (const agent of [CHILD, SIBLING]) {
     await vault.createPermission!({
       agentId: agent.did,

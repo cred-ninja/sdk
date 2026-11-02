@@ -36,6 +36,7 @@ function makeConfig(vaultPath: string): ServerConfig {
     tofuPath: path.join(path.dirname(vaultPath), 'tofu.json'),
     adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`,
     agentToken: TEST_TOKEN,
+    allowAgentsWithoutPermission: true,
     providers: [{ slug: 'google', clientId: 'cid', clientSecret: 'secret', defaultScopes: ['openid', 'email'] }],
     redirectBaseUri: BASE,
   };

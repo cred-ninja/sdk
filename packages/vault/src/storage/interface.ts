@@ -7,6 +7,7 @@ import type {
   DelegationRevocationSeed,
   RecordDelegationInput,
   RevokedDelegation,
+  AgentRevocation,
 } from '../delegation-revocation.js';
 
 /**
@@ -63,7 +64,12 @@ export interface StorageBackend {
   storePermission?(row: PermissionRow): void | Promise<void>;
   getPermission?(agentId: string, connectionId: string): PermissionRow | null | Promise<PermissionRow | null>;
   listPermissions?(agentId: string): PermissionRow[] | Promise<PermissionRow[]>;
-  revokePermission?(permissionId: string): void | Promise<void>;
+  /**
+   * Delete a permission row and, in the same transaction, record that the
+   * agent's access was revoked (an AgentRevocation for every user of the
+   * connection). Returns the row removed, or null when there was none.
+   */
+  revokePermission?(permissionId: string): PermissionRow | null | Promise<PermissionRow | null>;
   /**
    * Atomically apply a partial update to a single permission row, keyed
    * strictly by `id` (never by agent_id/connection_id). Must be a single
@@ -93,6 +99,14 @@ export interface StorageBackend {
     windowMs: number,
     now?: Date,
   ): boolean | Promise<boolean>;
+
+  // ── Agent revocations (optional; CredVault falls back to process memory) ──
+
+  storeAgentRevocations?(rows: readonly AgentRevocation[]): void | Promise<void>;
+  /** The newest revocation holding for any of these agent ids, on this service and user. */
+  getAgentRevocation?(agentIds: readonly string[], service: string, userId: string): AgentRevocation | null | Promise<AgentRevocation | null>;
+  /** Remove them for a re-grant; returns how many there were. */
+  clearAgentRevocations?(agentIds: readonly string[], service: string): number | Promise<number>;
 
   // ── Audit methods (optional — not all backends need these) ─────────────────
 

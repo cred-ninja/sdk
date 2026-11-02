@@ -28,6 +28,7 @@ function makeTestConfig(): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`,
     agentToken: TEST_TOKEN,
+    allowAgentsWithoutPermission: true,
    
     providers: [
       {

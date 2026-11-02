@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { SQLiteBackend } from '../storage/sqlite.js';
 import { CredVault } from '../vault.js';
 import {
+  AGENT_REVOCATION_ALL_USERS,
   collectDelegationSubtree,
   DelegationRevokedError,
   MemoryDelegationStore,
@@ -323,5 +324,66 @@ describe('CredVault delegation API', () => {
     expect((await vault.getDelegation('root'))?.status).toBe('active');
     await expect(vault.recordDelegation(rec('again', null, { agentDid: 'did:key:z6MkMid' })))
       .rejects.toMatchObject({ code: 'agent_revoked' });
+  });
+});
+
+describe('agent revocations', () => {
+  async function sqliteVault() {
+    const dir = mkdtempSync(join(tmpdir(), 'cred-agent-revocations-'));
+    const vault = new CredVault({ passphrase: 'test-passphrase-agent-revocations', storage: 'sqlite', path: join(dir, 'vault.sqlite') });
+    await vault.init();
+    return vault;
+  }
+  const permission = { agentId: 'did:key:zAgent', connectionId: 'google', allowedScopes: ['calendar.readonly'], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' };
+
+  it('revoking a Permission leaves a revocation for every user, and returns the row removed', async () => {
+    const vault = await sqliteVault();
+    const created = await vault.createPermission(permission);
+    expect((await vault.revokePermission(created.id))?.agentId).toBe('did:key:zAgent');
+    expect(await vault.getPermission('did:key:zAgent', 'google')).toBeNull();
+    const held = await vault.getAgentRevocation(['did:key:zAgent'], 'google', 'alice');
+    expect(held).toMatchObject({ userId: AGENT_REVOCATION_ALL_USERS, cause: `permission:${created.id}` });
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'github', 'alice')).toBeNull();
+  });
+
+  it('revoking a Permission that does not exist records nothing', async () => {
+    const vault = await sqliteVault();
+    expect(await vault.revokePermission('perm_missing')).toBeNull();
+    expect(await vault.getAgentRevocation(['perm_missing'], 'google', 'alice')).toBeNull();
+  });
+
+  it('creating a Permission ends the revocation it answers, on that connection only', async () => {
+    const vault = await sqliteVault();
+    await vault.recordAgentRevocations([
+      { agentId: 'did:key:zAgent', service: 'google', userId: 'alice', cause: 'delegation:del_1', revokedAt: '2026-11-02T00:00:00.000Z' },
+      { agentId: 'did:key:zAgent', service: 'github', userId: 'alice', cause: 'delegation:del_2', revokedAt: '2026-11-02T00:00:00.000Z' },
+    ]);
+    await vault.createPermission(permission);
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'google', 'alice')).toBeNull();
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'github', 'alice')).not.toBeNull();
+  });
+
+  it('a per-user revocation does not reach another user', async () => {
+    const vault = await sqliteVault();
+    await vault.recordAgentRevocations([{ agentId: 'did:key:zAgent', service: 'google', userId: 'alice', cause: 'delegation:del_1', revokedAt: '2026-11-02T00:00:00.000Z' }]);
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'google', 'bob')).toBeNull();
+  });
+
+  it('agentOnService revokes that agent on that service only', async () => {
+    const vault = await sqliteVault();
+    await vault.recordDelegation({ id: 'del_google', agentDid: 'did:key:zAgent', service: 'google', userId: 'alice' });
+    await vault.recordDelegation({ id: 'del_github', agentDid: 'did:key:zAgent', service: 'github', userId: 'alice' });
+    const result = await vault.revokeDelegations({ agentOnService: { agentDid: 'did:key:zAgent', service: 'google' } });
+    expect(result.revokedIds).toEqual(['del_google']);
+  });
+
+  it('keeps revocations in process memory on the file backend', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cred-agent-revocations-file-'));
+    const vault = new CredVault({ passphrase: 'test-passphrase-agent-revocations', storage: 'file', path: join(dir, 'vault.json') });
+    await vault.init();
+    await vault.recordAgentRevocations([{ agentId: 'did:key:zAgent', service: 'google', userId: 'alice', cause: 'delegation:del_1', revokedAt: '2026-11-02T00:00:00.000Z' }]);
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'google', 'alice')).not.toBeNull();
+    expect(await vault.clearAgentRevocations(['did:key:zAgent'], 'google')).toBe(1);
+    expect(await vault.getAgentRevocation(['did:key:zAgent'], 'google', 'alice')).toBeNull();
   });
 });

@@ -628,7 +628,7 @@ describe('Configuration and pre-existing gap fixes', () => {
   });
 
   it('brokers Linear and HubSpot API calls (SERVICE_ALLOWLIST)', async () => {
-    const { app, server } = await harness({ linkEnabled: false });
+    const { app, server } = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     const agent = await newAgent();

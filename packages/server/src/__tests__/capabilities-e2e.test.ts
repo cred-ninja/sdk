@@ -30,7 +30,7 @@ async function setup(agents: AgentIdentity[] = []) {
   const config: ServerConfig = {
     port: 0, host: '127.0.0.1', vaultPassphrase: 'test-passphrase-not-for-production', vaultStorage: 'sqlite',
     vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'file', tofuPath: path.join(dir, 'tofu.json'),
-    adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN,
+    adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN, allowAgentsWithoutPermission: true,
     providers: [{ slug: 'google', clientId: 'cid', clientSecret: 'secret', defaultScopes: [DRIVE] }],
     redirectBaseUri: BASE,
   };
@@ -177,7 +177,7 @@ describe('GitHub capabilities end to end', () => {
     const { app, vault } = createServer({
       port: 0, host: '127.0.0.1', vaultPassphrase: 'test-passphrase-not-for-production', vaultStorage: 'sqlite',
       vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'file', tofuPath: path.join(dir, 'tofu.json'),
-      adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN,
+      adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN, allowAgentsWithoutPermission: true,
       providers: [{ slug: 'github', clientId: 'cid', clientSecret: 'secret', defaultScopes: ['repo'] }],
       redirectBaseUri: BASE, ...extra,
     });

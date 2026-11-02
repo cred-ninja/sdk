@@ -25,9 +25,11 @@ export {
   MemoryDelegationStore,
   DelegationRevokedError,
   DEFAULT_MAX_REVOCATION_DEPTH,
+  AGENT_REVOCATION_ALL_USERS,
 } from './delegation-revocation.js';
 export type { PermissionApprover } from './types.js';
 export type {
+  AgentRevocation,
   DelegationGrant,
   DelegationRecord,
   DelegationStatus,

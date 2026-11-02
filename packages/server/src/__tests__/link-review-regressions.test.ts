@@ -554,7 +554,7 @@ describe('small hardening items (review item 8)', () => {
 
 describe('broker allowlist (review item 9)', () => {
   it('Link off: Linear only at GraphQL, HubSpot only at data APIs, Slack never at auth.revoke', async () => {
-    const hx = await harness({ linkEnabled: false });
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'slack', userId: 'default', accessToken: 'xoxb-legacy', scopes: ['chat:write'] });
@@ -741,7 +741,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('broker URLs cannot hide segments with percent-encoding (v2 item 1)', () => {
   it('refuses encoded dot, slash, backslash and percent in any case, and dot or empty segments', async () => {
-    const hx = await harness({ linkEnabled: false });
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await hx.server.vault.store({ provider: 'slack', userId: 'default', accessToken: 'xoxb-legacy', scopes: ['chat:write'] });
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });

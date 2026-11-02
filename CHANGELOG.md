@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### BREAKING: agents need a Permission, and a revocation holds
+
+- `@credninja/server`: `POST /api/v1/delegate` and `POST /bc-authorize` refuse
+  an agent named by `agent_did` that holds no Permission for the service
+  (`403 permission_required`, naming the fix). Before this, an agent with no
+  Permission was issued the whole connection, so any new did:key presented with
+  the agent token got every stored scope. Grant one at `POST /admin/permissions`.
+  A file vault cannot store Permissions, so every agent is refused there; use
+  `VAULT_STORAGE=sqlite`.
+- Revoking a Permission no longer widens the agent to the whole connection. It
+  used to delete the row, and the agent then counted as having no limit. The
+  revocation is now recorded, the agent's live delegations on that service are
+  revoked, and it is refused (`403 agent_access_revoked`) until it is granted
+  again.
+- Revoking a delegation holds out each agent the cascade reached, for that user
+  and service, instead of letting it ask again at once. This also applies at
+  `/api/v1/subdelegate`, `/bc-authorize` and `/api/v1/token`.
+  `POST /admin/permissions` ends the hold at the limits it names. Disconnecting
+  a connection holds no agent out.
+- `POST /api/v1/delegate` now honours a Permission stored under the agent's
+  record id, as `/api/v1/subdelegate` already did. It used to look only under
+  the DID and otherwise issue the whole connection.
+- `@credninja/vault`: `revokePermission` returns the Permission removed and
+  records an agent revocation; `createPermission` ends one. New
+  `recordAgentRevocations`, `getAgentRevocation` and `clearAgentRevocations`,
+  and a `vault_agent_revocations` table created on start. Existing rows are not
+  changed, and a Permission revoked before this version left no record.
+- Deprecated opt-outs, each logging a warning at startup and marking affected
+  audit events in `metadata.enforcementOptOuts`:
+  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` and
+  `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION`. Setting both restores the old
+  behavior, widening included. They will be removed.
+
 ### Changed: Cred Link on Delegation Tokens
 
 - `@credninja/server`: a Cred Link delegation (`connection_id`) is a

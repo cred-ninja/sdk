@@ -33,6 +33,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
+    allowAgentsWithoutPermission: true,
     allowRawTokens: true,
     providers: [
       {
@@ -262,6 +263,7 @@ describe('@credninja/server', () => {
     it('supports a custom request verifier without a static agent token', async () => {
       const { app, tofu } = createServer(makeTestConfig({
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         agentRequestVerifier: (req) => {
           if (req.get('X-Test-Agent') === 'external-agent') {
@@ -297,6 +299,7 @@ describe('@credninja/server', () => {
     it('throws when no agent auth mode is configured', () => {
       expect(() => createServer(makeTestConfig({
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         agentRequestVerifier: undefined,
       }))).toThrow('Either agentToken or agentRequestVerifier is required');
@@ -2305,6 +2308,7 @@ describe('@credninja/server', () => {
       const config = makeTestConfig({
         requireAgentIdentity: false,
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,

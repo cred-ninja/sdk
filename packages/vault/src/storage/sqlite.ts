@@ -8,6 +8,8 @@ import {
   collectDelegationSubtree,
   toRevoked,
   DelegationRevokedError,
+  AGENT_REVOCATION_ALL_USERS,
+  type AgentRevocation,
   type DelegationGrant,
   type DelegationRecord,
   type DelegationRevocationOptions,
@@ -206,6 +208,18 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_delegations_agent ON vault_delegations(agent_did);
     `);
     this.ensureColumn('vault_delegations', 'grant_json', 'ALTER TABLE vault_delegations ADD COLUMN grant_json TEXT');
+
+    // A revocation that outlives the rows it revoked: see AgentRevocation.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_agent_revocations (
+        agent_id   TEXT NOT NULL,
+        service    TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        cause      TEXT NOT NULL,
+        revoked_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, service, user_id)
+      );
+    `);
 
     // Consent records are written once and never updated (draft Section 8.2).
     this.db.exec(`
@@ -670,6 +684,7 @@ export class SQLiteBackend implements StorageBackend {
     const childrenStmt = db.prepare('SELECT id FROM vault_delegations WHERE parent_id = ?').pluck();
     const byAgentStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? ORDER BY created_at, id').pluck();
     const byConnectionStmt = db.prepare('SELECT id FROM vault_delegations WHERE service = ? AND user_id = ? ORDER BY created_at, id').pluck();
+    const byAgentOnServiceStmt = db.prepare('SELECT id FROM vault_delegations WHERE agent_did = ? AND service = ? ORDER BY created_at, id').pluck();
     const rowStmt = db.prepare('SELECT id, parent_id, agent_did, service, user_id, status FROM vault_delegations WHERE id = ?');
     const revokeStmt = db.prepare(`
       UPDATE vault_delegations
@@ -682,6 +697,7 @@ export class SQLiteBackend implements StorageBackend {
         ...(seed.delegationIds ?? []),
         ...(seed.agentDid ? byAgentStmt.all(seed.agentDid) as string[] : []),
         ...(seed.connection ? byConnectionStmt.all(seed.connection.service, seed.connection.userId) as string[] : []),
+        ...(seed.agentOnService ? byAgentOnServiceStmt.all(seed.agentOnService.agentDid, seed.agentOnService.service) as string[] : []),
       ];
       const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => childrenStmt.all(id) as string[], options);
       const revoked: RevokedDelegation[] = [];
@@ -708,7 +724,9 @@ export class SQLiteBackend implements StorageBackend {
   storePermission(row: PermissionRow): void {
     const db = this.ensureDb();
 
-    db.prepare(`
+    // Granting is what ends a revocation: same transaction, so the agent is
+    // never left holding the new row and the old refusal.
+    const insert = db.prepare(`
       INSERT INTO vault_permissions (
         id, agent_id, connection_id, allowed_scopes,
         rate_limit_max, rate_limit_window_ms, ttl_override,
@@ -732,7 +750,12 @@ export class SQLiteBackend implements StorageBackend {
         expires_at           = excluded.expires_at,
         created_by           = excluded.created_by,
         updated_at           = excluded.updated_at
-    `).run(row);
+    `);
+    const clear = db.prepare('DELETE FROM vault_agent_revocations WHERE agent_id = ? AND service = ?');
+    db.transaction(() => {
+      insert.run(row);
+      clear.run(row.agent_id, row.connection_id);
+    })();
   }
 
   getPermission(agentId: string, connectionId: string): PermissionRow | null {
@@ -845,15 +868,60 @@ export class SQLiteBackend implements StorageBackend {
     return row;
   }
 
-  revokePermission(permissionId: string): void {
+  revokePermission(permissionId: string): PermissionRow | null {
     const db = this.ensureDb();
 
-    const revoke = db.transaction((id: string) => {
+    const revoke = db.transaction((id: string): PermissionRow | null => {
+      const row = db.prepare(`SELECT ${PERMISSION_COLUMNS} FROM vault_permissions WHERE id = ?`).get(id) as PermissionRow | undefined;
       db.prepare('DELETE FROM vault_rate_limit_counters WHERE permission_id = ?').run(id);
       db.prepare('DELETE FROM vault_permissions WHERE id = ?').run(id);
+      if (!row) return null;
+      db.prepare(`
+        INSERT INTO vault_agent_revocations (agent_id, service, user_id, cause, revoked_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(agent_id, service, user_id) DO UPDATE SET cause = excluded.cause, revoked_at = excluded.revoked_at
+      `).run(row.agent_id, row.connection_id, AGENT_REVOCATION_ALL_USERS, `permission:${id}`, new Date().toISOString());
+      return row;
     });
 
-    revoke(permissionId);
+    return revoke(permissionId);
+  }
+
+  storeAgentRevocations(rows: readonly AgentRevocation[]): void {
+    const db = this.ensureDb();
+    const insert = db.prepare(`
+      INSERT INTO vault_agent_revocations (agent_id, service, user_id, cause, revoked_at)
+      VALUES (@agentId, @service, @userId, @cause, @revokedAt)
+      ON CONFLICT(agent_id, service, user_id) DO UPDATE SET cause = excluded.cause, revoked_at = excluded.revoked_at
+    `);
+    db.transaction(() => {
+      for (const row of rows) insert.run(row);
+    })();
+  }
+
+  getAgentRevocation(agentIds: readonly string[], service: string, userId: string): AgentRevocation | null {
+    if (agentIds.length === 0) return null;
+    const db = this.ensureDb();
+    const row = db.prepare(`
+      SELECT agent_id, service, user_id, cause, revoked_at
+      FROM vault_agent_revocations
+      WHERE agent_id IN (${agentIds.map(() => '?').join(', ')}) AND service = ? AND user_id IN (?, ?)
+      ORDER BY revoked_at DESC
+      LIMIT 1
+    `).get(...agentIds, service, userId, AGENT_REVOCATION_ALL_USERS) as
+      { agent_id: string; service: string; user_id: string; cause: string; revoked_at: string } | undefined;
+    return row
+      ? { agentId: row.agent_id, service: row.service, userId: row.user_id, cause: row.cause, revokedAt: row.revoked_at }
+      : null;
+  }
+
+  clearAgentRevocations(agentIds: readonly string[], service: string): number {
+    if (agentIds.length === 0) return 0;
+    const db = this.ensureDb();
+    return db.prepare(`
+      DELETE FROM vault_agent_revocations
+      WHERE agent_id IN (${agentIds.map(() => '?').join(', ')}) AND service = ?
+    `).run(...agentIds, service).changes;
   }
 
   listPermissionsForConnection(connectionId: string): PermissionRow[] {

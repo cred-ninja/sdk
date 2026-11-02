@@ -30,6 +30,8 @@ import {
   type DelegationRevocationResult,
   type DelegationRevocationSeed,
   type RecordDelegationInput,
+  type AgentRevocation,
+  MemoryAgentRevocationStore,
 } from './delegation-revocation.js';
 import { MemoryConsentStore } from './consent.js';
 import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from './consent.js';
@@ -79,6 +81,7 @@ export class CredVault {
   private permissionStore: PermissionStore | null = null;
   private memoryDelegations: MemoryDelegationStore | null = null;
   private memoryConsents: MemoryConsentStore | null = null;
+  private memoryAgentRevocations: MemoryAgentRevocationStore | null = null;
 
   constructor(options: VaultOptions) {
     genuineVaults.add(this);
@@ -622,9 +625,50 @@ export class CredVault {
     return this.getPermissionStore().list(agentId);
   }
 
-  async revokePermission(permissionId: string): Promise<void> {
+  /**
+   * Remove a Permission and record that the agent's access was revoked, so
+   * the agent is not treated as simply having no Permission. Returns the
+   * Permission removed, or null when there was none.
+   */
+  async revokePermission(permissionId: string): Promise<Permission | null> {
     await this.ensureInit();
-    await this.getPermissionStore().revoke(permissionId);
+    return this.getPermissionStore().revoke(permissionId);
+  }
+
+  private agentRevocationStore(): Required<Pick<StorageBackend, 'storeAgentRevocations' | 'getAgentRevocation' | 'clearAgentRevocations'>> {
+    const backend = this.backend;
+    if (backend.storeAgentRevocations && backend.getAgentRevocation && backend.clearAgentRevocations) {
+      return {
+        storeAgentRevocations: backend.storeAgentRevocations.bind(backend),
+        getAgentRevocation: backend.getAgentRevocation.bind(backend),
+        clearAgentRevocations: backend.clearAgentRevocations.bind(backend),
+      };
+    }
+    this.memoryAgentRevocations ??= new MemoryAgentRevocationStore();
+    const memory = this.memoryAgentRevocations;
+    return {
+      storeAgentRevocations: memory.storeAgentRevocations.bind(memory),
+      getAgentRevocation: memory.getAgentRevocation.bind(memory),
+      clearAgentRevocations: memory.clearAgentRevocations.bind(memory),
+    };
+  }
+
+  /** Record that these agents' access was revoked (see AgentRevocation). */
+  async recordAgentRevocations(rows: readonly AgentRevocation[]): Promise<void> {
+    await this.ensureInit();
+    if (rows.length > 0) await this.agentRevocationStore().storeAgentRevocations(rows);
+  }
+
+  /** The newest revocation holding for any of these ids of one agent, or null. */
+  async getAgentRevocation(agentIds: readonly string[], service: string, userId: string): Promise<AgentRevocation | null> {
+    await this.ensureInit();
+    return this.agentRevocationStore().getAgentRevocation(agentIds, service, userId);
+  }
+
+  /** End an agent's revocations on a service, for a re-grant. Returns how many ended. */
+  async clearAgentRevocations(agentIds: readonly string[], service: string): Promise<number> {
+    await this.ensureInit();
+    return this.agentRevocationStore().clearAgentRevocations(agentIds, service);
   }
 
   /**

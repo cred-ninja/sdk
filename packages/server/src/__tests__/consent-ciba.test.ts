@@ -228,7 +228,7 @@ describe('consent retention', () => {
 
   it('purges only consents past retention, and audits the purge', async () => {
     const agent = await newAgent();
-    const { app, vault, purgeExpiredConsents } = await setup(agent, null);
+    const { app, vault, purgeExpiredConsents } = await setup(agent, null, { allowAgentsWithoutPermission: true });
     mockNetwork();
     const minted = await delegate(app, agent);
     const consentId = claimsOf(minted.body.access_token).consent_id;

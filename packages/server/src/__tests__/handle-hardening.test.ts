@@ -26,6 +26,7 @@ function makeConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     adminToken: ADMIN_TOKEN,
     requireAgentIdentity: false,
     allowRawTokens: true,
+    allowAgentsWithoutPermission: true,
     agentRequestVerifier: (req) => {
       const agent = req.get('X-Test-Agent');
       return agent

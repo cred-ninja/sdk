@@ -56,7 +56,7 @@ npm run dev
 | GET | `/connect/:provider` | Admin | Start OAuth flow (browser): `?request=<id>` from a connect request; see [User ids](#user-ids) |
 | POST | `/connect/:provider/start` | Admin | JSON `{ user_id, scopes }`: mint a single-use connect request, answers `{ url }` |
 | GET | `/connect/:provider/callback` | None | OAuth callback |
-| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint. A Delegation Token is issued to the did:key in `agent_did`, which proves its key with a `DPoP` proof (see Delegation Tokens below). Returns `access_token`, `token_type: "DPoP"` and `cnf.jkt`. `"token_format": "raw"` gets `403 raw_token_disabled` unless the server runs with `CRED_ALLOW_RAW_TOKENS=true`; a service with no brokered-use path can then only be reached with that setting (`400 brokered_format_unsupported` otherwise) |
+| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint. A Delegation Token is issued to the did:key in `agent_did`, which proves its key with a `DPoP` proof (see Delegation Tokens below). Returns `access_token`, `token_type: "DPoP"` and `cnf.jkt`. `"token_format": "raw"` gets `403 raw_token_disabled` unless the server runs with `CRED_ALLOW_RAW_TOKENS=true`; a service with no brokered-use path can then only be reached with that setting (`400 brokered_format_unsupported` otherwise). An agent that holds no Permission gets `403 permission_required`, and one whose access was revoked gets `403 agent_access_revoked`, see [Agent access](#agent-access) |
 | POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the delegator's `actor_token` is always required. Always returns a brokered Delegation Token (never the raw provider token), or with `exchange: "grant"` a single-use grant, regardless of the requested `token_format` — see note below |
 | POST | `/api/v1/use` | `Authorization: DPoP <token>` + DPoP | Broker an upstream API call with a Delegation Token, with a `DPoP` proof by the key the token is bound to (no `delegation_id` in the body). Under a cumulative constraint the call is debited against the running totals first (see below) |
 | POST | `/api/v1/token` | Bearer + actor token | Sub-Delegation Exchange step 2: RFC 8693 token exchange redeeming a single-use delegation grant from `/api/v1/subdelegate` with `exchange: "grant"` |
@@ -195,6 +195,47 @@ npm run dev
 > root first, as `agent_delegation_chain`. The agent must be an Ed25519 or P-256 did:key so the
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
+
+## Agent access
+
+An agent gets what it was granted. A request naming `agent_did` needs a
+Permission for that agent on that service, stored under its DID or its agent
+record id. Create one with `POST /admin/permissions`:
+
+```json
+{ "agentId": "did:key:z6Mk...", "connectionId": "github", "allowedScopes": ["repo"] }
+```
+
+`connectionId` is the service slug on these routes. Without a Permission the
+agent gets `403 permission_required`, so a new key presented with the agent
+token gets nothing. Permissions need `VAULT_STORAGE=sqlite`, the default: on a
+file vault no agent can be granted one, so every agent is refused. Cred Link
+connections use their own Permissions and are not affected.
+
+A revocation holds until an operator grants access again:
+
+- `DELETE /admin/permissions/:id` revokes the agent's live delegations on that
+  service and holds it out for every user of the service.
+- `DELETE /api/v1/delegations/:id` holds out each agent the cascade reached,
+  for that user and service. Any holder of the agent token can make this call,
+  and only an operator can undo it.
+- Revoking an agent record is permanent for that record.
+- `POST /admin/permissions` ends the hold, for that agent and connection, at
+  the limits it names. It replaces a Permission that already exists.
+- Disconnecting a connection revokes its delegations but holds no agent out:
+  they may be delegated to again once the user reconnects.
+
+While held out, the agent gets `403 agent_access_revoked` at `/api/v1/delegate`,
+`/bc-authorize`, `/api/v1/subdelegate` and `/api/v1/token`, and approved CIBA
+requests cannot be redeemed. On a SQLite vault the hold survives a restart.
+
+Known limits: a raw-token request (the deprecated `CRED_ALLOW_RAW_TOKENS=true`)
+that names no `agent_did` is outside these checks, since it identifies no
+agent. `POST /api/v1/agents/:agentId/revoke-all` and `DELETE
+/admin/agents/:agentId` still need an agent record; revoke the Permission of a
+did:key that has none. `POST /admin/consents/revoke` ends consents, not an
+agent's standing, so an agent with a Permission that needs no approval can be
+issued a new delegation after it.
 
 ## Cascading revocation
 
@@ -602,6 +643,8 @@ All configuration via environment variables (or `.env` file):
 | `CRED_CIBA_BACKCHANNEL_ENDPOINT`, `CRED_CIBA_TOKEN_ENDPOINT`, `CRED_CIBA_CLIENT_ID`, `CRED_CIBA_CLIENT_SECRET` | No | Ask the subject through an external OpenID Provider's CIBA endpoints instead, as its client (all four together) |
 | `CRED_CIBA_CONSENT_TTL_SECONDS` | No | How long an approved CIBA consent is reused for later requests it covers (default `86400`) |
 | `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
+| `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` | No | `false` (default): an agent named by `agent_did` is issued nothing without a Permission (`403 permission_required`). `true`: deprecated, issues up to the whole connection to an agent with no Permission, logs a warning at startup and marks each such issuance in the audit log (`enforcementOptOuts`) |
+| `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION` | No | `false` (default): an agent whose delegation or Permission was revoked is issued nothing on that service until it is granted a Permission again (`403 agent_access_revoked`). `true`: deprecated, lets it ask again at once, logs a warning at startup and marks each such issuance in the audit log (`enforcementOptOuts`) |
 | `CRED_REQUIRE_DPOP` | No | Removed: ignored, with a warning at startup. Every delegation, Cred Link's included, is a DPoP-bound Delegation Token, and a Link token is never issued to the shared static Bearer identity |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | Ignored and deprecated: `/api/v1/subdelegate` always requires an `actor_token` proving the caller is the agent the parent receipt names |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |
