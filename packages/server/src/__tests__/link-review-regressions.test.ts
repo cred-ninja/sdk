@@ -1069,6 +1069,27 @@ describe('polish review: narrowing', () => {
     }
   });
 
+  it('GitHub answers record, whose table does not separate every scope, and its calls are still classified', async () => {
+    const hx = await harness();
+    hx.fake.githubScope = 'repo,read:user';
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['github'], scopes: { github: ['repo', 'read:user'] }, required_scopes: {} }), { provider: 'github', scopes: ['repo', 'read:user'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'github')).text, ['repo', 'read:user']));
+    if (r.outcome !== 'success') throw new Error('github flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    const handle = (await delegate(app, { connection_id: r.connection_id })).body.delegation_id;
+    const n = await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['read:user'] });
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['repo']);
+    expect(n.body.enforcement).toBe('record');
+    const write = await use(app, { delegation_id: handle, url: 'https://api.github.com/repos/o/r/issues', method: 'POST', body: { title: 't' } });
+    expect(write.status).toBe(403);
+    expect(write.body.error).toBe('scope_insufficient');
+    expect(hx.fake.upstream.map((u) => u.url)).not.toContain('https://api.github.com/repos/o/r/issues');
+  });
+
   it('Slack with classification off (deprecated) answers record, and the call still reaches upstream', async () => {
     const hx = await harness({ allowUnclassifiedBrokerCalls: true });
     const { app } = hx;

@@ -144,7 +144,7 @@ back to `default` on its own.
 | POST | `/link/v1/connections/:id/refresh` | Link client | Force a token refresh; returns status only |
 | POST | `/link/v1/connections/:id/reauth` | Link client | Reauth pushed request for this connection |
 | POST | `/link/v1/connections/:id/permissions` | Link client | Grant an agent scopes within the grant |
-| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker`, since every brokered call is classified against the grant as it now stands; `record` only with `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS` set) |
+| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker`, since every brokered call is classified against the grant as it now stands; `record` for GitHub, whose table does not separate every scope, and with `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS` set) |
 
 `GET /api/v1/audit` and `GET /admin/audit` are separate routes: the former
 is scoped to the requesting agent's own `userId`; the latter is

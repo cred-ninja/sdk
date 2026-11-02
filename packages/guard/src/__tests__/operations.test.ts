@@ -72,6 +72,43 @@ describe('evaluateOperation', () => {
     expect(outcome('linear', 'POST', url, ['admin'], { query: 'mutation { issueDelete(id:"x") { success } }' })).toBe('insufficient');
   });
 
+  describe('GitHub GraphQL', () => {
+    const url = 'https://api.github.com/graphql';
+    const query = { query: '{ repository(owner: "o", name: "r") { issues(first: 1) { totalCount } } }' };
+    const mutation = (fields: string) => ({ query: `mutation { ${fields} }` });
+    const create = 'createIssue(input: {}) { clientMutationId }';
+
+    it('a query needs a repository read scope, not an identity scope', () => {
+      for (const scope of ['github.read', 'repo', 'public_repo']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('allowed');
+      for (const scope of ['read:user', 'user', 'read:org', 'gist']) expect(outcome('github', 'POST', url, [scope], query), scope).toBe('insufficient');
+      expect(outcome('github', 'POST', url, ['read:user'], { query: '{ viewer { login } }' })).toBe('insufficient');
+    });
+
+    it('a listed mutation needs its write scope', () => {
+      for (const field of [create, 'closeIssue(input: {}) { clientMutationId }', 'addComment(input: {}) { clientMutationId }']) {
+        expect(outcome('github', 'POST', url, ['repo'], mutation(field)), field).toBe('allowed');
+        expect(outcome('github', 'POST', url, ['public_repo'], mutation(field)), field).toBe('allowed');
+        expect(outcome('github', 'POST', url, ['github.read'], mutation(field)), field).toBe('insufficient');
+        expect(outcome('github', 'POST', url, ['read:user'], mutation(field)), field).toBe('insufficient');
+      }
+    });
+
+    it('any other mutation is not mapped, whatever the grant', () => {
+      for (const field of ['deleteRepository(input: {}) { clientMutationId }', 'addStar(input: {}) { clientMutationId }', 'constructor', '__proto__']) {
+        expect(outcome('github', 'POST', url, ['repo', 'admin:org', 'delete_repo'], mutation(field)), field).toBe('not_mapped');
+      }
+    });
+
+    it('a listed mutation cannot carry an unlisted one, by alias, fragment or a second operation', () => {
+      const grant = ['repo'];
+      expect(outcome('github', 'POST', url, grant, mutation(`${create} deleteRepository(input: {}) { clientMutationId }`))).toBe('not_mapped');
+      expect(outcome('github', 'POST', url, grant, mutation('createIssue: deleteRepository(input: {}) { clientMutationId }'))).toBe('not_mapped');
+      expect(outcome('github', 'POST', url, grant, { query: 'mutation { ...F } fragment F on Mutation { createIssue(input: {}) { clientMutationId } }' })).toBe('not_mapped');
+      expect(outcome('github', 'POST', url, grant, { query: `mutation A { ${create} } mutation B { deleteRepository(input: {}) { clientMutationId } }`, operationName: 'A' })).toBe('not_mapped');
+      expect(outcome('github', 'POST', url, grant, mutation(`renamed: ${create} again: ${create}`))).toBe('allowed');
+    });
+  });
+
   it('an empty scope list covers nothing', () => {
     expect(outcome('notion', 'POST', 'https://api.notion.com/v1/pages', [], {})).toBe('insufficient');
     expect(outcome('github', 'GET', 'https://api.github.com/repos/o/r', [])).toBe('insufficient');

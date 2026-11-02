@@ -307,6 +307,19 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
 
 const LINEAR_ORIGIN = 'https://api.linear.app';
 const GITHUB_ORIGIN = 'https://api.github.com';
+/** What a GitHub GraphQL query needs. A query can reach any repository data, so an identity scope is not enough. */
+const GITHUB_GRAPHQL_READ = ['github.read', 'repo', 'public_repo'];
+/**
+ * The GitHub GraphQL mutations the broker forwards, each with the scopes that
+ * cover it. Any other is refused: `repo` also covers mutations that administer a
+ * repository, which one write scope should not reach by accident. GitHub does
+ * not publish scopes per mutation, so these follow its scope descriptions.
+ */
+const GITHUB_GRAPHQL_MUTATIONS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['createIssue', GH_WRITE],
+  ['closeIssue', GH_WRITE],
+  ['addComment', GH_WRITE],
+]);
 /** The mutations a narrow Linear scope allows. Linear's own `issues:create` also updates; Cred's label says create. */
 const LINEAR_NARROW_MUTATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   'issues:create': new Set(['issueCreate', 'attachmentCreate']),
@@ -526,6 +539,8 @@ interface Mapped {
   needs: Needs;
   /** Extra coverage for this exact call, for scopes that allow only certain mutations. */
   alsoCoveredBy?: (scope: string) => boolean;
+  /** When a call does several things: each entry must be covered, and `needs` alone is not enough. */
+  needsEach?: ReadonlyArray<readonly string[]>;
 }
 
 function classify(request: OperationRequest): Mapped | { reason: string } {
@@ -546,9 +561,11 @@ function classify(request: OperationRequest): Mapped | { reason: string } {
     const shape = classifyGraphql(request.body);
     if (shape.kind === 'refused') return { reason: shape.reason };
     if (service === 'github') {
-      return shape.kind === 'query'
-        ? { operation: 'POST /graphql query', access: 'read', needs: ['github.read', 'repo', 'public_repo', 'read:user', 'user', 'read:org'] }
-        : { operation: 'POST /graphql mutation', access: 'write', needs: GH_WRITE };
+      if (shape.kind === 'query') return { operation: 'POST /graphql query', access: 'read', needs: GITHUB_GRAPHQL_READ };
+      const needsEach = shape.fields?.map((field) => GITHUB_GRAPHQL_MUTATIONS.get(field));
+      if (!needsEach || needsEach.length === 0 || needsEach.some((needs) => needs === undefined)) return { reason: 'mutation_not_in_table' };
+      const mutationNeeds = needsEach as ReadonlyArray<readonly string[]>;
+      return { operation: 'POST /graphql mutation', access: 'write', needs: [...new Set(mutationNeeds.flat())], needsEach: mutationNeeds };
     }
     if (shape.kind === 'query') return { operation: 'POST /graphql query', access: 'read', needs: ['read', 'write', 'admin'] };
     const { fields } = shape;
@@ -638,10 +655,13 @@ export function hasOperationTable(service: string): boolean {
 export function evaluateOperation(request: OperationRequest, grantedScopes: readonly string[]): OperationVerdict {
   const mapped = classify(request);
   if ('reason' in mapped) return { outcome: 'not_mapped', reason: mapped.reason };
-  const { operation, access, needs, alsoCoveredBy } = mapped;
+  const { operation, access, needs, alsoCoveredBy, needsEach } = mapped;
   if (needs === ANY_GRANT) return { outcome: 'allowed', operation, access };
   const scopes = grantedScopes.map((scope) => canonicalScope(request.service, scope));
-  if (scopes.some((scope) => needs.includes(scope) || alsoCoveredBy?.(scope))) return { outcome: 'allowed', operation, access };
+  const covered = needsEach
+    ? needsEach.every((each) => each.some((scope) => scopes.includes(scope)))
+    : scopes.some((scope) => needs.includes(scope) || alsoCoveredBy?.(scope));
+  if (covered) return { outcome: 'allowed', operation, access };
   const known = knownScopes(request.service);
   if (scopes.length > 0 && !scopes.some((scope) => known.has(scope))) return { outcome: 'not_mapped', reason: 'scope_not_in_table' };
   return { outcome: 'insufficient', operation, access, needs };

@@ -209,7 +209,18 @@ describe('GitHub', () => {
     await expectAllowed(ctx, `${GH}/graphql`, 'POST', { query: '{ viewer { login } }' });
     await expectRefused(ctx, `${GH}/repos/o/r/contents/a.txt`, 'PUT', { message: 'm', content: 'eA' }, 'scope_insufficient');
     await expectRefused(ctx, `${GH}/repos/o/r/issues`, 'POST', { title: 't' }, 'scope_insufficient');
-    await expectRefused(ctx, `${GH}/graphql`, 'POST', { query: 'mutation { addStar(input: {starrableId: "x"}) { clientMutationId } }' }, 'scope_insufficient');
+    await expectRefused(ctx, `${GH}/graphql`, 'POST', { query: 'mutation { createIssue(input: {}) { clientMutationId } }' }, 'scope_insufficient');
+    await expectRefused(ctx, `${GH}/graphql`, 'POST', { query: 'mutation { deleteRepository(input: {}) { clientMutationId } }' }, 'operation_not_mapped');
+  });
+
+  it('GraphQL: an identity scope runs no query, and repo runs only the listed mutations', async () => {
+    const identity = await connected('github', ['read:user'], ['read:user']);
+    await expectRefused(identity, `${GH}/graphql`, 'POST', { query: '{ viewer { repositories(first: 1) { totalCount } } }' }, 'scope_insufficient');
+    const repo = await connected('github', ['repo'], ['repo']);
+    await expectAllowed(repo, `${GH}/graphql`, 'POST', { query: '{ viewer { login } }' });
+    await expectAllowed(repo, `${GH}/graphql`, 'POST', { query: 'mutation { addComment(input: {}) { clientMutationId } }' });
+    await expectRefused(repo, `${GH}/graphql`, 'POST', { query: 'mutation { deleteRepository(input: {}) { clientMutationId } }' }, 'operation_not_mapped');
+    await expectRefused(repo, `${GH}/graphql`, 'POST', { query: 'mutation { createIssue: updateRepository(input: {}) { clientMutationId } }' }, 'operation_not_mapped');
   });
 
   it('repo writes, but only delete_repo deletes a repository', async () => {
@@ -596,7 +607,7 @@ describe('the tables agree with what the rest of the code says', () => {
       ['PUT', 'https://sheets.googleapis.com/v4/spreadsheets/a/values/A1', {}],
       ['POST', 'https://docs.googleapis.com/v1/documents/a:batchUpdate', {}],
     ],
-    github: [['POST', 'https://api.github.com/repos/o/r/issues', {}], ['PATCH', 'https://api.github.com/user', {}], ['POST', 'https://api.github.com/graphql', { query: 'mutation { a }' }]],
+    github: [['POST', 'https://api.github.com/repos/o/r/issues', {}], ['PATCH', 'https://api.github.com/user', {}], ['POST', 'https://api.github.com/graphql', { query: 'mutation { createIssue(input: {}) { clientMutationId } }' }]],
     slack: [['POST', 'https://slack.com/api/chat.postMessage', {}], ['POST', 'https://slack.com/api/files.getUploadURLExternal', {}]],
     linear: [['POST', 'https://api.linear.app/graphql', { query: 'mutation { issueDelete(id: "x") { success } }' }]],
     hubspot: [['POST', 'https://api.hubapi.com/crm/v3/objects/contacts', {}]],

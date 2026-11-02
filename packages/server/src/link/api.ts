@@ -904,9 +904,14 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
 /**
  * What stops an agent from exercising the scopes a narrow removed. Every
  * brokered call is classified against the grant as it now stands, so a call only
- * the removed scopes covered is refused, for any provider: 'broker'. That says
- * nothing of a scope that stays and covers the same call (remove gmail.send, keep
- * gmail.modify), which still sends because the grant still says so.
+ * the removed scopes covered is refused: 'broker'. That says nothing of a scope
+ * that stays and covers the same call (remove gmail.send, keep gmail.modify),
+ * which still sends because the grant still says so.
+ *
+ * GitHub answers 'record' for now. Its table follows scope descriptions, as GitHub
+ * publishes no scopes per endpoint, and it does not separate every scope: remove
+ * `workflow`, keep `repo`, and the broker cannot tell a workflow file from any
+ * other, while the provider token still holds both. Calls are still classified.
  *
  * With classification turned off, the broker tells only Google API families
  * apart, so 'broker' only when every removed scope belongs to a family that no
@@ -914,7 +919,7 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
  * this call, so it is judged on what the provider token carries beyond the grant.
  */
 function narrowEnforcement(classifyBrokerCalls: boolean, connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
-  if (classifyBrokerCalls) return 'broker';
+  if (classifyBrokerCalls) return connection.provider === 'github' ? 'record' : 'broker';
   if (linkNarrowEnforcementFor(connection.provider) !== 'broker') return 'record';
   if (connection.provider !== 'google') return 'record';
   const beyond = removed ?? scopeDifference(

@@ -121,6 +121,7 @@ export class FakeProviders {
   googleExpiresIn = 3600;
   googleExchangeStatus = 200;
   salesforceInstance = 'https://acme.my.salesforce.com';
+  githubScope = 'repo';
   /** When set, Google refresh responses report this `scope`. */
   googleRefreshScope: string | undefined = undefined;
   refreshMode: RefreshMode = 'ok';
@@ -237,7 +238,7 @@ export class FakeProviders {
     }
     if (url === 'https://github.com/login/oauth/access_token') {
       this.exchanges.push({ provider: 'github', params });
-      return this.json(200, { access_token: 'gho_token', scope: 'repo', token_type: 'bearer' });
+      return this.json(200, { access_token: 'gho_token', scope: this.githubScope, token_type: 'bearer' });
     }
     if (url === 'https://api.github.com/user') {
       return this.json(200, { id: 4242, login: 'octo' });

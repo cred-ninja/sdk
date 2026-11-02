@@ -1509,13 +1509,14 @@ export interface NarrowConnectionResponse {
    * granted.
    *   'broker': the broker refuses a brokered call that only the removed
    *     scopes covered. Every brokered call is classified against the grant
-   *     as it now stands, for every provider. A scope that stays can still
-   *     cover the same call: remove gmail.send, keep gmail.modify, and sending
+   *     as it now stands. A scope that stays can still cover the same call: remove gmail.send, keep gmail.modify, and sending
    *     still works, because the grant still allows it.
    *   'record': only the records change: the grant, every Permission, and
    *     the scopes an agent may request or hold. A brokered call through a
-   *     still-valid handle is NOT restricted by the removed scopes. Answered
-   *     only when the server runs with classification turned off
+   *     still-valid handle is not promised to be restricted by the removed
+   *     scopes. Answered for GitHub, whose operation table does not separate
+   *     every scope (a removed `workflow` under a remaining `repo`), and when
+   *     the server runs with classification turned off
    *     (CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS).
    * A raw provider token is outside both. To remove access from one, run an
    * update or reauth flow that asks the provider for fewer scopes, or delete
