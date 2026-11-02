@@ -11,25 +11,37 @@ npm install @credninja/sdk
 ## Quick Start: Remote Server Mode
 
 ```typescript
-import { Cred, ConsentRequiredError } from '@credninja/sdk';
+import { Cred, ConsentRequiredError, importAgentIdentity } from '@credninja/sdk';
 
 const cred = new Cred({
   agentToken: process.env.CRED_AGENT_TOKEN!,
   baseUrl: process.env.CRED_BASE_URL!,
 });
+// The agent's key, which only this process holds. An operator grants this DID a
+// Permission on the server; without one it is issued nothing.
+const agentIdentity = await importAgentIdentity({
+  did: process.env.CRED_AGENT_DID!,
+  privateKeyHex: process.env.CRED_AGENT_PRIVATE_KEY_HEX!,
+});
 
 try {
-  const { accessToken } = await cred.delegate({
+  const { token } = await cred.delegateHandle({
     userId: 'user_123',
     appClientId: 'your_app_client_id',
     service: 'google',
-    scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+    scopes: ['calendar.readonly'],
+    agentIdentity,
   });
 
-  // Use the token. Don't store it, it expires.
-  const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary', {
-    headers: { Authorization: `Bearer ${accessToken}` },
+  // The call goes through Cred, which checks it against the grant. The provider
+  // token never reaches this process.
+  const result = await cred.use({
+    token,
+    agentIdentity,
+    url: 'https://www.googleapis.com/calendar/v3/calendars/primary',
+    method: 'GET',
   });
+  console.log(result.status, result.body);
 } catch (err) {
   if (err instanceof ConsentRequiredError) {
     // User hasn't connected Google yet. Send them to the consent URL.
@@ -38,75 +50,16 @@ try {
 }
 ```
 
-## Quick Start: Local / Standalone Mode
-
-Local SDK delegation and local MCP use do **not** enforce receipt constraints.
-They reject every nonempty constraint list before credential export or upstream
-dispatch, including restrictions inherited from a parent receipt. Known types
-return `unsupported_constraint`, unknown types return `unknown_constraint`, and
-malformed lists return `invalid_constraints`. An omitted or empty list remains
-unrestricted. This includes `max_lifetime` and `max_subtree`: local mode has no
-cumulative accounting. Use the hosted broker for its supported enforcement;
-this does not imply that it enforces every known per-action constraint type.
-
-No Cred account needed. Use `@credninja/oauth` and `@credninja/vault` directly:
-
-```typescript
-import { OAuthClient, GoogleAdapter } from '@credninja/oauth';
-import { createVault } from '@credninja/vault';
-
-// OAuth flow
-const google = new OAuthClient({
-  adapter: new GoogleAdapter(),
-  clientId: process.env.GOOGLE_CLIENT_ID!,
-  clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-  redirectUri: 'http://localhost:3000/callback',
-});
-
-const { url, codeVerifier } = await google.getAuthorizationUrl({
-  scopes: ['calendar.readonly'],
-});
-// redirect user to url, exchange code on callback
-const tokens = await google.exchangeCode({ code, codeVerifier });
-
-// Encrypted local vault
-const vault = await createVault({
-  passphrase: process.env.VAULT_PASSPHRASE!,
-  storage: 'sqlite',
-  path: './cred-vault.db',
-});
-await vault.store({
-  provider: 'google', userId: 'user-123',
-  accessToken: tokens.access_token,
-  refreshToken: tokens.refresh_token,
-  expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
-  scopes: ['calendar.readonly'],
-});
-```
-
-See [`@credninja/oauth`](../oauth) and [`@credninja/vault`](../vault) for full standalone docs.
-
-## Configuration
-
-### Remote Server Mode
-
-```typescript
-const cred = new Cred({
-  agentToken: 'your_agent_token',   // required, configured on your Cred server
-  baseUrl: 'https://cred.example.com', // your Cred server URL (required)
-});
-```
-
 `agentToken`, `baseUrl`, and `appClientId` are deployment-time config. Bake them into your agent's environment variables. Don't pass them at runtime from user input.
 
 ## API
 
 ### `cred.delegate(params)`
 
-Get a delegated access token for a service on behalf of a user. Against a Cred server this asks
-for the provider token itself, which servers refuse by default (`raw_token_disabled`): use
-`delegateHandle()` and `use()` below. It still works in local mode and against a server run with
-`CRED_ALLOW_RAW_TOKENS=true`.
+Local mode, or a server run with the deprecated `CRED_ALLOW_RAW_TOKENS=true`: get the provider
+access token itself. Servers refuse this by default (`raw_token_disabled`), and a token handed out
+this way carries the connection's whole scope. Against a server, use `delegateHandle()` and `use()`
+below.
 
 ```typescript
 const result = await cred.delegate({
@@ -130,6 +83,12 @@ Brokered delegation: the provider token stays on the Cred server, and the agent 
 Token, a JWT it can use only with its own key. The server binds the token to the agent's did:key
 and requires a DPoP proof (RFC 9449) by that key to issue it and on every call. `delegateHandle()`
 requires `agentIdentity`; the SDK signs the proofs and the private key never leaves your process.
+
+The agent needs a Permission on the server (`403 permission_required` otherwise), and access stays
+revoked until an operator grants it again (`403 agent_access_revoked`). Each `use()` is checked
+against the grant: `403 scope_insufficient` when it does not cover the call, and
+`403 operation_not_mapped` when the server has not mapped it. See the
+[server docs](https://github.com/cred-ninja/sdk/tree/main/packages/server#operation-enforcement).
 
 ```typescript
 import { importAgentIdentity } from '@credninja/sdk';
@@ -296,11 +255,11 @@ const identity = await importAgentIdentity({
 });
 
 // Delegate with your DID. The receipt proves this delegation happened.
-const { accessToken, receipt } = await cred.delegate({
+const { receipt } = await cred.delegateHandle({
   userId: 'user_123',
   appClientId: 'app_xxx',
   service: 'google',
-  agentDid: identity.did,
+  agentIdentity: identity,
 });
 
 // Verify the receipt
@@ -318,6 +277,8 @@ const valid = await verifyDelegationReceipt(receipt!, {
 | Slack | `slack` |
 | Notion | `notion` |
 | Salesforce | `salesforce` |
+| Linear | `linear` |
+| HubSpot | `hubspot` |
 
 ## Error handling
 
@@ -325,7 +286,7 @@ const valid = await verifyDelegationReceipt(receipt!, {
 import { Cred, ConsentRequiredError, CredError } from '@credninja/sdk';
 
 try {
-  const { accessToken } = await cred.delegate({ ... });
+  const { token } = await cred.delegateHandle({ ... });
 } catch (err) {
   if (err instanceof ConsentRequiredError) {
     // User needs to authorize. Send them to err.consentUrl.

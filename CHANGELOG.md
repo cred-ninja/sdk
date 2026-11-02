@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### BREAKING: generated apps are multi-user, with an agent to grant
+
+- `@credninja/create-app`: a generated app sets `SINGLE_USER_MODE=false`, so every
+  request names `user_id`. It also generates an agent identity in `agent.env` (mode
+  0600, not read by the server) and a `grant-agent.mjs` script, run as
+  `npm run grant -- github github.read`, which creates the Permission an agent now
+  needs. Apps generated earlier keep their settings, but their agents need a
+  Permission once they upgrade.
+
+### Changed: docs match the code
+
+- README, SDK and MCP samples use Delegation Tokens and `use()`, with the agent's
+  key, in place of provider tokens. The MCP sample's `CRED_AGENT_DID` is a did:key,
+  which the server requires. Linear and HubSpot are listed beside the other five
+  brokered services, and the Notion row no longer lists scopes Notion does not have.
+- `SECURITY-AUDITS.md` is now titled Security Review Notes and dated: these are
+  maintainer reviews, not independent audits.
+- `docs/releases/npm-2.0.0.md` records that 2.0.0 is published.
+
 ### BREAKING: a grant means what it says at the broker
 
 - `@credninja/guard`: new operation classifier (`evaluateOperation`,

@@ -17,6 +17,11 @@ on named people into files, commit messages, or PR titles and bodies. Cite only 
 datatracker.ietf.org). `.github/workflows/public-leak-guard.yml` enforces
 this on every PR and push to `main`.
 
+## When docs and code disagree
+
+When docs or marketing describe behavior the code doesn't have, fix the code in
+the same change, or file an issue for it. Don't add a caveat to the docs instead.
+
 ## What this repo does
 
 Cred is OAuth2 credential delegation middleware for AI agents. An agent
@@ -75,7 +80,7 @@ failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
 User ids on the legacy routes: every route that acts on stored provider
 tokens resolves its user id through one resolver (`requestUserId` in
 server.ts). Without `user_id` it refuses with `400 user_id_required` unless
-`SINGLE_USER_MODE=true`, which acts on the shared user `default`. A custom
+`SINGLE_USER_MODE=true`, which acts on the shared user `default`; a generated app sets it to `false`. A custom
 `agentRequestVerifier` principal with `userId` binds agent requests to that
 user (`403 user_id_mismatch` for another). Never add a route that falls
 back to `default` on its own.
@@ -87,10 +92,10 @@ back to `default` on its own.
 | GET | `/admin/login` | None | Admin login form |
 | POST | `/admin/login` | None | Create admin session cookie |
 | GET | `/providers` | Admin | List configured providers |
-| POST | `/admin/permissions` | Admin | Create a Permission record |
+| POST | `/admin/permissions` | Admin | Create or replace a Permission record. A did:key agent is issued nothing without one (`403 permission_required`), and this ends a revocation that holds it out (`403 agent_access_revoked`) |
 | GET | `/admin/permissions` | Admin | List/fetch Permission records |
 | PATCH | `/admin/permissions/:id` | Admin | Update a Permission record |
-| DELETE | `/admin/permissions/:id` | Admin | Delete a Permission record |
+| DELETE | `/admin/permissions/:id` | Admin | Revoke a Permission: the agent's live delegations on the service end, and it is issued nothing new until granted again |
 | GET | `/admin/audit` | Admin | Audit events across all agents (not scoped to one user) |
 | POST | `/bc-authorize` | Bearer + DPoP | CIBA backchannel authentication request for a delegation whose Permission requires approval; returns `auth_req_id`, `expires_in`, `interval`; the agent polls `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba` and a DPoP proof by the same key |
 | GET | `/approve/:authReqId` | None (signed link) | Built-in approval page for the subject, reached by the signed link the approval webhook carries |

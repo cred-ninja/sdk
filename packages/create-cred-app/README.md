@@ -10,14 +10,16 @@ cd my-cred-server
 npm start
 ```
 
-Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to manage OAuth providers.
+Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to manage OAuth providers, then grant your agent what it may do with `npm run grant -- github github.read`.
 
 ## What You Get
 
 - **Express server** powered by `@credninja/server`
 - **SQLite vault** — zero config, audit-capable, no external database needed
 - **Admin UI** at `/connect` for managing OAuth provider connections
-- **Auto-generated credentials** — vault passphrase, admin token, agent token
+- **Auto-generated credentials** — vault passphrase, admin token, agent token, and an agent identity in `agent.env`
+- **Multi-user by default** — every request names the user it acts for
+- **A grant script** — an agent with no Permission is issued nothing
 - **Pre-configured** for Google, GitHub, and Slack
 
 ## How It Works
@@ -26,7 +28,8 @@ Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.e
 2. Generates a `.env` with a random vault passphrase and tokens
 3. Run `npm start` to launch the server with the built-in CLI
 4. Use the admin UI to connect OAuth providers
-5. Give your AI agent the agent token and server URL — it can use `POST /api/v1/delegate` through `@credninja/sdk` to get brokered handles or legacy short-lived access tokens
+5. Grant your agent a Permission with `npm run grant`
+6. Give your agent `agent.env`. Through `@credninja/sdk` it gets a Delegation Token bound to its key, and makes calls through `POST /api/v1/use`, where each is checked against what it was granted
 
 ## Documentation
 
