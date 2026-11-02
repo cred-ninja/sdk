@@ -122,6 +122,7 @@ export class FakeProviders {
   googleExchangeStatus = 200;
   salesforceInstance = 'https://acme.my.salesforce.com';
   githubScope = 'repo';
+  slackScope = 'chat:write,channels:read';
   /** When set, Google refresh responses report this `scope`. */
   googleRefreshScope: string | undefined = undefined;
   refreshMode: RefreshMode = 'ok';
@@ -190,7 +191,7 @@ export class FakeProviders {
       return this.json(200, {
         ok: true,
         access_token: 'xoxb-bot-token',
-        scope: 'chat:write,channels:read',
+        scope: this.slackScope,
         token_type: 'bot',
         bot_user_id: 'U0BOT',
         team: { id: 'T0TEAM', name: 'Acme Workspace' },

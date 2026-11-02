@@ -69,6 +69,12 @@ export interface DelegationResult {
   expiresAt: Date;
   service: string;
   scopes: string[];
+  /**
+   * Local mode: no request, Permission or ceiling narrowed this delegation, so it
+   * is everything the stored connection holds. An empty `scopes` means the whole
+   * connection only when this is set.
+   */
+  unnarrowed?: boolean;
   delegationId: string;
   /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
   receipt?: string;

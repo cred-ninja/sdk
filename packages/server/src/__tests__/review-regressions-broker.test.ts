@@ -153,9 +153,10 @@ describe('Notion scopes at /connect', () => {
     expect((await server.vault.getStored({ provider: 'notion', userId: 'alice' }))?.scopes).toEqual(['notion.read']);
     const agent = await newAgent();
     await server.vault.createPermission!({ agentId: agent.did, connectionId: 'notion', allowedScopes: ['content'], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' });
-    const refused = await delegateAs(server.app, agent, { service: 'notion', user_id: 'alice' }, { bearer: BEARER });
-    expect(refused.status).toBe(400);
-    expect(refused.body.error).toBe('invalid_scope');
+    const issued = await delegateAs(server.app, agent, { service: 'notion', user_id: 'alice' }, { bearer: BEARER });
+    expect(issued.status).toBe(200);
+    expect(issued.body.scopes).toEqual(['notion.read']);
+    expect((await delegateAs(server.app, agent, { service: 'notion', user_id: 'alice', scopes: ['content'] }, { bearer: BEARER })).status).toBe(403);
   });
 
   it('an old name is stored as sent, and it does not widen: read_content derives no write', async () => {
@@ -164,12 +165,12 @@ describe('Notion scopes at /connect', () => {
     const ask = async (server: typeof reader, allowed: string) => {
       const agent = await newAgent();
       await server.vault.createPermission!({ agentId: agent.did, connectionId: 'notion', allowedScopes: [allowed], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' });
-      return (await delegateAs(server.app, agent, { service: 'notion', user_id: 'alice' }, { bearer: BEARER })).status;
+      return (await delegateAs(server.app, agent, { service: 'notion', user_id: 'alice' }, { bearer: BEARER })).body.scopes;
     };
-    expect(await ask(reader, 'notion.read')).toBe(200);
-    expect(await ask(reader, 'content')).toBe(400);
+    expect(await ask(reader, 'notion.read')).toEqual(['notion.read']);
+    expect(await ask(reader, 'content')).not.toContain('content');
     const writer = await connectNotion(['update_content']);
-    expect(await ask(writer, 'content')).toBe(200);
+    expect(await ask(writer, 'content')).toContain('content');
   });
 
   it('a row stored under the old names keeps its meaning: read_content reads, update_content writes', async () => {

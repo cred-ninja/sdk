@@ -432,8 +432,8 @@ describe('derived read scopes reach every grant path', () => {
     expect(res.body.error).toBe('scope_escalation_denied');
   });
 
-  it('a derived scope cannot be asked for unless the Permission allows it', async () => {
-    const ctx = await connected('github', ['repo'], ['repo']);
+  it('a derived scope cannot be asked for unless the Permission covers it', async () => {
+    const ctx = await connected('github', ['repo', 'read:user'], ['read:user']);
     const res = await delegateAs(ctx.app, ctx.agent, { service: 'github', user_id: 'alice', scopes: ['github.read'] }, { bearer: BEARER });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('scope_escalation_denied');

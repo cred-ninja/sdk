@@ -5,6 +5,7 @@
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
+import { withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 import {
   CredConfig,
   CredLocalConfig,
@@ -920,19 +921,25 @@ export class Cred {
 
     const delegationId = `local_${params.service}_${params.userId}`;
     const grantedScopes = entry.scopes ?? [];
+    const requested = params.scopes && params.scopes.length > 0 ? params.scopes : null;
+    const ceiling = !requested && agentRecord && agentRecord.scopeCeiling.length > 0 ? agentRecord.scopeCeiling : null;
+    const unnarrowed = !permission && !requested && !ceiling;
     let delegatedScopes = grantedScopes;
 
-    if (permission) {
-      delegatedScopes = delegatedScopes.filter((scope) => permission!.allowedScopes.includes(scope));
-    }
-
-    if (params.scopes && params.scopes.length > 0) {
-      const permittedRequestedScopes = permission
-        ? params.scopes.filter((scope) => permission!.allowedScopes.includes(scope))
-        : params.scopes;
-      delegatedScopes = delegatedScopes.filter((scope) => permittedRequestedScopes.includes(scope));
-    } else if (agentRecord && agentRecord.scopeCeiling.length > 0) {
-      delegatedScopes = delegatedScopes.filter((scope) => agentRecord.scopeCeiling.includes(scope));
+    if (!unnarrowed) {
+      // Read scopes derived from what is stored are available to a narrowed
+      // delegation, and an empty result is a refusal, never the whole connection.
+      delegatedScopes = withStoredDerivedScopes(params.service, grantedScopes);
+      if (permission) {
+        const allowed = withDerivedScopes(params.service, permission.allowedScopes);
+        delegatedScopes = delegatedScopes.filter((scope) => allowed.includes(scope));
+      }
+      if (requested) delegatedScopes = delegatedScopes.filter((scope) => requested.includes(scope));
+      if (ceiling) delegatedScopes = delegatedScopes.filter((scope) => ceiling.includes(scope));
+      if (!requested) delegatedScopes = withoutRedundantDerivedScopes(params.service, delegatedScopes);
+      if (delegatedScopes.length === 0) {
+        throw new CredError('This request or Permission leaves no scope to delegate', 'invalid_scope', 400);
+      }
     }
 
     // Build HMAC of token for audit (raw token never stored)
@@ -974,6 +981,7 @@ export class Cred {
       expiresAt,
       service: params.service,
       scopes: delegatedScopes,
+      ...(unnarrowed ? { unnarrowed: true } : {}),
       delegationId,
       receipt,
     };

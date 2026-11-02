@@ -9,6 +9,7 @@
  * status 401 and a Cred-Request-Id header.
  */
 
+import { narrowedScopeStaysExposed } from '@credninja/guard';
 import type { NextFunction, Request, Response } from 'express';
 import {
   LINK_API_ERROR_STATUS,
@@ -908,6 +909,10 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
  * that stays and covers the same call (remove gmail.send, keep gmail.modify),
  * which still sends because the grant still says so.
  *
+ * A remaining scope that narrows by resource answers 'record' when the provider
+ * token still holds a wider or sibling one (keep drive.file, drop drive): the call
+ * is allowed, and what comes back depends on the whole token.
+ *
  * GitHub answers 'record' for now. Its table follows scope descriptions, as GitHub
  * publishes no scopes per endpoint, and it does not separate every scope: remove
  * `workflow`, keep `repo`, and the broker cannot tell a workflow file from any
@@ -919,7 +924,10 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
  * this call, so it is judged on what the provider token carries beyond the grant.
  */
 function narrowEnforcement(classifyBrokerCalls: boolean, connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
-  if (classifyBrokerCalls) return connection.provider === 'github' ? 'record' : 'broker';
+  if (classifyBrokerCalls) {
+    if (connection.provider === 'github') return 'record';
+    return narrowedScopeStaysExposed(connection.provider, grant.scopes, canonicalScopeSet(connection.provider_scopes)) ? 'record' : 'broker';
+  }
   if (linkNarrowEnforcementFor(connection.provider) !== 'broker') return 'record';
   if (connection.provider !== 'google') return 'record';
   const beyond = removed ?? scopeDifference(

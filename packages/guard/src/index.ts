@@ -38,14 +38,12 @@ export {
   canonicalBrokerUrl,
   methodOverrideChannel,
   contentTypeMismatch,
-  derivedScopes,
-  withDerivedScopes,
-  withoutRedundantDerivedScopes,
-  isBrokerOnlyScope,
+  narrowedScopeStaysExposed,
   hasOperationTable,
   SLACK_MAPPED_METHODS,
 } from './operations.js';
 export type { OperationAccess, OperationRequest, OperationVerdict } from './operations.js';
+export { withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, isBrokerOnlyScope } from '@credninja/protocol';
 
 // Types
 export type {

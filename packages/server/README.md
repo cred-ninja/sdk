@@ -623,6 +623,10 @@ granted.
   handle issued before the narrowing. A scope that stays can still cover the
   same call: narrowing `[gmail.modify, gmail.send]` to `[gmail.modify]` still
   lets a handle send mail, because `gmail.modify` allows it.
+- A remaining scope that narrows by resource (`drive.file`, `drive.metadata*`, Slack
+  `channels:*`, `groups:*`, `im:*`, `mpim:*`) answers `enforcement: "record"` when the
+  provider token still holds a wider or sibling scope: the call is allowed, and what
+  comes back depends on the whole token.
 - GitHub answers `enforcement: "record"`. Calls are still classified against the
   grant, but the table does not separate every GitHub scope: remove `workflow`,
   keep `repo`, and the broker cannot tell a workflow file from any other.

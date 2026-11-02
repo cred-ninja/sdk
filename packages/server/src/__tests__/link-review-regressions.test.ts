@@ -1090,6 +1090,19 @@ describe('polish review: narrowing', () => {
     expect(hx.fake.upstream.map((u) => u.url)).not.toContain('https://api.github.com/repos/o/r/issues');
   });
 
+  it('Slack: a kept read scope with a sibling still on the token answers record', async () => {
+    const hx = await harness();
+    hx.fake.slackScope = 'chat:write,channels:read,groups:read';
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['slack'], scopes: { slack: ['chat:write', 'channels:read'] }, required_scopes: {} }), { provider: 'slack', scopes: ['chat:write', 'channels:read'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'slack')).text, ['chat:write', 'channels:read']));
+    if (r.outcome !== 'success') throw new Error('slack flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    expect((await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['channels:read'] })).body.enforcement).toBe('record');
+  });
+
   it('Slack with classification off (deprecated) answers record, and the call still reaches upstream', async () => {
     const hx = await harness({ allowUnclassifiedBrokerCalls: true });
     const { app } = hx;
@@ -1254,6 +1267,21 @@ describe('second review: Google narrowing is enforced per API family only', () =
     }
     expect(hx.fake.upstream.map((u) => u.url)).not.toContain(GMAIL_SEND_WWW);
     expect((await narrow(hx, client, conn, ['gmail.readonly'])).body).toMatchObject({ changed: false, enforcement: 'broker' });
+  });
+
+  it('keeping a resource-partitioned scope while the token holds a wider one answers record', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['drive', 'drive.file']);
+    const n = await narrow(hx, client, conn, ['drive.file']);
+    expect(n.status, JSON.stringify(n.body)).toBe(200);
+    expect(n.body.enforcement).toBe('record');
+    expect((await narrow(hx, client, conn, ['drive.file'])).body).toMatchObject({ changed: false, enforcement: 'record' });
+  });
+
+  it('keeping a read scope whose wider scope was removed still answers broker', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['drive', 'drive.readonly']);
+    expect((await narrow(hx, client, conn, ['drive.readonly'])).body.enforcement).toBe('broker');
   });
 
   it('a mixed removal answers broker, and each removed scope is closed', async () => {

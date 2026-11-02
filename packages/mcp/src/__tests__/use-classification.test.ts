@@ -84,9 +84,15 @@ describe('local mode cred_use classification', () => {
     expect(JSON.parse(text(result)).status).toBe(302);
   });
 
-  it('a Notion connection with no named scope is write-capable', async () => {
+  it('a Notion delegation is write-capable with no named scope only if nothing narrowed it', async () => {
     const { ctx } = context();
-    expect((await handleUse({ delegation_id: handle('notion', []), url: 'https://api.notion.com/v1/pages', method: 'POST', body: {} }, ctx)).isError).toBe(false);
+    const url = 'https://api.notion.com/v1/pages';
+    const unnarrowed = tokenCache.store({ accessToken: 'tok', service: 'notion', userId: 'default', scopes: [], unnarrowed: true, expiresAt: Date.now() + 60_000 });
+    expect((await handleUse({ delegation_id: unnarrowed, url, method: 'POST', body: {} }, ctx)).isError).toBe(false);
+    mockFetch.mockClear();
+    const narrowed = await handleUse({ delegation_id: handle('notion', []), url, method: 'POST', body: {} }, ctx);
+    expect(narrowed.isError).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('a Salesforce call names its target for the instance check, and keeps the handle if refused for it', async () => {

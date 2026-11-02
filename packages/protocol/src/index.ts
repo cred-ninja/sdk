@@ -26,3 +26,4 @@ export function isCredProtocolVersionSupported(version: string): boolean {
 
 // Cred Link Phase 1 contracts (types, constants, pure helpers).
 export * from './link.js';
+export * from './derived-scopes.js';

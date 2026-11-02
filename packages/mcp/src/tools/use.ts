@@ -14,7 +14,7 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred, CredError } from '@credninja/sdk';
-import { canonicalBrokerUrl, contentTypeMismatch, evaluateOperation, methodOverrideChannel, withDerivedScopes } from '@credninja/guard';
+import { canonicalBrokerUrl, contentTypeMismatch, evaluateOperation, methodOverrideChannel, withDerivedScopes, withStoredDerivedScopes } from '@credninja/guard';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
 import { summarizeGuardDecision } from '../guard-wiring.js';
@@ -240,7 +240,9 @@ export async function handleUse(
       ? { outcome: 'not_mapped' as const, reason: 'content_type' }
       : evaluateOperation(
           { service: entry.service, method: input.method, url: targetUrl, body: input.body },
-          withDerivedScopes(entry.service, entry.scopes ?? []),
+          // Only an unnarrowed delegation is the whole stored connection: a list
+          // narrowed to nothing covers nothing.
+          entry.unnarrowed ? withStoredDerivedScopes(entry.service, entry.scopes ?? []) : withDerivedScopes(entry.service, entry.scopes ?? []),
         );
     if (verdict.outcome === 'not_mapped') {
       return refuse('operation_not_mapped', `Error: operation_not_mapped: this ${entry.service} call is not mapped to a scope, so it is refused.`, { method: input.method, reason: verdict.reason });

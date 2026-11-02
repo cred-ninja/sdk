@@ -3,14 +3,11 @@ import {
   SLACK_MAPPED_METHODS,
   canonicalBrokerUrl,
   contentTypeMismatch,
-  derivedScopes,
   evaluateOperation,
   hasOperationTable,
-  isBrokerOnlyScope,
   methodOverrideChannel,
-  withDerivedScopes,
-  withoutRedundantDerivedScopes,
 } from '../operations.js';
+import { isBrokerOnlyScope, withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 
 const outcome = (service: string, method: string, url: string, scopes: string[], body?: unknown) =>
   evaluateOperation({ service, method, url, body }, scopes).outcome;
@@ -121,21 +118,26 @@ describe('evaluateOperation', () => {
 });
 
 describe('derived read scopes', () => {
+  const derived = (service: string, scopes: string[]) => withDerivedScopes(service, scopes).filter((scope) => !scopes.includes(scope));
+
   it('derive from the wider scope, on that provider only, one way', () => {
-    expect(derivedScopes('github', ['repo'])).toEqual(['github.read']);
-    expect(derivedScopes('github', ['public_repo'])).toEqual(['github.read']);
-    expect(derivedScopes('github', ['read:user'])).toEqual([]);
-    expect(derivedScopes('github', ['github.read'])).toEqual([]);
-    expect(derivedScopes('salesforce', ['api'])).toEqual(['salesforce.read']);
-    expect(derivedScopes('salesforce', ['refresh_token'])).toEqual([]);
-    expect(derivedScopes('slack', ['channels:read'])).toEqual([]);
-    expect(derivedScopes('google', ['repo'])).toEqual([]);
+    expect(derived('github', ['repo'])).toEqual(['github.read']);
+    expect(derived('github', ['public_repo'])).toEqual(['github.read']);
+    expect(derived('github', ['read:user'])).toEqual([]);
+    expect(derived('github', ['github.read'])).toEqual([]);
+    expect(derived('salesforce', ['api'])).toEqual(['salesforce.read']);
+    expect(derived('salesforce', ['refresh_token'])).toEqual([]);
+    expect(derived('slack', ['channels:read'])).toEqual([]);
+    expect(derived('google', ['repo'])).toEqual([]);
+    expect(derived('constructor', ['repo'])).toEqual([]);
   });
 
-  it('a Notion connection with no scopes covers both names, and a read-only list cannot widen', () => {
-    expect(withDerivedScopes('notion', [])).toEqual(['notion.read', 'content']);
+  it('only a stored Notion connection with no scopes covers both names, and a read-only list cannot widen', () => {
+    expect(withStoredDerivedScopes('notion', [])).toEqual(['notion.read', 'content']);
+    expect(withDerivedScopes('notion', [])).toEqual([]);
     expect(withDerivedScopes('notion', ['content'])).toEqual(['content', 'notion.read']);
     expect(withDerivedScopes('notion', ['notion.read'])).toEqual(['notion.read']);
+    expect(withStoredDerivedScopes('notion', ['notion.read'])).toEqual(['notion.read']);
   });
 
   it('drops a derived scope only when its source stays', () => {

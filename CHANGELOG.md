@@ -85,6 +85,18 @@
 - `/connect` offers `notion.read` and `content` for Notion, in place of names the
   tables did not know. Rows stored under the old names keep their meaning:
   `read_content` reads, and `update_content` and `insert_content` write.
+- A Permission, ceiling or parent covers the read scope its scopes derive: Permission
+  `[repo]` plus a request for `github.read` returns `github.read`. The receipt chain
+  verifier uses the same helper. Wildcard Permissions now reach matching stored
+  scopes at `/api/v1/delegate`, as they did at `/api/v1/subdelegate`.
+- Only a stored connection has a whole-connection rule. A Permission, ceiling, parent
+  or capability list that is empty stays empty. In local mode, a request or Permission
+  that narrows to nothing is refused with `invalid_scope`.
+- Under a Guard, a request naming no scope shows Guard what the agent's Permission
+  allows rather than the whole connection.
+- Cred Link: a narrow answers `record` when a remaining scope narrows by resource
+  (`drive.file`, `drive.metadata*`, Slack `channels:*`, `groups:*`, `im:*`, `mpim:*`)
+  and the provider token still holds a wider or sibling scope.
 - Deprecated opt-out: `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS`, which warns at
   startup and marks every affected audit event. The URL allowlist still applies.
 

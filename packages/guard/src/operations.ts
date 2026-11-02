@@ -367,62 +367,30 @@ const LINEAR_NARROW_MUTATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 const LINEAR_SCOPES = ['read', 'write', 'issues:create', 'comments:create', 'timeSchedule:write', 'admin'];
 
-// ── Scopes Cred derives from stored consent ─────────────────────────────────
+// ── Scopes that share a resource partition ──────────────────────────────────
 
 /**
- * Delegation-only read scopes. GitHub, Salesforce and Notion have no read-only
- * scope to ask the provider for, so a connection holding wider consent can hand
- * an agent a read-only delegation that only the broker enforces. The provider
- * token is unchanged, so these mean nothing outside the broker.
- * `from` lists the stored scopes that cover it; null means the connection itself
- * does (a Notion token carries no scopes: its capabilities are set on the
- * integration).
+ * Scopes that narrow by resource rather than by operation. The broker can tell
+ * that a Drive read or a Slack listing is allowed, but what comes back depends on
+ * everything the provider token holds, and narrowing never changes that token. So
+ * with a sibling or wider scope still on the token, these reach more than they say.
  */
-const DERIVED_READ_SCOPES: Readonly<Record<string, { scope: string; from: readonly string[] | null }>> = {
-  github: { scope: 'github.read', from: ['repo', 'public_repo'] },
-  salesforce: { scope: 'salesforce.read', from: ['api', 'full'] },
-  notion: { scope: 'notion.read', from: null },
+const RESOURCE_PARTITIONS: Readonly<Record<string, ReadonlyArray<{ partitioned: readonly string[]; family: readonly string[] }>>> = {
+  google: [{
+    partitioned: ['drive.file', 'drive.metadata', 'drive.metadata.readonly'],
+    family: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata', 'drive.metadata.readonly'],
+  }],
+  slack: [
+    { partitioned: ['channels:read', 'groups:read', 'im:read', 'mpim:read'], family: ['channels:read', 'groups:read', 'im:read', 'mpim:read'] },
+    { partitioned: ['channels:history', 'groups:history', 'im:history', 'mpim:history'], family: ['channels:history', 'groups:history', 'im:history', 'mpim:history'] },
+  ],
 };
 
-/** A Notion connection stores no scopes, and `content` is Cred's name for all it can do. */
-const NOTION_WHOLE_CONNECTION = 'content';
-const NOTION_LEGACY_WRITE = ['update_content', 'insert_content'];
-
-/** The scopes this stored consent derives, beyond what it names. */
-export function derivedScopes(service: string, stored: readonly string[]): string[] {
-  const derived = DERIVED_READ_SCOPES[service];
-  if (!derived) return [];
-  const out: string[] = [];
-  if (derived.from === null || derived.from.some((scope) => stored.includes(scope))) out.push(derived.scope);
-  if (service === 'notion' && (stored.length === 0 || stored.some((scope) => NOTION_LEGACY_WRITE.includes(scope)))) out.push(NOTION_WHOLE_CONNECTION);
-  return out.filter((scope) => !stored.includes(scope));
-}
-
-/** Whether a scope means anything only at the broker, so it can never describe a raw token. */
-export function isBrokerOnlyScope(service: string, scope: string): boolean {
-  return DERIVED_READ_SCOPES[service]?.scope === scope;
-}
-
-/**
- * Scopes plus what they derive: the one coverage helper every grant path uses,
- * so a stored grant, a Permission, a scope ceiling and a parent delegation all
- * mean the same thing. Coverage runs one way, from the wider scope to the read.
- */
-export function withDerivedScopes(service: string, scopes: readonly string[]): string[] {
-  return [...scopes, ...derivedScopes(service, scopes)];
-}
-
-/**
- * Drop a derived scope whose source is also in the list, so a delegation that
- * asked for nothing in particular is issued what was stored, not both.
- */
-export function withoutRedundantDerivedScopes(service: string, scopes: readonly string[]): string[] {
-  const derived = DERIVED_READ_SCOPES[service];
-  if (!derived) return [...scopes];
-  const covered = derived.from === null
-    ? scopes.some((scope) => scope === NOTION_WHOLE_CONNECTION)
-    : derived.from.some((scope) => scopes.includes(scope));
-  return covered ? scopes.filter((scope) => scope !== derived.scope) : [...scopes];
+/** Whether a remaining partitioned scope still reaches what the token holds beyond it. */
+export function narrowedScopeStaysExposed(service: string, remaining: readonly string[], providerScopes: readonly string[]): boolean {
+  const partitions = Object.prototype.hasOwnProperty.call(RESOURCE_PARTITIONS, service) ? RESOURCE_PARTITIONS[service]! : [];
+  return partitions.some(({ partitioned, family }) => remaining.some((scope) => partitioned.includes(scope))
+    && providerScopes.some((scope) => family.includes(scope) && !remaining.includes(scope)));
 }
 
 // ── Canonical requests ──────────────────────────────────────────────────────

@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, withDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, withDerivedScopes, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -3291,7 +3291,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           const resolved = resolveUserId(req, { explicit, agent: true });
           if (resolved.ok && !isReservedLinkVaultUserId(resolved.userId)) {
             const stored = await vault.getStored({ provider: service, userId: resolved.userId });
-            if (stored) storedScopesForGuard.set(req, stored.scopes ?? []);
+            if (stored) {
+              // Through the agent's Permission: Guard judges what could be issued.
+              // With none the route refuses, and says what fixes it.
+              const agentDid = req.body?.agent_did;
+              const record = typeof agentDid === 'string' ? await vault.getAgentByDid?.(agentDid) ?? null : null;
+              const permission = typeof agentDid === 'string' ? await permissionForDidAgent(agentDid, record, service) : null;
+              storedScopesForGuard.set(req, permission
+                ? withoutRedundantDerivedScopes(service, scopesForDidAgent(service, stored.scopes ?? [], record, permission))
+                : stored.scopes ?? []);
+            }
           }
         }
       } catch {
@@ -4136,9 +4145,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   function scopesForDidAgent(service: string, stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
     if (!permission && !allowAgentsWithoutPermission) return [];
-    return withDerivedScopes(service, stored)
+    const allowed = permission ? withDerivedScopes(service, permission.allowedScopes) : null;
+    return withStoredDerivedScopes(service, stored)
       .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope))
-      .filter((scope) => !permission || permission.allowedScopes.some((allowed) => scopeEquivalent(allowed, scope)));
+      .filter((scope) => !allowed || allowed.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(allowed, scope));
   }
 
   /** A ceiling covers a scope, or the wider scope a derived read scope comes from. Never the reverse. */

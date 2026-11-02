@@ -602,3 +602,38 @@ describe('local mode: a Salesforce token goes only to the stored instance', () =
     await expect(cred().authorizeLocalUse({ service: 'github', userId: 'user-1', accessToken: 't' })).resolves.toBeUndefined();
   });
 });
+
+describe('local mode: narrowing a Notion connection', () => {
+  const notion = { provider: 'notion', userId: 'user-1', accessToken: 'ntn', scopes: [] as string[] };
+  const ask = (extra: Record<string, unknown> = {}) => makeLocalCred({ notion: { clientId: 'i', clientSecret: 's' } }).delegate({ service: 'notion', userId: 'user-1', appClientId: 'local', ...extra } as never);
+  const withPermission = (allowedScopes: string[]) => {
+    mockVault.getPermission = vi.fn().mockResolvedValue({ id: 'p', agentId: 'did:key:zA', connectionId: 'notion', allowedScopes, requiresApproval: false });
+    mockVault.getAgentByDid = vi.fn().mockResolvedValue({ id: 'agt_a', status: 'active', scopeCeiling: [] });
+  };
+  beforeEach(() => {
+    mockVault.get.mockResolvedValue(notion);
+    mockVault.writeAuditEvent = vi.fn();
+  });
+
+  it('an unnarrowed delegation says so', async () => {
+    const result = await ask();
+    expect(result.scopes).toEqual([]);
+    expect(result.unnarrowed).toBe(true);
+  });
+
+  it('a request that narrows to nothing is refused, not the whole connection', async () => {
+    await expect(ask({ scopes: ['no.such.scope'] })).rejects.toMatchObject({ code: 'invalid_scope' });
+  });
+
+  it('a Permission that narrows to nothing is refused', async () => {
+    withPermission([]);
+    await expect(ask({ agentDid: 'did:key:zA' })).rejects.toMatchObject({ code: 'invalid_scope' });
+  });
+
+  it('read scopes derive from the stored list before filtering', async () => {
+    withPermission(['notion.read']);
+    const result = await ask({ agentDid: 'did:key:zA' });
+    expect(result.scopes).toEqual(['notion.read']);
+    expect(result.unnarrowed).toBeUndefined();
+  });
+});
