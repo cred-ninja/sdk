@@ -8,6 +8,8 @@ export interface VaultEntry {
   refreshToken?: string;
   expiresAt?: Date;
   scopes?: string[];
+  /** Salesforce: the org's `https://` instance origin. A token for this connection goes nowhere else. */
+  instanceUrl?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -22,6 +24,8 @@ export interface StoreInput {
   refreshToken?: string;
   expiresAt?: Date;
   scopes?: string[];
+  /** Salesforce: the org's `https://` instance origin. A token for this connection goes nowhere else. */
+  instanceUrl?: string;
 }
 
 /**
@@ -160,6 +164,7 @@ export interface StoredRow {
   refreshTokenTag?: string;
   expiresAt?: string; // ISO string
   scopes?: string; // JSON array string
+  instanceUrl?: string;
   createdAt: string; // ISO string
   updatedAt: string; // ISO string
 }

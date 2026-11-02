@@ -1597,6 +1597,8 @@ describe('@credninja/server', () => {
         provider: 'salesforce',
         userId: 'sf-user',
         accessToken: '00D.sf-token',
+        // A token goes only to its connection's stored instance; these cases are about the host grammar in front of that.
+        instanceUrl: allowed ? new URL(targetUrl).origin : 'https://acme.my.salesforce.com',
         expiresAt: new Date(Date.now() + 3600 * 1000),
         scopes: ['api'],
       });

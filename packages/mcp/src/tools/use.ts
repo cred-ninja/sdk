@@ -250,6 +250,12 @@ export async function handleUse(
     }
   }
 
+  // The check against the stored Salesforce instance is in authorizeLocalUse:
+  // with nothing to run it, no host can be trusted with the token.
+  if (entry.service === 'salesforce' && !(context.cred && context.useServerBroker === false)) {
+    return refuse('salesforce_instance_unknown', 'Error: salesforce_instance_unknown: this call cannot be checked against the connection\'s Salesforce instance.', { method: input.method });
+  }
+
   // ── 4. Local mode: re-check the connection and audit the exercise ─────────
   // The cached token outlives a revocation made by another process sharing
   // the vault, so the connection is checked on every call, not only at
@@ -261,11 +267,13 @@ export async function handleUse(
         userId: entry.userId,
         accessToken: entry.accessToken,
         ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
+        ...(entry.service === 'salesforce' ? { targetUrl } : {}),
         ...(context.agentDid ? { agentId: context.agentDid } : {}),
         ...(classify ? {} : { auditMetadata: { enforcementOptOuts: ['unclassified_broker_calls'] } }),
       });
     } catch (err) {
-      context.tokenCache.delete(input.delegation_id);
+      // A wrong host says nothing about the handle: only a revoked connection ends it.
+      if (!(err instanceof CredError && err.code.startsWith('salesforce_instance_'))) context.tokenCache.delete(input.delegation_id);
       return toolErrorResult(err, 'Local use was refused');
     }
   }
@@ -329,7 +337,8 @@ export async function handleUse(
       }
 
       const nextUrl = new URL(response.headers.get('location')!, currentUrl).toString();
-      if (!context.tokenCache.isAllowedUrl(entry.service, nextUrl, entry.scopes)) {
+      const leavesInstance = entry.service === 'salesforce' && new URL(nextUrl).origin !== new URL(targetUrl).origin;
+      if (leavesInstance || !context.tokenCache.isAllowedUrl(entry.service, nextUrl, entry.scopes)) {
         // Refuse to forward the token to a redirect target outside the allowlist.
         return {
           content: [{

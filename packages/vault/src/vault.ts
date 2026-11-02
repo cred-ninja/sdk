@@ -216,6 +216,7 @@ export class CredVault {
       accessTokenTag: accessEnc.tag,
       expiresAt: input.expiresAt?.toISOString(),
       scopes: input.scopes ? JSON.stringify(input.scopes) : undefined,
+      ...(input.instanceUrl ? { instanceUrl: input.instanceUrl } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -292,6 +293,8 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          // A refresh never moves a connection to another instance.
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         });
 
         return {
@@ -367,6 +370,7 @@ export class CredVault {
       refreshToken,
       expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
       scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };
@@ -413,6 +417,7 @@ export class CredVault {
         refreshToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
         scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         createdAt: new Date(row.createdAt),
         updatedAt: new Date(row.updatedAt),
       };

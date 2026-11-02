@@ -54,7 +54,14 @@ type Server = ReturnType<typeof createServer>;
 async function connected(service: string, stored: string[], granted: string[], overrides: Partial<ServerConfig> = {}, permission: Record<string, unknown> = {}) {
   const server: Server = createServer(config(overrides));
   await server.vault.init();
-  await server.vault.store({ provider: service, userId: 'alice', accessToken: 'upstream-token', expiresAt: new Date(Date.now() + 3600_000), scopes: stored });
+  await server.vault.store({
+    provider: service,
+    userId: 'alice',
+    accessToken: 'upstream-token',
+    expiresAt: new Date(Date.now() + 3600_000),
+    scopes: stored,
+    ...(service === 'salesforce' ? { instanceUrl: 'https://acme.my.salesforce.com' } : {}),
+  });
   const agent = await newAgent();
   await grantTo(server, agent, service, granted, permission);
   const minted = await delegateAs(server.app, agent, { service, user_id: 'alice' }, { bearer: BEARER });

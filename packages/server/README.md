@@ -219,9 +219,9 @@ queries and no mutation, however the document is arranged.
 | Slack | The methods in `SLACK_READ_METHODS` and `SLACK_WRITE_METHODS` | Every other method, and a write method over GET |
 | Linear | GraphQL queries (`read`, `write`, `admin`); mutations (`write`); `issueCreate` and `attachmentCreate` (`issues:create`); `commentCreate` (`comments:create`) | Subscriptions, batches, persisted queries, unparseable documents, and a mutation under `admin` alone |
 | GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries (`github.read`, `repo`, `public_repo`, not an identity scope); the GraphQL mutations `createIssue`, `closeIssue` and `addComment` (`repo`, `public_repo`) | Every other GraphQL mutation, enterprise routes, GraphQL over GET, anything else |
-| HubSpot | Contacts, companies, deals, tickets, line items and quotes: read, search, create, update and delete; owners; properties | Batch endpoints, `/cms/`, `/content/`, `/automation/` |
+| HubSpot | Contacts, companies, deals, tickets, line items and quotes: read, search, create, update and delete; owners; properties. HubSpot's legacy `tickets` scope, which token responses can still name, covers ticket reads and writes | Batch endpoints, `/cms/`, `/content/`, `/automation/` |
 | Notion | Pages, blocks, databases, data sources, comments, users, search | File uploads |
-| Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects` | Composite, tooling, jobs and Apex REST |
+| Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects`, at the connection's own instance | Composite, tooling, jobs, Apex REST, and any other host |
 
 GitHub does not publish scopes per endpoint, and HubSpot's per-endpoint scopes
 could not be read from its docs, so those two tables follow the provider's scope
@@ -235,8 +235,22 @@ only the broker enforces: `github.read` (from stored `repo` or `public_repo`),
 `salesforce.read` (from `api` or `full`) and `notion.read` (from any Notion
 connection). Name one in a Permission's `allowedScopes`, a ceiling or a request.
 The provider token is unchanged, so a derived scope is never issued as a raw token
-(`400 invalid_scope`). A Notion connection stores no scopes: `content` names all it
-can do.
+(`400 invalid_scope`). A Notion connection stores what `/connect` asked for, or no
+scopes at all, and `content` then names all it can do. `/connect` used to offer
+`read_content`, `update_content` and `insert_content`: rows stored under them keep
+that meaning.
+
+`github.read` reaches code, issues, pull requests and search. It does not reach a
+repository's secrets, variables, hooks, keys, collaborators, branch protection or
+alerts, or account and org settings, which need the provider scope itself. It does
+cover GraphQL queries, whose root fields are not mapped, so a GraphQL query under
+`github.read` is not held to that list.
+
+A Salesforce token goes only to the instance stored for its connection, which the
+OAuth callback records from Salesforce's answer: `400 salesforce_instance_mismatch`
+for any other host, and `400 salesforce_instance_unknown` when none is stored, with
+no opt-out. A Salesforce connection made before this version has none and must be
+reconnected. An instance change at Salesforce needs a reconnect too.
 
 The request classified is the request sent. Encoded separators (`%2F`, `%2E` in a
 segment, `%5C`, `%25`), doubled slashes, trailing-dot hosts, and a percent-encoded
@@ -260,8 +274,7 @@ Cred Link agent, then the shared `server-agent`) with the key thumbprint as
 names and writes `{id}` for every other segment, so it holds no query string and
 no identifier, at the cost of some detail. `origin` is recorded only for a known
 provider host or the instance stored for a Salesforce connection, else as
-`refused`. Only Cred Link connections store an instance, so every other Salesforce
-call records `refused`, successful ones included. Refusals are events too (`guard_denied`, `url_refused`,
+`refused`. Refusals are events too (`guard_denied`, `url_refused`,
 `method_override_refused`, `capability_denied`, `upstream_unreachable`). Repeats
 of one refusal within a minute (same agent, delegation, method, origin, route and
 policy) collapse into the first event and a summary with `metadata.aggregated`,

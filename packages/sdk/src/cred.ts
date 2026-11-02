@@ -1532,6 +1532,24 @@ export class Cred {
     const entry = entries.find((candidate) => candidate.provider === params.service);
     const connected = entry !== undefined
       && (params.accessToken === undefined || sameSecret(entry.accessToken, params.accessToken));
+    // Any *.salesforce.com or *.force.com host passes the URL allowlist, and
+    // anyone can have one, so the token goes only to the stored instance.
+    if (connected && params.service === 'salesforce') {
+      const instance = (entry as { instanceUrl?: string }).instanceUrl;
+      let targetOrigin: string | null = null;
+      try {
+        targetOrigin = params.targetUrl ? new URL(params.targetUrl).origin : null;
+      } catch {
+        targetOrigin = null;
+      }
+      if (!instance || targetOrigin !== new URL(instance).origin) {
+        const error = instance ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
+        await this.recordLocalRefusal({ service: params.service, userId: params.userId, error, ...(params.agentId ? { agentId: params.agentId } : {}) });
+        throw new CredError(instance
+          ? 'This Salesforce connection belongs to another instance'
+          : 'This Salesforce connection has no stored instance. Store it again with instanceUrl.', error, 403);
+      }
+    }
     this.writeAuditEvent({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),

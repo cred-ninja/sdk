@@ -74,6 +74,7 @@ import {
   isCredProtocolVersionSupported,
   isConnectionId,
   isScopeSubset,
+  linkAudienceFor,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
 import { auditOriginAndRoute, createRefusalAggregator } from './audit-route.js';
@@ -130,7 +131,7 @@ interface BrokeredDelegation {
   link?: LinkHandleBinding;
   /** DID the handle was issued to, when the request named one. */
   agentDid?: string;
-  /** Salesforce: the origin of the instance stored for this connection, set at each Link exercise. */
+  /** Salesforce: the origin of the instance stored for this connection, set at each exercise. */
   instanceOrigin?: string;
   /** The Delegation Token's capabilities: exercise is held within them. */
   capabilities?: CredDelegationDetail[];
@@ -2709,9 +2710,10 @@ export function createServer(config: ServerConfig) {
           { label: 'Files (write)', value: 'files:write' },
         ],
         notion: [
-          { label: 'Read content', value: 'read_content' },
-          { label: 'Update content', value: 'update_content' },
-          { label: 'Insert content', value: 'insert_content' },
+          // Notion takes no scopes: its capabilities are set on the integration.
+          // These are what Cred's broker holds an agent to.
+          { label: 'Read content', value: 'notion.read' },
+          { label: 'Read and change content', value: 'content' },
         ],
         salesforce: [
           { label: 'API', value: 'api' },
@@ -3149,6 +3151,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ? tokens.scope.split(/[\s,]+/).map((scope) => scope.trim()).filter(Boolean)
         : pending.scopes;
 
+      // A Salesforce token is good only at its org's instance, which the broker
+      // holds it to. An answer naming no acceptable instance stores nothing.
+      const instanceUrl = slug === 'salesforce' ? linkAudienceFor('salesforce', tokens.instance_url ?? null) : null;
+      if (slug === 'salesforce' && !instanceUrl) {
+        console.error('[connect] Salesforce named no acceptable instance', { provider: slug });
+        res.status(502).send('Salesforce did not name an acceptable instance URL, so this connection was not stored.');
+        return;
+      }
+
       await vault.store({
         provider: slug,
         userId: pending.userId,
@@ -3156,6 +3167,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refreshToken: tokens.refresh_token,
         expiresAt,
         scopes,
+        ...(instanceUrl ? { instanceUrl } : {}),
       });
 
       console.log('[connect] Provider connected successfully', { provider: slug });
@@ -4714,6 +4726,25 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseBrokeredCall(delegationId, delegation, url, 'url_refused', { method: normalizedMethod });
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
+      }
+      // Any *.salesforce.com or *.force.com host passes the grammar above, and
+      // anyone can have one, so a Salesforce token goes only to the instance
+      // stored for its connection. This has no opt-out. (Link connections are
+      // held to theirs by upstreamAllowed.)
+      if (delegation.service === 'salesforce' && !delegation.link) {
+        const stored = await vault.getStored({ provider: delegation.service, userId: delegation.userId });
+        delegation.instanceOrigin = stored?.instanceUrl ? new URL(stored.instanceUrl).origin : undefined;
+        if (!delegation.instanceOrigin || new URL(upstreamUrl).origin !== delegation.instanceOrigin) {
+          const error = delegation.instanceOrigin ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
+          refuseBrokeredCall(delegationId, delegation, url, error, { method: normalizedMethod });
+          res.status(400).json({
+            error,
+            message: delegation.instanceOrigin
+              ? 'This Salesforce connection belongs to another instance'
+              : 'This Salesforce connection has no stored instance, so no host can be trusted with its token. Reconnect it.',
+          });
+          return;
+        }
       }
       // Classify the exact URL, method and body that will be forwarded.
       if (classifyBrokerCalls) {

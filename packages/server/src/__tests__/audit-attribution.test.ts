@@ -447,19 +447,20 @@ describe('refusals are events', () => {
     expect(after.find((e) => e.metadata?.overflow === true)?.metadata?.repeats).toBe(20);
   });
 
-  it('a Salesforce host is recorded only when it is the connection\'s stored instance, and a legacy connection stores none', async () => {
+  it('a Salesforce host is recorded only when it is the connection\'s stored instance', async () => {
     const { app, vault } = await setup();
-    await vault.store({ provider: 'salesforce', userId: 'alice', accessToken: 'sf', expiresAt: new Date(Date.now() + 3600_000), scopes: ['api'] });
+    await vault.store({ provider: 'salesforce', userId: 'alice', accessToken: 'sf', expiresAt: new Date(Date.now() + 3600_000), scopes: ['api'], instanceUrl: 'https://acme.my.salesforce.com' });
     stubUpstream();
     const agent = await newAgent();
     await vault.createPermission!({ agentId: agent.did, connectionId: 'salesforce', allowedScopes: ['api'], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' });
     const minted = await delegateAs(app, agent, { service: 'salesforce', user_id: 'alice' }, { bearer: BEARER });
     expect(minted.status, JSON.stringify(minted.body)).toBe(200);
-    const res = await use(app, agent, minted.body.access_token, 'https://tok-secret.my.salesforce.com/services/data/v60.0/limits');
-    expect(res.status).toBe(200);
-    const event = (await eventsOf(vault)).find((e) => e.action === 'access' && e.outcome === 'success');
-    expect(event?.metadata?.origin).toBe(REFUSED_ORIGIN);
-    expect(JSON.stringify(event)).not.toContain('tok-secret');
+    expect((await use(app, agent, minted.body.access_token, 'https://tok-secret.my.salesforce.com/services/data/v60.0/limits')).status).toBe(400);
+    const refused = (await eventsOf(vault)).find((e) => e.errorMessage === 'salesforce_instance_mismatch');
+    expect(refused?.metadata?.origin).toBe(REFUSED_ORIGIN);
+    expect(JSON.stringify(refused)).not.toContain('tok-secret');
+    expect((await use(app, agent, minted.body.access_token, 'https://acme.my.salesforce.com/services/data/v60.0/limits')).status).toBe(200);
+    expect((await eventsOf(vault)).find((e) => e.action === 'access' && e.outcome === 'success')?.metadata?.origin).toBe('https://acme.my.salesforce.com');
   });
 
   it('flushes on SIGTERM and SIGINT, then exits with the signal status', () => {

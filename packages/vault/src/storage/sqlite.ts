@@ -104,6 +104,7 @@ export class SQLiteBackend implements StorageBackend {
       CREATE INDEX IF NOT EXISTS idx_audit_action    ON vault_audit_events(action, timestamp);
     `);
 
+    this.ensureColumn('vault_credentials', 'instance_url', 'ALTER TABLE vault_credentials ADD COLUMN instance_url TEXT');
     this.ensureColumn('vault_audit_events', 'metadata_json', 'ALTER TABLE vault_audit_events ADD COLUMN metadata_json TEXT');
     // Tamper-evident chain. Rows written before these columns existed stay
     // unchained; the chain starts with the first row written after.
@@ -281,12 +282,12 @@ export class SQLiteBackend implements StorageBackend {
         provider, user_id,
         access_token_enc, access_token_iv, access_token_tag,
         refresh_token_enc, refresh_token_iv, refresh_token_tag,
-        expires_at, scopes, created_at, updated_at
+        expires_at, scopes, instance_url, created_at, updated_at
       ) VALUES (
         @provider, @userId,
         @accessTokenEnc, @accessTokenIv, @accessTokenTag,
         @refreshTokenEnc, @refreshTokenIv, @refreshTokenTag,
-        @expiresAt, @scopes, @createdAt, @updatedAt
+        @expiresAt, @scopes, @instanceUrl, @createdAt, @updatedAt
       )
       ON CONFLICT (provider, user_id) DO UPDATE SET
         access_token_enc  = excluded.access_token_enc,
@@ -297,6 +298,7 @@ export class SQLiteBackend implements StorageBackend {
         refresh_token_tag = excluded.refresh_token_tag,
         expires_at        = excluded.expires_at,
         scopes            = excluded.scopes,
+        instance_url      = excluded.instance_url,
         updated_at        = excluded.updated_at
     `);
 
@@ -311,6 +313,7 @@ export class SQLiteBackend implements StorageBackend {
       refreshTokenTag: row.refreshTokenTag ?? null,
       expiresAt: row.expiresAt ?? null,
       scopes: row.scopes ?? null,
+      instanceUrl: row.instanceUrl ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     });
@@ -331,6 +334,7 @@ export class SQLiteBackend implements StorageBackend {
         refresh_token_tag  AS refreshTokenTag,
         expires_at         AS expiresAt,
         scopes,
+        instance_url       AS instanceUrl,
         created_at         AS createdAt,
         updated_at         AS updatedAt
       FROM vault_credentials
@@ -360,6 +364,7 @@ export class SQLiteBackend implements StorageBackend {
         refresh_token_tag  AS refreshTokenTag,
         expires_at         AS expiresAt,
         scopes,
+        instance_url       AS instanceUrl,
         created_at         AS createdAt,
         updated_at         AS updatedAt
       FROM vault_credentials
@@ -391,6 +396,7 @@ export class SQLiteBackend implements StorageBackend {
         refresh_token_tag  AS refreshTokenTag,
         expires_at         AS expiresAt,
         scopes,
+        instance_url       AS instanceUrl,
         created_at         AS createdAt,
         updated_at         AS updatedAt
       FROM vault_credentials

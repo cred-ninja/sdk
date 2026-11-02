@@ -150,6 +150,7 @@ const GOOGLE_BY_ORIGIN: Readonly<Record<string, readonly Rule[]>> = {
     read('/oauth2/v3/userinfo', IDENTITY),
   ],
   'https://calendar.googleapis.com': CALENDAR_RULES,
+  'https://drive.googleapis.com': DRIVE_RULES,
   'https://sheets.googleapis.com': SHEETS_RULES,
   'https://docs.googleapis.com': DOCS_RULES,
   'https://people.googleapis.com': PEOPLE_RULES,
@@ -191,16 +192,50 @@ export const SLACK_MAPPED_METHODS: readonly string[] = [...Object.keys(SLACK_REA
 
 // ── GitHub ──────────────────────────────────────────────────────────────────
 
-const GH_READ = ['github.read', 'repo', 'public_repo'];
 const GH_WRITE = ['repo', 'public_repo'];
+const GH_READ = ['github.read', ...GH_WRITE];
+/**
+ * What github.read reaches under a repository: code, issues and pull requests.
+ * An allowlist, since `repo` at the provider also reads secrets' metadata, hooks,
+ * keys and settings, and a delegation called read-only must not. Anything else
+ * under /repos needs the provider scope itself.
+ */
+const GH_REPOSITORY_READS: Rule[] = [
+  '/repos/*/*',
+  '/repos/*/*/readme',
+  '/repos/*/*/languages',
+  '/repos/*/*/topics',
+  '/repos/*/*/contributors',
+  '/repos/*/*/tags',
+  '/repos/*/*/branches',
+  '/repos/*/*/branches/*',
+  '/repos/*/*/labels',
+  '/repos/*/*/labels/*',
+  '/repos/*/*/milestones',
+  '/repos/*/*/milestones/*',
+  '/repos/*/*/contents',
+  '/repos/*/*/contents/**',
+  '/repos/*/*/commits',
+  '/repos/*/*/commits/**',
+  '/repos/*/*/compare/**',
+  '/repos/*/*/git/**',
+  '/repos/*/*/issues',
+  '/repos/*/*/issues/**',
+  '/repos/*/*/pulls',
+  '/repos/*/*/pulls/**',
+  '/repos/*/*/releases',
+  '/repos/*/*/releases/**',
+].map((pattern) => read(pattern, GH_READ));
 
 // ── HubSpot ─────────────────────────────────────────────────────────────────
 
 const HUBSPOT_RULES: Rule[] = [
   ...['contacts', 'companies', 'deals', 'tickets', 'line_items', 'quotes'].flatMap((type) => {
     const base = `/crm/v3/objects/${type}`;
-    const canRead = [`crm.objects.${type}.read`];
-    const canWrite = [`crm.objects.${type}.write`];
+    // HubSpot's legacy `tickets` covers both, and token responses can still name it.
+    const legacy = type === 'tickets' ? ['tickets'] : [];
+    const canRead = [`crm.objects.${type}.read`, ...legacy];
+    const canWrite = [`crm.objects.${type}.write`, ...legacy];
     return [
       read(base, canRead),
       rule('POST', `${base}/search`, canRead, 'read'),
@@ -215,12 +250,16 @@ const HUBSPOT_RULES: Rule[] = [
     read(`/crm/v3/properties/${type}`, [`crm.schemas.${type}.read`]),
     read(`/crm/v3/properties/${type}/*`, [`crm.schemas.${type}.read`]),
   ]),
+  read('/crm/v3/properties/tickets', ['crm.schemas.tickets.read', 'tickets']),
+  read('/crm/v3/properties/tickets/*', ['crm.schemas.tickets.read', 'tickets']),
 ];
 
 // ── Notion and Salesforce: reads named by Cred ──────────────────────────────
 
-const NOTION_READ = ['notion.read', 'content'];
-const NOTION_WRITE = ['content'];
+// read_content, update_content and insert_content are names /connect used to
+// offer. Notion never saw them, but rows stored under them keep their meaning.
+const NOTION_READ = ['notion.read', 'content', 'read_content'];
+const NOTION_WRITE = ['content', 'update_content', 'insert_content'];
 const SALESFORCE_READ = ['salesforce.read', 'api', 'full'];
 const SALESFORCE_WRITE = ['api', 'full'];
 const SALESFORCE_HOST = /^https:\/\/[a-z0-9.-]+\.(?:salesforce\.com|force\.com)$/;
@@ -231,15 +270,16 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
     otherScopes: ['workflow', 'user:email', 'read:packages', 'write:packages'],
     rules: [
       read('/user', ANY_GRANT),
-      read('/user/**', ['user', 'read:user', 'user:email', ...GH_READ]),
+      read('/user/**', ['user', 'read:user', 'user:email', ...GH_WRITE]),
       read('/users/**', ANY_GRANT),
       read('/rate_limit', ANY_GRANT),
-      read('/repos/**', GH_READ),
+      ...GH_REPOSITORY_READS,
+      read('/repos/**', GH_WRITE),
       read('/search/**', GH_READ),
-      read('/orgs/**', [...GH_READ, 'read:org', 'write:org', 'admin:org']),
-      read('/gists', [...GH_READ, 'gist']),
-      read('/gists/**', [...GH_READ, 'gist']),
-      read('/notifications', ['notifications', 'repo', 'github.read']),
+      read('/orgs/**', [...GH_WRITE, 'read:org', 'write:org', 'admin:org']),
+      read('/gists', [...GH_WRITE, 'gist']),
+      read('/gists/**', [...GH_WRITE, 'gist']),
+      read('/notifications', ['notifications', 'repo']),
       write('DELETE', '/repos/*/*', ['delete_repo']),
       write(WRITE_METHODS, '/repos/*/*/**', GH_WRITE),
       write('POST', '/user/repos', GH_WRITE),
@@ -346,6 +386,7 @@ const DERIVED_READ_SCOPES: Readonly<Record<string, { scope: string; from: readon
 
 /** A Notion connection stores no scopes, and `content` is Cred's name for all it can do. */
 const NOTION_WHOLE_CONNECTION = 'content';
+const NOTION_LEGACY_WRITE = ['update_content', 'insert_content'];
 
 /** The scopes this stored consent derives, beyond what it names. */
 export function derivedScopes(service: string, stored: readonly string[]): string[] {
@@ -353,7 +394,7 @@ export function derivedScopes(service: string, stored: readonly string[]): strin
   if (!derived) return [];
   const out: string[] = [];
   if (derived.from === null || derived.from.some((scope) => stored.includes(scope))) out.push(derived.scope);
-  if (service === 'notion' && stored.length === 0) out.push(NOTION_WHOLE_CONNECTION);
+  if (service === 'notion' && (stored.length === 0 || stored.some((scope) => NOTION_LEGACY_WRITE.includes(scope)))) out.push(NOTION_WHOLE_CONNECTION);
   return out.filter((scope) => !stored.includes(scope));
 }
 

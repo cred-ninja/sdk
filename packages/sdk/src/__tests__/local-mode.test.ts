@@ -577,3 +577,28 @@ describe('Local mode audit enforcement', () => {
     }));
   });
 });
+
+describe('local mode: a Salesforce token goes only to the stored instance', () => {
+  const stored = { provider: 'salesforce', userId: 'user-1', accessToken: 'sf-token', instanceUrl: 'https://acme.my.salesforce.com' };
+  const params = (targetUrl?: string) => ({ service: 'salesforce', userId: 'user-1', accessToken: 'sf-token', ...(targetUrl ? { targetUrl } : {}) });
+  const cred = () => new Cred({ mode: 'local', vault: { passphrase: 'test-passphrase', storage: 'sqlite', path: ':memory:' } } as never);
+
+  it('allows the stored instance and refuses any other host, or none named', async () => {
+    mockVault.list.mockResolvedValue([stored]);
+    const client = cred();
+    await expect(client.authorizeLocalUse(params('https://acme.my.salesforce.com/services/data/v60.0/limits'))).resolves.toBeUndefined();
+    await expect(client.authorizeLocalUse(params('https://attacker.my.salesforce.com/x'))).rejects.toMatchObject({ code: 'salesforce_instance_mismatch' });
+    await expect(client.authorizeLocalUse(params())).rejects.toMatchObject({ code: 'salesforce_instance_mismatch' });
+    await expect(client.authorizeLocalUse(params('not a url'))).rejects.toMatchObject({ code: 'salesforce_instance_mismatch' });
+  });
+
+  it('refuses every host when no instance is stored', async () => {
+    mockVault.list.mockResolvedValue([{ ...stored, instanceUrl: undefined }]);
+    await expect(cred().authorizeLocalUse(params('https://acme.my.salesforce.com/x'))).rejects.toMatchObject({ code: 'salesforce_instance_unknown' });
+  });
+
+  it('other services are not affected', async () => {
+    mockVault.list.mockResolvedValue([{ provider: 'github', userId: 'user-1', accessToken: 't' }]);
+    await expect(cred().authorizeLocalUse({ service: 'github', userId: 'user-1', accessToken: 't' })).resolves.toBeUndefined();
+  });
+});

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Cred } from '@credninja/sdk';
+import { CredError, type Cred } from '@credninja/sdk';
 import { TokenCache } from '../token-cache';
 import { handleUse } from '../tools/use';
 
@@ -87,6 +87,25 @@ describe('local mode cred_use classification', () => {
   it('a Notion connection with no named scope is write-capable', async () => {
     const { ctx } = context();
     expect((await handleUse({ delegation_id: handle('notion', []), url: 'https://api.notion.com/v1/pages', method: 'POST', body: {} }, ctx)).isError).toBe(false);
+  });
+
+  it('a Salesforce call names its target for the instance check, and keeps the handle if refused for it', async () => {
+    const { ctx, authorizeLocalUse } = context();
+    const id = handle('salesforce', ['api']);
+    const url = 'https://acme.my.salesforce.com/services/data/v60.0/limits';
+    expect((await handleUse({ delegation_id: id, url, method: 'GET' }, ctx)).isError).toBe(false);
+    expect(authorizeLocalUse).toHaveBeenCalledWith(expect.objectContaining({ targetUrl: url }));
+    mockFetch.mockClear();
+    authorizeLocalUse.mockRejectedValue(new CredError('another instance', 'salesforce_instance_mismatch', 403));
+    expect((await handleUse({ delegation_id: id, url: 'https://attacker.my.salesforce.com/services/data/v60.0/limits', method: 'GET' }, ctx)).isError).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(tokenCache.get(id)).toBeDefined();
+  });
+
+  it('a Salesforce call with nothing to check its instance is refused', async () => {
+    const result = await handleUse({ delegation_id: handle('salesforce', ['api']), url: 'https://acme.my.salesforce.com/services/data/v60.0/limits', method: 'GET' }, { tokenCache });
+    expect(result.isError).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('the opt-out restores the old behavior and marks the audit event', async () => {

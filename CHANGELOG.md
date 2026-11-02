@@ -26,7 +26,22 @@
   maintainer reviews, not independent audits.
 - `docs/releases/npm-2.0.0.md` records that 2.0.0 is published.
 
-### BREAKING: a grant means what it says at the broker
+### BREAKING: a Salesforce token goes only to its connection's instance
+
+- `@credninja/server`: outside Cred Link, `/api/v1/use` forwarded a Salesforce
+  connection's bearer token to any `*.salesforce.com` or `*.force.com` host the
+  caller named, and such a host can belong to anyone. The token now goes only to
+  the instance stored for the connection: `400 salesforce_instance_mismatch` for any
+  other host, `400 salesforce_instance_unknown` when none is stored. There is no
+  opt-out. Salesforce connections made before this version store no instance and
+  must be reconnected.
+- `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
+  across a refresh. New `instance_url` column, added on start; existing rows are
+  not changed. The OAuth callback stores Salesforce's `instance_url` and stores
+  nothing when it is outside the host grammar.
+- `@credninja/sdk` and `@credninja/mcp` local mode apply the same rule through
+  `authorizeLocalUse`'s new `targetUrl`. Store local Salesforce connections with
+  `instanceUrl`, or their calls are refused.
 
 - `@credninja/guard`: new operation classifier (`evaluateOperation`,
   `canonicalBrokerUrl`, `methodOverrideChannel`, `contentTypeMismatch`), with
@@ -62,6 +77,14 @@
 - `@credninja/mcp` local mode applies the same refusals, forwards the canonical
   URL and no longer follows upstream redirects. Refusals are audited through the
   new `Cred.recordLocalRefusal`.
+- `github.read` covers code, issues, pull requests and search, not a repository's
+  secrets, hooks, keys, collaborators, protection or alerts, or account and org
+  settings. `repo` still reaches those. GraphQL queries are not held to this list.
+- `drive.googleapis.com` is mapped like the Drive API, and HubSpot's legacy
+  `tickets` scope covers ticket reads, writes and properties.
+- `/connect` offers `notion.read` and `content` for Notion, in place of names the
+  tables did not know. Rows stored under the old names keep their meaning:
+  `read_content` reads, and `update_content` and `insert_content` write.
 - Deprecated opt-out: `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS`, which warns at
   startup and marks every affected audit event. The URL allowlist still applies.
 

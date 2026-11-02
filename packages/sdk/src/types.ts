@@ -222,6 +222,8 @@ export interface LocalUseParams {
   accessToken?: string;
   /** Agent making the call, for the audit trail. */
   agentId?: string;
+  /** The URL about to be called. Salesforce: it must be the connection's stored instance. */
+  targetUrl?: string;
   /** Added to the audit event, such as a marker that a deprecated opt-out applied. */
   auditMetadata?: Record<string, unknown>;
   /** Constraints carried by the cached delegation being exercised. */
