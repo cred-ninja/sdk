@@ -204,18 +204,23 @@ Cred Link agent, then the shared `server-agent`) with the key thumbprint as
 `route` is a template: it keeps known API path words and listed Slack method
 names and writes `{id}` for every other segment, so it holds no query string and
 no identifier, at the cost of some detail. `origin` is recorded only for a known
-provider host, else as `refused`; a Salesforce instance host counts as known, so
-its subdomain is recorded. Refusals are events too (`guard_denied`, `url_refused`,
+provider host or the instance stored for a Salesforce connection, else as
+`refused`. Only Cred Link connections store an instance, so every other Salesforce
+call records `refused`, successful ones included. Refusals are events too (`guard_denied`, `url_refused`,
 `method_override_refused`, `capability_denied`, `upstream_unreachable`). Repeats
 of one refusal within a minute (same agent, delegation, method, origin, route and
-policy) collapse into the first event and a summary with `metadata.aggregated`
-and `metadata.repeats`, written when the window ends or when `cred-server` gets
+policy) collapse into the first event and a summary with `metadata.aggregated`,
+`metadata.repeats` and `metadata.distinctClaims`, which counts claimed values while
+the first is kept. Past 20 distinct refusals by one agent in a window, the rest
+collapse into one summary with `metadata.overflow`, so its details are those of
+the first it held. Summaries are written when the window ends or when `cred-server` gets
 SIGTERM or SIGINT. An embedding app calls `flushAuditAggregates()` from
 `createServer` itself. Capability denials are written each time. A crash can lose
 a window's count, though not its first event. A Guard denial on a route's
 middleware comes before anything in the request is authorized, so a named
 `user_id` or `agent_did` is only a claim in its metadata, and the event is in no
-user's feed unless a verifier bound the caller to that user. Rows written before
+user's feed unless a verifier bound the caller to that user. `GET /admin/audit`
+still finds it by `service`. Rows written before
 this version are unchanged and still say `server-agent`.
 
 ## Agent access

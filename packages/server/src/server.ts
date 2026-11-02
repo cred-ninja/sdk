@@ -130,6 +130,8 @@ interface BrokeredDelegation {
   link?: LinkHandleBinding;
   /** DID the handle was issued to, when the request named one. */
   agentDid?: string;
+  /** Salesforce: the origin of the instance stored for this connection, set at each Link exercise. */
+  instanceOrigin?: string;
   /** The Delegation Token's capabilities: exercise is held within them. */
   capabilities?: CredDelegationDetail[];
   /**
@@ -259,6 +261,20 @@ const BROKER_BLOCKED_ENDPOINTS: Record<string, string[]> = {
 const KNOWN_PROVIDER_ORIGINS: ReadonlySet<string> = new Set(
   [...Object.values(SERVICE_ALLOWLIST), ...Object.values(SERVICE_EXACT_ENDPOINTS)].flat().map((url) => new URL(url).origin),
 );
+
+/**
+ * Resource id of a refusal that names no authorized user. It holds no '/', so
+ * the agent-facing feed, which splits ids into service and user, can never read
+ * a user out of it. Only the admin log shows these.
+ */
+const GUARD_DENIAL_RESOURCE_PREFIX = 'guard-denial:';
+
+/** The service an audit resource id is about. */
+function auditEventService(resourceId: string): string {
+  return resourceId.startsWith(GUARD_DENIAL_RESOURCE_PREFIX)
+    ? resourceId.slice(GUARD_DENIAL_RESOURCE_PREFIX.length)
+    : resourceId.split('/')[0]!;
+}
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'authorization',
@@ -1612,20 +1628,16 @@ export function createServer(config: ServerConfig) {
     };
   }
 
-  /** Whether an origin is a host this server brokers to. Anything else is not recorded. */
-  function isKnownProviderOrigin(origin: string): boolean {
-    if (KNOWN_PROVIDER_ORIGINS.has(origin)) return true;
-    if (!origin.startsWith('https://')) return false;
-    const host = origin.slice('https://'.length);
-    return SALESFORCE_HOST_PATTERN.test(host) && !/^(\d{1,3}\.){3}\d{1,3}\./.test(host);
-  }
-
   /** What every /api/v1/use event says about the call. Never the query string. */
   function brokeredCallMetadata(delegationId: string, delegation: BrokeredDelegation, url?: string): Record<string, unknown> {
     return {
       delegationId,
       ...(delegation.link ? { linkAgentId: delegation.link.agentId } : {}),
-      ...(url !== undefined ? auditOriginAndRoute(url, isKnownProviderOrigin) : {}),
+      // A fixed provider host, or the Salesforce instance stored for this
+      // connection. Any other host, even one a pattern would admit, is a value
+      // the caller chose.
+      ...(url !== undefined ? auditOriginAndRoute(url, (origin) => KNOWN_PROVIDER_ORIGINS.has(origin)
+        || (delegation.service === 'salesforce' && origin === delegation.instanceOrigin)) : {}),
     };
   }
 
@@ -2549,11 +2561,11 @@ export function createServer(config: ServerConfig) {
       const entries = events
         .filter((event) => {
           if (!service) return true;
-          const [eventService] = event.resource.id.split('/');
-          return eventService === service;
+          return auditEventService(event.resource.id) === service;
         })
         .map((event) => {
-          const [eventService, eventUserId] = event.resource.id.split('/');
+          const eventService = auditEventService(event.resource.id);
+          const eventUserId = event.resource.id.split('/')[1];
           return {
             id: event.id,
             action: event.action,
@@ -3220,7 +3232,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       action: 'deny',
       resource: {
         type: 'token',
-        id: knownUser !== undefined && !knownUser.includes('/') ? `${provider}/${knownUser}` : `guard-denial:${provider}`,
+        id: knownUser !== undefined && !knownUser.includes('/') ? `${provider}/${knownUser}` : `${GUARD_DENIAL_RESOURCE_PREFIX}${provider}`,
       },
       outcome: 'denied',
       correlationId: crypto.randomUUID(),
@@ -3228,7 +3240,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       metadata: {
         policy: decision.deniedBy?.policy,
         // The route's template, not the request's path, which holds the provider it named.
-        path: typeof req.route?.path === 'string' ? req.route.path : 'unknown',
+        route: typeof req.route?.path === 'string' ? req.route.path : 'unknown',
         ...(claimedUserId ? { claimedUserId } : {}),
         ...(claimedAgentDid ? { claimedAgentDid } : {}),
       },
@@ -4672,6 +4684,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           link: delegation.link,
         }, true);
         if (!linkAccess) return;
+        delegation.instanceOrigin = linkAccess.connection.instance_url
+          ? new URL(linkAccess.connection.instance_url).origin
+          : undefined;
       }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
         delegationId,

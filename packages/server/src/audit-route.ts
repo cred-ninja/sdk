@@ -90,18 +90,32 @@ export function auditOriginAndRoute(url: string, isKnownOrigin: (origin: string)
 export interface RefusalAggregatorOptions {
   write: (event: AuditEvent) => void;
   windowMs?: number;
+  /** Bounds the refusals and the actors held in memory. */
   maxKeys?: number;
+  /** Distinct refusals one actor may write per window, before the rest collapse into one summary. */
+  maxFirstWritesPerActor?: number;
   now?: () => number;
 }
+
+/** What makes two refusals the same: bounded values only, beside actor, resource and error. */
+const REFUSAL_KEY_FIELDS = ['delegationId', 'method', 'origin', 'policy', 'route'] as const;
+/** Values a caller chooses. The first is kept and the rest counted, so they cannot mint new refusals. */
+const CLAIM_FIELDS = ['claimedUserId', 'claimedAgentDid'] as const;
+/** A distinct count saturates here, which bounds the memory a flood of claims can take. */
+const MAX_TRACKED_CLAIMS = 32;
 
 interface HeldRefusal {
   event: AuditEvent;
   startedAt: number;
   repeats: number;
+  claims: Map<string, Set<string>>;
 }
 
-/** The event fields that make two refusals the same refusal, beside actor, resource and error. */
-const REFUSAL_KEY_FIELDS = ['delegationId', 'method', 'origin', 'route', 'policy', 'path', 'claimedAgentDid', 'claimedUserId'] as const;
+interface ActorWindow {
+  startedAt: number;
+  firstWrites: number;
+  overflow: HeldRefusal | null;
+}
 
 function refusalKey(event: AuditEvent): string {
   return JSON.stringify([
@@ -112,23 +126,48 @@ function refusalKey(event: AuditEvent): string {
   ]);
 }
 
+function hold(event: AuditEvent, startedAt: number): HeldRefusal {
+  const entry: HeldRefusal = { event, startedAt, repeats: 0, claims: new Map() };
+  noteClaims(entry, event);
+  return entry;
+}
+
+function noteClaims(entry: HeldRefusal, event: AuditEvent): void {
+  for (const field of CLAIM_FIELDS) {
+    const value = event.metadata?.[field];
+    if (typeof value !== 'string') continue;
+    const seen = entry.claims.get(field) ?? new Set<string>();
+    if (seen.size < MAX_TRACKED_CLAIMS) seen.add(value);
+    entry.claims.set(field, seen);
+  }
+}
+
 /**
- * Holds down a flood of one refusal by one agent, in a log that is written
- * once and chained. The first refusal in a window is written at once. Repeats
- * are counted, then written as one summary when the window ends. Refusals of
- * a different delegation, method, destination or policy are different refusals,
- * so a noisy one cannot hide another. `maxKeys` bounds the memory held. The
- * running count lives in process memory, so a crash loses at most one window's
- * count, never the first event.
+ * Holds down a flood of refusals in a log that is written once and chained.
+ *
+ * The first refusal of a kind in a window is written at once. Repeats are
+ * counted, then written as one summary when the window ends, so a refusal of a
+ * different delegation, method, destination or policy is never hidden by a noisy
+ * one. Values a caller chooses are not part of a refusal's kind: the summary
+ * counts them. An actor can still vary a route, so each actor has a cap on first
+ * writes per window, and past it everything collapses into one summary marked
+ * `overflow`. A window therefore writes a bounded number of rows per actor.
+ *
+ * Counts live in process memory, so a crash loses at most one window's counts,
+ * never a first event.
  */
 export function createRefusalAggregator(options: RefusalAggregatorOptions) {
   const windowMs = options.windowMs ?? 60_000;
   const maxKeys = options.maxKeys ?? 1_000;
+  const maxFirstWrites = options.maxFirstWritesPerActor ?? 20;
   const now = options.now ?? Date.now;
   const held = new Map<string, HeldRefusal>();
+  const actors = new Map<string, ActorWindow>();
 
-  function writeSummary(entry: HeldRefusal): void {
+  function writeSummary(entry: HeldRefusal, marker: Record<string, unknown> = {}): void {
     if (entry.repeats === 0) return;
+    const distinct = Object.fromEntries([...entry.claims].filter(([, seen]) => seen.size > 1).map(([field, seen]) => [field, seen.size]));
+    const capped = [...entry.claims.values()].some((seen) => seen.size >= MAX_TRACKED_CLAIMS);
     options.write({
       ...entry.event,
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -136,51 +175,84 @@ export function createRefusalAggregator(options: RefusalAggregatorOptions) {
       correlationId: crypto.randomUUID(),
       metadata: {
         ...entry.event.metadata,
+        ...marker,
         aggregated: true,
         repeats: entry.repeats,
         windowStartedAt: new Date(entry.startedAt).toISOString(),
+        ...(Object.keys(distinct).length > 0 ? { distinctClaims: distinct } : {}),
+        ...(capped ? { distinctClaimsCapped: MAX_TRACKED_CLAIMS } : {}),
       },
     });
   }
 
-  function flushExpired(): void {
-    const at = now();
-    for (const [key, entry] of held) {
-      if (at - entry.startedAt < windowMs) continue;
-      held.delete(key);
-      writeSummary(entry);
+  function endActorWindow(actorId: string, window: ActorWindow): void {
+    actors.delete(actorId);
+    if (window.overflow) writeSummary(window.overflow, { overflow: true });
+  }
+
+  /** The actor's current window, a new one if the last has ended. */
+  function actorWindow(actorId: string, at: number): ActorWindow {
+    const current = actors.get(actorId);
+    if (current && at - current.startedAt < windowMs) return current;
+    if (current) endActorWindow(actorId, current);
+    if (actors.size >= maxKeys) {
+      const [oldestId, oldest] = actors.entries().next().value as [string, ActorWindow];
+      endActorWindow(oldestId, oldest);
     }
+    const fresh: ActorWindow = { startedAt: at, firstWrites: 0, overflow: null };
+    actors.set(actorId, fresh);
+    return fresh;
   }
 
   return {
-    /** Write this refusal, or count it as a repeat of one written in this window. */
+    /** Write this refusal, or count it. */
     record(event: AuditEvent): void {
       const key = refusalKey(event);
       const at = now();
       const entry = held.get(key);
       if (entry && at - entry.startedAt < windowMs) {
         entry.repeats += 1;
+        noteClaims(entry, event);
         return;
       }
       if (entry) {
         held.delete(key);
         writeSummary(entry);
       }
+      const window = actorWindow(event.actor.id, at);
+      if (window.firstWrites >= maxFirstWrites) {
+        window.overflow ??= hold(event, at);
+        window.overflow.repeats += 1;
+        noteClaims(window.overflow, event);
+        return;
+      }
+      window.firstWrites += 1;
       if (held.size >= maxKeys) {
         const [oldestKey, oldest] = held.entries().next().value as [string, HeldRefusal];
         held.delete(oldestKey);
         writeSummary(oldest);
       }
-      held.set(key, { event, startedAt: at, repeats: 0 });
+      held.set(key, hold(event, at));
       options.write(event);
     },
-    flushExpired,
+    flushExpired(): void {
+      const at = now();
+      for (const [key, entry] of held) {
+        if (at - entry.startedAt < windowMs) continue;
+        held.delete(key);
+        writeSummary(entry);
+      }
+      for (const [actorId, window] of actors) {
+        if (at - window.startedAt >= windowMs) endActorWindow(actorId, window);
+      }
+    },
     /** Write every summary now, for a clean shutdown. */
     flush(): void {
       for (const [key, entry] of held) {
         held.delete(key);
         writeSummary(entry);
       }
+      for (const [actorId, window] of actors) endActorWindow(actorId, window);
     },
   };
 }

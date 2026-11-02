@@ -37,7 +37,10 @@ function config(overrides: Partial<ServerConfig> = {}): ServerConfig {
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN,
     agentToken: BEARER,
-    providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: ['calendar.readonly'] }],
+    providers: [
+      { slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: ['calendar.readonly'] },
+      { slug: 'salesforce', clientId: 'id', clientSecret: 'secret', defaultScopes: ['api'] },
+    ],
     redirectBaseUri: 'http://localhost:3456',
     ...overrides,
   };
@@ -203,7 +206,7 @@ describe('refusals are events', () => {
     const res = await delegateAs(app, agent, { service: 'google', user_id: 'alice' }, { bearer: BEARER });
     expect(res.status).toBe(403);
     const event = (await eventsOf(vault)).find((e) => e.action === 'deny' && e.errorMessage === 'guard_denied');
-    expect(event?.metadata).toMatchObject({ policy: 'deny-all', path: '/api/v1/delegate', claimedUserId: 'alice' });
+    expect(event?.metadata).toMatchObject({ policy: 'deny-all', route: '/api/v1/delegate', claimedUserId: 'alice' });
     // user_id is not authorized here either: a claim, under a resource in no user's feed.
     expect(event?.resource.id).toBe('guard-denial:google');
     // The agent_did in the body is not yet proven here: it is recorded as a claim, never as the actor.
@@ -224,15 +227,32 @@ describe('refusals are events', () => {
       expect((await delegateAs(app, agent, body, { bearer: BEARER })).status).toBe(403);
     }
     const denials = (await eventsOf(vault)).filter((e) => e.errorMessage === 'guard_denied');
-    expect(denials).toHaveLength(4);
     for (const event of denials) {
       expect(event.resource.id).not.toContain('/');
       expect(event.resource.id).not.toContain('victim');
     }
-    expect(denials.map((e) => e.resource.id).sort()).toEqual(['guard-denial:google', 'guard-denial:google', 'guard-denial:unknown', 'guard-denial:unknown']);
+    expect(denials.map((e) => e.resource.id).sort()).toEqual(['guard-denial:google', 'guard-denial:unknown']);
     const feed = await request(app).get('/api/v1/audit').set('Authorization', `Bearer ${BEARER}`).query({ user_id: 'victim' });
     expect(feed.status).toBe(200);
     expect(JSON.stringify(feed.body)).not.toContain('guard_denied');
+  });
+
+  it('a user-less Guard denial is found under its service in the admin log, and in no user\'s feed', async () => {
+    const deny: CredPolicy = { name: 'deny-all', evaluate: () => ({ decision: 'DENY', policy: 'deny-all', reason: 'no' }) };
+    const { app } = await setup({ guard: new CredGuard({ policies: [deny] }) });
+    await delegateAs(app, await newAgent(), { service: 'google', user_id: 'alice' }, { bearer: BEARER });
+    await delegateAs(app, await newAgent(), { service: 'not-configured', user_id: 'alice' }, { bearer: BEARER });
+    const admin = (service: string) => request(app).get('/admin/audit').set('Authorization', `Bearer ${ADMIN}`).query({ service });
+    const google = (await admin('google')).body.entries;
+    const googleDenials = (google as Array<{ metadata: { errorMessage?: string }; service: string; userId: string | null }>).filter((e) => e.metadata.errorMessage === 'guard_denied');
+    expect(googleDenials).toHaveLength(1);
+    expect(googleDenials[0]).toMatchObject({ service: 'google', userId: null });
+    expect(JSON.stringify((await admin('github')).body)).not.toContain('guard_denied');
+    expect(JSON.stringify((await admin('guard-denial:google')).body)).not.toContain('guard_denied');
+    for (const user_id of ['alice', 'undefined', 'guard-denial:google', 'unknown', 'null', '']) {
+      const feed = await request(app).get('/api/v1/audit').set('Authorization', `Bearer ${BEARER}`).query({ user_id });
+      expect(JSON.stringify(feed.body), user_id).not.toContain('guard_denied');
+    }
   });
 
   it('a Guard denial for a bound user is in that user\'s feed; a single-user server files it under default', async () => {
@@ -365,6 +385,81 @@ describe('refusals are events', () => {
     expect(written.filter((e) => e.metadata?.aggregated === true).map((e) => e.metadata?.route)).toEqual(['/1']);
     aggregator.record(event('/1'));
     expect(written.filter((e) => e.metadata?.route === '/1' && e.metadata?.aggregated !== true)).toHaveLength(2);
+  });
+
+  function refusal(metadata: Record<string, unknown>, actor = 'did:key:zA'): AuditEvent {
+    return {
+      id: crypto.randomUUID(), timestamp: new Date(), actor: { type: 'agent', id: actor }, action: 'deny',
+      resource: { type: 'token', id: 'guard-denial:google' }, outcome: 'denied', correlationId: 'c', errorMessage: 'guard_denied', metadata,
+    };
+  }
+
+  it('values a caller chooses cannot mint new refusals: the first is kept and the rest counted', () => {
+    const written: AuditEvent[] = [];
+    const aggregator = createRefusalAggregator({ write: (event) => written.push(event) });
+    for (let i = 0; i < 500; i += 1) aggregator.record(refusal({ policy: 'p', route: '/r', claimedUserId: `user-${i}`, claimedAgentDid: `did:key:z${i % 3}` }));
+    expect(written).toHaveLength(1);
+    expect(written[0]!.metadata?.claimedUserId).toBe('user-0');
+    aggregator.flush();
+    expect(written).toHaveLength(2);
+    expect(written[1]!.metadata).toMatchObject({
+      aggregated: true,
+      repeats: 499,
+      claimedUserId: 'user-0',
+      distinctClaims: { claimedUserId: 32, claimedAgentDid: 3 },
+      distinctClaimsCapped: 32,
+    });
+  });
+
+  it('caps first writes per actor per window, and collapses the rest into one marked summary', () => {
+    let clock = 1_000_000;
+    const written: AuditEvent[] = [];
+    const aggregator = createRefusalAggregator({ write: (event) => written.push(event), now: () => clock, maxFirstWritesPerActor: 3 });
+    for (let i = 0; i < 10; i += 1) aggregator.record(refusal({ route: `/varied/${i}` }));
+    expect(written).toHaveLength(3);
+    aggregator.record(refusal({ route: '/other-actor' }, 'did:key:zB'));
+    expect(written).toHaveLength(4);
+    // A refusal already written still counts against itself, not the cap.
+    aggregator.record(refusal({ route: '/varied/0' }));
+    clock += 61_000;
+    aggregator.flushExpired();
+    const summaries = written.filter((e) => e.metadata?.aggregated === true);
+    expect(summaries.find((e) => e.metadata?.overflow === true)?.metadata).toMatchObject({ repeats: 7, route: '/varied/3' });
+    expect(summaries.find((e) => e.metadata?.overflow !== true)?.metadata).toMatchObject({ repeats: 1, route: '/varied/0' });
+    expect(written).toHaveLength(6);
+    // A new window starts over.
+    aggregator.record(refusal({ route: '/varied/9' }));
+    expect(written).toHaveLength(7);
+  });
+
+  it('a flood of varied paths through the server writes a bounded number of rows', async () => {
+    const { app, vault, flushAuditAggregates } = await setup();
+    stubUpstream();
+    const { agent, token } = await issued(app, vault);
+    for (let i = 0; i < 40; i += 1) {
+      // Each depth is a different route template.
+      await use(app, agent, token, `https://evil.example.com${'/x'.repeat(i + 1)}`);
+    }
+    expect((await eventsOf(vault)).filter((e) => e.errorMessage === 'url_refused')).toHaveLength(20);
+    flushAuditAggregates();
+    const after = (await eventsOf(vault)).filter((e) => e.errorMessage === 'url_refused');
+    expect(after).toHaveLength(21);
+    expect(after.find((e) => e.metadata?.overflow === true)?.metadata?.repeats).toBe(20);
+  });
+
+  it('a Salesforce host is recorded only when it is the connection\'s stored instance, and a legacy connection stores none', async () => {
+    const { app, vault } = await setup();
+    await vault.store({ provider: 'salesforce', userId: 'alice', accessToken: 'sf', expiresAt: new Date(Date.now() + 3600_000), scopes: ['api'] });
+    stubUpstream();
+    const agent = await newAgent();
+    await vault.createPermission!({ agentId: agent.did, connectionId: 'salesforce', allowedScopes: ['api'], requiresApproval: false, delegatable: false, maxDelegationDepth: 1, createdBy: 'test' });
+    const minted = await delegateAs(app, agent, { service: 'salesforce', user_id: 'alice' }, { bearer: BEARER });
+    expect(minted.status, JSON.stringify(minted.body)).toBe(200);
+    const res = await use(app, agent, minted.body.access_token, 'https://tok-secret.my.salesforce.com/services/data/v60.0/limits');
+    expect(res.status).toBe(200);
+    const event = (await eventsOf(vault)).find((e) => e.action === 'access' && e.outcome === 'success');
+    expect(event?.metadata?.origin).toBe(REFUSED_ORIGIN);
+    expect(JSON.stringify(event)).not.toContain('tok-secret');
   });
 
   it('flushes on SIGTERM and SIGINT, then exits with the signal status', () => {

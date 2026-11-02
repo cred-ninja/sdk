@@ -238,6 +238,12 @@ describe('Link delegation enforcement without a Guard', () => {
     const own = await use(app, { delegation_id: handle.body.delegation_id, url: 'https://acme.my.salesforce.com/services/data/v60.0/sobjects', method: 'GET' });
     expect(own.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.authorization).toBe('Bearer 00Dsf-access');
+    // The audit log names the instance stored for this connection, and no other host.
+    const events = server.vault.queryAuditEvents({ limit: 100 });
+    expect(events.find((e) => e.action === 'access' && e.outcome === 'success')?.metadata?.origin).toBe('https://acme.my.salesforce.com');
+    const refused = events.find((e) => e.errorMessage === 'url_refused');
+    expect(refused?.metadata?.origin).toBe('refused');
+    expect(JSON.stringify(refused)).not.toContain('evil.my.salesforce.com');
   });
 
   it('refuses a Salesforce instance_url outside the host grammar', async () => {

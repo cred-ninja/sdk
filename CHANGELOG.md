@@ -13,17 +13,20 @@
 - Those events also carry `delegationId`, `origin` and a `route` with identifiers
   redacted (`/repos/{id}/{id}/issues/{id}`), capped at 256 characters. A route
   keeps only known API path words and listed Slack method names, and never holds
-  a query string. `origin` is recorded only for a known provider host, else as
-  `refused`.
+  a query string. `origin` is recorded only for a known provider host or the
+  instance stored for a Salesforce connection, else as `refused`. Only Cred Link
+  connections store an instance, so other Salesforce calls record `refused`.
 - New events: Guard denials (`guard_denied`, on `/api/v1/use` and on routes under
   the Guard middleware, where an unproven `agent_did` or `user_id` is recorded as
   `claimedAgentDid` or `claimedUserId` under a resource in no user's feed; admins
-  read those at `/admin/audit`), Guard failures at `/api/v1/use` (`guard_failed`), refused URLs
+  find those by service at `/admin/audit`), Guard failures at `/api/v1/use` (`guard_failed`), refused URLs
   (`url_refused`), method overrides (`method_override_refused`) and unreachable
   upstreams (`upstream_unreachable`). Repeats of one refusal within a minute (same
   agent, delegation, method, origin, route and policy) are one event and then one
-  summary (`aggregated`, `repeats`); `cred-server` writes held summaries on SIGTERM
-  and SIGINT. Capability denials are written each time. The running count is in
+  summary (`aggregated`, `repeats`, and `distinctClaims` counting the claimed
+  values, of which the first is kept). Past 20 distinct refusals by one agent in
+  a window, the rest collapse into one summary marked `overflow`. `cred-server`
+  writes held summaries on SIGTERM and SIGINT. Capability denials are written each time. The running count is in
   process memory, so a crash can lose a window's count, though not its first
   event.
 - Existing audit rows are not changed, so rows written earlier still say
