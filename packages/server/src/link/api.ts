@@ -893,7 +893,7 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
         changed,
         removed_scopes: step.removed,
         // Narrowing never changes the provider token: say what enforces it.
-        enforcement: narrowEnforcement(current, step.grant, changed ? step.removed : null),
+        enforcement: narrowEnforcement(ctx.classifyBrokerCalls !== false, current, step.grant, changed ? step.removed : null),
       };
       res.setHeader('Cache-Control', 'no-store');
       res.json(response);
@@ -902,21 +902,19 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
 }
 
 /**
- * What stops an agent from exercising the scopes a narrow removed. The
- * provider's upper bound comes from linkNarrowEnforcementFor; within it,
- * the broker only tells Google API families apart (google-scopes.ts, the
- * same table and matcher the broker uses). So 'broker' only when every
- * removed scope belongs to a family that no remaining scope unlocks; a
- * removed scope that shares a family with a remaining one (gmail.send
- * removed, gmail.readonly kept) or belongs to no family answers 'record'.
+ * What stops an agent from exercising the scopes a narrow removed. Every
+ * brokered call is classified against the grant as it now stands, so a call only
+ * the removed scopes covered is refused, for any provider: 'broker'. That says
+ * nothing of a scope that stays and covers the same call (remove gmail.send, keep
+ * gmail.modify), which still sends because the grant still says so.
  *
- * An unchanged (idempotent) narrow removed nothing in this call, so it is
- * judged on what the provider token carries beyond the grant: the
- * non-hidden catalog scopes the provider granted that the grant lacks.
- * That matches the original narrow's answer when the grant was cut from
- * the token, and it never claims more than the broker enforces.
+ * With classification turned off, the broker tells only Google API families
+ * apart, so 'broker' only when every removed scope belongs to a family that no
+ * remaining scope unlocks. An unchanged (idempotent) narrow removed nothing in
+ * this call, so it is judged on what the provider token carries beyond the grant.
  */
-function narrowEnforcement(connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
+function narrowEnforcement(classifyBrokerCalls: boolean, connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
+  if (classifyBrokerCalls) return 'broker';
   if (linkNarrowEnforcementFor(connection.provider) !== 'broker') return 'record';
   if (connection.provider !== 'google') return 'record';
   const beyond = removed ?? scopeDifference(

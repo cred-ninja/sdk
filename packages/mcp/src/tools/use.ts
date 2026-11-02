@@ -14,6 +14,7 @@
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred, CredError } from '@credninja/sdk';
+import { canonicalBrokerUrl, contentTypeMismatch, evaluateOperation, methodOverrideChannel, withDerivedScopes } from '@credninja/guard';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
 import { summarizeGuardDecision } from '../guard-wiring.js';
@@ -102,6 +103,12 @@ export interface UseToolContext {
   /** True in cloud mode, where every cached entry is a server handle. */
   useServerBroker?: boolean;
   agentDid?: string;
+  /**
+   * Local mode: forward calls without classifying them, and follow redirects
+   * (CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS). Deprecated: a read-only scope can
+   * then reach a write endpoint. Each call's audit event says so.
+   */
+  allowUnclassifiedCalls?: boolean;
   /** This agent's own identity; signs the DPoP proof for each brokered call. */
   delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
@@ -181,8 +188,30 @@ export async function handleUse(
     };
   }
 
+  const classify = context.allowUnclassifiedCalls !== true;
+  const refuse = async (error: string, text: string, metadata: Record<string, unknown>): Promise<CallToolResult> => {
+    try {
+      await context.cred?.recordLocalRefusal?.({
+        service: entry.service,
+        userId: entry.userId,
+        error,
+        metadata,
+        ...(context.agentDid ? { agentId: context.agentDid } : {}),
+      });
+    } catch {
+      // The call stays refused whether or not the refusal could be recorded.
+    }
+    return { content: [{ type: 'text', text }], isError: true };
+  };
+
+  // Canonicalize once: what is checked below is exactly what is forwarded.
+  const targetUrl = classify ? canonicalBrokerUrl(input.url) : input.url;
+  if (targetUrl === null) {
+    return refuse('url_refused', `Error: URL is not a valid ${entry.service} API endpoint.`, { method: input.method });
+  }
+
   // ── 2. Validate target URL (SSRF protection) ───────────────────────────────
-  if (!context.tokenCache.isAllowedUrl(entry.service, input.url, entry.scopes)) {
+  if (!context.tokenCache.isAllowedUrl(entry.service, targetUrl, entry.scopes)) {
     return {
       content: [{
         type: 'text',
@@ -202,6 +231,25 @@ export async function handleUse(
     };
   }
 
+  // ── 3b. Classify the exact call: the same refusal the server broker gives ──
+  if (classify) {
+    if (methodOverrideChannel({ url: targetUrl, ...(input.extra_headers ? { headers: input.extra_headers } : {}), body: input.body })) {
+      return refuse('method_override_refused', 'Error: invalid_request: a method override is not allowed. The call runs the method it names.', { method: input.method });
+    }
+    const verdict = contentTypeMismatch(input.extra_headers)
+      ? { outcome: 'not_mapped' as const, reason: 'content_type' }
+      : evaluateOperation(
+          { service: entry.service, method: input.method, url: targetUrl, body: input.body },
+          withDerivedScopes(entry.service, entry.scopes ?? []),
+        );
+    if (verdict.outcome === 'not_mapped') {
+      return refuse('operation_not_mapped', `Error: operation_not_mapped: this ${entry.service} call is not mapped to a scope, so it is refused.`, { method: input.method, reason: verdict.reason });
+    }
+    if (verdict.outcome === 'insufficient') {
+      return refuse('scope_insufficient', `Error: scope_insufficient: this delegation's scopes do not cover this ${verdict.access} call.`, { method: input.method, access: verdict.access });
+    }
+  }
+
   // ── 4. Local mode: re-check the connection and audit the exercise ─────────
   // The cached token outlives a revocation made by another process sharing
   // the vault, so the connection is checked on every call, not only at
@@ -214,6 +262,7 @@ export async function handleUse(
         accessToken: entry.accessToken,
         ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
         ...(context.agentDid ? { agentId: context.agentDid } : {}),
+        ...(classify ? {} : { auditMetadata: { enforcementOptOuts: ['unclassified_broker_calls'] } }),
       });
     } catch (err) {
       context.tokenCache.delete(input.delegation_id);
@@ -232,7 +281,8 @@ export async function handleUse(
     ...(input.extra_headers
       ? Object.fromEntries(
           Object.entries(input.extra_headers).filter(
-            ([key, value]) => isForwardableExtraHeader(key, value),
+            // Content-Type was checked above and is always JSON: set here, not by the caller.
+            ([key, value]) => isForwardableExtraHeader(key, value) && !(classify && key.trim().toLowerCase() === 'content-type'),
           ),
         )
       : {}),
@@ -241,12 +291,13 @@ export async function handleUse(
   // Execute with manual redirect handling. fetch() follows redirects by
   // default, which would forward the Authorization: Bearer token to whatever
   // Location a (possibly compromised or DNS-hijacked) allowed host returns —
-  // exfiltrating the token to an arbitrary URL. We re-validate every hop
-  // against the same per-service allowlist and refuse to follow a redirect to
-  // a non-allowlisted target.
+  // exfiltrating the token to an arbitrary URL. A redirect is not followed: its
+  // target would be a call nobody classified, so the agent gets the 3xx. Only
+  // the deprecated opt-out follows, re-validating every hop against the
+  // per-service allowlist.
   const MAX_REDIRECTS = 5;
   let response: Response;
-  let currentUrl = input.url;
+  let currentUrl = targetUrl;
   try {
     for (let hop = 0; ; hop++) {
       const hopHeaders = context.webBotAuthSigner
@@ -266,7 +317,7 @@ export async function handleUse(
 
       const isRedirect =
         response.status >= 300 && response.status < 400 && response.headers.has('location');
-      if (!isRedirect) {
+      if (!isRedirect || classify) {
         break;
       }
 

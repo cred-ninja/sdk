@@ -157,6 +157,13 @@ export interface ServerConfig {
   // event.
   allowRedelegationAfterRevocation?: boolean;
 
+  // Forward brokered calls without classifying them (env
+  // CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS). Default false: a call the operation
+  // tables do not map is refused, and so is one the grant does not cover. true
+  // is deprecated, logs a warning at startup and marks every /api/v1/use audit
+  // event. The URL allowlist still applies.
+  allowUnclassifiedBrokerCalls?: boolean;
+
   // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
   delegationGrantTtlSeconds?: number;
 
@@ -312,6 +319,7 @@ export function loadConfig(): ServerConfig {
   else if (allowRawTokensRaw !== '') throw new Error('CRED_ALLOW_RAW_TOKENS must be true or false');
   const allowAgentsWithoutPermission = booleanEnv('CRED_ALLOW_AGENTS_WITHOUT_PERMISSION');
   const allowRedelegationAfterRevocation = booleanEnv('CRED_ALLOW_REDELEGATION_AFTER_REVOCATION');
+  const allowUnclassifiedBrokerCalls = booleanEnv('CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS');
   const retentionRaw = (process.env.CONSENT_RETENTION_DAYS ?? '').trim();
   const consentRetentionDays = retentionRaw === '' ? undefined : Number(retentionRaw);
   const cibaTtlRaw = (process.env.CRED_CIBA_CONSENT_TTL_SECONDS ?? '').trim();
@@ -390,6 +398,7 @@ export function loadConfig(): ServerConfig {
     ...(allowRawTokens !== undefined ? { allowRawTokens } : {}),
     ...(allowAgentsWithoutPermission !== undefined ? { allowAgentsWithoutPermission } : {}),
     ...(allowRedelegationAfterRevocation !== undefined ? { allowRedelegationAfterRevocation } : {}),
+    ...(allowUnclassifiedBrokerCalls !== undefined ? { allowUnclassifiedBrokerCalls } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

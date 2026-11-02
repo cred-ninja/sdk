@@ -168,7 +168,7 @@ describe('who did what', () => {
     const { app, vault } = await setup();
     stubUpstream();
     const { agent, token } = await issued(app, vault, { constraints: [{ key: 'request_bytes', max_lifetime: 1 }] });
-    const res = await use(app, agent, token, CAL, 'POST', { way: 'over the budget' });
+    const res = await use(app, agent, token, `${CAL}?q=over-the-budget`);
     expect(res.status).toBe(403);
     const event = (await eventsOf(vault)).find((e) => e.action === 'deny' && e.errorMessage === 'cumulative_constraint_exceeded');
     expect(event?.actor.id).toBe(agent.did);

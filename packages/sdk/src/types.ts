@@ -202,6 +202,15 @@ export interface RevokeParams {
 }
 
 /** A local-mode exercise of a cached token, checked and audited before the call. */
+/** A local-mode cred_use call refused before it left the process. */
+export interface LocalRefusalParams {
+  service: string;
+  userId: string;
+  agentId?: string;
+  error: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface LocalUseParams {
   service: string;
   userId: string;
@@ -213,6 +222,8 @@ export interface LocalUseParams {
   accessToken?: string;
   /** Agent making the call, for the audit trail. */
   agentId?: string;
+  /** Added to the audit event, such as a marker that a deprecated opt-out applied. */
+  auditMetadata?: Record<string, unknown>;
   /** Constraints carried by the cached delegation being exercised. */
   constraints?: unknown[];
 }

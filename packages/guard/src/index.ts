@@ -32,6 +32,21 @@
 // Core
 export { CredGuard } from './guard.js';
 
+// Operation classification
+export {
+  evaluateOperation,
+  canonicalBrokerUrl,
+  methodOverrideChannel,
+  contentTypeMismatch,
+  derivedScopes,
+  withDerivedScopes,
+  withoutRedundantDerivedScopes,
+  isBrokerOnlyScope,
+  hasOperationTable,
+  SLACK_MAPPED_METHODS,
+} from './operations.js';
+export type { OperationAccess, OperationRequest, OperationVerdict } from './operations.js';
+
 // Types
 export type {
   GuardContext,

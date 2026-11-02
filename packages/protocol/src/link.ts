@@ -1507,20 +1507,19 @@ export interface NarrowConnectionResponse {
    * What actually stops an agent from exercising a removed scope. Narrowing
    * never changes the provider token, which keeps every scope the provider
    * granted.
-   *   'broker': every removed scope took its whole provider API out of
-   *     the grant, and the broker refuses brokered calls to an API the grant
-   *     no longer covers. Google only in Phase 1: the broker maps Google
-   *     URLs to API families (Gmail, Calendar, Drive, ...), not to single
-   *     scopes. Removing the last Gmail scope blocks every Gmail URL.
+   *   'broker': the broker refuses a brokered call that only the removed
+   *     scopes covered. Every brokered call is classified against the grant
+   *     as it now stands, for every provider. A scope that stays can still
+   *     cover the same call: remove gmail.send, keep gmail.modify, and sending
+   *     still works, because the grant still allows it.
    *   'record': only the records change: the grant, every Permission, and
    *     the scopes an agent may request or hold. A brokered call through a
-   *     still-valid handle is NOT restricted by the removed scopes. This is
-   *     the answer for every other provider, and for Google whenever a
-   *     removed scope shares an API family with a scope that stays (remove
-   *     gmail.send, keep gmail.readonly: the broker checks the API, not
-   *     read versus write, so sending still works). To really remove
-   *     access, run an update or reauth flow that asks the provider for
-   *     fewer scopes, or delete the connection.
+   *     still-valid handle is NOT restricted by the removed scopes. Answered
+   *     only when the server runs with classification turned off
+   *     (CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS).
+   * A raw provider token is outside both. To remove access from one, run an
+   * update or reauth flow that asks the provider for fewer scopes, or delete
+   * the connection.
    */
   enforcement: LinkNarrowEnforcement;
 }
@@ -1533,9 +1532,11 @@ export type LinkNarrowEnforcement = 'broker' | 'record';
  */
 export const LINK_BROKER_SCOPED_PROVIDERS: readonly LinkProviderSlug[] = Object.freeze(['google']);
 /**
- * The strongest enforcement a narrow can have for a provider. The server
- * answers 'record' instead of 'broker' when any removed scope shares an API
- * family with a scope that stays in the grant.
+ * The strongest enforcement a narrow can have for a provider when the server
+ * runs with operation classification turned off. It then answers 'record'
+ * instead of 'broker' when any removed scope shares an API family with a scope
+ * that stays in the grant. With classification on, the default, every narrow is
+ * 'broker'.
  */
 export function linkNarrowEnforcementFor(provider: LinkProviderSlug): LinkNarrowEnforcement {
   return LINK_BROKER_SCOPED_PROVIDERS.includes(provider) ? 'broker' : 'record';

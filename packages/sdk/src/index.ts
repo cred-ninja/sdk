@@ -48,6 +48,7 @@ export type {
   GetConsentUrlParams,
   RevokeParams,
   LocalUseParams,
+  LocalRefusalParams,
   AuditEntry,
   AuditParams,
   RegisterAgentParams,

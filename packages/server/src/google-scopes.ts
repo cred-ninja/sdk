@@ -4,10 +4,12 @@
  * whether the broker can enforce a narrowing). One table and one matcher,
  * so the two cannot drift.
  *
- * Enforcement is per family, not per scope: any scope of a family unlocks
- * every URL under that family's bases. Read and write scopes of one family
- * (gmail.readonly and gmail.send, calendar.readonly and calendar.events,
- * drive.file and drive, ...) are not told apart.
+ * This table is per family, not per scope: any scope of a family unlocks every
+ * URL under that family's bases. It is the allowlist in front of the operation
+ * classifier (evaluateOperation in @credninja/guard), which tells read and write
+ * scopes of one family apart. With classification turned off
+ * (CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS) this is the only check, and gmail.readonly
+ * can then send.
  */
 
 export interface GoogleScopeFamily {

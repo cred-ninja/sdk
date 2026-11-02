@@ -196,6 +196,61 @@ npm run dev
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
 
+## Operation enforcement
+
+A grant means what it says. `/api/v1/use` classifies the exact URL, method and
+body it will forward, against tables of each provider's API in
+`packages/guard/src/operations.ts`:
+
+- `403 operation_not_mapped`: the tables do not map this call, or know none of
+  the delegation's scopes. A call is refused until it is mapped, so a provider
+  API this server has not mapped stays closed.
+- `403 scope_insufficient`: the call is mapped and the delegation's scopes do not
+  cover it. `needs_one_of` lists what would.
+
+Both are audited. So `gmail.readonly` reads and cannot send, `calendar.readonly`
+cannot create an event and can run a `freeBusy` POST, a Slack read scope can use a
+read method over POST and cannot call `chat.postMessage`, and Linear's `read` runs
+queries and no mutation, however the document is arranged.
+
+| Provider | Mapped | Not mapped, so refused |
+|---|---|---|
+| Google | Gmail messages, threads, labels, drafts and profile; Calendar events, calendars and `freeBusy`; Drive files; Sheets values; Docs; People; Directory users and groups; userinfo | HTTP batch, uploads (`/upload/`, `uploadType`), Gmail `batchDelete` and `batchModify`, anything else |
+| Slack | The methods in `SLACK_READ_METHODS` and `SLACK_WRITE_METHODS` | Every other method, and a write method over GET |
+| Linear | GraphQL queries (`read`, `write`, `admin`); mutations (`write`); `issueCreate` and `attachmentCreate` (`issues:create`); `commentCreate` (`comments:create`) | Subscriptions, batches, persisted queries, unparseable documents, and a mutation under `admin` alone |
+| GitHub | REST reads; repository, gist, org and user writes under the scope that covers them; GraphQL queries and mutations | Anything else, including enterprise routes and GraphQL over GET |
+| HubSpot | Contacts, companies, deals, tickets, line items and quotes: read, search, create, update and delete; owners; properties | Batch endpoints, `/cms/`, `/content/`, `/automation/` |
+| Notion | Pages, blocks, databases, data sources, comments, users, search | File uploads |
+| Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects` | Composite, tooling, jobs and Apex REST |
+
+GitHub does not publish scopes per endpoint, and HubSpot's per-endpoint scopes
+could not be read from its docs, so those two tables follow the provider's scope
+descriptions. Where a provider accepts more scopes than a rule lists, the rule is
+narrower on purpose: a Drive scope does not reach the Sheets API here, and Linear's
+own `issues:create` also updates issues.
+
+Cred-side read scopes. GitHub, Salesforce and Notion have no read-only scope, so
+a connection with wider consent can give an agent a read-only delegation that
+only the broker enforces: `github.read` (from stored `repo` or `public_repo`),
+`salesforce.read` (from `api` or `full`) and `notion.read` (from any Notion
+connection). Name one in a Permission's `allowedScopes`, a ceiling or a request.
+The provider token is unchanged, so a derived scope is never issued as a raw token
+(`400 invalid_scope`). A Notion connection stores no scopes: `content` names all it
+can do.
+
+The request classified is the request sent. Encoded separators (`%2F`, `%2E` in a
+segment, `%5C`, `%25`), doubled slashes, trailing-dot hosts, and a percent-encoded
+plain character or matrix parameter in a path are refused. Every method-override
+channel is refused rather than dropped: the query (`_method`, `$httpMethod`,
+`_HttpMethod`, ...), the headers (`X-HTTP-Method-Override`, `X-HTTP-Method`,
+`X-Method-Override`, `X-Original-URL`, `X-Rewrite-URL`) and the top level of a JSON
+body. A `Content-Type` other than JSON is refused, since every body forwarded is
+JSON. Upstream redirects are not followed: the agent gets the 3xx.
+
+This decides whether the broker forwards a call, not what the provider allows: a
+token still needs the scope at the provider. The URL allowlist and Google API
+family check still apply in front of it.
+
 ## Audit attribution
 
 Each `/api/v1/use` event names its agent as `actor.id` (the did:key, then the
@@ -542,26 +597,21 @@ granted.
   longer request or be issued the removed scopes (`/api/v1/delegate` refuses
   them, and new handles never carry them). Raw tokens are no longer issued
   for the connection (see below).
-- Google: the broker tells Google API families apart (Gmail, Calendar,
-  Drive, Sheets, Docs, Admin, Contacts), not single scopes, and not read
-  versus write. Any remaining scope of a family unlocks every URL of that
-  family. When every removed scope belongs to a family that no remaining
-  scope unlocks, the response says `enforcement: "broker"` and a brokered
-  call into that family is refused before it reaches Google, also through a
-  handle issued before the narrowing. When a removed scope shares a family
-  with a remaining one, the response says `enforcement: "record"` and the
-  call still reaches Google: gmail.readonly and gmail.send, calendar.readonly
-  and calendar.events, drive.file and drive, spreadsheets.readonly and
-  spreadsheets, documents.readonly and documents, contacts.readonly and
-  contacts are not separated. Narrowing `[gmail.readonly, gmail.send]` to
-  `[gmail.readonly]` therefore still lets a handle send mail.
-- GitHub, Slack, Notion, Linear, HubSpot and Salesforce (always
-  `enforcement: "record"`): the broker cannot tell which scope a URL needs,
-  so a still-valid handle can reach any allowlisted URL of the provider,
-  including ones that need a removed scope, because the provider token is
-  unchanged.
+- Brokered calls: the response says `enforcement: "broker"`. Every call is
+  classified against the grant as it now stands (see
+  [Operation enforcement](#operation-enforcement)), so a call only the removed
+  scopes covered is refused before it reaches the provider, also through a
+  handle issued before the narrowing. A scope that stays can still cover the
+  same call: narrowing `[gmail.modify, gmail.send]` to `[gmail.modify]` still
+  lets a handle send mail, because `gmail.modify` allows it.
+- With `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true` (deprecated) the broker tells
+  only Google API families apart. It answers `broker` when every removed scope
+  belongs to a family no remaining scope unlocks, and otherwise `record`, which
+  means the call still reaches the provider: narrowing `[gmail.readonly,
+  gmail.send]` to `[gmail.readonly]` then still lets a handle send mail.
 
-To really remove access at the provider, run an update or reauth flow that
+A raw provider token, where one was issued, keeps every scope the provider
+granted. To remove access at the provider, run an update or reauth flow that
 asks the provider for fewer scopes, or delete the connection.
 
 **Popup fallback.** In popup mode the result page posts the result to the
@@ -672,6 +722,7 @@ All configuration via environment variables (or `.env` file):
 | `CRED_ALLOW_RAW_TOKENS` | No | `false` (default): the server never hands out provider access tokens; `token_format: "raw"` and `GET /api/token/:provider` are refused with `403 raw_token_disabled`, and Cred Link raw tokens with Link's `400 invalid_request`. `true`: deprecated, restores them and logs a warning at startup |
 | `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` | No | `false` (default): an agent named by `agent_did` is issued nothing without a Permission (`403 permission_required`). `true`: deprecated, issues up to the whole connection to an agent with no Permission, logs a warning at startup and marks each such issuance in the audit log (`enforcementOptOuts`) |
 | `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION` | No | `false` (default): an agent whose delegation or Permission was revoked is issued nothing on that service until it is granted a Permission again (`403 agent_access_revoked`). `true`: deprecated, lets it ask again at once, logs a warning at startup and marks each such issuance in the audit log (`enforcementOptOuts`) |
+| `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS` | No | `false` (default): each `/api/v1/use` call is classified, and refused with `403 operation_not_mapped` or `403 scope_insufficient`. `true`: deprecated, forwards any call the URL allowlist admits, so a read-only scope can reach a write endpoint; logs a warning at startup and marks every `/api/v1/use` audit event (`enforcementOptOuts`). Also read by `@credninja/mcp` in local mode, where it also follows redirects |
 | `CRED_REQUIRE_DPOP` | No | Removed: ignored, with a warning at startup. Every delegation, Cred Link's included, is a DPoP-bound Delegation Token, and a Link token is never issued to the shared static Bearer identity |
 | `CRED_REQUIRE_AGENT_IDENTITY` | No | Ignored and deprecated: `/api/v1/subdelegate` always requires an `actor_token` proving the caller is the agent the parent receipt names |
 | `WEB_BOT_AUTH_MODE` | No | `off` (default), `optional`, or `require` for ingress Web Bot Auth verification |

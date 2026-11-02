@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { createExpressMiddleware, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, withDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -302,23 +302,10 @@ const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
   'x-http-method-override',
   'x-http-method',
   'x-method-override',
+  'x-original-url',
+  'x-rewrite-url',
+  'x-original-method',
 ]);
-
-/**
- * Query parameters an API may read as a method override, in any spelling:
- * `$httpMethod`, `_HttpMethod`, `_method`, `x-http-method-override`,
- * `method-override`, and so on.
- */
-const METHOD_OVERRIDE_QUERY_KEY = /^(x)?(http)?method(override)?$/i;
-
-function hasMethodOverrideQuery(url: string): boolean {
-  try {
-    // Separators in any combination: x_http_method, x.http.method, $httpMethod.
-    return [...new URL(url).searchParams.keys()].some((key) => METHOD_OVERRIDE_QUERY_KEY.test(key.replace(/[-_$.\s]/g, '')));
-  } catch {
-    return true;
-  }
-}
 
 function isForwardableBrokerHeader(key: string, value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -447,6 +434,7 @@ export function createServer(config: ServerConfig) {
   const allowRawTokens = config.allowRawTokens ?? false;
   const allowAgentsWithoutPermission = config.allowAgentsWithoutPermission === true;
   const allowRedelegationAfterRevocation = config.allowRedelegationAfterRevocation === true;
+  const classifyBrokerCalls = config.allowUnclassifiedBrokerCalls !== true;
   const webBotAuthDirectoryCache = new Map<string, { expiresAt: number; directory: WebBotAuthDirectoryResponse }>();
   const webBotAuthNonceStore = createWebBotAuthNonceStore({
     store: config.webBotAuthNonceStore ?? 'memory',
@@ -474,6 +462,7 @@ export function createServer(config: ServerConfig) {
         checkAgentKey: (req, res, resourceId) => checkLinkAgentKey(req, res, resourceId),
         issueToken: (req, res, input) => issueLinkDelegationToken(req, res, input),
         allowRawTokens: config.allowRawTokens ?? false,
+        classifyBrokerCalls,
         ...(config.linkHandleTtlSeconds !== undefined ? { handleTtlSeconds: config.linkHandleTtlSeconds } : {}),
         makeRateLimiter: (max) => makeRateLimiter(max),
       })
@@ -1632,6 +1621,7 @@ export function createServer(config: ServerConfig) {
   function brokeredCallMetadata(delegationId: string, delegation: BrokeredDelegation, url?: string): Record<string, unknown> {
     return {
       delegationId,
+      ...(classifyBrokerCalls ? {} : { enforcementOptOuts: ['unclassified_broker_calls'] }),
       ...(delegation.link ? { linkAgentId: delegation.link.agentId } : {}),
       // A fixed provider host, or the Salesforce instance stored for this
       // connection. Any other host, even one a pattern would admit, is a value
@@ -1714,6 +1704,9 @@ export function createServer(config: ServerConfig) {
   }
   if (allowAgentsWithoutPermission) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true issues delegations to agents that hold no Permission, up to the whole connection, so any did:key presented with the agent token can act for the user. Grant each agent a Permission at POST /admin/permissions; this setting will be removed.');
+  }
+  if (!classifyBrokerCalls) {
+    console.warn('[cred] DEPRECATED: CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true forwards brokered calls without checking them against the grant, so a read-only scope can reach a write endpoint on an allowed host. Remove it, and map any call that needs mapping; this setting will be removed.');
   }
   if (allowRedelegationAfterRevocation) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_REDELEGATION_AFTER_REVOCATION=true lets an agent whose delegation or Permission was revoked ask again at once, so a revocation does not hold. Re-grant at POST /admin/permissions instead; this setting will be removed.');
@@ -3872,7 +3865,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   }): Promise<void> {
     // The same did:key controls as any root delegation: a suspended agent,
     // or one asking past its scope ceiling, gets no Link token either.
-    const agentCheck = await didAgentCheck(input.agentDid, input.scopes);
+    const agentCheck = await didAgentCheck(input.agentDid, input.service, input.scopes);
     if (!agentCheck.ok) {
       res.status(403).json({ error: agentCheck.error, message: agentCheck.message });
       return;
@@ -3976,9 +3969,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   // delegation scopes, and are not expected to use the ".*" wildcard form.
   // Delegation-chain narrowing is wildcard-aware separately, in
   // validateSubDelegation and the per-agent scopeCeiling checks.
-  function resolveGrantedScopes(storedScopes: string[], requestedScopes?: string[]) {
+  //
+  // Cred's derived read scopes are the exception, and storedScopes already
+  // holds them (see scopesForDidAgent). A request naming no scope is issued what
+  // was stored, not the derived scope as well.
+  function resolveGrantedScopes(service: string, storedScopes: string[], requestedScopes?: string[]) {
     if (!requestedScopes || requestedScopes.length === 0) {
-      return { grantedScopes: storedScopes, widenedScopes: [] as string[] };
+      return { grantedScopes: withoutRedundantDerivedScopes(service, storedScopes), widenedScopes: [] as string[] };
     }
 
     const widenedScopes = requestedScopes.filter(
@@ -4107,14 +4104,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * asking past its scope ceiling. On success, the record (null when the
    * agent is not registered).
    */
-  async function didAgentCheck(agentDid: string, requestedScopes: string[] | undefined): Promise<
+  async function didAgentCheck(agentDid: string, service: string, requestedScopes: string[] | undefined): Promise<
     { ok: true; record: AgentRecord | null } | { ok: false; error: string; message: string }
   > {
     const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
     if (record?.status === 'revoked') return { ok: false, error: 'agent_revoked', message: 'Agent has been revoked' };
     if (record?.status === 'suspended') return { ok: false, error: 'agent_suspended', message: 'Agent is suspended' };
     const over = record?.scopeCeiling.length && requestedScopes?.length
-      ? requestedScopes.filter((scope) => !scopeCoveredBy(record.scopeCeiling, scope))
+      ? requestedScopes.filter((scope) => !ceilingCovers(service, record.scopeCeiling, scope))
       : [];
     if (over.length > 0) return { ok: false, error: 'scope_ceiling_exceeded', message: `Agent scope ceiling exceeded: ${over.join(', ')}` };
     return { ok: true, record };
@@ -4125,11 +4122,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * ceiling and within its Permission's allowedScopes. No Permission means
    * none, unless the deprecated opt-out is set.
    */
-  function scopesForDidAgent(stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
+  function scopesForDidAgent(service: string, stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
     if (!permission && !allowAgentsWithoutPermission) return [];
-    return stored
-      .filter((scope) => !record?.scopeCeiling.length || scopeCoveredBy(record.scopeCeiling, scope))
+    return withDerivedScopes(service, stored)
+      .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope))
       .filter((scope) => !permission || permission.allowedScopes.some((allowed) => scopeEquivalent(allowed, scope)));
+  }
+
+  /** A ceiling covers a scope, or the wider scope a derived read scope comes from. Never the reverse. */
+  function ceilingCovers(service: string, ceiling: string[], scope: string): boolean {
+    return scopeCoveredBy(withDerivedScopes(service, ceiling), scope);
   }
 
   /** Every id one agent can be named by: the id given, its DID and its record id. */
@@ -4319,7 +4321,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const guardDecision = (req as any).guardDecision;
       const effectiveRequestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(req.query.scopes));
       if (effectiveRequestedScopes === null) return;
-      const { grantedScopes, widenedScopes } = resolveGrantedScopes(entry.scopes ?? [], effectiveRequestedScopes);
+      const { grantedScopes, widenedScopes } = resolveGrantedScopes(slug, entry.scopes ?? [], effectiveRequestedScopes);
 
       if (widenedScopes.length > 0) {
         res.status(403).json({
@@ -4698,7 +4700,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (!guardResult.allowed) return;
 
       const upstreamUrl = resolveBrokerUrl(delegation.service, url, guardResult.effectiveScopes);
-      if (upstreamUrl && hasMethodOverrideQuery(upstreamUrl)) {
+      // Every channel that could run a different method than the one classified
+      // is refused rather than quietly dropped, so a caller learns it did not work.
+      if (upstreamUrl && methodOverrideChannel({
+        url: upstreamUrl,
+        ...(classifyBrokerCalls ? { headers: extraHeaders && typeof extraHeaders === 'object' ? extraHeaders : {}, body } : {}),
+      })) {
         refuseBrokeredCall(delegationId, delegation, url, 'method_override_refused', { method: normalizedMethod });
         res.status(400).json({ error: 'invalid_request', message: 'A method override is not allowed: the call runs the method it names' });
         return;
@@ -4708,6 +4715,22 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
       }
+      // Classify the exact URL, method and body that will be forwarded.
+      if (classifyBrokerCalls) {
+        const verdict = contentTypeMismatch(extraHeaders && typeof extraHeaders === 'object' ? extraHeaders : {})
+          ? { outcome: 'not_mapped' as const, reason: 'content_type' }
+          : evaluateOperation({ service: delegation.service, method: normalizedMethod, url: upstreamUrl, body }, guardResult.effectiveScopes);
+        if (verdict.outcome === 'not_mapped') {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'operation_not_mapped', { method: normalizedMethod, reason: verdict.reason });
+          res.status(403).json({ error: 'operation_not_mapped', message: `This server does not map this ${delegation.service} call to a scope, so it is refused` });
+          return;
+        }
+        if (verdict.outcome === 'insufficient') {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'scope_insufficient', { method: normalizedMethod, access: verdict.access });
+          res.status(403).json({ error: 'scope_insufficient', message: `This delegation's scopes do not cover this ${verdict.access} call`, needs_one_of: verdict.needs });
+          return;
+        }
+      }
       // The token's capabilities narrow the scopes further: a catalogue
       // operation allows one method and URL template, a resource one
       // repository or file (Section 5.2).
@@ -4716,7 +4739,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         delegation.service,
         normalizedMethod,
         upstreamUrl,
-        (ops) => resolveBrokerUrl(delegation.service, url, ops.filter((op) => guardResult.effectiveScopes.includes(op))) !== null,
+        (ops) => {
+          // The scope operations this token names, held to what it may do now.
+          const allowedNow = withDerivedScopes(delegation.service, guardResult.effectiveScopes);
+          const named = ops.filter((op) => allowedNow.includes(op));
+          if (named.length === 0) return false;
+          return classifyBrokerCalls
+            ? evaluateOperation({ service: delegation.service, method: normalizedMethod, url: upstreamUrl, body }, named).outcome === 'allowed'
+            : resolveBrokerUrl(delegation.service, url, named) !== null;
+        },
       )) {
         // Written each time: which operation was tried outside the capability is the point of the record.
         writeAuditEventIfSupported({
@@ -4833,6 +4864,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const sanitizedExtraHeaders = extraHeaders && typeof extraHeaders === 'object'
         ? Object.fromEntries(
             Object.entries(extraHeaders).filter(([key, value]) => {
+              // Checked above, and always JSON: the broker sets it itself.
+              if (classifyBrokerCalls && key.trim().toLowerCase() === 'content-type') return false;
               return isForwardableBrokerHeader(key, value);
             }),
           )
@@ -5166,7 +5199,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
         if (didAgentRecord?.scopeCeiling.length && effectiveRequestedScopes?.length) {
-          const unauthorizedScopes = effectiveRequestedScopes.filter((scope) => !scopeCoveredBy(didAgentRecord!.scopeCeiling, scope));
+          const unauthorizedScopes = effectiveRequestedScopes.filter((scope) => !ceilingCovers(service, didAgentRecord!.scopeCeiling, scope));
           if (unauthorizedScopes.length > 0) {
             res.status(403).json({
               error: 'scope_ceiling_exceeded',
@@ -5274,12 +5307,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // A request that names no agent (only a raw token can: see the
+      // agent_key_required check) identifies nobody a Permission could be for.
+      const principalScopes = (entry.scopes ?? []).filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope));
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(
-        scopesForDidAgent(
-          (entry.scopes ?? []).filter((scope) => !principalId || !allowedByPrincipal || allowedByPrincipal.includes(scope)),
-          didAgentRecord,
-          didPermission,
-        ),
+        service,
+        agentDid ? scopesForDidAgent(service, principalScopes, didAgentRecord, didPermission) : principalScopes,
         effectiveRequestedScopes,
       );
 
@@ -5287,6 +5320,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({
           error: 'scope_escalation_denied',
           message: `Requested scopes exceed stored consent: ${widenedScopes.join(', ')}`,
+        });
+        return;
+      }
+
+      // A provider token has the connection's whole scope, and a derived scope
+      // holds only at the broker: a raw token cannot be what it describes.
+      if (tokenFormat === 'raw' && grantedScopes.some((scope) => isBrokerOnlyScope(service, scope))) {
+        res.status(400).json({
+          error: 'invalid_scope',
+          message: 'A read scope Cred derives holds only at the broker, so it cannot be issued as a raw token; request token_format "handle"',
         });
         return;
       }
@@ -6377,7 +6420,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             service: parent.service,
             userId: parent.userId,
             appClientId: parent.appClientId,
-            scopesGranted: parent.scopes,
+            // A parent's wider scope covers the read scope derived from it, and
+            // never the other way round.
+            scopesGranted: withDerivedScopes(parent.service, parent.scopes),
             chainDepth: parent.chainDepth,
             constraints: parent.constraints,
           },
@@ -6392,7 +6437,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             ? { requestedConstraints: childConstraints.constraints }
             : {}),
           permission: {
-            allowedScopes: permission.allowedScopes,
+            allowedScopes: withDerivedScopes(service, permission.allowedScopes),
             delegatable: permission.delegatable,
             maxDelegationDepth: permission.maxDelegationDepth,
           },
@@ -6414,6 +6459,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         res.status(403).json({ error: message, code });
         return;
       }
+      validation.grantedScopes = withoutRedundantDerivedScopes(service, validation.grantedScopes);
 
       // ── Enforce the child agent's scope ceiling ──────────────────────────
       // Mirror the direct-delegation path (a non-empty scopeCeiling is a hard
@@ -6422,7 +6468,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // capped to on direct delegation.
       if (agentRecord?.scopeCeiling.length) {
         const withinCeiling = validation.grantedScopes.filter((scope) =>
-          scopeCoveredBy(agentRecord!.scopeCeiling, scope),
+          ceilingCovers(service, agentRecord!.scopeCeiling, scope),
         );
         if (withinCeiling.length === 0) {
           writeAuditEventIfSupported({
@@ -6953,7 +6999,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const requestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(body.scopes));
       if (requestedScopes === null) return;
-      const agentCheck = await didAgentCheck(agentDid, requestedScopes);
+      const agentCheck = await didAgentCheck(agentDid, service, requestedScopes);
       if (!agentCheck.ok) {
         res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });
         return;
@@ -6994,7 +7040,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const { grantedScopes, widenedScopes } = resolveGrantedScopes(
-        scopesForDidAgent(vaultEntry.entry.scopes ?? [], agentCheck.record, permission),
+        service,
+        scopesForDidAgent(service, vaultEntry.entry.scopes ?? [], agentCheck.record, permission),
         requestedScopes,
       );
       if (widenedScopes.length > 0 || grantedScopes.length === 0) {
@@ -7070,7 +7117,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   async function issueApprovedDelegation(request: ApprovalRequest, res: Response): Promise<void> {
     const refuse = (description: string) => res.status(400).json({ error: 'invalid_grant', error_description: description });
-    const agentCheck = await didAgentCheck(request.agentDid, request.scopes);
+    const agentCheck = await didAgentCheck(request.agentDid, request.service, request.scopes);
     if (!agentCheck.ok) {
       refuse(`The agent can no longer be delegated to (${agentCheck.error})`);
       return;
@@ -7091,7 +7138,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       refuse('The connection behind this approval is gone');
       return;
     }
-    const stillAllowed = resolveGrantedScopes(scopesForDidAgent(vaultEntry.entry.scopes ?? [], agentCheck.record, permission), request.scopes);
+    const stillAllowed = resolveGrantedScopes(request.service, scopesForDidAgent(request.service, vaultEntry.entry.scopes ?? [], agentCheck.record, permission), request.scopes);
     if (stillAllowed.widenedScopes.length > 0) {
       refuse('The approved scopes are no longer all allowed; ask again');
       return;

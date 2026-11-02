@@ -146,7 +146,14 @@ function buildServerState(config: CredMcpConfig) {
         ? agentTokenHashForLocalMode(config.agentDid)
         : undefined;
 
+  const allowUnclassifiedRaw = (process.env.CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS ?? '').trim().toLowerCase();
+  const allowUnclassifiedCalls = allowUnclassifiedRaw === 'true' || allowUnclassifiedRaw === '1';
+  if (allowUnclassifiedCalls && config.mode !== 'cloud') {
+    console.error('[cred] DEPRECATED: CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true forwards local cred_use calls without checking them against the grant and follows redirects, so a read-only scope can reach a write endpoint. Remove it; this setting will be removed.');
+  }
+
   const toolContext = {
+    allowUnclassifiedCalls,
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     agentDid: config.agentDid,

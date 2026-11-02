@@ -96,6 +96,8 @@ export interface CreateLinkServiceOptions {
   issueToken: Parameters<typeof handleLinkDelegate>[0]['issueToken'];
   /** CRED_ALLOW_RAW_TOKENS (default false). */
   allowRawTokens?: boolean;
+  /** False under CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS. Default true. */
+  classifyBrokerCalls?: boolean;
   /** Lifetime of Link Delegation Tokens, seconds (default 300, capped at 900). */
   handleTtlSeconds?: number;
   makeRateLimiter: (max: number) => RequestHandler;
@@ -190,7 +192,7 @@ export function createLinkService(options: CreateLinkServiceOptions): LinkServic
       }).catch(() => undefined);
     },
   });
-  ctx = { store, secrets, hooks, permissions, providers, tokens, locks, quarantine, clientAuth, vault: options.vault, baseUrl, selfOrigin };
+  ctx = { store, secrets, hooks, permissions, providers, tokens, locks, quarantine, clientAuth, vault: options.vault, baseUrl, selfOrigin, ...(options.classifyBrokerCalls === false ? { classifyBrokerCalls: false } : {}) };
 
   // The heal starts now; requests that touch Link wait for it (gate below).
   const heal = healUnsettledActivations(ctx);

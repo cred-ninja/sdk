@@ -31,6 +31,7 @@ import {
   GetConsentUrlParams,
   RevokeParams,
   LocalUseParams,
+  LocalRefusalParams,
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
@@ -1540,10 +1541,28 @@ export class Cred {
       outcome: connected ? 'success' : 'denied',
       correlationId: crypto.randomUUID(),
       ...(connected ? {} : { errorMessage: 'connection_revoked' }),
+      ...(params.auditMetadata ? { metadata: params.auditMetadata } : {}),
     });
     if (!connected) {
       throw new CredError(`The ${params.service} connection has been revoked`, 'connection_revoked', 401);
     }
+  }
+
+  /** Audit a local-mode call refused before it left the process. */
+  async recordLocalRefusal(params: LocalRefusalParams): Promise<void> {
+    if (!this.isLocal) return;
+    await this.ensureVault();
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentId ?? 'local-agent' },
+      action: 'deny',
+      resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: params.error,
+      ...(params.metadata ? { metadata: params.metadata } : {}),
+    });
   }
 
   async revoke(params: RevokeParams): Promise<void> {

@@ -111,7 +111,7 @@ back to `default` on its own.
 | GET | `/api/v1/providers` | Bearer | List configured provider slugs |
 | GET | `/api/v1/connections` | Bearer | List stored connections |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke a stored connection |
-| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`), Cred Link delegations included |
+| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`), Cred Link delegations included. Each call is classified against the grant (`packages/guard/src/operations.ts`): `403 operation_not_mapped` when the tables do not map it, `403 scope_insufficient` when the grant does not cover it |
 | DELETE | `/api/v1/delegations/:delegationId` (also `/delegation/:delegationId`) | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
 | POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; issues a Delegation Token (DPoP-bound JWT: `authorization_details` as requested (granted scopes or catalogue operations with resources) or the granted scopes, `prf`, `consent_id`, `credential_handle`) to the did:key agent that proves its key with a DPoP proof, and records the consent behind it; raw-token requests take no proof |
 | POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token`; always required; returns the child's Delegation Token, bound to the receiving agent's key, or with `exchange: "grant"` a single-use delegation grant |
@@ -139,7 +139,7 @@ back to `default` on its own.
 | POST | `/link/v1/connections/:id/refresh` | Link client | Force a token refresh; returns status only |
 | POST | `/link/v1/connections/:id/reauth` | Link client | Reauth pushed request for this connection |
 | POST | `/link/v1/connections/:id/permissions` | Link client | Grant an agent scopes within the grant |
-| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker` only for Google when whole API families were removed, else `record`: family level, not read versus write) |
+| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker`, since every brokered call is classified against the grant as it now stands; `record` only with `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS` set) |
 
 `GET /api/v1/audit` and `GET /admin/audit` are separate routes: the former
 is scoped to the requesting agent's own `userId`; the latter is
@@ -178,7 +178,7 @@ use flow, exposed under that framework's own tool-registration convention.
 | `packages/oauth` | Provider OAuth adapters (Google, GitHub, Slack, Notion, Salesforce, ...). |
 | `packages/tofu` | Trust-on-first-use agent identity registry (Web Bot Auth keys, DIDs). |
 | `packages/vault` | Encrypted credential storage, Permission records, audit log, cumulative-constraint ledger. |
-| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express. |
+| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, and the operation classifier the broker uses to decide whether a grant covers a call. |
 | `packages/sdk` | `Cred` client class — the shared surface both `packages/mcp` and `packages/server` build on. |
 | `packages/sdk-python` | Python port of the SDK client, used by the Python framework integrations. |
 | `packages/server` | Hosted REST API (cloud mode) — see endpoint table above. |

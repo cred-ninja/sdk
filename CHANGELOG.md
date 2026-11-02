@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### BREAKING: a grant means what it says at the broker
+
+- `@credninja/guard`: new operation classifier (`evaluateOperation`,
+  `canonicalBrokerUrl`, `methodOverrideChannel`, `contentTypeMismatch`), with
+  tables for Google, Slack, Linear, GitHub, HubSpot, Notion and Salesforce and a
+  new dependency on `graphql`.
+- `@credninja/server`: `/api/v1/use` used to check only a URL allowlist and, for
+  Google, an API family, so `gmail.readonly` could send mail, `calendar.readonly`
+  could create events, a Slack read scope could post and Linear's `read` could run
+  mutations. Each call is now classified on the exact URL, method and body
+  forwarded. An unmapped call or scope gets `403 operation_not_mapped`, and a call
+  the grant does not cover gets `403 scope_insufficient`. Both are audited.
+- Calls that worked and are now refused: any provider API the tables do not map,
+  HubSpot `/cms/`, `/content/` and `/automation/`, Salesforce composite, tooling
+  and Apex REST, Google uploads and batch, GitHub GraphQL over GET, and any call
+  whose scope does not cover it. A token whose scopes do not match a call's now
+  fails here instead of at the provider. See the README for what is mapped.
+- A method override in a header or JSON body is refused with `400 invalid_request`
+  where a header used to be dropped silently. A `Content-Type` other than JSON in
+  `extra_headers` is refused.
+- New delegation-only read scopes `github.read`, `salesforce.read` and
+  `notion.read`, derived from stored consent through one helper used by every
+  grant path: stored scopes, Permissions, ceilings, sub-delegation and
+  capabilities. A derived scope is never issued as a raw token. A Notion
+  connection with no stored scopes now covers `content`, so a Permission naming
+  `content` or `notion.read` can be delegated.
+- Cred Link: narrowing now answers `enforcement: "broker"` for every provider,
+  and a call only the removed scopes covered is refused, also through a handle
+  issued before the narrow.
+- `@credninja/mcp` local mode applies the same refusals, forwards the canonical
+  URL and no longer follows upstream redirects. Refusals are audited through the
+  new `Cred.recordLocalRefusal`.
+- Deprecated opt-out: `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS`, which warns at
+  startup and marks every affected audit event. The URL allowlist still applies.
+
 ### Fixed: the audit log names the agent behind a brokered call
 
 - `@credninja/server`: a successful `/api/v1/use` call and a cumulative-constraint

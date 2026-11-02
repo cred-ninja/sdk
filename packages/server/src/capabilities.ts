@@ -13,6 +13,7 @@
  * is never read as broad.
  */
 import { CRED_DELEGATION_TYPE, scopeCoveredBy, type CredDelegationDetail } from '@credninja/attenuation';
+import { withDerivedScopes } from '@credninja/guard';
 import { brokerScopeEquivalent, googleScopeMatches } from './google-scopes.js';
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -41,6 +42,7 @@ export interface CatalogueOperation {
 const REPO: ResourceKind = { kind: 'repo', params: ['owner', 'repo'] };
 const FILE: ResourceKind = { kind: 'file', params: ['fileId'] };
 const GITHUB_REPO_SCOPES = ['repo', 'public_repo'];
+const GITHUB_REPO_READ_SCOPES = [...GITHUB_REPO_SCOPES, 'github.read'];
 const DRIVE_READ = ['drive.readonly', 'drive', 'drive.file', 'drive.metadata.readonly'];
 const DRIVE_WRITE = ['drive', 'drive.file'];
 
@@ -49,14 +51,14 @@ const DRIVE = 'https://www.googleapis.com/drive/v3';
 
 export const OPERATION_CATALOGUE: readonly CatalogueOperation[] = [
   { name: 'github.user.get', provider: 'github', method: 'GET', url: `${GH}/user`, scopes: ['read:user', 'user'] },
-  { name: 'github.repos.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'github.contents.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/contents/{path+}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'github.issues.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
-  { name: 'github.issues.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues/{number}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
+  { name: 'github.repos.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO },
+  { name: 'github.contents.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/contents/{path+}`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO },
+  { name: 'github.issues.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
+  { name: 'github.issues.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/issues/{number}`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO },
   { name: 'github.issues.create', provider: 'github', method: 'POST', url: `${GH}/repos/{owner}/{repo}/issues`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
   { name: 'github.issues.comment', provider: 'github', method: 'POST', url: `${GH}/repos/{owner}/{repo}/issues/{number}/comments`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
-  { name: 'github.pulls.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls`, scopes: GITHUB_REPO_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
-  { name: 'github.pulls.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls/{number}`, scopes: GITHUB_REPO_SCOPES, resource: REPO },
+  { name: 'github.pulls.list', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO, page: { param: 'per_page', max: 100 } },
+  { name: 'github.pulls.get', provider: 'github', method: 'GET', url: `${GH}/repos/{owner}/{repo}/pulls/{number}`, scopes: GITHUB_REPO_READ_SCOPES, resource: REPO },
   { name: 'drive.files.list', provider: 'google', method: 'GET', url: `${DRIVE}/files`, scopes: DRIVE_READ, page: { param: 'pageSize', max: 1000 } },
   { name: 'drive.files.get', provider: 'google', method: 'GET', url: `${DRIVE}/files/{fileId}`, scopes: DRIVE_READ, resource: FILE },
   { name: 'drive.files.export', provider: 'google', method: 'GET', url: `${DRIVE}/files/{fileId}/export`, scopes: DRIVE_READ, resource: FILE },
@@ -110,7 +112,7 @@ export function validateCapabilities(
       if (entry) {
         if (entry.provider !== provider) return { ok: false, message: `operation ${op} is not a ${provider} operation` };
         if (!operationGranted(entry, grantedScopes)) return { ok: false, message: `operation ${op} needs a scope this delegation is not granted` };
-      } else if (!grantedScopes.some((scope) => scope === op || scopeCoveredBy([scope], op)
+      } else if (!withDerivedScopes(provider, grantedScopes).some((scope) => scope === op || scopeCoveredBy([scope], op)
         || (provider === 'google' && brokerScopeEquivalent(scope, op)))) {
         return { ok: false, message: `unknown operation ${op}: not a granted scope or a catalogue operation` };
       }
@@ -239,7 +241,7 @@ export function capabilitiesSubsumed(parent: readonly CredDelegationDetail[], ch
     && c.operations.every((op) => p.operations.includes(op)
       // A parent scope operation covers a narrower scope, and a catalogue
       // operation it makes available.
-      || (!p.resources && !catalogueOperation(op) && p.operations.some((po) => !catalogueOperation(po)) && scopeCoveredBy(p.operations, op))
+      || (!p.resources && !catalogueOperation(op) && p.operations.some((po) => !catalogueOperation(po)) && scopeCoveredBy(withDerivedScopes(p.provider, p.operations), op))
       || (!p.resources && catalogueOperation(op) !== undefined && operationGranted(catalogueOperation(op)!, p.operations)))
     && (!p.resources || (c.resources !== undefined && c.resources.every((r) => p.resources!.some((pr) => sameResource(pr, r)))))));
 }
