@@ -76,6 +76,7 @@ import {
   isScopeSubset,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
+import { auditOriginAndRoute, createRefusalAggregator } from './audit-route.js';
 import { capabilitiesAllow, capabilitiesSubsumed, matchedPageParam, validateCapabilities } from './capabilities.js';
 import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWithinPrefix, meterSide } from './metering.js';
 import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
@@ -1584,6 +1585,57 @@ export function createServer(config: ServerConfig) {
       }
       throw err;
     }
+  }
+
+  // A flood of one refusal by one agent is one event and a count.
+  const refusals = createRefusalAggregator({ write: writeAuditEventIfSupported });
+  const refusalSweep = setInterval(() => {
+    try {
+      refusals.flushExpired();
+    } catch (err) {
+      console.error('[audit] Failed to write a refusal summary:', err instanceof Error ? err.message : err);
+    }
+  }, 30_000);
+  if (refusalSweep.unref) refusalSweep.unref();
+
+  /** Who made a brokered call: its agent's DID, else its Link agent, else the shared identity. */
+  function brokeredActor(delegation: BrokeredDelegation): AuditActor {
+    return {
+      type: 'agent',
+      id: delegation.agentDid ?? delegation.link?.agentId ?? 'server-agent',
+      ...(delegation.dpopJkt ? { fingerprint: delegation.dpopJkt } : {}),
+    };
+  }
+
+  /** What every /api/v1/use event says about the call. Never the query string. */
+  function brokeredCallMetadata(delegationId: string, delegation: BrokeredDelegation, url?: string): Record<string, unknown> {
+    return {
+      delegationId,
+      ...(delegation.link ? { linkAgentId: delegation.link.agentId } : {}),
+      ...(url !== undefined ? auditOriginAndRoute(url) : {}),
+    };
+  }
+
+  /** Record a refused /api/v1/use call, aggregated per agent. */
+  function refuseBrokeredCall(
+    delegationId: string,
+    delegation: BrokeredDelegation,
+    url: string,
+    error: string,
+    metadata: Record<string, unknown> = {},
+    outcome: AuditEvent['outcome'] = 'denied',
+  ): void {
+    refusals.record({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: brokeredActor(delegation),
+      action: outcome === 'denied' ? 'deny' : 'access',
+      resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
+      outcome,
+      correlationId: crypto.randomUUID(),
+      errorMessage: error,
+      metadata: { ...brokeredCallMetadata(delegationId, delegation, url), ...metadata },
+    });
   }
 
   /** Batched writeAuditEventIfSupported(): one transaction on SQLite. */
@@ -3127,17 +3179,49 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (typeof scopes === 'string') return scopes.split(',').map((scope) => scope.trim()).filter(Boolean);
     return [];
   }
+  /**
+   * Audit a Guard denial on a route's middleware, which runs before the
+   * agent proves its key: `agent_did` in the body is recorded as a claim,
+   * never as the actor.
+   */
+  function recordGuardRouteDenial(req: Request, decision: GuardDecision): void {
+    const printable = (value: unknown, max: number): string | undefined => (
+      typeof value === 'string' && value.length <= max && /^[\x21-\x7e]+$/.test(value) ? value : undefined
+    );
+    const principal = (req as any).agentPrincipal as RequestAgentPrincipal | undefined;
+    const identity = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
+    const provider = printable(routeParam(req.params.provider), 64) ?? 'unknown';
+    const user = printable(principalBoundUserId(req) ?? explicitRequestUserId(req), 128) ?? (singleUserMode ? 'default' : 'unknown');
+    const claimed = printable(req.body?.agent_did, 256);
+    refusals.record({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: identity?.agentId ?? principal?.principalId ?? 'server-agent' },
+      action: 'deny',
+      resource: { type: 'token', id: `${provider}/${user}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: 'guard_denied',
+      metadata: {
+        policy: decision.deniedBy?.policy,
+        path: req.path.slice(0, 128),
+        ...(claimed ? { claimedAgentDid: claimed } : {}),
+      },
+    });
+  }
+
   const guardMiddleware = config.guard
     ? createExpressMiddleware(config.guard, {
         extractScopes: (req) => storedScopesForGuard.get(req) ?? scopesNamedBy(req),
         // Link context from verified state only (set by the Link precheck).
         resolveLinkContext: (req) => linkService?.resolveGuardLinkContext(req),
-        onDeny: (_req, res, decision) => {
+        onDeny: (req, res, decision) => {
           // Log guard denials for audit
           console.warn('[guard] DENIED', {
             policy: decision.deniedBy?.policy,
             reason: decision.deniedBy?.reason,
           });
+          recordGuardRouteDenial(req, decision);
           const code = decision.deniedBy?.code;
           res.status(403).json({
             error: 'Request denied by guard policy',
@@ -3369,11 +3453,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   }
 
   /** Audit a /api/v1/use refusal under a cumulative constraint. */
-  function denyCumulative(delegationId: string, delegation: BrokeredDelegation, error: string, keys: string[]): void {
+  function denyCumulative(delegationId: string, delegation: BrokeredDelegation, error: string, keys: string[], url?: string): void {
     writeAuditEventIfSupported({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
-      actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
+      actor: brokeredActor(delegation),
       action: 'deny',
       // service/userId, like every other deny event, so the owning user's
       // /api/v1/audit and audit stream can see it.
@@ -3381,7 +3465,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       outcome: 'denied',
       correlationId: crypto.randomUUID(),
       errorMessage: error,
-      metadata: { delegationId, constraints: keys },
+      metadata: { ...brokeredCallMetadata(delegationId, delegation, url), constraints: keys },
     });
   }
 
@@ -3510,7 +3594,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     writeAuditEventIfSupported({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
-      actor: { type: 'agent', id: delegation.agentDid ?? 'server-agent' },
+      actor: brokeredActor(delegation),
       action: 'deny',
       resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
       outcome: 'denied',
@@ -3934,6 +4018,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       if (!decision.allowed) {
         const code = decision.deniedBy?.code;
+        refuseBrokeredCall(input.delegationId, input.delegation, input.url, 'guard_denied', { policy: decision.deniedBy?.policy, method: input.method });
         res.status(403).json({
           error: 'Request denied by guard policy',
           policy: decision.deniedBy?.policy,
@@ -3949,6 +4034,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         decision,
       };
     } catch (err) {
+      refuseBrokeredCall(input.delegationId, input.delegation, input.url, 'guard_failed', { method: input.method });
       res.status(500).json({
         error: 'Guard evaluation failed',
         message: err instanceof Error ? err.message : String(err),
@@ -4515,13 +4601,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         writeAuditEventIfSupported({
           id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
           timestamp: new Date(),
-          actor: { type: 'agent', id: delegation.agentDid ?? 'unverified' },
+          actor: brokeredActor(delegation),
           action: 'deny',
           resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
           outcome: 'denied',
           correlationId: crypto.randomUUID(),
           errorMessage: UNKNOWN_CONSTRAINT,
-          metadata: { delegationId },
+          metadata: brokeredCallMetadata(delegationId, delegation, url),
         });
         res.status(403).json({ error: UNKNOWN_CONSTRAINT, message: 'This delegation carries an unimplemented constraint type' });
         return;
@@ -4538,7 +4624,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         ...cumulative.filter((c) => meterSide(c.key) === null || c.key === 'method' || c.key === 'destination'),
       ].map((c) => c.key);
       if (unmetered.length > 0) {
-        denyCumulative(delegationId, delegation, 'unmetered_constraint', unmetered);
+        denyCumulative(delegationId, delegation, 'unmetered_constraint', unmetered, url);
         res.status(403).json({
           error: 'unmetered_constraint',
           message: 'This delegation carries a constraint on a quantity this server does not measure, so no exercise can be decided under it',
@@ -4573,10 +4659,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       const upstreamUrl = resolveBrokerUrl(delegation.service, url, guardResult.effectiveScopes);
       if (upstreamUrl && hasMethodOverrideQuery(upstreamUrl)) {
+        refuseBrokeredCall(delegationId, delegation, url, 'method_override_refused', { method: normalizedMethod });
         res.status(400).json({ error: 'invalid_request', message: 'A method override is not allowed: the call runs the method it names' });
         return;
       }
       if (!upstreamUrl || (linkAccess && !linkService!.upstreamAllowed(linkAccess.connection, upstreamUrl))) {
+        refuseBrokeredCall(delegationId, delegation, url, 'url_refused', { method: normalizedMethod });
         res.status(400).json({ error: `URL is not allowed for ${delegation.service} with the delegated scopes` });
         return;
       }
@@ -4590,17 +4678,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         upstreamUrl,
         (ops) => resolveBrokerUrl(delegation.service, url, ops.filter((op) => guardResult.effectiveScopes.includes(op))) !== null,
       )) {
-        writeAuditEventIfSupported({
-          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-          timestamp: new Date(),
-          actor: { type: 'agent', id: delegation.agentDid ?? 'unverified' },
-          action: 'deny',
-          resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
-          outcome: 'denied',
-          correlationId: crypto.randomUUID(),
-          errorMessage: 'capability_denied',
-          metadata: { delegationId, method: normalizedMethod },
-        });
+        refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'capability_denied', { method: normalizedMethod });
         res.status(403).json({ error: 'capability_denied', message: 'This call is outside the delegation\'s capabilities' });
         return;
       }
@@ -4644,7 +4722,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           ? (destinationWithinPrefix(String(measured), (c as { prefix: string }).prefix) ? null : 'destination is outside the allowed prefix')
           : exerciseConstraintViolation(constraint, measured);
         if (violation) {
-          denyCumulative(delegationId, delegation, 'ceiling_exceeded', [c.key]);
+          denyCumulative(delegationId, delegation, 'ceiling_exceeded', [c.key], upstreamUrl);
           res.status(403).json({ error: 'ceiling_exceeded', message: violation, constraint: c.key });
           return;
         }
@@ -4672,13 +4750,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         writeAuditEventIfSupported({
           id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
           timestamp: new Date(),
-          actor: { type: 'agent', id: delegation.agentDid ?? 'server-agent' },
+          actor: brokeredActor(delegation),
           action: 'deny',
           resource: { type: 'token', id: `${delegation.service}/${delegation.userId}` },
           outcome: 'denied',
           correlationId: crypto.randomUUID(),
           errorMessage: 'connection_revoked',
-          metadata: { delegationId },
+          metadata: brokeredCallMetadata(delegationId, delegation, upstreamUrl),
         });
         res.status(401).json({ error: 'connection_revoked', message: 'The connection behind this handle has been revoked' });
         return;
@@ -4694,7 +4772,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         if (debit.ok) requestDebit = debit;
         if (!debit.ok) {
           const error = debit.reason === 'exceeded' ? 'cumulative_constraint_exceeded' : CUMULATIVE_CONSTRAINT_UNENFORCEABLE;
-          denyCumulative(delegationId, delegation, error, debit.key ? [debit.key] : cumulative.map((c) => c.key));
+          denyCumulative(delegationId, delegation, error, debit.key ? [debit.key] : cumulative.map((c) => c.key), upstreamUrl);
           res.status(403).json({ error, message: debit.message, ...(debit.key ? { constraint: debit.key, type: debit.type } : {}) });
           return;
         }
@@ -4730,6 +4808,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         });
       } catch (err) {
         refundRequestDebit();
+        // The error text can quote the URL, so it stays out of the log.
+        refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'upstream_unreachable', { method: normalizedMethod }, 'error');
         throw err;
       }
 
@@ -4765,13 +4845,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         writeAuditEventIfSupported({
           id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
           timestamp: new Date(),
-          actor: { type: 'agent', id: delegation.agentDid ?? delegation.link?.agentId ?? 'server-agent' },
+          actor: brokeredActor(delegation),
           action: 'access',
           resource: { type: 'connection', id: `${delegation.service}/${delegation.userId}` },
           outcome: 'denied',
           correlationId: crypto.randomUUID(),
           errorMessage: error,
-          metadata: { delegationId, withheld: true, constraint, detail, method: normalizedMethod, upstreamStatus: upstream.status },
+          metadata: { ...brokeredCallMetadata(delegationId, delegation, upstreamUrl), withheld: true, constraint, detail, method: normalizedMethod, upstreamStatus: upstream.status },
         });
         res.status(403).json({
           error,
@@ -4811,13 +4891,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
         timestamp: new Date(),
-        actor: { type: 'agent', id: delegation.link?.agentId ?? 'server-agent' },
+        actor: brokeredActor(delegation),
         action: 'access',
         resource: { type: 'connection', id: `${delegation.service}/${delegation.userId}` },
         outcome: upstream.ok ? 'success' : 'error',
         scopesGranted: guardResult.effectiveScopes,
         correlationId: crypto.randomUUID(),
         metadata: {
+          ...brokeredCallMetadata(delegationId, delegation, upstreamUrl),
           brokered: true,
           method: normalizedMethod,
           status: upstream.status,
@@ -7426,5 +7507,5 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
   }, 60_000);
   if (firstPurge.unref) firstPurge.unref();
 
-  return { app, vault, tofu, link: linkService, purgeExpiredConsents };
+  return { app, vault, tofu, link: linkService, purgeExpiredConsents, flushAuditAggregates: () => refusals.flush() };
 }

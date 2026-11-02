@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed: the audit log names the agent behind a brokered call
+
+- `@credninja/server`: a successful `/api/v1/use` call and a cumulative-constraint
+  denial were recorded as the shared `server-agent` whichever agent made them.
+  Every `/api/v1/use` event now resolves its actor through one helper: the agent
+  DID, then the Link agent, then `server-agent`, with the key thumbprint as
+  `fingerprint`. A Link call's actor is therefore now the DID, with the Link
+  agent in `metadata.linkAgentId`.
+- Those events also carry `delegationId`, `origin` and a `route` with identifiers
+  redacted (`/repos/{id}/{id}/issues/{id}`), capped at 256 characters. A route
+  keeps only known API path words, and never holds a query string.
+- New events: Guard denials (`guard_denied`, on `/api/v1/use` and on routes under
+  the Guard middleware, where an unproven `agent_did` is recorded as
+  `claimedAgentDid`), Guard failures at `/api/v1/use` (`guard_failed`), refused URLs
+  (`url_refused`), method overrides (`method_override_refused`) and unreachable
+  upstreams (`upstream_unreachable`). Repeats of one refusal by one agent within
+  a minute are one event and then one summary (`aggregated`, `repeats`). The
+  running count is in process memory, so a crash can lose a window's count,
+  though not its first event.
+- Existing audit rows are not changed, so rows written earlier still say
+  `server-agent`. The hash chain verifies across old and new rows.
+
 ### BREAKING: agents need a Permission, and a revocation holds
 
 - `@credninja/server`: `POST /api/v1/delegate` and `POST /bc-authorize` refuse

@@ -196,6 +196,20 @@ npm run dev
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
 
+## Audit attribution
+
+Each `/api/v1/use` event names its agent as `actor.id` (the did:key, then the
+Cred Link agent, then the shared `server-agent`) with the key thumbprint as
+`actor.fingerprint`, and carries `metadata.delegationId`, `origin` and `route`.
+`route` is a template: it keeps known API path words and writes `{id}` for
+every other segment, so it holds no query string and no identifier, at the cost
+of some detail. Refusals are events too (`guard_denied`, `url_refused`,
+`method_override_refused`, `capability_denied`, `upstream_unreachable`). Repeats
+of one refusal by one agent within a minute collapse into the first event and a
+summary with `metadata.aggregated` and `metadata.repeats`. A crash can lose a
+window's count, though not its first event. Rows written before this version
+are unchanged and still say `server-agent`.
+
 ## Agent access
 
 An agent gets what it was granted. A request naming `agent_did` needs a
