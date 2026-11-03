@@ -112,6 +112,11 @@ export function applyPatch(snapshot: PolicySnapshot, patch: PolicyPatch, now: Da
       if (!isNewPolicyValue(op.value)) {
         throw new PatchError(`a policy value must be { kind, parameters }`, index);
       }
+      if (op.op === 'replace' && position !== -1 && (policies[position].descriptor.opaquePaths?.length ?? 0) > 0) {
+        // A whole-policy replace would silently drop the predicates kept by
+        // reference; the patch must edit the serializable fields instead.
+        throw new PatchError(`policy "${target.policyName}" holds opaque values; replace its parameters individually`, index);
+      }
       const entry: PolicyEntry = {
         name: target.policyName!,
         descriptor: { kind: op.value.kind, parameters: cloneParameters(op.value.parameters) as Record<string, ParameterValue> },
@@ -132,8 +137,15 @@ export function applyPatch(snapshot: PolicySnapshot, patch: PolicyPatch, now: Da
     if (entry.descriptor.kind === 'opaque') {
       throw new PatchError(`policy "${entry.name}" is opaque; its parameters cannot be patched`, index);
     }
-    if (entry.descriptor.opaquePaths?.some((opaque) => target.relative === opaque || target.relative!.startsWith(opaque + '/'))) {
-      throw new PatchError(`${op.path} is an opaque value kept by reference and cannot be patched`, index);
+    const touchesOpaque = entry.descriptor.opaquePaths?.some(
+      (opaque) =>
+        target.relative === opaque ||
+        target.relative!.startsWith(opaque + '/') ||
+        // An ancestor: removing or replacing it would drop the opaque value.
+        (op.op !== 'add' && opaque.startsWith(target.relative! + '/')),
+    );
+    if (touchesOpaque) {
+      throw new PatchError(`${op.path} is, or contains, an opaque value kept by reference and cannot be patched`, index);
     }
     try {
       entry.descriptor.parameters = editTree(entry.descriptor.parameters, target.relative!, op) as Record<string, ParameterValue>;
@@ -244,14 +256,19 @@ function diffTree(before: ParameterValue, after: ParameterValue, path: string, o
     if (scalar(before) && scalar(after)) {
       const afterSet = new Set(after.map((item) => canonicalJson(item)));
       const beforeSet = new Set(before.map((item) => canonicalJson(item)));
-      // Removals from the end first so earlier indexes stay valid.
-      for (let i = before.length - 1; i >= 0; i -= 1) {
-        if (!afterSet.has(canonicalJson(before[i]))) ops.push({ op: 'remove', path: `${path}/${i}` });
+      const kept = before.filter((item) => afterSet.has(canonicalJson(item)));
+      const added = after.filter((item) => !beforeSet.has(canonicalJson(item)));
+      // Removals plus appends reproduce `after` only when the kept members
+      // already stand in its order; otherwise the array is replaced whole so
+      // the diff round-trips to the same hash.
+      if (canonicalJson([...kept, ...added]) === canonicalJson(after)) {
+        // Removals from the end first so earlier indexes stay valid.
+        for (let i = before.length - 1; i >= 0; i -= 1) {
+          if (!afterSet.has(canonicalJson(before[i]))) ops.push({ op: 'remove', path: `${path}/${i}` });
+        }
+        for (const item of added) ops.push({ op: 'add', path: `${path}/-`, value: item });
+        return;
       }
-      for (const item of after) {
-        if (!beforeSet.has(canonicalJson(item))) ops.push({ op: 'add', path: `${path}/-`, value: item });
-      }
-      return;
     }
   }
   ops.push({ op: 'replace', path, value: after });
@@ -292,6 +309,13 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
   const touched = Math.max(1, Math.max(before === undefined ? 0 : countLeaves(before), after === undefined ? 0 : countLeaves(after)));
 
   const result = (effect: OpEffect, rationale: string): ClassifiedOp => ({ op, effect, rationale, touched });
+  const root = patchRootView(snapshot);
+  /** True when `op` removes the only element of the list it names. */
+  const removesLastElement = (): boolean => {
+    if (op.op !== 'remove') return false;
+    const parent = getAtPointer(root, op.path.slice(0, op.path.lastIndexOf('/')));
+    return Array.isArray(parent) && parent.length === 1;
+  };
 
   if (target.kind === 'onError') {
     if (after === 'allow') return result('widening', 'a policy error would let the request through');
@@ -348,7 +372,17 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
         }
         if (segments.length === 3) {
           if (added) return result('widening', 'one more URL pattern is reachable');
-          if (removed) return result('narrowing', 'one URL pattern is no longer reachable');
+          if (removed) {
+            if (removesLastElement()) {
+              // With no patterns left under this key, only the other table can still constrain the provider.
+              const other = key === 'allowedUrls' ? 'wildcardSubdomains' : 'allowedUrls';
+              const otherList = getAtPointer(root, joinPointer([target.policyName!, other, segments[1]]));
+              if (!Array.isArray(otherList) || otherList.length === 0) {
+                return result('widening', `the last URL rule for "${segments[1]}" is removed, so url-allowlist skips it and any URL is reachable`);
+              }
+            }
+            return result('narrowing', 'one URL pattern is no longer reachable');
+          }
           return result('unknown', 'a URL pattern was rewritten; review as remove plus add');
         }
       }
@@ -414,14 +448,29 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
     case 'time-window': {
       if (key === 'allowedHours' && segments.length === 2) {
         const numeric = (value: unknown) => (typeof value === 'number' ? value : undefined);
-        if (segments[1] === 'start') return compareNumbers(numeric(before), numeric(after), 'down', result, 'window start');
-        if (segments[1] === 'end') return compareNumbers(numeric(before), numeric(after), 'up', result, 'window end');
+        const field = segments[1];
+        // An overnight window (start > end) does not compare edge by edge:
+        // moving start from 2 to 22 in a 2..6 window adds 22, 23, 0 and 1.
+        const sibling = numeric(getAtPointer(root, joinPointer([target.policyName!, key, field === 'start' ? 'end' : 'start'])));
+        const wraps = (start?: number, end?: number) => start !== undefined && end !== undefined && start > end;
+        const beforeStart = field === 'start' ? numeric(before) : sibling;
+        const beforeEnd = field === 'end' ? numeric(before) : sibling;
+        const afterStart = field === 'start' ? numeric(after) : sibling;
+        const afterEnd = field === 'end' ? numeric(after) : sibling;
+        if (wraps(beforeStart, beforeEnd) || wraps(afterStart, afterEnd)) {
+          return result('unknown', 'an overnight window changed; compare the hour sets by hand');
+        }
+        if (field === 'start') return compareNumbers(numeric(before), numeric(after), 'down', result, 'window start');
+        if (field === 'end') return compareNumbers(numeric(before), numeric(after), 'up', result, 'window end');
       }
       if (key === 'allowedDays') {
         if (segments.length === 1 && removed) return result('widening', 'every weekday is allowed');
         if (segments.length === 1 && added) return result('narrowing', 'only listed weekdays are allowed');
         if (segments.length === 2 && added) return result('widening', 'one more weekday is allowed');
-        if (segments.length === 2 && removed) return result('narrowing', 'one weekday is no longer allowed');
+        if (segments.length === 2 && removed) {
+          if (removesLastElement()) return result('widening', 'the last listed weekday is removed, so every weekday is allowed');
+          return result('narrowing', 'one weekday is no longer allowed');
+        }
       }
       if (key === 'timezone') return result('unknown', 'the window moved to another zone; its hours mean different times');
       break;
@@ -432,7 +481,10 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
         if (segments.length === 1 && removed) return result('widening', `every ${key === 'allowedIdentitySources' ? 'identity source' : 'Signature-Agent'} is accepted`);
         if (segments.length === 1 && added) return result('narrowing', 'only the listed values are accepted');
         if (segments.length === 2 && added) return result('widening', 'one more value is accepted');
-        if (segments.length === 2 && removed) return result('narrowing', 'one value is no longer accepted');
+        if (segments.length === 2 && removed) {
+          if (removesLastElement()) return result('widening', 'the last value is removed, so this check no longer applies');
+          return result('narrowing', 'one value is no longer accepted');
+        }
       }
       break;
     }
@@ -441,8 +493,23 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
         const leaf = key === 'requiredClaims' ? 2 : 3;
         if (segments.length === leaf && added) return result('narrowing', 'one more claim is required');
         if (segments.length === leaf && removed) return result('widening', 'one claim is no longer required');
-        if (segments.length === leaf - 1 && removed) return result('widening', 'no claims are required there any more');
-        if (segments.length === leaf - 1 && added) return result('narrowing', 'claims are now required there');
+        if (segments.length === leaf - 1 && removed) {
+          if (key === 'perProvider') {
+            // The provider falls back to the global list; compare the two.
+            const global = getAtPointer(root, joinPointer([target.policyName!, 'requiredClaims']));
+            return requiredSetChange(before, Array.isArray(global) ? global : [], result);
+          }
+          return result('widening', 'no claims are required there any more');
+        }
+        if (segments.length === leaf - 1 && added) {
+          if (key === 'perProvider') {
+            // A provider list replaces the global list for that provider, so
+            // it narrows only if it keeps every global claim.
+            const global = getAtPointer(root, joinPointer([target.policyName!, 'requiredClaims']));
+            return requiredSetChange(Array.isArray(global) ? global : [], after, result);
+          }
+          return result('narrowing', 'claims are now required there');
+        }
       }
       break;
     }
@@ -467,6 +534,24 @@ function compareSets(
   if (gained) return result('widening', `more ${noun}s are allowed`);
   if (lost) return result('narrowing', `fewer ${noun}s are allowed`);
   return result('neutral', `the ${noun} list is unchanged`);
+}
+
+/**
+ * For a list of *required* items (claims), gaining members narrows and
+ * losing members widens: the opposite of an allowlist.
+ */
+function requiredSetChange(
+  before: unknown,
+  after: unknown,
+  result: (effect: OpEffect, rationale: string) => ClassifiedOp,
+): ClassifiedOp {
+  const flipped = compareSets(before, after, (effect, rationale) => ({ op: {} as PatchOp, effect, rationale, touched: 0 }), 'required claim');
+  const effect: OpEffect = flipped.effect === 'widening' ? 'narrowing' : flipped.effect === 'narrowing' ? 'widening' : flipped.effect;
+  const rationale =
+    effect === 'narrowing' ? 'more claims are required for this provider than before'
+      : effect === 'widening' ? 'fewer claims are required for this provider than before'
+        : flipped.rationale;
+  return result(effect, rationale);
 }
 
 function compareNumbers(

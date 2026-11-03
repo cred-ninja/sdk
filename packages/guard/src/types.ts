@@ -196,6 +196,8 @@ export interface GuardAuditEvent {
   code?: string;
   /** Present when the call named a Cred Link connection. */
   link?: GuardLinkContext;
+  /** Present when the request carried receipt-chain claims, so a replay can re-evaluate receipt-claims. */
+  receiptClaims?: string[];
   requestedScopes: string[];
   effectiveScopes: string[];
   targetUrl?: string;

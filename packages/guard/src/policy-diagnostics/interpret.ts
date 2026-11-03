@@ -101,11 +101,18 @@ export function interpretSnapshot(snapshot: PolicySnapshot): SnapshotInterpretat
         break;
       }
       case 'web-bot-auth': {
-        global.identity = {
-          ...(typeof parameters.requireKeyId === 'boolean' ? { requireKeyId: parameters.requireKeyId } : {}),
-          ...(Array.isArray(parameters.allowedIdentitySources) ? { allowedIdentitySources: parameters.allowedIdentitySources.map(String) } : {}),
-          ...(Array.isArray(parameters.allowedSignatureAgentPrefixes) ? { allowedSignatureAgentPrefixes: parameters.allowedSignatureAgentPrefixes.map(String) } : {}),
+        // Only a constraining configuration counts: an empty policy, or one
+        // with empty lists and requireKeyId off, allows every request.
+        const identity: NonNullable<SnapshotInterpretation['global']['identity']> = {
+          ...(parameters.requireKeyId === true ? { requireKeyId: true } : {}),
+          ...(Array.isArray(parameters.allowedIdentitySources) && parameters.allowedIdentitySources.length > 0
+            ? { allowedIdentitySources: parameters.allowedIdentitySources.map(String) }
+            : {}),
+          ...(Array.isArray(parameters.allowedSignatureAgentPrefixes) && parameters.allowedSignatureAgentPrefixes.length > 0
+            ? { allowedSignatureAgentPrefixes: parameters.allowedSignatureAgentPrefixes.map(String) }
+            : {}),
         };
+        if (Object.keys(identity).length > 0) global.identity = identity;
         break;
       }
       case 'receipt-claims': {

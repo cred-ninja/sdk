@@ -154,3 +154,12 @@ describe('MaxTtlPolicy', () => {
     });
   });
 });
+
+describe('MaxTtlPolicy.parseParameters bound', () => {
+  it('refuses a TTL that would push the expiry outside the Date range', async () => {
+    const { MaxTtlPolicy, MAX_TTL_SECONDS } = await import('../policies/max-ttl.js');
+    expect(() => MaxTtlPolicy.parseParameters({ maxTtlSeconds: MAX_TTL_SECONDS + 1 })).toThrow(/up to/);
+    expect(() => MaxTtlPolicy.parseParameters({ maxTtlSeconds: 900, perProvider: { google: Number.MAX_SAFE_INTEGER } })).toThrow(/up to/);
+    expect(MaxTtlPolicy.parseParameters({ maxTtlSeconds: MAX_TTL_SECONDS }).maxTtlSeconds).toBe(MAX_TTL_SECONDS);
+  });
+});

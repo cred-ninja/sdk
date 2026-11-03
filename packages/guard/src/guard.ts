@@ -150,7 +150,9 @@ export class CredGuard {
 
   private remember(ctx: GuardContext, decision: GuardDecision): void {
     if (this.decisionHistorySize === 0) return;
-    this.decisionHistory.push(buildAuditEvent(ctx, decision));
+    // Cloned at store time: the event would otherwise alias the caller's
+    // requestedScopes array, and a caller that reuses it would rewrite history.
+    this.decisionHistory.push(structuredClone(buildAuditEvent(ctx, decision)));
     if (this.decisionHistory.length > this.decisionHistorySize) {
       this.decisionHistory.splice(0, this.decisionHistory.length - this.decisionHistorySize);
     }

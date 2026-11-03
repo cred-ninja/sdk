@@ -28,6 +28,7 @@ export function buildAuditEvent(ctx: GuardContext, decision: GuardDecision): Gua
     })),
     ...(typeof decision.deniedBy?.code === 'string' ? { code: decision.deniedBy.code } : {}),
     ...(ctx.link ? { link: { ...ctx.link } } : {}),
+    ...(ctx.receiptClaims ? { receiptClaims: [...ctx.receiptClaims] } : {}),
     requestedScopes: ctx.requestedScopes,
     effectiveScopes: decision.effectiveScopes,
     targetUrl: ctx.targetUrl,

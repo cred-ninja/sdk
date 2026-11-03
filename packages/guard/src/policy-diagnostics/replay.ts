@@ -6,12 +6,14 @@
  * outcome flips, so a reviewer sees what a patch changes in practice before
  * applying it to configuration. Policies that hold runtime state
  * (rate-limit) are left out of both chains: their answer depends on history
- * the replay does not have. The running guard is never touched.
+ * the replay does not have. Opaque policies are left out too: the only
+ * instance available is the live one, and evaluating it here could change
+ * state it keeps. The running guard is never touched.
  */
 
 import { CredGuard } from '../guard.js';
 import type { CredPolicy, GuardContext } from '../types.js';
-import { materializePolicies } from './snapshot.js';
+import { materializePolicies, OPAQUE_KIND } from './snapshot.js';
 import type { MaterializeOptions } from './snapshot.js';
 import type { Observation, PolicySnapshot, ReplayFlip, ReplayReport } from './types.js';
 
@@ -33,6 +35,7 @@ export function contextFromObservation(event: Observation): GuardContext {
     ...(event.webBotAuthKeyId ? { webBotAuthKeyId: event.webBotAuthKeyId } : {}),
     ...(event.signatureAgent ? { signatureAgent: event.signatureAgent } : {}),
     ...(event.link ? { link: { ...event.link } } : {}),
+    ...(event.receiptClaims ? { receiptClaims: [...event.receiptClaims] } : {}),
   };
 }
 
@@ -44,12 +47,16 @@ export async function replayDecisions(
   events: Observation[],
   options: ReplayOptions = {},
 ): Promise<ReplayReport> {
-  const materialize = (snapshot: PolicySnapshot): CredPolicy[] =>
-    materializePolicies(snapshot, { ...options, excludeStateful: true });
   const excluded = new Set<string>();
   for (const entry of [...base.policies, ...patched.policies]) {
-    if (entry.descriptor.stateful) excluded.add(entry.name);
+    if (entry.descriptor.stateful || entry.descriptor.kind === OPAQUE_KIND) excluded.add(entry.name);
   }
+  const withoutExcluded = (snapshot: PolicySnapshot): PolicySnapshot => ({
+    ...snapshot,
+    policies: snapshot.policies.filter((entry) => !excluded.has(entry.name)),
+  });
+  const materialize = (snapshot: PolicySnapshot): CredPolicy[] =>
+    materializePolicies(withoutExcluded(snapshot), { ...options, excludeStateful: true });
   const before = new CredGuard({ policies: materialize(base), onError: base.onError });
   const after = new CredGuard({ policies: materialize(patched), onError: patched.onError });
 

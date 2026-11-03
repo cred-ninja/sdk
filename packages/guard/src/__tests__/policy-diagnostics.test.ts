@@ -132,10 +132,25 @@ describe('applyPatch', () => {
     expect(() => materializePolicies(unknown, { previous: buildGuard().getPolicies() })).toThrow(/no factory/);
   });
 
-  it('refuses to touch opaque values and opaque policies', () => {
+  it('refuses to touch opaque values, their ancestors, and opaque policies', () => {
     const base = snapshotGuard(buildGuard([{ name: 'custom', evaluate: () => ({ decision: 'ALLOW', policy: 'custom' }) }]));
     expect(() => applyPatch(base, [{ op: 'remove', path: '/url-allowlist/scopeGate/github' }])).toThrow(/opaque/);
+    expect(() => applyPatch(base, [{ op: 'remove', path: '/url-allowlist/scopeGate' }])).toThrow(/opaque/);
+    expect(() => applyPatch(base, [{ op: 'replace', path: '/url-allowlist/scopeGate', value: {} }])).toThrow(/opaque/);
+    expect(() => applyPatch(base, [{ op: 'replace', path: '/url-allowlist', value: { kind: 'url-allowlist', parameters: { allowedUrls: {} } } }])).toThrow(/opaque/);
     expect(() => applyPatch(base, [{ op: 'add', path: '/custom/anything', value: 1 }])).toThrow(/opaque/);
+    // Adding a sibling under the same parent is fine.
+    expect(() => applyPatch(base, [{ op: 'add', path: '/url-allowlist/allowedUrls/slack', value: ['https://slack.com/api/'] }])).not.toThrow();
+  });
+
+  it('diffs a reordered scalar array as a whole-array replace so the result hashes equal', () => {
+    const base = snapshotGuard(buildGuard());
+    const removedMiddle = applyPatch(base, [{ op: 'remove', path: '/scope-filter/allowedScopes/github/1' }]);
+    const rollback = diffSnapshots(removedMiddle, base);
+    expect(rollback).toEqual([{ op: 'replace', path: '/scope-filter/allowedScopes/github', value: ['repo', 'read:user', 'gist'] }]);
+    expect(applyPatch(removedMiddle, rollback).hash).toBe(base.hash);
+    const removedLast = applyPatch(base, [{ op: 'remove', path: '/scope-filter/allowedScopes/github/2' }]);
+    expect(diffSnapshots(removedLast, base)).toEqual([{ op: 'add', path: '/scope-filter/allowedScopes/github/-', value: 'gist' }]);
   });
 
   it('adds and removes whole policies', () => {
@@ -216,6 +231,38 @@ describe('classifyPatch', () => {
     expect(classifyPatch(withTable, [{ op: 'remove', path: '/rate-limit/perProvider' }]).effect).toBe('widening');
   });
 
+  it('treats removing the last entry of an allowlist as widening when the policy then skips', () => {
+    const guard = new CredGuard({
+      policies: [
+        urlAllowlistPolicy({ allowedUrls: { github: ['https://api.github.com/repos/'], slack: ['https://slack.com/api/'] }, wildcardSubdomains: { slack: ['.slack.com'] } }),
+        timeWindowPolicy({ allowedHours: { start: 9, end: 17 }, allowedDays: [1] }),
+        webBotAuthPolicy({ allowedIdentitySources: ['web-bot-auth'], allowedSignatureAgentPrefixes: ['https://a.example/', 'https://b.example/'] }),
+      ],
+    });
+    const base = snapshotGuard(guard);
+    expect(classifyPatch(base, [{ op: 'remove', path: '/url-allowlist/allowedUrls/github/0' }]).effect).toBe('widening');
+    expect(classifyPatch(base, [{ op: 'remove', path: '/url-allowlist/allowedUrls/slack/0' }]).effect).toBe('narrowing');
+    expect(classifyPatch(base, [{ op: 'remove', path: '/time-window/allowedDays/0' }]).effect).toBe('widening');
+    expect(classifyPatch(base, [{ op: 'remove', path: '/web-bot-auth/allowedIdentitySources/0' }]).effect).toBe('widening');
+    expect(classifyPatch(base, [{ op: 'remove', path: '/web-bot-auth/allowedSignatureAgentPrefixes/0' }]).effect).toBe('narrowing');
+  });
+
+  it('refuses to compare the edges of an overnight time window', () => {
+    const base = snapshotGuard(new CredGuard({ policies: [timeWindowPolicy({ allowedHours: { start: 2, end: 6 } })] }));
+    expect(classifyPatch(base, [{ op: 'replace', path: '/time-window/allowedHours/start', value: 22 }]).effect).toBe('unknown');
+    expect(classifyPatch(base, [{ op: 'replace', path: '/time-window/allowedHours/start', value: 3 }]).effect).toBe('narrowing');
+    const overnight = snapshotGuard(new CredGuard({ policies: [timeWindowPolicy({ allowedHours: { start: 22, end: 6 } })] }));
+    expect(classifyPatch(overnight, [{ op: 'replace', path: '/time-window/allowedHours/end', value: 5 }]).effect).toBe('unknown');
+  });
+
+  it('compares a per-provider receipt-claims list with the global list it replaces', () => {
+    const base = snapshotGuard(new CredGuard({ policies: [receiptClaimsPolicy({ requiredClaims: ['purpose', 'ticket'], perProvider: { slack: ['purpose'] } })] }));
+    expect(classifyPatch(base, [{ op: 'add', path: '/receipt-claims/perProvider/github', value: [] }]).effect).toBe('widening');
+    expect(classifyPatch(base, [{ op: 'add', path: '/receipt-claims/perProvider/github', value: ['purpose'] }]).effect).toBe('widening');
+    expect(classifyPatch(base, [{ op: 'add', path: '/receipt-claims/perProvider/github', value: ['purpose', 'ticket', 'owner'] }]).effect).toBe('narrowing');
+    expect(classifyPatch(base, [{ op: 'remove', path: '/receipt-claims/perProvider/slack' }]).effect).toBe('narrowing');
+  });
+
   it('falls back to unknown, which callers treat as widening', () => {
     const base = snapshotGuard(buildGuard());
     const result = classifyPatch(base, [{ op: 'replace', path: '/scope-filter/allowedScopes', value: { github: ['repo'] } }]);
@@ -238,6 +285,15 @@ describe('interpretSnapshot', () => {
     expect(google?.maxTtlSeconds).toBe(300);
     expect(interpretation.summary.join('\n')).toContain('only rate-limited');
     expect(interpretation.summary.join('\n')).toContain('fail-closed');
+  });
+
+  it('does not count an empty web-bot-auth policy as a constraint', () => {
+    const empty = interpretSnapshot(snapshotGuard(new CredGuard({ policies: [webBotAuthPolicy({})] })));
+    expect(empty.global.identity).toBeUndefined();
+    expect(empty.unlistedProviders).toBe('unconstrained');
+    const strict = interpretSnapshot(snapshotGuard(new CredGuard({ policies: [webBotAuthPolicy({ requireKeyId: true })] })));
+    expect(strict.global.identity).toEqual({ requireKeyId: true });
+    expect(strict.unlistedProviders).toBe('constrained');
   });
 
   it('says so when nothing is configured', () => {
@@ -305,6 +361,26 @@ describe('diagnosePolicies', () => {
 });
 
 describe('replayDecisions', () => {
+  it('leaves opaque policies out and replays receipt claims as recorded', async () => {
+    let evaluations = 0;
+    const counting: CredPolicy = { name: 'counting', evaluate: () => { evaluations += 1; return { decision: 'ALLOW', policy: 'counting' }; } };
+    const guard = new CredGuard({
+      policies: [counting, receiptClaimsPolicy({ requiredClaims: ['purpose'] })],
+      decisionHistorySize: 10,
+    });
+    const events = await observe(guard, [ctx({ receiptClaims: ['purpose'] }), ctx({ receiptClaims: [] })]);
+    expect(events.map((event) => event.receiptClaims)).toEqual([['purpose'], []]);
+    evaluations = 0;
+    const base = snapshotGuard(guard);
+    const patched = applyPatch(base, [{ op: 'add', path: '/receipt-claims/requiredClaims/-', value: 'ticket' }]);
+    const report = await replayDecisions(base, patched, events, { previous: guard.getPolicies() });
+    expect(evaluations).toBe(0);
+    expect(report.excludedPolicies).toEqual(['counting']);
+    // First request carried only "purpose": allowed before, denied once "ticket" is also required.
+    expect(report.newlyDenied.map((flip) => flip.index)).toEqual([0]);
+    expect(report.unchanged).toBe(1);
+  });
+
   it('reports which recorded decisions a patch flips, leaving stateful policies out', async () => {
     const guard = buildGuard();
     const events = await observe(guard, [
@@ -331,6 +407,14 @@ describe('replayDecisions', () => {
 });
 
 describe('CredGuard.recentDecisions', () => {
+  it('does not alias the caller\'s scopes array', async () => {
+    const guard = new CredGuard({ policies: [], decisionHistorySize: 5 });
+    const scopes = ['repo'];
+    await guard.evaluate(ctx({ requestedScopes: scopes }));
+    scopes.push('delete_repo');
+    expect(guard.recentDecisions()[0].requestedScopes).toEqual(['repo']);
+  });
+
   it('is off by default and bounded when on', async () => {
     const off = new CredGuard({ policies: [] });
     await off.evaluate(ctx());

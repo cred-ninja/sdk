@@ -16,6 +16,17 @@ import type {
 } from '../types.js';
 import { cloneParameters, isPlainObject, isPositiveInteger } from '../policy-diagnostics/params.js';
 
+/**
+ * Largest accepted TTL: 100 years in seconds. Far below the point where
+ * `expiresAt` would leave the valid Date range and `evaluate` would throw,
+ * which under `onError: 'allow'` would skip the cap entirely.
+ */
+export const MAX_TTL_SECONDS = 3_155_760_000;
+
+function isTtlSeconds(value: unknown): value is number {
+  return isPositiveInteger(value) && value <= MAX_TTL_SECONDS;
+}
+
 export interface MaxTtlPolicyResult extends PolicyResult {
   /** The enforced max TTL in seconds */
   maxTtlSeconds: number;
@@ -61,14 +72,14 @@ export class MaxTtlPolicy implements CredPolicy {
 
   static parseParameters(parameters: Record<string, ParameterValue>): MaxTtlPolicyConfig {
     if (!isPlainObject(parameters)) throw new Error('max-ttl parameters must be an object');
-    if (!isPositiveInteger(parameters.maxTtlSeconds)) throw new Error('max-ttl.maxTtlSeconds must be a positive integer');
+    if (!isTtlSeconds(parameters.maxTtlSeconds)) throw new Error(`max-ttl.maxTtlSeconds must be a positive integer up to ${MAX_TTL_SECONDS}`);
     const config: MaxTtlPolicyConfig = { maxTtlSeconds: parameters.maxTtlSeconds };
     const perProvider = parameters.perProvider;
     if (perProvider !== undefined && perProvider !== null) {
       if (!isPlainObject(perProvider)) throw new Error('max-ttl.perProvider must be an object');
       config.perProvider = {};
       for (const [provider, ttl] of Object.entries(perProvider)) {
-        if (!isPositiveInteger(ttl)) throw new Error(`max-ttl.perProvider.${provider} must be a positive integer`);
+        if (!isTtlSeconds(ttl)) throw new Error(`max-ttl.perProvider.${provider} must be a positive integer up to ${MAX_TTL_SECONDS}`);
         config.perProvider[provider] = ttl;
       }
     }
