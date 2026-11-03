@@ -198,6 +198,36 @@ npm run dev
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
 
+### Policy weight-space routes (experimental)
+
+Present only when `createServer` is given both `guard` and `policyEditor` (a
+`PolicyWeightSpaceEditor` from `@credninja/guard` bound to that guard). All
+are admin-authenticated and rate-limited.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/policy` | The guard's policy chain as a hashed snapshot, its interpretation, its diagnosis against recent decisions, and the pending proposals. `?include=snapshot,interpretation,diagnosis` selects sections. |
+| POST | `/admin/policy/proposals` | Dry-run `{ patch, rationale, proposer? }`. `201` with the classified, measured, replayed proposal; `400 invalid_patch` naming the failing op. Never changes the chain. |
+| GET | `/admin/policy/proposals/:id` | A pending proposal. |
+| POST | `/admin/policy/proposals/:id/apply` | Apply with `{ approvals }`. `403` without enough valid signed approvals (the admin session does not stand in for one), `409 base_mismatch` when the chain moved since the proposal, `404` for an unknown or already applied id. Rebuilds only the policies the patch touched. |
+
+Every proposal, application and rejection is written to the vault audit log
+as a `policy` resource whose id is the proposal id, with the proposer,
+approvers, effect, magnitude, base and result hashes and, on apply, the
+patch, inside the tamper-evident chain. See
+`docs/design/weight-space-policy-editing.md`.
+
+```typescript
+import { CredGuard, scopeFilterPolicy, PolicyWeightSpaceEditor } from '@credninja/guard';
+import { createServer } from '@credninja/server';
+
+const guard = new CredGuard({ policies: [scopeFilterPolicy({ allowedScopes: { github: ['repo'] } })], decisionHistorySize: 1000 });
+const policyEditor = new PolicyWeightSpaceEditor(guard, {
+  approvers: [{ id: 'kieran', publicKey: process.env.POLICY_APPROVER_PUBLIC_KEY_PEM! }],
+});
+const { app } = createServer({ ...config, guard, policyEditor });
+```
+
 ## Operation enforcement
 
 A grant means what it says. `/api/v1/use` classifies the exact URL, method and

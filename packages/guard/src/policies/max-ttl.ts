@@ -6,7 +6,15 @@
  * Sets narrowedScopes metadata to indicate TTL enforcement.
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, MaxTtlPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  MaxTtlPolicyConfig,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+} from '../types.js';
+import { cloneParameters, isPlainObject, isPositiveInteger } from '../weightspace/params.js';
 
 export interface MaxTtlPolicyResult extends PolicyResult {
   /** The enforced max TTL in seconds */
@@ -40,6 +48,31 @@ export class MaxTtlPolicy implements CredPolicy {
       maxTtlSeconds,
       expiresAt: expiresAt.toISOString(),
     };
+  }
+
+  /** The configuration as a parameter tree (see CredPolicy.describe). */
+  describe(): PolicyDescriptor {
+    return { kind: this.name, parameters: cloneParameters(this.config) as Record<string, ParameterValue> };
+  }
+
+  withParameters(parameters: Record<string, ParameterValue>): MaxTtlPolicy {
+    return new MaxTtlPolicy(MaxTtlPolicy.parseParameters(parameters));
+  }
+
+  static parseParameters(parameters: Record<string, ParameterValue>): MaxTtlPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('max-ttl parameters must be an object');
+    if (!isPositiveInteger(parameters.maxTtlSeconds)) throw new Error('max-ttl.maxTtlSeconds must be a positive integer');
+    const config: MaxTtlPolicyConfig = { maxTtlSeconds: parameters.maxTtlSeconds };
+    const perProvider = parameters.perProvider;
+    if (perProvider !== undefined && perProvider !== null) {
+      if (!isPlainObject(perProvider)) throw new Error('max-ttl.perProvider must be an object');
+      config.perProvider = {};
+      for (const [provider, ttl] of Object.entries(perProvider)) {
+        if (!isPositiveInteger(ttl)) throw new Error(`max-ttl.perProvider.${provider} must be a positive integer`);
+        config.perProvider[provider] = ttl;
+      }
+    }
+    return config;
   }
 }
 

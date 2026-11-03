@@ -5,7 +5,20 @@
  * Default: DENY unlisted scopes. Opt-in: narrow instead of deny.
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, ScopeFilterPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+  ScopeFilterPolicyConfig,
+} from '../types.js';
+import {
+  cloneParameters,
+  isPlainObject,
+  requireOptionalBoolean,
+  requireStringArrayRecord,
+} from '../weightspace/params.js';
 
 export class ScopeFilterPolicy implements CredPolicy {
   readonly name = 'scope-filter';
@@ -57,6 +70,25 @@ export class ScopeFilterPolicy implements CredPolicy {
       policy: this.name,
       reason: `Disallowed scopes requested: ${disallowed.join(', ')}`,
     };
+  }
+
+  /** The configuration as a parameter tree (see CredPolicy.describe). */
+  describe(): PolicyDescriptor {
+    return { kind: this.name, parameters: cloneParameters(this.config) as Record<string, ParameterValue> };
+  }
+
+  withParameters(parameters: Record<string, ParameterValue>): ScopeFilterPolicy {
+    return new ScopeFilterPolicy(ScopeFilterPolicy.parseParameters(parameters));
+  }
+
+  static parseParameters(parameters: Record<string, ParameterValue>): ScopeFilterPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('scope-filter parameters must be an object');
+    const config: ScopeFilterPolicyConfig = {
+      allowedScopes: requireStringArrayRecord(parameters.allowedScopes, 'scope-filter.allowedScopes'),
+    };
+    const narrow = requireOptionalBoolean(parameters.narrowInsteadOfDeny, 'scope-filter.narrowInsteadOfDeny');
+    if (narrow !== undefined) config.narrowInsteadOfDeny = narrow;
+    return config;
   }
 }
 

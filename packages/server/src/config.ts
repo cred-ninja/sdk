@@ -7,7 +7,7 @@
 
 import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
-import type { CredGuard } from '@credninja/guard';
+import type { CredGuard, PolicyWeightSpaceEditor } from '@credninja/guard';
 import type { Request } from 'express';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 
@@ -170,6 +170,13 @@ export interface ServerConfig {
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
+
+  // Weight-space editor over `guard` (experimental). When provided, the
+  // admin-authenticated /admin/policy routes exist: read the chain as data,
+  // dry-run a minimal patch, apply it under the editor's approval rules.
+  // Ignored unless `guard` is also set. Build it with
+  // `new PolicyWeightSpaceEditor(guard, { approvers })` from @credninja/guard.
+  policyEditor?: PolicyWeightSpaceEditor;
 
   // Web Bot Auth ingress verification mode
   webBotAuthMode?: 'off' | 'optional' | 'require';

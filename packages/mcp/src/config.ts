@@ -5,7 +5,7 @@
  * Supports cloud mode (default) and local mode (CRED_MODE=local).
  */
 
-import type { CredGuard } from '@credninja/guard';
+import type { CredGuard, PolicyWeightSpaceEditor } from '@credninja/guard';
 
 export interface CredMcpWebBotAuthConfig {
   /** Raw 32-byte Ed25519 private key encoded as hex */
@@ -44,6 +44,15 @@ export interface CredMcpCloudConfig {
    */
   guard?: CredGuard;
   /**
+   * Optional weight-space editor over `guard`. When set, the server also
+   * lists `cred_policy_inspect`, `cred_policy_propose` and
+   * `cred_policy_apply`, through which the agent reads the policy chain,
+   * dry-runs minimal patches and applies them under the editor's approval
+   * rules. Omitted: none of the three exist. Build it with
+   * `new PolicyWeightSpaceEditor(guard, { approvers })` from @credninja/guard.
+   */
+  policyEditor?: PolicyWeightSpaceEditor;
+  /**
    * The operator-provisioned agentId that `cred_rotate_key` and
    * `cred_revoke_identity` target when the caller doesn't supply one
    * explicitly. This is a distinct field from `agentDid` above — `agentDid`
@@ -77,6 +86,15 @@ export interface CredMcpLocalConfig {
    * instance even when `guard` is set here.
    */
   guard?: CredGuard;
+  /**
+   * Optional weight-space editor over `guard`. When set, the server also
+   * lists `cred_policy_inspect`, `cred_policy_propose` and
+   * `cred_policy_apply`, through which the agent reads the policy chain,
+   * dry-runs minimal patches and applies them under the editor's approval
+   * rules. Omitted: none of the three exist. Build it with
+   * `new PolicyWeightSpaceEditor(guard, { approvers })` from @credninja/guard.
+   */
+  policyEditor?: PolicyWeightSpaceEditor;
   /**
    * The operator-provisioned agentId that `cred_rotate_key` and
    * `cred_revoke_identity` target when the caller doesn't supply one

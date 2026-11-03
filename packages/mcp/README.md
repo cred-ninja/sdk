@@ -148,6 +148,46 @@ Revoke a user's connection to a service.
 
 **Returns:** Confirmation message.
 
+### Policy weight-space tools (`cred_policy_inspect`, `cred_policy_propose`, `cred_policy_apply`)
+
+Present only when the server is started with a `policyEditor` (a
+`PolicyWeightSpaceEditor` from `@credninja/guard` bound to the same `guard`).
+Without one, none of the three is listed.
+
+- `cred_policy_inspect` returns the guard's policy chain as a hashed snapshot,
+  a plain-language interpretation of what each provider may do, and findings
+  where the chain disagrees with recent decisions, each with the smallest
+  patch that addresses it. Read-only; like `cred_whoami` it is never
+  guard-wrapped, so it works during a guard outage. `include` selects
+  sections.
+- `cred_policy_propose` takes `patch` (JSON Pointer ops such as
+  `{ "op": "remove", "path": "/scope-filter/allowedScopes/github/2" }`) and
+  `rationale`, and returns a proposal: its id and hash, the snapshot hash it
+  applies to, its effect (widening, narrowing, neutral, unknown, mixed), its
+  magnitude (parameters touched over total) and a replay of recorded
+  decisions showing which would flip. It never changes the guard.
+- `cred_policy_apply` takes `proposal_id` and `approvals`. By default every
+  patch needs an Ed25519-signed approval from a configured approver, made
+  outside the agent with `signProposal()`; the agent carries it and cannot
+  forge it. A proposal written against a chain that has since changed is
+  refused with `base_mismatch`.
+
+```typescript
+import { CredGuard, rateLimitPolicy, scopeFilterPolicy, PolicyWeightSpaceEditor } from '@credninja/guard';
+import { createCredMcpServer } from '@credninja/mcp';
+
+const guard = new CredGuard({
+  policies: [rateLimitPolicy({ maxRequests: 60, windowMs: 60_000 }), scopeFilterPolicy({ allowedScopes: { github: ['repo'] } })],
+  decisionHistorySize: 1000,
+});
+const policyEditor = new PolicyWeightSpaceEditor(guard, {
+  approvers: [{ id: 'ops', publicKey: process.env.POLICY_APPROVER_PUBLIC_KEY_PEM! }],
+  requireApprovalFor: 'widening', // the agent may tighten its own guard unsigned, never loosen it
+});
+
+const server = createCredMcpServer({ ...config, guard, policyEditor });
+```
+
 ## Example Conversation
 
 Here's what it looks like when an MCP client uses the Cred MCP server:

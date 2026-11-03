@@ -10,6 +10,7 @@ This folder is the top-level documentation index for the open-source Cred repo.
 - [Delegation constraint ceilings design note](./design/delegation-constraints.md)
 - [Cred Link design and Phase 1 status](./design/cred-link.md)
 - [Cred Link real-browser checklist](./cred-link-browser-checklist.md)
+- [Weight-space policy editing design note](./design/weight-space-policy-editing.md)
 
 ## Package Docs
 

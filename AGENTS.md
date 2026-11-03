@@ -44,7 +44,8 @@ base delegation flow.
 ## MCP tools (`packages/mcp`)
 
 Registered by `packages/mcp/src/server.ts` (`createCredMcpServer()` /
-`startServer()`, both via the single `registerTools()` path). 11 tools:
+`startServer()`, both via the single `registerTools()` path). 11 tools always,
+plus 3 policy tools when a `policyEditor` is configured:
 
 | Tool | Purpose |
 |---|---|
@@ -59,13 +60,16 @@ Registered by `packages/mcp/src/server.ts` (`createCredMcpServer()` /
 | `cred_audit_log` | Read the calling agent's own audit trail. Read-only; never guard-wrapped, so it survives a guard-subsystem outage. |
 | `cred_capabilities` | Discover which providers are configured on this deployment and their default scopes, before calling `cred_delegate`/`cred_subdelegate`. |
 | `cred_whoami` | Introspect the calling agent's own runtime permission state: active guard policy names, remaining rate-limit headroom, and (best-effort, cloud mode) its effective delegated scopes. Read-only; never guard-wrapped, so it survives a guard-subsystem outage. |
+| `cred_policy_inspect` | Only with a configured `policyEditor`. Read the guard's policy chain as a hashed snapshot, its plain-language interpretation and findings where it disagrees with recent decisions, each with the smallest patch that addresses it. Read-only; never guard-wrapped. |
+| `cred_policy_propose` | Only with a configured `policyEditor`. Dry-run a minimal JSON Pointer patch to the chain: validated, classified (widening or narrowing), measured (parameters touched over total) and replayed against recorded decisions. Never changes the guard. |
+| `cred_policy_apply` | Only with a configured `policyEditor`. Apply a pending proposal under the editor's approval rules; by default needs an Ed25519-signed approval from a configured approver, which the agent carries but cannot make. |
 
 When a `CredGuard` is configured (opt-in), every tool above except
 `cred_delegate`/`cred_subdelegate` in cloud mode (already enforced
-server-side) and `cred_audit_log`/`cred_whoami` (read-only introspection,
-kept available during a guard outage) runs through policy evaluation before
-executing, and allow-path responses include the guard-computed TTL and
-rate-limit headroom.
+server-side) and `cred_audit_log`/`cred_whoami`/`cred_policy_inspect`
+(read-only introspection, kept available during a guard outage) runs through
+policy evaluation before executing, and allow-path responses include the
+guard-computed TTL and rate-limit headroom.
 
 ## REST endpoints (`packages/server`)
 
@@ -106,6 +110,10 @@ back to `default` on its own.
 | POST | `/admin/approvals/:authReqId` | Admin | An admin's approve or deny decision |
 | POST | `/admin/consents/revoke` | Admin | Security event: revoke consents by id, subject or agent; their tokens are refused at exercise and the next request asks again |
 | GET | `/admin/audit/verify` | Admin | Recompute the tamper-evident audit chain; `200` with `entries`, `unchained` and the `head` (`seq`, `hash`) to record outside the host, or `409` naming the first broken entry (`501` on storage without the chain) |
+| GET | `/admin/policy` | Admin | Only with `policyEditor`. The guard's policy chain as a hashed snapshot, its interpretation, its diagnosis against recent decisions, and pending proposals; `?include=snapshot,interpretation,diagnosis` selects sections |
+| POST | `/admin/policy/proposals` | Admin | Only with `policyEditor`. Dry-run a patch `{ patch, rationale, proposer? }`: `201` with the classified, measured, replayed proposal; `400 invalid_patch` naming the failing op. Never changes the chain |
+| GET | `/admin/policy/proposals/:id` | Admin | Only with `policyEditor`. A pending proposal |
+| POST | `/admin/policy/proposals/:id/apply` | Admin | Only with `policyEditor`. Apply under the editor's rules with `{ approvals }`: `403` without enough valid signed approvals, `409 base_mismatch` when the chain moved, `404` unknown; rebuilds only the policies the patch touched. Each outcome is a `policy` audit event |
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
@@ -185,7 +193,7 @@ use flow, exposed under that framework's own tool-registration convention.
 | `packages/oauth` | Provider OAuth adapters (Google, GitHub, Slack, Notion, Salesforce, ...). |
 | `packages/tofu` | Trust-on-first-use agent identity registry (Web Bot Auth keys, DIDs). |
 | `packages/vault` | Encrypted credential storage, Permission records, audit log, cumulative-constraint ledger. |
-| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, and the operation classifier the broker uses to decide whether a grant covers a call. |
+| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, the operation classifier the broker uses to decide whether a grant covers a call, and the weight-space tooling (`snapshotGuard`, `PolicyWeightSpaceEditor`) that reads, diagnoses and patches the policy chain under signed approval. |
 | `packages/sdk` | `Cred` client class — the shared surface both `packages/mcp` and `packages/server` build on. |
 | `packages/sdk-python` | Python port of the SDK client, used by the Python framework integrations. |
 | `packages/server` | Hosted REST API (cloud mode) — see endpoint table above. |

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added: weight-space editing of the guard's policy chain
+
+- `@credninja/guard`: the policy chain can be read as data and patched
+  surgically. `CredPolicy` gains optional `describe()` and `withParameters()`,
+  implemented by every built-in policy; `snapshotGuard()` hashes the chain,
+  `interpretSnapshot()` says what it lets each provider do, `diagnosePolicies()`
+  reports where it disagrees with recent decisions and proposes the smallest
+  patch for each finding, `applyPatch()`/`diffSnapshots()`/`classifyPatch()`
+  edit it one leaf at a time and say whether an edit widens or narrows, and
+  `replayDecisions()` dry-runs a patch against recorded decisions.
+  `PolicyWeightSpaceEditor` runs that loop over a live `CredGuard` under
+  Ed25519-signed approval, rebuilding only the policies a patch touched.
+  `CredGuard` gains `getPolicies()`, `getOnError()`, `replacePolicies()` and an
+  opt-in `decisionHistorySize` buffer read with `recentDecisions()`.
+  See `docs/design/weight-space-policy-editing.md`.
+- `@credninja/guard`: experimental `weightArtifactPolicy` for agents that move
+  model weights and tensors through `cred_use`: pins artifact-store hosts,
+  write prefixes, digests and sizes.
+- `@credninja/mcp`: `cred_policy_inspect`, `cred_policy_propose` and
+  `cred_policy_apply`, present only when the server is given a `policyEditor`.
+- `@credninja/server`: `GET /admin/policy`, `POST /admin/policy/proposals`,
+  `GET /admin/policy/proposals/:id` and `POST /admin/policy/proposals/:id/apply`,
+  present only when the server is given a `policyEditor`; every proposal,
+  application and rejection is a `policy` audit event.
+- `@credninja/vault`: `AuditResource.type` accepts `policy`.
+
 ### BREAKING: generated apps are multi-user, with an agent to grant
 
 - `@credninja/create-app`: a generated app sets `SINGLE_USER_MODE=false`, so every

@@ -56,6 +56,7 @@ export default tseslint.config(
       'packages/server/src/server.ts',
       'packages/mcp/src/server.ts',
       'examples/**/*.ts',
+      'examples/**/*.mts',
       'scripts/**',
     ],
     rules: { 'no-console': 'off' },

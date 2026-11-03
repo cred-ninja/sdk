@@ -11,3 +11,5 @@ export { MaxTtlPolicy, maxTtlPolicy } from './max-ttl.js';
 export { webBotAuthPolicy } from './web-bot-auth.js';
 export { receiptClaimsPolicy } from './receipt-claims.js';
 export type { MaxTtlPolicyResult } from './max-ttl.js';
+export { WeightArtifactPolicy, weightArtifactPolicy } from './weight-artifact.js';
+export type { WeightArtifactPolicyConfig, WeightArtifactStoreConfig } from './weight-artifact.js';

@@ -5,7 +5,15 @@
  * In-memory counters, resets on server restart.
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, RateLimitPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+  RateLimitPolicyConfig,
+} from '../types.js';
+import { cloneParameters, isPlainObject, isPositiveInteger } from '../weightspace/params.js';
 
 interface RequestRecord {
   timestamps: number[];
@@ -117,6 +125,39 @@ export class RateLimitPolicy implements CredPolicy {
         this.requests.delete(key);
       }
     }
+  }
+
+  /** The configuration as a parameter tree (see CredPolicy.describe). */
+  describe(): PolicyDescriptor {
+    return {
+      kind: this.name,
+      parameters: cloneParameters(this.config) as Record<string, ParameterValue>,
+      stateful: true,
+    };
+  }
+
+  /** A fresh policy (counters reset) from an edited parameter tree. */
+  withParameters(parameters: Record<string, ParameterValue>): RateLimitPolicy {
+    return new RateLimitPolicy(RateLimitPolicy.parseParameters(parameters));
+  }
+
+  static parseParameters(parameters: Record<string, ParameterValue>): RateLimitPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('rate-limit parameters must be an object');
+    const { maxRequests, windowMs, perProvider } = parameters;
+    if (!isPositiveInteger(maxRequests)) throw new Error('rate-limit.maxRequests must be a positive integer');
+    if (!isPositiveInteger(windowMs)) throw new Error('rate-limit.windowMs must be a positive integer');
+    const config: RateLimitPolicyConfig = { maxRequests, windowMs };
+    if (perProvider !== undefined && perProvider !== null) {
+      if (!isPlainObject(perProvider)) throw new Error('rate-limit.perProvider must be an object');
+      config.perProvider = {};
+      for (const [provider, limits] of Object.entries(perProvider)) {
+        if (!isPlainObject(limits) || !isPositiveInteger(limits.maxRequests) || !isPositiveInteger(limits.windowMs)) {
+          throw new Error(`rate-limit.perProvider.${provider} must be { maxRequests, windowMs } with positive integers`);
+        }
+        config.perProvider[provider] = { maxRequests: limits.maxRequests, windowMs: limits.windowMs };
+      }
+    }
+    return config;
   }
 
   /**
