@@ -106,6 +106,7 @@ back to `default` on its own.
 | POST | `/admin/approvals/:authReqId` | Admin | An admin's approve or deny decision |
 | POST | `/admin/consents/revoke` | Admin | Security event: revoke consents by id, subject or agent; their tokens are refused at exercise and the next request asks again |
 | GET | `/admin/audit/verify` | Admin | Recompute the tamper-evident audit chain; `200` with `entries`, `unchained` and the `head` (`seq`, `hash`) to record outside the host, or `409` naming the first broken entry (`501` on storage without the chain) |
+| GET | `/admin/policy` | Admin | Only with `guard` and `policyDiagnostics: true` (default off). Read-only: the guard's policy chain as a hashed snapshot, what it lets each provider do, and least-privilege findings against the guard's recent decisions, each with the smallest configuration patch that addresses it; `?include=snapshot,interpretation,diagnosis` selects sections. Changes nothing |
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
@@ -185,7 +186,7 @@ use flow, exposed under that framework's own tool-registration convention.
 | `packages/oauth` | Provider OAuth adapters (Google, GitHub, Slack, Notion, Salesforce, ...). |
 | `packages/tofu` | Trust-on-first-use agent identity registry (Web Bot Auth keys, DIDs). |
 | `packages/vault` | Encrypted credential storage, Permission records, audit log, cumulative-constraint ledger. |
-| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, and the operation classifier the broker uses to decide whether a grant covers a call. |
+| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, the operation classifier the broker uses to decide whether a grant covers a call, and the policy diagnostics (`snapshotGuard`, `diagnosePolicies`, `replayDecisions`) that report least-privilege findings against recorded decisions. |
 | `packages/sdk` | `Cred` client class — the shared surface both `packages/mcp` and `packages/server` build on. |
 | `packages/sdk-python` | Python port of the SDK client, used by the Python framework integrations. |
 | `packages/server` | Hosted REST API (cloud mode) — see endpoint table above. |

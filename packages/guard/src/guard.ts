@@ -6,21 +6,27 @@
 
 import type {
   CredPolicy,
+  GuardAuditEvent,
   GuardConfig,
   GuardContext,
   GuardDecision,
   PolicyResult,
 } from './types.js';
+import { buildAuditEvent } from './audit.js';
 
 export class CredGuard {
   private readonly policies: CredPolicy[];
   private readonly onError: 'deny' | 'allow' | 'log-and-deny';
   private readonly onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
+  private readonly decisionHistorySize: number;
+  private readonly decisionHistory: GuardAuditEvent[] = [];
 
   constructor(config: GuardConfig) {
     this.policies = [...config.policies];
     this.onError = config.onError ?? 'deny';
     this.onDecision = config.onDecision;
+    const size = config.decisionHistorySize ?? 0;
+    this.decisionHistorySize = Number.isInteger(size) && size > 0 ? size : 0;
   }
 
   /**
@@ -41,6 +47,7 @@ export class CredGuard {
         effectiveScopes,
         evaluationMs: performance.now() - startTime,
       };
+      this.remember(ctx, decision);
       this.onDecision?.(ctx, results);
       return decision;
     }
@@ -114,9 +121,41 @@ export class CredGuard {
       evaluationMs: performance.now() - startTime,
     };
 
+    this.remember(ctx, decision);
     this.onDecision?.(ctx, results);
 
     return decision;
+  }
+
+  /**
+   * The most recent decisions, oldest first, when `decisionHistorySize` is
+   * set. Empty otherwise. Read-only copies: mutating the result changes nothing.
+   */
+  recentDecisions(): GuardAuditEvent[] {
+    return this.decisionHistory.map((event) => structuredClone(event));
+  }
+
+  /** The configured error disposition (`deny` by default). */
+  getOnError(): 'deny' | 'allow' | 'log-and-deny' {
+    return this.onError;
+  }
+
+  /**
+   * The policy instances in evaluation order. Read-only view: the array is a
+   * copy, the instances are the live ones.
+   */
+  getPolicies(): readonly CredPolicy[] {
+    return [...this.policies];
+  }
+
+  private remember(ctx: GuardContext, decision: GuardDecision): void {
+    if (this.decisionHistorySize === 0) return;
+    // Cloned at store time: the event would otherwise alias the caller's
+    // requestedScopes array, and a caller that reuses it would rewrite history.
+    this.decisionHistory.push(structuredClone(buildAuditEvent(ctx, decision)));
+    if (this.decisionHistory.length > this.decisionHistorySize) {
+      this.decisionHistory.splice(0, this.decisionHistory.length - this.decisionHistorySize);
+    }
   }
 
   /**

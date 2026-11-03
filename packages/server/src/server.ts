@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, diagnosePolicies, interpretSnapshot, snapshotGuard, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -1589,6 +1589,7 @@ export function createServer(config: ServerConfig) {
   const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
   const adminPermissionsRateLimiter = makeRateLimiter(30);  // /admin/permissions* — sqlite query per request
   const adminAuditRateLimiter = makeRateLimiter(30);  // /admin/audit          — vault audit query per request
+  const adminPolicyRateLimiter = makeRateLimiter(30);  // /admin/policy         — snapshot and diagnosis per request
   const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
@@ -2659,6 +2660,37 @@ export function createServer(config: ServerConfig) {
       res.status(500).json({ error: 'Failed to fetch audit log' });
     }
   });
+
+  // ── GET /admin/policy — read-only least-privilege diagnostics of the guard ──
+  //
+  // Off by default. Exists only when both `guard` and `policyDiagnostics`
+  // are configured. Reports the guard's policy chain as a hashed snapshot,
+  // what it lets each provider do, and findings where the chain disagrees
+  // with the guard's recent decisions (unused scopes, unhit URL patterns,
+  // unconstrained providers, slack rate limits, repeated denials), each with
+  // the smallest configuration patch that addresses it. Nothing is changed
+  // through this route; patches are for an operator to review and apply to
+  // configuration. `?include=snapshot,interpretation,diagnosis` selects
+  // sections.
+  if (config.guard && config.policyDiagnostics) {
+    const diagnosedGuard = config.guard;
+    const diagnosisOptions = config.policyDiagnosisOptions ?? {};
+    app.get('/admin/policy', adminPolicyRateLimiter, requireAdminAuth, (req: Request, res: Response) => {
+      try {
+        const includeRaw = typeof req.query.include === 'string' ? req.query.include : '';
+        const include = new Set(includeRaw ? includeRaw.split(',').map((part) => part.trim()) : ['snapshot', 'interpretation', 'diagnosis']);
+        const snapshot = snapshotGuard(diagnosedGuard);
+        res.json({
+          ...(include.has('snapshot') ? { snapshot } : { snapshotHash: snapshot.hash }),
+          ...(include.has('interpretation') ? { interpretation: interpretSnapshot(snapshot) } : {}),
+          ...(include.has('diagnosis') ? { diagnosis: diagnosePolicies(snapshot, diagnosedGuard.recentDecisions(), diagnosisOptions) } : {}),
+        });
+      } catch (err) {
+        console.error('[/admin/policy] Error:', err);
+        res.status(500).json({ error: 'policy_diagnostics_failed' });
+      }
+    });
+  }
 
   /**
    * GET /admin/agents — list registered agent identities with their status

@@ -10,6 +10,7 @@ Cred is an agent credential delegation protocol — it lets AI agents receive an
 - [Repo Structure](#repo-structure)
 - [Running Tests](#running-tests)
 - [Adding an OAuth Provider Adapter](#adding-an-oauth-provider-adapter)
+- [Adding a Guard Policy](#adding-a-guard-policy)
 - [Security Policy](#security-policy)
 - [Protocol Contributions](#protocol-contributions)
 - [Pull Request Process](#pull-request-process)
@@ -148,6 +149,29 @@ Mock all HTTP calls. Cover: successful code exchange, token refresh, refresh fai
 - Token exchange uses HTTPS only
 - Refresh errors throw `CredRefreshError`, not generic `Error`
 - `expiresAt` is a UTC timestamp in milliseconds, never a duration
+
+---
+
+## Adding a Guard Policy
+
+A policy in `packages/guard/src/policies/` implements `CredPolicy`: a `name`
+and an `evaluate(ctx)` that returns `ALLOW`, `DENY` or `SKIP`. Two more
+methods make it readable by the policy diagnostics (`snapshotGuard`,
+`diagnosePolicies`, `replayDecisions`, `GET /admin/policy`):
+
+- `describe()` returns `{ kind, parameters }`, the configuration as plain JSON.
+  Encode a RegExp with `encodeRegExp()`; show a function as `OPAQUE` and list
+  its pointer in `opaquePaths`.
+- `withParameters(parameters)` builds a new instance from an edited tree for
+  dry-run replay. It must validate every field and throw on anything invalid.
+  Reattach opaque values from `this` (see `UrlAllowlistPolicy.parseParameters`).
+
+A policy without them still works and is recorded as `opaque`: it is carried
+over by reference in a dry run and no patch can touch it. Register a new kind
+in `BUILTIN_FACTORIES` (`src/policy-diagnostics/snapshot.ts`) so a patch can
+add it by name, and add its widening/narrowing rules to `classifyOp`
+(`src/policy-diagnostics/patch.ts`); an edit with no rule is classified
+`unknown`, which callers treat as widening.
 
 ---
 

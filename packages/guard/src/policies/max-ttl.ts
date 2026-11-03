@@ -6,7 +6,26 @@
  * Sets narrowedScopes metadata to indicate TTL enforcement.
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, MaxTtlPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  MaxTtlPolicyConfig,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+} from '../types.js';
+import { cloneParameters, isPlainObject, isPositiveInteger } from '../policy-diagnostics/params.js';
+
+/**
+ * Largest accepted TTL: 100 years in seconds. Far below the point where
+ * `expiresAt` would leave the valid Date range and `evaluate` would throw,
+ * which under `onError: 'allow'` would skip the cap entirely.
+ */
+export const MAX_TTL_SECONDS = 3_155_760_000;
+
+function isTtlSeconds(value: unknown): value is number {
+  return isPositiveInteger(value) && value <= MAX_TTL_SECONDS;
+}
 
 export interface MaxTtlPolicyResult extends PolicyResult {
   /** The enforced max TTL in seconds */
@@ -40,6 +59,31 @@ export class MaxTtlPolicy implements CredPolicy {
       maxTtlSeconds,
       expiresAt: expiresAt.toISOString(),
     };
+  }
+
+  /** The configuration as a parameter tree (see CredPolicy.describe). */
+  describe(): PolicyDescriptor {
+    return { kind: this.name, parameters: cloneParameters(this.config) as Record<string, ParameterValue> };
+  }
+
+  withParameters(parameters: Record<string, ParameterValue>): MaxTtlPolicy {
+    return new MaxTtlPolicy(MaxTtlPolicy.parseParameters(parameters));
+  }
+
+  static parseParameters(parameters: Record<string, ParameterValue>): MaxTtlPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('max-ttl parameters must be an object');
+    if (!isTtlSeconds(parameters.maxTtlSeconds)) throw new Error(`max-ttl.maxTtlSeconds must be a positive integer up to ${MAX_TTL_SECONDS}`);
+    const config: MaxTtlPolicyConfig = { maxTtlSeconds: parameters.maxTtlSeconds };
+    const perProvider = parameters.perProvider;
+    if (perProvider !== undefined && perProvider !== null) {
+      if (!isPlainObject(perProvider)) throw new Error('max-ttl.perProvider must be an object');
+      config.perProvider = {};
+      for (const [provider, ttl] of Object.entries(perProvider)) {
+        if (!isTtlSeconds(ttl)) throw new Error(`max-ttl.perProvider.${provider} must be a positive integer up to ${MAX_TTL_SECONDS}`);
+        config.perProvider[provider] = ttl;
+      }
+    }
+    return config;
   }
 }
 

@@ -61,7 +61,13 @@ export type {
   WebBotAuthPolicyConfig,
   ReceiptClaimsPolicyConfig,
   GuardLinkContext,
+  ParameterValue,
+  PolicyDescriptor,
 } from './types.js';
+
+// Policy diagnostics: read the chain as data, interpret it, diagnose it
+// against recorded decisions, and dry-run least-privilege patches
+export * from './policy-diagnostics/index.js';
 
 // Policies
 export {

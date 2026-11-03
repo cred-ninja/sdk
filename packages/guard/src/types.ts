@@ -98,6 +98,52 @@ export interface CredPolicy {
   name: string;
   /** Evaluate the request against this policy */
   evaluate(ctx: GuardContext): PolicyResult | Promise<PolicyResult>;
+  /**
+   * Optional: expose this policy's configuration as a JSON-serializable
+   * parameter tree, so the policy diagnostics (`snapshotGuard`,
+   * `diagnosePolicies`, `replayDecisions`) can read, diff and dry-run
+   * changes to it. A policy without `describe()` is recorded as opaque: it
+   * is carried over by reference and no patch may touch its parameters.
+   */
+  describe?(): PolicyDescriptor;
+  /**
+   * Optional: build a new instance of this policy from an edited parameter
+   * tree. Used by `materializePolicies` (dry-run replay) for policies whose
+   * parameters a patch changed; untouched policies keep their instance. Must
+   * validate the parameters and throw on an invalid tree.
+   */
+  withParameters?(parameters: Record<string, ParameterValue>): CredPolicy;
+}
+
+/** A JSON-serializable value inside a policy's parameter tree. */
+export type ParameterValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ParameterValue[]
+  | { [key: string]: ParameterValue };
+
+/**
+ * A policy's configuration, serialized. This is what the policy diagnostics
+ * read, diff and dry-run patches against.
+ */
+export interface PolicyDescriptor {
+  /** Policy kind, for example `rate-limit`. Opaque policies report `opaque`. */
+  kind: string;
+  /** The policy's configuration as a JSON-serializable tree. */
+  parameters: Record<string, ParameterValue>;
+  /**
+   * JSON pointers (relative to `parameters`) that stand for values which
+   * cannot be serialized (functions such as `scopeGate`). They are shown as
+   * `{"$opaque": true}` and are kept by reference when the policy is rebuilt.
+   */
+  opaquePaths?: string[];
+  /**
+   * True when the policy holds runtime state (rate-limit counters). Stateful
+   * policies are excluded from dry-run replay.
+   */
+  stateful?: boolean;
 }
 
 /** Guard configuration */
@@ -108,6 +154,14 @@ export interface GuardConfig {
   onError?: 'deny' | 'allow' | 'log-and-deny';
   /** Callback for every policy decision (for audit/logging) */
   onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
+  /**
+   * Keep the most recent N decisions in memory as `GuardAuditEvent`s, read
+   * back with `CredGuard.recentDecisions()`. Default 0 (off). The policy
+   * diagnostics (`diagnosePolicies`, `replayDecisions`) read this buffer
+   * when no other audit source is wired in. Bounded: the oldest decision is
+   * dropped at N.
+   */
+  decisionHistorySize?: number;
 }
 
 /** Final decision from the guard */
@@ -142,6 +196,8 @@ export interface GuardAuditEvent {
   code?: string;
   /** Present when the call named a Cred Link connection. */
   link?: GuardLinkContext;
+  /** Present when the request carried receipt-chain claims, so a replay can re-evaluate receipt-claims. */
+  receiptClaims?: string[];
   requestedScopes: string[];
   effectiveScopes: string[];
   targetUrl?: string;

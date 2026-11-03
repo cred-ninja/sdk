@@ -198,6 +198,28 @@ npm run dev
 > token can carry `cnf`. The receipt records the token's `jti` and the scope mapping
 > (`chain_profile`).
 
+### Policy diagnostics route
+
+Off by default. `GET /admin/policy` exists only when `createServer` is given
+both `guard` and `policyDiagnostics: true`. Admin-authenticated, rate-limited,
+read-only: it reports the guard's policy chain as a hashed snapshot, what the
+chain lets each provider do, and least-privilege findings against the guard's
+recent decisions (set `decisionHistorySize` on the guard to record them),
+each with the smallest configuration patch that addresses it.
+`?include=snapshot,interpretation,diagnosis` selects sections. Nothing is
+changed through this route; an operator applies an accepted patch to
+configuration. Thresholds come from `policyDiagnosisOptions`. See
+`docs/design/policy-least-privilege-diagnostics.md`.
+
+```typescript
+import { CredGuard, scopeFilterPolicy } from '@credninja/guard';
+import { createServer } from '@credninja/server';
+
+const guard = new CredGuard({ policies: [scopeFilterPolicy({ allowedScopes: { github: ['repo'] } })], decisionHistorySize: 1000 });
+const { app } = createServer({ ...config, guard, policyDiagnostics: true });
+// curl -H "Authorization: Bearer $ADMIN_TOKEN" https://cred.example.com/admin/policy?include=diagnosis
+```
+
 ## Operation enforcement
 
 A grant means what it says. `/api/v1/use` classifies the exact URL, method and

@@ -4,7 +4,15 @@
  * Restrict when delegations can occur based on time of day and day of week.
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, TimeWindowPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+  TimeWindowPolicyConfig,
+} from '../types.js';
+import { cloneParameters, isPlainObject } from '../policy-diagnostics/params.js';
 
 export class TimeWindowPolicy implements CredPolicy {
   readonly name = 'time-window';
@@ -57,6 +65,42 @@ export class TimeWindowPolicy implements CredPolicy {
       policy: this.name,
       reason: `Within allowed time window: ${allowedHours.start}-${allowedHours.end} (${timezone})`,
     };
+  }
+
+  /** The configuration as a parameter tree (see CredPolicy.describe). */
+  describe(): PolicyDescriptor {
+    return { kind: this.name, parameters: cloneParameters(this.config) as Record<string, ParameterValue> };
+  }
+
+  withParameters(parameters: Record<string, ParameterValue>): TimeWindowPolicy {
+    return new TimeWindowPolicy(TimeWindowPolicy.parseParameters(parameters));
+  }
+
+  static parseParameters(parameters: Record<string, ParameterValue>): TimeWindowPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('time-window parameters must be an object');
+    const hours = parameters.allowedHours;
+    const isHour = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24;
+    if (!isPlainObject(hours) || !isHour(hours.start) || !isHour(hours.end)) {
+      throw new Error('time-window.allowedHours must be { start, end } with integers 0..24');
+    }
+    const config: TimeWindowPolicyConfig = { allowedHours: { start: hours.start, end: hours.end } };
+    if (parameters.timezone !== undefined && parameters.timezone !== null) {
+      if (typeof parameters.timezone !== 'string') throw new Error('time-window.timezone must be a string');
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: parameters.timezone });
+      } catch {
+        throw new Error(`time-window.timezone "${parameters.timezone}" is not a valid IANA zone`);
+      }
+      config.timezone = parameters.timezone;
+    }
+    if (parameters.allowedDays !== undefined && parameters.allowedDays !== null) {
+      const days = parameters.allowedDays;
+      if (!Array.isArray(days) || !days.every((day) => Number.isInteger(day) && (day as number) >= 0 && (day as number) <= 6)) {
+        throw new Error('time-window.allowedDays must be an array of integers 0..6');
+      }
+      config.allowedDays = days as number[];
+    }
+    return config;
   }
 
   private getTimeInTimezone(date: Date, timezone: string): { hour: number; dayOfWeek: number } {

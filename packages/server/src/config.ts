@@ -7,7 +7,7 @@
 
 import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
-import type { CredGuard } from '@credninja/guard';
+import type { CredGuard, DiagnosisOptions } from '@credninja/guard';
 import type { Request } from 'express';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 
@@ -170,6 +170,15 @@ export interface ServerConfig {
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
+
+  // Policy diagnostics (read-only). Default off. When true and `guard` is
+  // set, the admin-authenticated GET /admin/policy route exists: the guard's
+  // policy chain as data, what it lets each provider do, and least-privilege
+  // findings against the guard's recent decisions (set `decisionHistorySize`
+  // on the guard to record them). Nothing is ever changed through this route.
+  policyDiagnostics?: boolean;
+  // Thresholds for the findings behind GET /admin/policy.
+  policyDiagnosisOptions?: DiagnosisOptions;
 
   // Web Bot Auth ingress verification mode
   webBotAuthMode?: 'off' | 'optional' | 'require';

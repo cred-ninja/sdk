@@ -5,7 +5,24 @@
  * SKIP for delegation requests (no targetUrl).
  */
 
-import type { CredPolicy, GuardContext, PolicyResult, UrlAllowlistPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+  UrlAllowlistPolicyConfig,
+} from '../types.js';
+import {
+  OPAQUE,
+  decodeRegExp,
+  encodeRegExp,
+  escapePointerSegment,
+  isEncodedRegExp,
+  isOpaqueMarker,
+  isPlainObject,
+  isStringArray,
+} from '../policy-diagnostics/params.js';
 
 export class UrlAllowlistPolicy implements CredPolicy {
   readonly name = 'url-allowlist';
@@ -101,6 +118,98 @@ export class UrlAllowlistPolicy implements CredPolicy {
       policy: this.name,
       reason: `URL ${targetUrl} does not match any allowed pattern`,
     };
+  }
+
+  /**
+   * The configuration as a parameter tree. RegExp patterns are encoded as
+   * `{ "$regex": source, "flags": flags }`; `scopeGate` predicates are
+   * functions, so each is shown as `{ "$opaque": true }`, listed in
+   * `opaquePaths`, and carried over by reference by `withParameters`.
+   */
+  describe(): PolicyDescriptor {
+    const allowedUrls: Record<string, ParameterValue[]> = {};
+    for (const [provider, patterns] of Object.entries(this.config.allowedUrls)) {
+      allowedUrls[provider] = patterns.map((pattern) => (pattern instanceof RegExp ? encodeRegExp(pattern) : pattern));
+    }
+    const parameters: Record<string, ParameterValue> = { allowedUrls };
+    if (this.config.wildcardSubdomains) {
+      parameters.wildcardSubdomains = Object.fromEntries(
+        Object.entries(this.config.wildcardSubdomains).map(([provider, suffixes]) => [provider, [...suffixes]]),
+      );
+    }
+    const opaquePaths: string[] = [];
+    if (this.config.scopeGate) {
+      const scopeGate: Record<string, ParameterValue> = {};
+      for (const provider of Object.keys(this.config.scopeGate)) {
+        scopeGate[provider] = OPAQUE;
+        opaquePaths.push(`/scopeGate/${escapePointerSegment(provider)}`);
+      }
+      parameters.scopeGate = scopeGate;
+    }
+    return { kind: this.name, parameters, ...(opaquePaths.length > 0 ? { opaquePaths } : {}) };
+  }
+
+  withParameters(parameters: Record<string, ParameterValue>): UrlAllowlistPolicy {
+    return new UrlAllowlistPolicy(UrlAllowlistPolicy.parseParameters(parameters, this.config.scopeGate));
+  }
+
+  /**
+   * Parse an edited parameter tree. `previousScopeGate` supplies the function
+   * behind each `{ "$opaque": true }` marker; a marker for a provider that
+   * had no gate before, or a non-marker value under `scopeGate`, is refused,
+   * since a patch can neither invent nor rewrite a predicate.
+   */
+  static parseParameters(
+    parameters: Record<string, ParameterValue>,
+    previousScopeGate?: UrlAllowlistPolicyConfig['scopeGate'],
+  ): UrlAllowlistPolicyConfig {
+    if (!isPlainObject(parameters)) throw new Error('url-allowlist parameters must be an object');
+    if (!isPlainObject(parameters.allowedUrls)) throw new Error('url-allowlist.allowedUrls must be an object');
+    const allowedUrls: Record<string, (string | RegExp)[]> = {};
+    for (const [provider, patterns] of Object.entries(parameters.allowedUrls)) {
+      if (!Array.isArray(patterns)) throw new Error(`url-allowlist.allowedUrls.${provider} must be an array`);
+      allowedUrls[provider] = patterns.map((pattern, index) => {
+        if (typeof pattern === 'string') {
+          let parsed: URL;
+          try {
+            parsed = new URL(pattern);
+          } catch {
+            throw new Error(`url-allowlist.allowedUrls.${provider}[${index}] is not an absolute URL`);
+          }
+          if (parsed.protocol !== 'https:') throw new Error(`url-allowlist.allowedUrls.${provider}[${index}] must use https`);
+          return pattern;
+        }
+        if (isEncodedRegExp(pattern)) {
+          try {
+            return decodeRegExp(pattern);
+          } catch {
+            throw new Error(`url-allowlist.allowedUrls.${provider}[${index}] is not a valid regular expression`);
+          }
+        }
+        throw new Error(`url-allowlist.allowedUrls.${provider}[${index}] must be a string or { "$regex", "flags" }`);
+      });
+    }
+    const config: UrlAllowlistPolicyConfig = { allowedUrls };
+    if (parameters.wildcardSubdomains !== undefined && parameters.wildcardSubdomains !== null) {
+      if (!isPlainObject(parameters.wildcardSubdomains)) throw new Error('url-allowlist.wildcardSubdomains must be an object');
+      config.wildcardSubdomains = {};
+      for (const [provider, suffixes] of Object.entries(parameters.wildcardSubdomains)) {
+        if (!isStringArray(suffixes)) throw new Error(`url-allowlist.wildcardSubdomains.${provider} must be an array of strings`);
+        config.wildcardSubdomains[provider] = [...suffixes];
+      }
+    }
+    if (parameters.scopeGate !== undefined && parameters.scopeGate !== null) {
+      if (!isPlainObject(parameters.scopeGate)) throw new Error('url-allowlist.scopeGate must be an object');
+      config.scopeGate = {};
+      for (const [provider, marker] of Object.entries(parameters.scopeGate)) {
+        const gate = previousScopeGate?.[provider];
+        if (!isOpaqueMarker(marker) || typeof gate !== 'function') {
+          throw new Error(`url-allowlist.scopeGate.${provider} cannot be set by a patch; it is a predicate kept by reference`);
+        }
+        config.scopeGate[provider] = gate;
+      }
+    }
+    return config;
   }
 
   private matchesPattern(url: string, pattern: string | RegExp): boolean {

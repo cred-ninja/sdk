@@ -4,11 +4,49 @@
  * Enforces presence and basic shape of Web Bot Auth identity metadata.
  */
 
-import type { CredPolicy, PolicyResult, GuardContext, WebBotAuthPolicyConfig } from '../types.js';
+import type {
+  CredPolicy,
+  GuardContext,
+  ParameterValue,
+  PolicyDescriptor,
+  PolicyResult,
+  WebBotAuthPolicyConfig,
+} from '../types.js';
+import {
+  cloneParameters,
+  isPlainObject,
+  requireOptionalBoolean,
+  requireOptionalStringArray,
+} from '../policy-diagnostics/params.js';
+
+const IDENTITY_SOURCES = new Set(['agent-token', 'did', 'tofu', 'web-bot-auth']);
+
+export function parseWebBotAuthParameters(parameters: Record<string, ParameterValue>): WebBotAuthPolicyConfig {
+  if (!isPlainObject(parameters)) throw new Error('web-bot-auth parameters must be an object');
+  const config: WebBotAuthPolicyConfig = {};
+  const requireKeyId = requireOptionalBoolean(parameters.requireKeyId, 'web-bot-auth.requireKeyId');
+  if (requireKeyId !== undefined) config.requireKeyId = requireKeyId;
+  const sources = requireOptionalStringArray(parameters.allowedIdentitySources, 'web-bot-auth.allowedIdentitySources');
+  if (sources !== undefined) {
+    for (const source of sources) {
+      if (!IDENTITY_SOURCES.has(source)) throw new Error(`web-bot-auth.allowedIdentitySources: unknown source "${source}"`);
+    }
+    config.allowedIdentitySources = sources as WebBotAuthPolicyConfig['allowedIdentitySources'];
+  }
+  const prefixes = requireOptionalStringArray(parameters.allowedSignatureAgentPrefixes, 'web-bot-auth.allowedSignatureAgentPrefixes');
+  if (prefixes !== undefined) config.allowedSignatureAgentPrefixes = prefixes;
+  return config;
+}
 
 export function webBotAuthPolicy(config: WebBotAuthPolicyConfig = {}): CredPolicy {
   return {
     name: 'web-bot-auth',
+    describe(): PolicyDescriptor {
+      return { kind: 'web-bot-auth', parameters: cloneParameters(config) as Record<string, ParameterValue> };
+    },
+    withParameters(parameters: Record<string, ParameterValue>): CredPolicy {
+      return webBotAuthPolicy(parseWebBotAuthParameters(parameters));
+    },
     evaluate(ctx: GuardContext): PolicyResult {
       if (config.allowedIdentitySources && config.allowedIdentitySources.length > 0) {
         const identitySource = ctx.identitySource ?? 'agent-token';
