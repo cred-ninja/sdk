@@ -14,7 +14,7 @@ import type {
   PolicyDescriptor,
   PolicyResult,
 } from '../types.js';
-import { cloneParameters, isPlainObject, isPositiveInteger } from '../weightspace/params.js';
+import { cloneParameters, isPlainObject, isPositiveInteger } from '../policy-diagnostics/params.js';
 
 export interface MaxTtlPolicyResult extends PolicyResult {
   /** The enforced max TTL in seconds */

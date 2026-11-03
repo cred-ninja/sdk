@@ -18,7 +18,7 @@ import {
   isPlainObject,
   requireOptionalBoolean,
   requireStringArrayRecord,
-} from '../weightspace/params.js';
+} from '../policy-diagnostics/params.js';
 
 export class ScopeFilterPolicy implements CredPolicy {
   readonly name = 'scope-filter';

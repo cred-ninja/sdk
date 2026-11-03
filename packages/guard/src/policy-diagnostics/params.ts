@@ -2,9 +2,9 @@
  * @credninja/guard — Parameter tree helpers
  *
  * Small validators and codecs shared by the built-in policies' `describe()`
- * and `withParameters()` implementations and by the weight-space tooling.
- * A policy's parameters are plain JSON so an LLM, a diff tool or an operator
- * can read them as data; the helpers here keep that boundary honest by
+ * and `withParameters()` implementations and by the policy diagnostics.
+ * A policy's parameters are plain JSON so a diff tool, a reviewer or a CI
+ * job can read them as data; the helpers here keep that boundary honest by
  * refusing anything that does not round-trip.
  */
 
@@ -83,8 +83,8 @@ export function requireOptionalBoolean(value: unknown, label: string): boolean |
 }
 
 /**
- * Count the leaves of a parameter tree. This is the "parameter count" the
- * weight-space tooling reports: every scalar, every array element that is a
+ * Count the leaves of a parameter tree. This is the `parameterCount` a
+ * snapshot reports: every scalar, every array element that is a
  * scalar, every encoded RegExp and every opaque marker counts as one.
  */
 export function countLeaves(value: unknown): number {

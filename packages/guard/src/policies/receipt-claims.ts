@@ -17,7 +17,7 @@ import {
   isPlainObject,
   requireOptionalStringArray,
   requireStringArrayRecord,
-} from '../weightspace/params.js';
+} from '../policy-diagnostics/params.js';
 
 export function parseReceiptClaimsParameters(parameters: Record<string, ParameterValue>): ReceiptClaimsPolicyConfig {
   if (!isPlainObject(parameters)) throw new Error('receipt-claims parameters must be an object');

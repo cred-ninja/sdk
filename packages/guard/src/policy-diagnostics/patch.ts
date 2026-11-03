@@ -4,9 +4,10 @@
  * A patch is a list of JSON Pointer ops against a snapshot. `applyPatch`
  * is pure and all-or-nothing. `classifyPatch` says, per op, whether the edit
  * widens or narrows what the guard lets through, using the semantics of each
- * built-in kind; anything it cannot place is `unknown`, which every
- * approval rule treats as widening. `diffSnapshots` recovers the minimal
- * patch between two snapshots, so a reviewer sees leaves, not documents.
+ * built-in kind; anything it cannot place is `unknown`, which callers should
+ * treat as widening. `diffSnapshots` recovers the minimal patch between two
+ * snapshots, so a reviewer sees leaves, not documents. Nothing here touches
+ * a running guard.
  */
 
 import type { ParameterValue } from '../types.js';
@@ -282,7 +283,7 @@ export function classifyPatch(base: PolicySnapshot, patch: PolicyPatch): PatchCl
 }
 
 /** Kinds whose presence only ever removes requests (adding one narrows). */
-const RESTRICTIVE_KINDS = new Set(['rate-limit', 'scope-filter', 'time-window', 'url-allowlist', 'web-bot-auth', 'receipt-claims', 'weight-artifact']);
+const RESTRICTIVE_KINDS = new Set(['rate-limit', 'scope-filter', 'time-window', 'url-allowlist', 'web-bot-auth', 'receipt-claims']);
 
 function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): ClassifiedOp {
   const target = resolveTarget(op.path, index);
@@ -360,7 +361,44 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
       if (key === 'perProvider') {
         if (segments.length === 3 && segments[2] === 'maxRequests') return compareNumbers(numeric(before), numeric(after), 'up', result, `requests per window for ${segments[1]}`);
         if (segments.length === 3 && segments[2] === 'windowMs') return compareNumbers(numeric(before), numeric(after), 'down', result, `window length for ${segments[1]}`);
-        return result('unknown', 'a per-provider limit was added, removed or replaced; compare it against the global limit');
+        // Adding, removing or replacing an override (or the whole override
+        // table): compare, per provider, the limit in force before (the
+        // override, else the global limit) with the limit in force after.
+        const params = entry?.descriptor.parameters;
+        const global = isPlainObject(params) ? { maxRequests: numeric(params.maxRequests), windowMs: numeric(params.windowMs) } : undefined;
+        const limitOf = (value: unknown) =>
+          isPlainObject(value) ? { maxRequests: numeric(value.maxRequests), windowMs: numeric(value.windowMs) } : global;
+        const compareLimit = (provider: string, was: ReturnType<typeof limitOf>, now: ReturnType<typeof limitOf>): [OpEffect, string] => {
+          if (!was || !now || was.maxRequests === undefined || now.maxRequests === undefined || was.windowMs === undefined || now.windowMs === undefined) {
+            return ['unknown', `the limit for ${provider} cannot be compared with the global limit`];
+          }
+          const looser = now.maxRequests > was.maxRequests || now.windowMs < was.windowMs;
+          const tighter = now.maxRequests < was.maxRequests || now.windowMs > was.windowMs;
+          if (looser && tighter) return ['unknown', `the limit for ${provider} is looser in one dimension and tighter in the other`];
+          const change = `${provider} goes from ${was.maxRequests}/${was.windowMs}ms to ${now.maxRequests}/${now.windowMs}ms`;
+          return looser ? ['widening', change] : tighter ? ['narrowing', change] : ['neutral', `the limit for ${provider} is unchanged`];
+        };
+        if (segments.length === 2) {
+          const [effect, rationale] = compareLimit(segments[1], limitOf(before), limitOf(after));
+          return result(effect, rationale);
+        }
+        if (segments.length === 1) {
+          const beforeTable = isPlainObject(before) ? before : {};
+          const afterTable = isPlainObject(after) ? after : {};
+          const providers = new Set([...Object.keys(beforeTable), ...Object.keys(afterTable)]);
+          const effects = new Set<OpEffect>();
+          const rationales: string[] = [];
+          for (const provider of providers) {
+            const [effect, rationale] = compareLimit(provider, limitOf(beforeTable[provider]), limitOf(afterTable[provider]));
+            if (effect !== 'neutral') {
+              effects.add(effect);
+              rationales.push(rationale);
+            }
+          }
+          if (effects.size === 0) return result('neutral', 'no per-provider limit changed');
+          if (effects.size === 1) return result([...effects][0], rationales.join('; '));
+          return result('unknown', `per-provider limits move in different directions: ${rationales.join('; ')}`);
+        }
       }
       break;
     }
@@ -405,37 +443,6 @@ function classifyOp(snapshot: PolicySnapshot, op: PatchOp, index: number): Class
         if (segments.length === leaf && removed) return result('widening', 'one claim is no longer required');
         if (segments.length === leaf - 1 && removed) return result('widening', 'no claims are required there any more');
         if (segments.length === leaf - 1 && added) return result('narrowing', 'claims are now required there');
-      }
-      break;
-    }
-    case 'weight-artifact': {
-      // /stores/<provider>/<field>[/<index>]
-      if (key === 'stores' && segments.length >= 2) {
-        const provider = segments[1];
-        if (segments.length === 2) {
-          if (removed) return result('widening', `provider "${provider}" loses its artifact store rules, so weight-artifact skips it`);
-          if (added) return result('narrowing', `provider "${provider}" gains artifact store rules`);
-          return result('unknown', `the whole store rule for "${provider}" was replaced; review per field`);
-        }
-        const field = segments[2];
-        const numeric = (value: unknown) => (typeof value === 'number' ? value : undefined);
-        if (field === 'hosts' || field === 'pinnedDigests' || field === 'writePathPrefixes' || field === 'readMethods') {
-          if (segments.length === 4 && added) return result('widening', `one more ${field} entry is accepted`);
-          if (segments.length === 4 && removed) return result('narrowing', `one ${field} entry is no longer accepted`);
-          if (segments.length === 3 && field === 'pinnedDigests') {
-            return removed ? result('widening', 'any digest may be read or written') : added ? result('narrowing', 'only pinned digests may be read or written') : compareSets(before, after, result, 'digest');
-          }
-          if (segments.length === 3 && field === 'writePathPrefixes') {
-            return removed ? result('widening', 'writes may target any path') : added ? result('narrowing', 'writes are limited to listed prefixes') : compareSets(before, after, result, 'prefix');
-          }
-          if (segments.length === 3) return compareSets(before, after, result, field === 'hosts' ? 'host' : 'method');
-        }
-        if (field === 'allowWrite') return after === true ? result('widening', 'writes to the artifact store are allowed') : result('narrowing', 'writes to the artifact store are refused');
-        if (field === 'maxBytes') {
-          if (removed) return result('widening', 'no size cap on artifacts');
-          if (added) return result('narrowing', 'artifacts are size-capped');
-          return compareNumbers(numeric(before), numeric(after), 'up', result, 'artifact size cap');
-        }
       }
       break;
     }

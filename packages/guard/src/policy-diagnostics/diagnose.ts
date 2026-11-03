@@ -1,5 +1,5 @@
 /**
- * @credninja/guard — Diagnose: read access patterns against the chain
+ * @credninja/guard — Diagnose: least-privilege findings from recorded decisions
  *
  * Takes a snapshot and the guard's recent decisions and reports where the
  * configuration and the observed traffic disagree: allowed scopes nobody
@@ -7,7 +7,9 @@
  * rate limits with far more headroom than traffic, the same denial over and
  * over. Each finding carries the smallest patch that addresses it and says
  * whether that patch widens or narrows the guard. The heuristics are
- * deterministic; an LLM reviewing them gets evidence, not guesses.
+ * deterministic with observation thresholds, in the spirit of IAM Access
+ * Analyzer's unused-permission findings: evidence for a reviewer, not a
+ * verdict.
  */
 
 import { classifyPatch } from './patch.js';
@@ -220,9 +222,13 @@ export function diagnosePolicies(snapshot: PolicySnapshot, events: Observation[]
         : undefined;
       const hasOverride = perProvider ? Object.prototype.hasOwnProperty.call(perProvider, provider) : false;
       const proposed = Math.max(1, Math.ceil(s.rateLimitPeak * 2));
+      // Three shapes: tighten an existing override, add an override to an
+      // existing table, or create the table with this one override.
       const path = hasOverride
         ? `/${escapePointerSegment(rateLimit.name)}/perProvider/${escapePointerSegment(provider)}/maxRequests`
-        : `/${escapePointerSegment(rateLimit.name)}/perProvider/${escapePointerSegment(provider)}`;
+        : perProvider
+          ? `/${escapePointerSegment(rateLimit.name)}/perProvider/${escapePointerSegment(provider)}`
+          : `/${escapePointerSegment(rateLimit.name)}/perProvider`;
       const windowMs = hasOverride && isPlainObject(perProvider![provider]) && typeof (perProvider![provider] as Record<string, unknown>).windowMs === 'number'
         ? ((perProvider![provider] as Record<string, unknown>).windowMs as number)
         : typeof rateLimit.descriptor.parameters.windowMs === 'number'
@@ -230,9 +236,11 @@ export function diagnosePolicies(snapshot: PolicySnapshot, events: Observation[]
           : undefined;
       const patch: PolicyPatch | undefined = hasOverride
         ? [{ op: 'replace', path, value: proposed }]
-        : windowMs !== undefined
-          ? [{ op: 'add', path, value: { maxRequests: proposed, windowMs } }]
-          : undefined;
+        : windowMs === undefined
+          ? undefined
+          : perProvider
+            ? [{ op: 'add', path, value: { maxRequests: proposed, windowMs } }]
+            : [{ op: 'add', path, value: { [provider]: { maxRequests: proposed, windowMs } } }];
       findings.push(withPatch({
         code: 'rate-limit-slack',
         severity: 'info',
@@ -264,7 +272,7 @@ export function diagnosePolicies(snapshot: PolicySnapshot, events: Observation[]
         severity: denial.count >= repeated * 4 ? 'medium' : 'low',
         policy: denial.policy,
         provider,
-        message: `"${denial.policy}" denied "${provider}" ${denial.count} times for the same reason: ${denial.reason}. Either the rule is too tight for a legitimate workflow or an agent keeps probing; ${suggestedPatch ? 'the patch widens the rule and needs approval' : 'no automatic patch is offered'}.`,
+        message: `"${denial.policy}" denied "${provider}" ${denial.count} times for the same reason: ${denial.reason}. Either the rule is too tight for a legitimate workflow or an agent keeps probing; ${suggestedPatch ? 'the patch widens the rule and needs a human decision' : 'no automatic patch is offered'}.`,
         evidence: { count: denial.count, reason: denial.reason, ...(denial.code ? { code: denial.code } : {}) },
         ...(suggestedPatch ? { suggestedPatch } : {}),
       }));

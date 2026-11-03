@@ -100,17 +100,17 @@ export interface CredPolicy {
   evaluate(ctx: GuardContext): PolicyResult | Promise<PolicyResult>;
   /**
    * Optional: expose this policy's configuration as a JSON-serializable
-   * parameter tree, so the weight-space tooling (`snapshotGuard`,
-   * `PolicyWeightSpaceEditor`) can read, diff and patch it. A policy without
-   * `describe()` is recorded as opaque: it is carried over by reference on
-   * every edit and no patch may touch its parameters.
+   * parameter tree, so the policy diagnostics (`snapshotGuard`,
+   * `diagnosePolicies`, `replayDecisions`) can read, diff and dry-run
+   * changes to it. A policy without `describe()` is recorded as opaque: it
+   * is carried over by reference and no patch may touch its parameters.
    */
   describe?(): PolicyDescriptor;
   /**
    * Optional: build a new instance of this policy from an edited parameter
-   * tree. Called by the weight-space editor only for policies whose
-   * parameters a patch changed; untouched policies keep their instance and
-   * runtime state. Must validate the parameters and throw on an invalid tree.
+   * tree. Used by `materializePolicies` (dry-run replay) for policies whose
+   * parameters a patch changed; untouched policies keep their instance. Must
+   * validate the parameters and throw on an invalid tree.
    */
   withParameters?(parameters: Record<string, ParameterValue>): CredPolicy;
 }
@@ -125,8 +125,8 @@ export type ParameterValue =
   | { [key: string]: ParameterValue };
 
 /**
- * A policy's configuration, serialized. This is the unit the weight-space
- * tooling reads and patches: the policy's parameters are its "weights".
+ * A policy's configuration, serialized. This is what the policy diagnostics
+ * read, diff and dry-run patches against.
  */
 export interface PolicyDescriptor {
   /** Policy kind, for example `rate-limit`. Opaque policies report `opaque`. */
@@ -141,8 +141,7 @@ export interface PolicyDescriptor {
   opaquePaths?: string[];
   /**
    * True when the policy holds runtime state (rate-limit counters). Stateful
-   * policies are excluded from replay and keep their instance when a patch
-   * leaves their parameters unchanged.
+   * policies are excluded from dry-run replay.
    */
   stateful?: boolean;
 }
@@ -157,9 +156,10 @@ export interface GuardConfig {
   onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
   /**
    * Keep the most recent N decisions in memory as `GuardAuditEvent`s, read
-   * back with `CredGuard.recentDecisions()`. Default 0 (off). The weight-space
-   * diagnostics and dry-run replay read this buffer when no other audit
-   * source is wired in. Bounded: the oldest decision is dropped at N.
+   * back with `CredGuard.recentDecisions()`. Default 0 (off). The policy
+   * diagnostics (`diagnosePolicies`, `replayDecisions`) read this buffer
+   * when no other audit source is wired in. Bounded: the oldest decision is
+   * dropped at N.
    */
   decisionHistorySize?: number;
 }

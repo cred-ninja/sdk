@@ -11,7 +11,6 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred, importAgentIdentity } from '@credninja/sdk';
 import type { CredGuard } from '@credninja/guard';
 
@@ -91,20 +90,6 @@ import {
   handleWhoami,
   WhoamiToolInput,
 } from './tools/whoami.js';
-import {
-  POLICY_INSPECT_TOOL_NAME,
-  POLICY_INSPECT_TOOL_DEFINITION,
-  POLICY_PROPOSE_TOOL_NAME,
-  POLICY_PROPOSE_TOOL_DEFINITION,
-  POLICY_APPLY_TOOL_NAME,
-  POLICY_APPLY_TOOL_DEFINITION,
-  handlePolicyInspect,
-  handlePolicyPropose,
-  handlePolicyApply,
-  PolicyInspectToolInput,
-  PolicyProposeToolInput,
-  PolicyApplyToolInput,
-} from './tools/policy.js';
 
 const MCP_SERVER_VERSION = '1.0.0';
 
@@ -181,10 +166,6 @@ function buildServerState(config: CredMcpConfig) {
       ? { delegatorIdentity: importAgentIdentity({ did: config.agentDid, privateKeyHex: config.agentPrivateKeyHex }) }
       : {}),
     guard,
-    // The weight-space editor is bound to the operator's guard instance, the
-    // same one the tools above are wrapped with; it is only exposed when the
-    // guard is in force for this server instance.
-    ...(guard && config.policyEditor ? { policyEditor: config.policyEditor } : {}),
     ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
     ...(agentTokenHash ? { agentTokenHash } : {}),
   };
@@ -296,32 +277,6 @@ function registerTools(
     () => ({ provider: syntheticProvider(WHOAMI_TOOL_NAME) }),
   );
 
-  // Weight-space policy tools exist only when an editor is configured. The
-  // inspect tool is read-only and exempt like cred_whoami; propose and apply
-  // are guard-wrapped under their own synthetic provider buckets.
-  const policyToolsEnabled = Boolean(toolContext.policyEditor);
-  const guardedHandlePolicyInspect = wireGuardedTool(
-    POLICY_INSPECT_TOOL_NAME,
-    mode,
-    guard,
-    handlePolicyInspect,
-    () => ({ provider: syntheticProvider(POLICY_INSPECT_TOOL_NAME) }),
-  );
-  const guardedHandlePolicyPropose = wireGuardedTool(
-    POLICY_PROPOSE_TOOL_NAME,
-    mode,
-    guard,
-    handlePolicyPropose,
-    () => ({ provider: syntheticProvider(POLICY_PROPOSE_TOOL_NAME) }),
-  );
-  const guardedHandlePolicyApply = wireGuardedTool(
-    POLICY_APPLY_TOOL_NAME,
-    mode,
-    guard,
-    handlePolicyApply,
-    () => ({ provider: syntheticProvider(POLICY_APPLY_TOOL_NAME) }),
-  );
-
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       DELEGATE_TOOL_DEFINITION,
@@ -335,9 +290,6 @@ function registerTools(
       AUDIT_LOG_TOOL_DEFINITION,
       CAPABILITIES_TOOL_DEFINITION,
       WHOAMI_TOOL_DEFINITION,
-      ...(policyToolsEnabled
-        ? [POLICY_INSPECT_TOOL_DEFINITION, POLICY_PROPOSE_TOOL_DEFINITION, POLICY_APPLY_TOOL_DEFINITION]
-        : []),
     ],
   }));
 
@@ -378,34 +330,18 @@ function registerTools(
       case WHOAMI_TOOL_NAME:
         return guardedHandleWhoami(args as unknown as WhoamiToolInput, toolContext);
 
-      case POLICY_INSPECT_TOOL_NAME:
-        if (!policyToolsEnabled) return unknownTool(name);
-        return guardedHandlePolicyInspect(args as unknown as PolicyInspectToolInput, toolContext);
-
-      case POLICY_PROPOSE_TOOL_NAME:
-        if (!policyToolsEnabled) return unknownTool(name);
-        return guardedHandlePolicyPropose(args as unknown as PolicyProposeToolInput, toolContext);
-
-      case POLICY_APPLY_TOOL_NAME:
-        if (!policyToolsEnabled) return unknownTool(name);
-        return guardedHandlePolicyApply(args as unknown as PolicyApplyToolInput, toolContext);
-
       default:
-        return unknownTool(name);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Unknown tool: ${name}`,
+            },
+          ],
+          isError: true,
+        };
     }
   });
-}
-
-function unknownTool(name: string): CallToolResult {
-  return {
-    content: [
-      {
-        type: 'text',
-        text: `Unknown tool: ${name}`,
-      },
-    ],
-    isError: true,
-  };
 }
 
 /**

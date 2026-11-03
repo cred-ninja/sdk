@@ -87,7 +87,6 @@ const guard = new CredGuard({
 | `maxTtlPolicy` | Cap delegation TTL | `{ maxTtlSeconds, perProvider? }` |
 | `webBotAuthPolicy` | Require or constrain Web Bot Auth identity metadata | `{ requireKeyId?, allowedIdentitySources?, allowedSignatureAgentPrefixes? }` |
 | `receiptClaimsPolicy` | Require claims on the delegation receipt chain | `{ requiredClaims?, perProvider? }` |
-| `weightArtifactPolicy` | Experimental. For agents moving model weights through `cred_use`: pin artifact-store hosts, write prefixes, digests and sizes | `{ stores: { [provider]: { hosts, allowWrite?, writePathPrefixes?, pinnedDigests?, maxBytes? } } }` |
 
 ## Policy Chain Behavior
 
@@ -113,7 +112,6 @@ class CredGuard {
   getPolicyNames(): string[];
   getPolicies(): readonly CredPolicy[];
   getOnError(): 'deny' | 'allow' | 'log-and-deny';
-  replacePolicies(policies: CredPolicy[]): void;   // atomic; used by PolicyWeightSpaceEditor
   recentDecisions(): GuardAuditEvent[];            // with decisionHistorySize > 0
 }
 ```
@@ -179,11 +177,11 @@ const event = buildAuditEvent(ctx, decision);
 // { type: 'guard.decision', timestamp, agentTokenHash, provider, allowed, policies, ... }
 ```
 
-Set `decisionHistorySize` on the guard to keep the last N of these in memory and read them back with `guard.recentDecisions()`. The weight-space diagnostics and dry runs below read that buffer by default.
+Set `decisionHistorySize` on the guard to keep the last N of these in memory and read them back with `guard.recentDecisions()`. The policy diagnostics below read that buffer by default. Off (0) unless set.
 
-## Weight-space editing
+## Policy diagnostics
 
-The policy chain is a small tree of parameters: scope lists, URL patterns, limits, ceilings. This module reads it as data, says what it does, finds where it disagrees with observed traffic, and patches it one leaf at a time under signed approval. The approach follows Weight-Space Programming (reading and surgically editing a network's weights); the design note is at `docs/design/weight-space-policy-editing.md`.
+Operators over-grant at setup (scopes, URL patterns, rate limits) and rarely revisit. This module reads a guard's policy chain as data, says what it lets each provider do, finds where the configuration disagrees with the decisions the guard actually made, and proposes the smallest configuration change for each finding, with a dry run of what that change would have decided differently. It is the guard-side equivalent of IAM Access Analyzer's unused-permission findings: evidence for a human to act on in configuration. Everything here is a pure function over a snapshot; nothing changes a running guard. Design note: `docs/design/policy-least-privilege-diagnostics.md`.
 
 ### Read and interpret
 
@@ -199,8 +197,8 @@ const guard = new CredGuard({
 });
 
 const snapshot = snapshotGuard(guard);
-// snapshot.hash          sha256 of the canonical chain; a patch applies to exactly this state
-// snapshot.parameterCount leaves across all policies
+// snapshot.hash            sha256 of the canonical chain; identifies this exact configuration
+// snapshot.parameterCount  leaves across all policies
 // snapshot.policies[1].descriptor
 //   { kind: 'scope-filter', parameters: { allowedScopes: { github: ['repo', 'read:user', 'gist'] } } }
 
@@ -212,9 +210,9 @@ interpretSnapshot(snapshot).summary;
 //   'github: scopes repo, read:user, gist; 100 requests per 60000ms.' ]
 ```
 
-Every built-in policy serializes itself. A custom policy is recorded as `kind: 'opaque'` unless it implements `describe()` and `withParameters()` (see CONTRIBUTING.md); an opaque policy is carried over unchanged on every edit and cannot be patched. A RegExp pattern is encoded as `{ "$regex": source, "flags": flags }`; a function such as `scopeGate` as `{ "$opaque": true }`, kept by reference.
+Every built-in policy serializes itself. A custom policy is recorded as `kind: 'opaque'` unless it implements `describe()` and `withParameters()` (see CONTRIBUTING.md); an opaque policy is carried over unchanged in a dry run and cannot be patched. A RegExp pattern is encoded as `{ "$regex": source, "flags": flags }`; a function such as `scopeGate` as `{ "$opaque": true }`, kept by reference.
 
-### Diagnose against traffic
+### Diagnose against recorded decisions
 
 ```typescript
 import { diagnosePolicies } from '@credninja/guard';
@@ -225,13 +223,25 @@ for (const finding of diagnosis.findings) {
 }
 // unused-allowed-scope /scope-filter/allowedScopes/github/2 narrowing
 //   Scope "gist" is allowed for "github" but none of 412 observed requests asked for it. ...
-// rate-limit-slack /rate-limit/perProvider/github narrowing
+// rate-limit-slack /rate-limit/perProvider narrowing
 //   "github" peaked at 9 of 100 requests per window over 412 requests. ...
 ```
 
-Findings are deterministic heuristics with observation thresholds (`DiagnosisOptions`). Each carries the smallest patch that addresses it and whether that patch widens or narrows the guard. `repeated-denial` is the one finding whose patch widens; it is offered so a reviewer can decide whether the denials describe a real workflow or an agent probing its limits.
+| Code | What it reads | Suggested patch | Effect |
+|---|---|---|---|
+| `unused-allowed-scope` | an allowed scope no request asked for | remove that one scope | narrowing |
+| `unused-url-pattern` | a pattern no brokered call matched | remove that one pattern | narrowing |
+| `unconstrained-provider-scopes` | traffic to a provider `scope-filter` does not list | add the observed scope set | narrowing |
+| `unconstrained-provider-urls` | brokered calls to a provider `url-allowlist` does not list | add the observed origins | narrowing |
+| `rate-limit-slack` | observed peak far under the limit | per-provider limit at twice the peak | narrowing |
+| `repeated-denial` | the same denial over and over | the scope the denials asked for | widening; human decision |
+| `error-fails-open` | `onError: "allow"` | set `deny` | narrowing |
+| `scope-narrowing-silent` | `narrowInsteadOfDeny` | set `false` | narrowing |
+| `dead-policy` | a policy that skipped every request | none, informational | |
 
-### Patch one leaf
+Findings are deterministic heuristics with observation thresholds (`DiagnosisOptions`: `minObservations`, `rateLimitSlackThreshold`, `repeatedDenialThreshold`). `repeated-denial` is the one finding whose patch widens; it is offered so a reviewer can decide whether the denials describe a real workflow or an agent probing its limits.
+
+### Dry-run a patch
 
 ```typescript
 import { applyPatch, classifyPatch, diffSnapshots, replayDecisions } from '@credninja/guard';
@@ -247,39 +257,9 @@ await replayDecisions(snapshot, next, guard.recentDecisions(), { previous: guard
 // { events: 412, excludedPolicies: ['rate-limit'], unchanged: 409, newlyDenied: [...3 gist requests], newlyAllowed: [] }
 ```
 
-Paths are JSON Pointers: `/onError`, `/<policy>` for a whole policy (`{ kind, parameters }`), or `/<policy>/<pointer into its parameters>`. Classification follows each kind's semantics (raising `maxRequests` widens, removing a provider key widens because the policy then skips that provider, adding a restrictive policy narrows). An op with no rule is `unknown`, which every approval rule treats as widening.
+Paths are JSON Pointers: `/onError`, `/<policy>` for a whole policy (`{ kind, parameters }`), or `/<policy>/<pointer into its parameters>`. Classification follows each kind's semantics: raising `maxRequests` widens, removing a provider key widens because the policy then skips that provider, adding a restrictive policy narrows. An op with no rule is `unknown`; treat it as widening. Replay rebuilds both chains in isolation and leaves out stateful policies (rate-limit), naming them in `excludedPolicies`. The running guard is never touched: apply an accepted patch to your configuration and redeploy.
 
-### Apply under signed approval
-
-```typescript
-import { PolicyWeightSpaceEditor, generateApproverKeyPair, signProposal } from '@credninja/guard';
-
-// On the operator's machine, once. The private key never goes near the agent.
-const { publicKey, privateKey } = generateApproverKeyPair();
-
-const editor = new PolicyWeightSpaceEditor(guard, {
-  approvers: [{ id: 'kieran', publicKey }],
-  requireApprovalFor: 'all',          // default; 'widening' lets narrowing patches apply unsigned
-  onEvent: (event) => auditLog.write(event),
-});
-
-const proposal = await editor.propose({
-  patch: [{ op: 'remove', path: '/scope-filter/allowedScopes/github/2' }],
-  rationale: 'gist is allowed but unused in 412 requests over 30 days',
-  proposer: 'did:key:z6Mk...agent',
-});
-// proposal.id, proposal.hash, proposal.baseHash, proposal.classification, proposal.dryRun
-
-// The approver reviews the proposal and signs its hash, elsewhere.
-const approval = signProposal(proposal, 'kieran', privateKey);
-
-const result = await editor.apply(proposal.id, [approval]);
-// { applied: true, approvers: ['kieran'], rebuilt: ['scope-filter'], kept: ['rate-limit'], snapshot }
-```
-
-`apply` refuses a proposal that is expired, tampered with, or written against a chain that has since changed (`base_mismatch`: propose again), one without enough valid approvals, and one the proposer signed for itself. It swaps the chain in one assignment and rebuilds only the policies the patch touched; the rate limit above keeps its instance and its counters. `history()` lists applied edits and `proposeRollback(id, proposer)` proposes the inverse under the same rules.
-
-The same loop is exposed to agents over MCP (`cred_policy_inspect`, `cred_policy_propose`, `cred_policy_apply`) and to operators over REST (`/admin/policy`), each only when a `policyEditor` is configured.
+The same report is available to operators over REST as `GET /admin/policy` on `@credninja/server`, off by default.
 
 ## License
 

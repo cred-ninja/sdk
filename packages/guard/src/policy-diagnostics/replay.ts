@@ -1,12 +1,12 @@
 /**
  * @credninja/guard — Replay: dry-run a patch against recorded decisions
  *
- * Rebuilds the base chain and the patched chain and evaluates every recorded
- * decision against both. The report lists the requests whose outcome flips,
- * so a reviewer sees what a patch changes in practice before it is applied,
- * the way a weight patch is checked against held-out prompts. Policies that
- * hold runtime state (rate-limit) are left out of both chains: their answer
- * depends on history the replay does not have.
+ * Rebuilds the base chain and the patched chain in isolation and evaluates
+ * every recorded decision against both. The report lists the requests whose
+ * outcome flips, so a reviewer sees what a patch changes in practice before
+ * applying it to configuration. Policies that hold runtime state
+ * (rate-limit) are left out of both chains: their answer depends on history
+ * the replay does not have. The running guard is never touched.
  */
 
 import { CredGuard } from '../guard.js';

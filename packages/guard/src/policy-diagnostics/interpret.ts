@@ -2,10 +2,9 @@
  * @credninja/guard — Interpret: say what a policy chain does
  *
  * Reads a snapshot and reports, per provider, what an agent can request and
- * reach, and what applies to every provider. The point is the same as
- * reading a network's weights to identify its task: the configuration is
- * the ground truth, the sentences are derived from it, and an LLM reviewing
- * a patch gets a description it did not have to infer from code.
+ * reach, and what applies to every provider. The configuration is the ground
+ * truth; the sentences are derived from it, so a reviewer gets a description
+ * they did not have to infer from code.
  */
 
 import { isEncodedRegExp, isPlainObject } from './params.js';
@@ -109,20 +108,6 @@ export function interpretSnapshot(snapshot: PolicySnapshot): SnapshotInterpretat
         };
         break;
       }
-      case 'weight-artifact': {
-        if (isPlainObject(parameters.stores)) {
-          for (const [provider, store] of Object.entries(parameters.stores)) {
-            if (!isPlainObject(store)) continue;
-            profile(provider).artifactStore = {
-              hosts: Array.isArray(store.hosts) ? store.hosts.map(String) : [],
-              allowWrite: store.allowWrite === true,
-              pinnedDigests: Array.isArray(store.pinnedDigests) ? store.pinnedDigests.length : 0,
-              ...(typeof store.maxBytes === 'number' ? { maxBytes: store.maxBytes } : {}),
-            };
-          }
-        }
-        break;
-      }
       case 'receipt-claims': {
         if (isPlainObject(parameters.perProvider)) {
           for (const [provider, claims] of Object.entries(parameters.perProvider)) {
@@ -181,7 +166,6 @@ export function interpretSnapshot(snapshot: PolicySnapshot): SnapshotInterpretat
     if (p.rateLimit) parts.push(`${p.rateLimit.maxRequests} requests per ${p.rateLimit.windowMs}ms`);
     if (p.maxTtlSeconds !== undefined) parts.push(`TTL at most ${p.maxTtlSeconds}s`);
     if (p.requiredReceiptClaims) parts.push(`receipt claims ${p.requiredReceiptClaims.join(', ')}`);
-    if (p.artifactStore) parts.push(`weight artifacts ${p.artifactStore.allowWrite ? 'read/write' : 'read-only'} at ${p.artifactStore.hosts.join(', ')}${p.artifactStore.pinnedDigests > 0 ? ` (${p.artifactStore.pinnedDigests} pinned digests)` : ''}`);
     summary.push(`${p.provider}: ${parts.join('; ')}.`);
   }
   if (global.opaquePolicies.length > 0) {

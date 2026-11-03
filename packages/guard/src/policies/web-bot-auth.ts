@@ -17,7 +17,7 @@ import {
   isPlainObject,
   requireOptionalBoolean,
   requireOptionalStringArray,
-} from '../weightspace/params.js';
+} from '../policy-diagnostics/params.js';
 
 const IDENTITY_SOURCES = new Set(['agent-token', 'did', 'tofu', 'web-bot-auth']);
 

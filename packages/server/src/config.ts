@@ -7,7 +7,7 @@
 
 import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
-import type { CredGuard, PolicyWeightSpaceEditor } from '@credninja/guard';
+import type { CredGuard, DiagnosisOptions } from '@credninja/guard';
 import type { Request } from 'express';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 
@@ -171,12 +171,14 @@ export interface ServerConfig {
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
 
-  // Weight-space editor over `guard` (experimental). When provided, the
-  // admin-authenticated /admin/policy routes exist: read the chain as data,
-  // dry-run a minimal patch, apply it under the editor's approval rules.
-  // Ignored unless `guard` is also set. Build it with
-  // `new PolicyWeightSpaceEditor(guard, { approvers })` from @credninja/guard.
-  policyEditor?: PolicyWeightSpaceEditor;
+  // Policy diagnostics (read-only). Default off. When true and `guard` is
+  // set, the admin-authenticated GET /admin/policy route exists: the guard's
+  // policy chain as data, what it lets each provider do, and least-privilege
+  // findings against the guard's recent decisions (set `decisionHistorySize`
+  // on the guard to record them). Nothing is ever changed through this route.
+  policyDiagnostics?: boolean;
+  // Thresholds for the findings behind GET /admin/policy.
+  policyDiagnosisOptions?: DiagnosisOptions;
 
   // Web Bot Auth ingress verification mode
   webBotAuthMode?: 'off' | 'optional' | 'require';

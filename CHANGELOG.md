@@ -2,31 +2,23 @@
 
 ## [Unreleased]
 
-### Added: weight-space editing of the guard's policy chain
+### Added: least-privilege policy diagnostics (default off)
 
-- `@credninja/guard`: the policy chain can be read as data and patched
-  surgically. `CredPolicy` gains optional `describe()` and `withParameters()`,
-  implemented by every built-in policy; `snapshotGuard()` hashes the chain,
-  `interpretSnapshot()` says what it lets each provider do, `diagnosePolicies()`
-  reports where it disagrees with recent decisions and proposes the smallest
-  patch for each finding, `applyPatch()`/`diffSnapshots()`/`classifyPatch()`
-  edit it one leaf at a time and say whether an edit widens or narrows, and
-  `replayDecisions()` dry-runs a patch against recorded decisions.
-  `PolicyWeightSpaceEditor` runs that loop over a live `CredGuard` under
-  Ed25519-signed approval, rebuilding only the policies a patch touched.
-  `CredGuard` gains `getPolicies()`, `getOnError()`, `replacePolicies()` and an
-  opt-in `decisionHistorySize` buffer read with `recentDecisions()`.
-  See `docs/design/weight-space-policy-editing.md`.
-- `@credninja/guard`: experimental `weightArtifactPolicy` for agents that move
-  model weights and tensors through `cred_use`: pins artifact-store hosts,
-  write prefixes, digests and sizes.
-- `@credninja/mcp`: `cred_policy_inspect`, `cred_policy_propose` and
-  `cred_policy_apply`, present only when the server is given a `policyEditor`.
-- `@credninja/server`: `GET /admin/policy`, `POST /admin/policy/proposals`,
-  `GET /admin/policy/proposals/:id` and `POST /admin/policy/proposals/:id/apply`,
-  present only when the server is given a `policyEditor`; every proposal,
-  application and rejection is a `policy` audit event.
-- `@credninja/vault`: `AuditResource.type` accepts `policy`.
+- `@credninja/guard`: the policy chain can be read as data and checked against
+  the decisions the guard actually made. `CredPolicy` gains optional
+  `describe()` and `withParameters()`, implemented by every built-in policy;
+  `snapshotGuard()` hashes the chain, `interpretSnapshot()` says what it lets
+  each provider do, `diagnosePolicies()` reports unused scopes and URL
+  patterns, unconstrained providers, slack rate limits, repeated denials and
+  fail-open configuration, each with the smallest configuration patch that
+  addresses it, and `applyPatch()`/`diffSnapshots()`/`classifyPatch()`/
+  `replayDecisions()` dry-run such a patch and say whether it widens or
+  narrows the guard and which recorded decisions it would flip. All pure:
+  nothing changes a running guard. `CredGuard` gains `getPolicies()`,
+  `getOnError()` and an opt-in `decisionHistorySize` buffer read with
+  `recentDecisions()`. See `docs/design/policy-least-privilege-diagnostics.md`.
+- `@credninja/server`: read-only `GET /admin/policy` reporting the same, present
+  only with `guard` and `policyDiagnostics: true`.
 
 ### BREAKING: generated apps are multi-user, with an agent to grant
 

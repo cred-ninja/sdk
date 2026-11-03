@@ -62,7 +62,7 @@ import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
-import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, PatchError, type GuardContext, type GuardDecision } from '@credninja/guard';
+import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, diagnosePolicies, interpretSnapshot, snapshotGuard, type GuardContext, type GuardDecision } from '@credninja/guard';
 import { computeTofuAuthorization, resolveTofuPrincipal, toTofuPrincipalId } from './tofu-bridge.js';
 import { createWebBotAuthNonceStore } from './nonce-store.js';
 import {
@@ -1589,7 +1589,7 @@ export function createServer(config: ServerConfig) {
   const providersRateLimiter = makeRateLimiter(30);  // /providers     — vault DB query per request
   const adminPermissionsRateLimiter = makeRateLimiter(30);  // /admin/permissions* — sqlite query per request
   const adminAuditRateLimiter = makeRateLimiter(30);  // /admin/audit          — vault audit query per request
-  const adminPolicyRateLimiter = makeRateLimiter(30);  // /admin/policy*        — snapshot, replay and signature checks per request
+  const adminPolicyRateLimiter = makeRateLimiter(30);  // /admin/policy         — snapshot and diagnosis per request
   const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
@@ -2661,140 +2661,33 @@ export function createServer(config: ServerConfig) {
     }
   });
 
-  // ── /admin/policy — weight-space editing of the guard's policy chain ──────
+  // ── GET /admin/policy — read-only least-privilege diagnostics of the guard ──
   //
-  // Experimental. These routes exist only when both `guard` and
-  // `policyEditor` are configured. They read the live chain as data,
-  // dry-run a minimal patch and apply it under the editor's approval rules
-  // (by default: a signed approval from a configured approver key, which
-  // the admin session does not stand in for). Every proposal, application
-  // and rejection is written to the vault audit log as a `policy` resource.
-  const policyEditor = config.guard && config.policyEditor ? config.policyEditor : null;
-
-  function writePolicyAudit(action: 'create' | 'update' | 'deny', proposalId: string, outcome: 'success' | 'denied', metadata: Record<string, unknown>): void {
-    writeAuditEventIfSupported({
-      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-      timestamp: new Date(),
-      actor: { type: 'system', id: 'admin' },
-      action,
-      resource: { type: 'policy', id: proposalId },
-      outcome,
-      correlationId: crypto.randomUUID(),
-      metadata,
-    });
-  }
-
-  if (policyEditor) {
-    /**
-     * GET /admin/policy — the live chain as a hashed snapshot, its
-     * interpretation and its diagnosis against recent decisions.
-     * `?include=snapshot,interpretation,diagnosis` selects sections.
-     */
+  // Off by default. Exists only when both `guard` and `policyDiagnostics`
+  // are configured. Reports the guard's policy chain as a hashed snapshot,
+  // what it lets each provider do, and findings where the chain disagrees
+  // with the guard's recent decisions (unused scopes, unhit URL patterns,
+  // unconstrained providers, slack rate limits, repeated denials), each with
+  // the smallest configuration patch that addresses it. Nothing is changed
+  // through this route; patches are for an operator to review and apply to
+  // configuration. `?include=snapshot,interpretation,diagnosis` selects
+  // sections.
+  if (config.guard && config.policyDiagnostics) {
+    const diagnosedGuard = config.guard;
+    const diagnosisOptions = config.policyDiagnosisOptions ?? {};
     app.get('/admin/policy', adminPolicyRateLimiter, requireAdminAuth, (req: Request, res: Response) => {
       try {
         const includeRaw = typeof req.query.include === 'string' ? req.query.include : '';
         const include = new Set(includeRaw ? includeRaw.split(',').map((part) => part.trim()) : ['snapshot', 'interpretation', 'diagnosis']);
-        const result = policyEditor.inspect();
+        const snapshot = snapshotGuard(diagnosedGuard);
         res.json({
-          ...(include.has('snapshot') ? { snapshot: result.snapshot } : { snapshotHash: result.snapshot.hash }),
-          ...(include.has('interpretation') ? { interpretation: result.interpretation } : {}),
-          ...(include.has('diagnosis') ? { diagnosis: result.diagnosis } : {}),
-          pendingProposals: policyEditor.pendingProposals().map((proposal) => ({ id: proposal.id, effect: proposal.classification.effect, expiresAt: proposal.expiresAt })),
+          ...(include.has('snapshot') ? { snapshot } : { snapshotHash: snapshot.hash }),
+          ...(include.has('interpretation') ? { interpretation: interpretSnapshot(snapshot) } : {}),
+          ...(include.has('diagnosis') ? { diagnosis: diagnosePolicies(snapshot, diagnosedGuard.recentDecisions(), diagnosisOptions) } : {}),
         });
       } catch (err) {
         console.error('[/admin/policy] Error:', err);
-        res.status(500).json({ error: 'policy_inspect_failed' });
-      }
-    });
-
-    /**
-     * POST /admin/policy/proposals — dry-run a patch. Body
-     * `{ patch: PatchOp[], rationale: string, proposer?: string }`. Never
-     * changes the chain. Answers 201 with the proposal, or 400 naming the
-     * failing op.
-     */
-    app.post('/admin/policy/proposals', adminPolicyRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
-      const body = req.body ?? {};
-      if (!Array.isArray(body.patch) || body.patch.length === 0) {
-        res.status(400).json({ error: 'invalid_patch', message: 'patch must be a non-empty array of ops' });
-        return;
-      }
-      if (typeof body.rationale !== 'string' || body.rationale.trim().length === 0) {
-        res.status(400).json({ error: 'invalid_rationale', message: 'rationale is required' });
-        return;
-      }
-      const proposer = typeof body.proposer === 'string' && body.proposer.trim() ? body.proposer.trim().slice(0, 256) : 'admin';
-      try {
-        const proposal = await policyEditor.propose({ patch: body.patch, rationale: body.rationale.slice(0, 2000), proposer });
-        writePolicyAudit('create', proposal.id, 'success', {
-          proposer, effect: proposal.classification.effect, magnitude: proposal.classification.magnitude, baseHash: proposal.baseHash, resultHash: proposal.resultHash,
-        });
-        res.status(201).json({ proposal, approvalRequired: policyEditor.approvalRequired(proposal) });
-      } catch (err) {
-        if (err instanceof PatchError) {
-          res.status(400).json({ error: 'invalid_patch', opIndex: err.opIndex, message: err.message });
-          return;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        if (/must be|cannot be|no factory|not a valid|is not an? |needs a/.test(message)) {
-          res.status(400).json({ error: 'invalid_patch', message });
-          return;
-        }
-        console.error('[/admin/policy/proposals] Error:', err);
-        res.status(500).json({ error: 'policy_propose_failed' });
-      }
-    });
-
-    app.get('/admin/policy/proposals/:id', adminPolicyRateLimiter, requireAdminAuth, (req: Request, res: Response) => {
-      const proposal = policyEditor.getProposal(String(req.params.id));
-      if (!proposal) {
-        res.status(404).json({ error: 'proposal_not_found' });
-        return;
-      }
-      res.json({ proposal, approvalRequired: policyEditor.approvalRequired(proposal) });
-    });
-
-    /**
-     * POST /admin/policy/proposals/:id/apply — apply a pending proposal.
-     * Body `{ approvals?: ProposalApproval[] }`. Answers 200 with what was
-     * rebuilt and kept, 404 for an unknown id, 409 when the chain moved,
-     * 403 when approval is missing or invalid.
-     */
-    app.post('/admin/policy/proposals/:id/apply', adminPolicyRateLimiter, requireAdminAuth, async (req: Request, res: Response) => {
-      const id = String(req.params.id);
-      const approvals = Array.isArray(req.body?.approvals) ? req.body.approvals : [];
-      for (const approval of approvals) {
-        if (!approval || typeof approval.approver !== 'string' || typeof approval.signature !== 'string' || typeof approval.signedAt !== 'string') {
-          res.status(400).json({ error: 'invalid_approval', message: 'each approval needs approver, signature and signedAt' });
-          return;
-        }
-      }
-      try {
-        const result = await policyEditor.apply(id, approvals);
-        if (!result.applied) {
-          const status =
-            result.code === 'proposal_not_found' ? 404
-              : result.code === 'base_mismatch' || result.code === 'proposal_expired' ? 409
-                : result.code === 'materialize_failed' ? 500
-                  : 403;
-          writePolicyAudit('deny', id, 'denied', { reason: result.code, approvals: approvals.map((approval: { approver: string }) => approval.approver) });
-          res.status(status).json({ error: result.code, message: result.message });
-          return;
-        }
-        writePolicyAudit('update', result.proposal.id, 'success', {
-          proposer: result.proposal.proposer,
-          approvers: result.approvers,
-          effect: result.proposal.classification.effect,
-          magnitude: result.proposal.classification.magnitude,
-          baseHash: result.proposal.baseHash,
-          resultHash: result.snapshot.hash,
-          rebuilt: result.rebuilt,
-          patch: result.proposal.patch,
-        });
-        res.json({ applied: true, proposalId: result.proposal.id, approvers: result.approvers, rebuilt: result.rebuilt, kept: result.kept, snapshotHash: result.snapshot.hash });
-      } catch (err) {
-        console.error('[/admin/policy/proposals/:id/apply] Error:', err);
-        res.status(500).json({ error: 'policy_apply_failed' });
+        res.status(500).json({ error: 'policy_diagnostics_failed' });
       }
     });
   }

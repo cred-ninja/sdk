@@ -15,7 +15,7 @@ import type {
 import { buildAuditEvent } from './audit.js';
 
 export class CredGuard {
-  private policies: CredPolicy[];
+  private readonly policies: CredPolicy[];
   private readonly onError: 'deny' | 'allow' | 'log-and-deny';
   private readonly onDecision?: (ctx: GuardContext, results: PolicyResult[]) => void;
   private readonly decisionHistorySize: number;
@@ -146,26 +146,6 @@ export class CredGuard {
    */
   getPolicies(): readonly CredPolicy[] {
     return [...this.policies];
-  }
-
-  /**
-   * Replace the whole chain atomically. Used by the weight-space editor after
-   * an approved patch; a request evaluating while this runs sees either the
-   * old chain or the new one, never a mix, because `evaluate` iterates the
-   * array it started with.
-   */
-  replacePolicies(policies: CredPolicy[]): void {
-    const names = new Set<string>();
-    for (const policy of policies) {
-      if (!policy || typeof policy.name !== 'string' || typeof policy.evaluate !== 'function') {
-        throw new Error('replacePolicies: every entry must be a CredPolicy');
-      }
-      if (names.has(policy.name)) {
-        throw new Error(`replacePolicies: duplicate policy name "${policy.name}"`);
-      }
-      names.add(policy.name);
-    }
-    this.policies = [...policies];
   }
 
   private remember(ctx: GuardContext, decision: GuardDecision): void {

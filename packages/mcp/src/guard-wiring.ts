@@ -31,7 +31,7 @@ type GuardCallToolResult = import('@credninja/guard').CallToolResult;
 /** Read-only self-diagnostic tools — never guard-wrapped, in either mode, so
  * they stay available to diagnose a guard-subsystem outage (see U1's Key
  * Technical Decisions). */
-const GUARD_EXEMPT_TOOLS = new Set(['cred_audit_log', 'cred_whoami', 'cred_policy_inspect']);
+const GUARD_EXEMPT_TOOLS = new Set(['cred_audit_log', 'cred_whoami']);
 
 /** Tools already covered by packages/server's own guard middleware in cloud
  * mode (/api/v1/delegate, /api/v1/subdelegate) — wrapping them again here

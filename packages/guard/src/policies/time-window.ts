@@ -12,7 +12,7 @@ import type {
   PolicyResult,
   TimeWindowPolicyConfig,
 } from '../types.js';
-import { cloneParameters, isPlainObject } from '../weightspace/params.js';
+import { cloneParameters, isPlainObject } from '../policy-diagnostics/params.js';
 
 export class TimeWindowPolicy implements CredPolicy {
   readonly name = 'time-window';

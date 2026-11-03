@@ -22,7 +22,7 @@ import {
   isOpaqueMarker,
   isPlainObject,
   isStringArray,
-} from '../weightspace/params.js';
+} from '../policy-diagnostics/params.js';
 
 export class UrlAllowlistPolicy implements CredPolicy {
   readonly name = 'url-allowlist';

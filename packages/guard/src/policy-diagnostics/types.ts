@@ -1,11 +1,10 @@
 /**
- * @credninja/guard — Weight-space types
+ * @credninja/guard — Policy diagnostics types
  *
- * The policy chain of a CredGuard, read as data. A snapshot is the chain's
- * "weights": one parameter tree per policy, in evaluation order, plus the
- * guard's error disposition. Patches are minimal JSON Pointer edits against
- * that tree, so an edit that changes one scope touches one leaf, not the
- * whole configuration.
+ * The policy chain of a CredGuard, read as data. A snapshot is one parameter
+ * tree per policy, in evaluation order, plus the guard's error disposition.
+ * Patches are minimal JSON Pointer edits against that tree, so a change that
+ * drops one scope touches one leaf, not the whole configuration.
  */
 
 import type { GuardAuditEvent, ParameterValue, PolicyDescriptor } from '../types.js';
@@ -90,8 +89,6 @@ export interface ProviderProfile {
   rateLimit?: { maxRequests: number; windowMs: number };
   maxTtlSeconds?: number;
   requiredReceiptClaims?: string[];
-  /** Experimental weight-artifact policy, when it names this provider. */
-  artifactStore?: { hosts: string[]; allowWrite: boolean; pinnedDigests: number; maxBytes?: number };
 }
 
 export interface SnapshotInterpretation {

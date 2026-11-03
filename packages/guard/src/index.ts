@@ -65,8 +65,9 @@ export type {
   PolicyDescriptor,
 } from './types.js';
 
-// Weight-space tooling: read, interpret, diagnose and patch the policy chain
-export * from './weightspace/index.js';
+// Policy diagnostics: read the chain as data, interpret it, diagnose it
+// against recorded decisions, and dry-run least-privilege patches
+export * from './policy-diagnostics/index.js';
 
 // Policies
 export {
@@ -82,10 +83,8 @@ export {
   maxTtlPolicy,
   webBotAuthPolicy,
   receiptClaimsPolicy,
-  WeightArtifactPolicy,
-  weightArtifactPolicy,
 } from './policies/index.js';
-export type { MaxTtlPolicyResult, RateLimitPolicyResult, WeightArtifactPolicyConfig, WeightArtifactStoreConfig } from './policies/index.js';
+export type { MaxTtlPolicyResult, RateLimitPolicyResult } from './policies/index.js';
 
 // Cred Link policy
 export { createLinkHooks, LINK_CHECK_ERROR_CODE, clientGrantPolicy, CLIENT_GRANT_POLICY_NAME } from './link/index.js';

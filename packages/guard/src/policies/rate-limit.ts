@@ -13,7 +13,7 @@ import type {
   PolicyResult,
   RateLimitPolicyConfig,
 } from '../types.js';
-import { cloneParameters, isPlainObject, isPositiveInteger } from '../weightspace/params.js';
+import { cloneParameters, isPlainObject, isPositiveInteger } from '../policy-diagnostics/params.js';
 
 interface RequestRecord {
   timestamps: number[];

@@ -19,14 +19,9 @@ import {
   interpretSnapshot,
   diagnosePolicies,
   replayDecisions,
-  generateApproverKeyPair,
-  signProposal,
-  verifyApproval,
-  PolicyWeightSpaceEditor,
   PatchError,
   canonicalJson,
-} from '../weightspace/index.js';
-import type { PolicyEditEvent } from '../weightspace/index.js';
+} from '../policy-diagnostics/index.js';
 
 function ctx(overrides: Partial<GuardContext> = {}): GuardContext {
   return {
@@ -127,6 +122,16 @@ describe('applyPatch', () => {
     }
   });
 
+  it('surfaces parameters the policy rejects when the patched chain is built', () => {
+    const base = snapshotGuard(buildGuard());
+    const bad = applyPatch(base, [{ op: 'replace', path: '/rate-limit/maxRequests', value: -1 }]);
+    expect(() => materializePolicies(bad, { previous: buildGuard().getPolicies() })).toThrow(/positive integer/);
+    const http = applyPatch(base, [{ op: 'add', path: '/url-allowlist/allowedUrls/github/-', value: 'http://api.github.com/' }]);
+    expect(() => materializePolicies(http, { previous: buildGuard().getPolicies() })).toThrow(/https/);
+    const unknown = applyPatch(base, [{ op: 'add', path: '/mystery', value: { kind: 'mystery', parameters: {} } }]);
+    expect(() => materializePolicies(unknown, { previous: buildGuard().getPolicies() })).toThrow(/no factory/);
+  });
+
   it('refuses to touch opaque values and opaque policies', () => {
     const base = snapshotGuard(buildGuard([{ name: 'custom', evaluate: () => ({ decision: 'ALLOW', policy: 'custom' }) }]));
     expect(() => applyPatch(base, [{ op: 'remove', path: '/url-allowlist/scopeGate/github' }])).toThrow(/opaque/);
@@ -196,7 +201,22 @@ describe('classifyPatch', () => {
     expect(classifyPatch(base, [{ op: 'add', path: '/time-window', value: { kind: 'time-window', parameters: { allowedHours: { start: 1, end: 2 } } } }]).effect).toBe('narrowing');
   });
 
-  it('falls back to unknown, which approval rules treat as widening', () => {
+  it('compares a per-provider rate limit with the limit it replaces', () => {
+    const base = snapshotGuard(buildGuard());
+    // No override table yet: the patch creates it with one override.
+    const table = (value: unknown) => classifyPatch(base, [{ op: 'add', path: '/rate-limit/perProvider', value: { github: value } as never }]).effect;
+    expect(table({ maxRequests: 20, windowMs: 60_000 })).toBe('narrowing');
+    expect(table({ maxRequests: 500, windowMs: 60_000 })).toBe('widening');
+    expect(table({ maxRequests: 20, windowMs: 1000 })).toBe('unknown');
+    const withTable = applyPatch(base, [{ op: 'add', path: '/rate-limit/perProvider', value: { github: { maxRequests: 20, windowMs: 60_000 } } }]);
+    const add = (value: unknown) => classifyPatch(withTable, [{ op: 'add', path: '/rate-limit/perProvider/google', value: value as never }]).effect;
+    expect(add({ maxRequests: 10, windowMs: 60_000 })).toBe('narrowing');
+    expect(add({ maxRequests: 500, windowMs: 60_000 })).toBe('widening');
+    expect(classifyPatch(withTable, [{ op: 'remove', path: '/rate-limit/perProvider/github' }]).effect).toBe('widening');
+    expect(classifyPatch(withTable, [{ op: 'remove', path: '/rate-limit/perProvider' }]).effect).toBe('widening');
+  });
+
+  it('falls back to unknown, which callers treat as widening', () => {
     const base = snapshotGuard(buildGuard());
     const result = classifyPatch(base, [{ op: 'replace', path: '/scope-filter/allowedScopes', value: { github: ['repo'] } }]);
     expect(result.effect).toBe('unknown');
@@ -248,7 +268,7 @@ describe('diagnosePolicies', () => {
     expect(codes).toContain('unused-url-pattern:/url-allowlist/allowedUrls/github/1');
     expect(codes).toContain('unused-url-pattern:/url-allowlist/allowedUrls/github/2');
     expect(codes).toContain('unconstrained-provider-scopes:/scope-filter/allowedScopes/slack');
-    expect(codes).toContain('rate-limit-slack:/rate-limit/perProvider/github');
+    expect(codes).toContain('rate-limit-slack:/rate-limit/perProvider');
 
     const unconstrained = diagnosis.findings.find((finding) => finding.code === 'unconstrained-provider-scopes');
     expect(unconstrained?.suggestedPatch).toEqual([{ op: 'add', path: '/scope-filter/allowedScopes/slack', value: ['chat:write'] }]);
@@ -299,168 +319,14 @@ describe('replayDecisions', () => {
       { op: 'add', path: '/scope-filter/allowedScopes/github/-', value: 'workflow' },
     ]);
     const report = await replayDecisions(base, patched, events, { previous: guard.getPolicies() });
+    // The running guard is untouched: gist is still allowed on it.
+    expect((await guard.evaluate(ctx({ requestedScopes: ['gist'] }))).allowed).toBe(true);
     expect(report.excludedPolicies).toEqual(['rate-limit']);
     expect(report.events).toBe(4);
     expect(report.unchanged).toBe(2);
     expect(report.newlyDenied.map((flip) => flip.requestedScopes)).toEqual([['gist']]);
     expect(report.newlyAllowed.map((flip) => flip.requestedScopes)).toEqual([['workflow']]);
     expect(report.newlyDenied[0].after.deniedBy).toBe('scope-filter');
-  });
-});
-
-describe('approvals', () => {
-  it('signs and verifies a proposal hash with Ed25519, and rejects the wrong key', () => {
-    const alice = generateApproverKeyPair();
-    const mallory = generateApproverKeyPair();
-    const proposal = { hash: 'a'.repeat(64) };
-    const approval = signProposal(proposal, 'alice', alice.privateKey);
-    expect(verifyApproval(proposal, approval, alice.publicKey)).toBe(true);
-    expect(verifyApproval(proposal, approval, mallory.publicKey)).toBe(false);
-    expect(verifyApproval({ hash: 'b'.repeat(64) }, approval, alice.publicKey)).toBe(false);
-    expect(verifyApproval(proposal, { ...approval, signature: 'AAAA' }, alice.publicKey)).toBe(false);
-  });
-});
-
-describe('PolicyWeightSpaceEditor', () => {
-  const alice = generateApproverKeyPair();
-  const bob = generateApproverKeyPair();
-
-  function editor(guard: CredGuard, options: ConstructorParameters<typeof PolicyWeightSpaceEditor>[1] = {}) {
-    const events: PolicyEditEvent[] = [];
-    const instance = new PolicyWeightSpaceEditor(guard, {
-      approvers: [{ id: 'alice', publicKey: alice.publicKey }, { id: 'bob', publicKey: bob.publicKey }],
-      onEvent: (event) => events.push(event),
-      ...options,
-    });
-    return { editor: instance, events };
-  }
-
-  it('proposes with classification, magnitude and a dry run, without changing the guard', async () => {
-    const guard = buildGuard();
-    await observe(guard, [ctx({ requestedScopes: ['gist'] })]);
-    const { editor: e, events } = editor(guard);
-    const before = e.snapshot().hash;
-    const proposal = await e.propose({
-      patch: [{ op: 'remove', path: '/scope-filter/allowedScopes/github/2' }],
-      rationale: 'gist is never used',
-      proposer: 'did:key:agent',
-    });
-    expect(proposal.id).toMatch(/^pp_[0-9a-f]{24}$/);
-    expect(proposal.baseHash).toBe(before);
-    expect(proposal.classification.effect).toBe('narrowing');
-    expect(proposal.classification.magnitude.touched).toBe(1);
-    expect(proposal.dryRun?.newlyDenied).toHaveLength(1);
-    expect(e.snapshot().hash).toBe(before);
-    expect(events.map((event) => event.type)).toEqual(['policy.proposed']);
-    expect(e.getProposal(proposal.id)?.hash).toBe(proposal.hash);
-  });
-
-  it('refuses to apply without a valid approval, and applies with one', async () => {
-    const guard = buildGuard();
-    const { editor: e, events } = editor(guard);
-    const proposal = await e.propose({
-      patch: [{ op: 'add', path: '/scope-filter/allowedScopes/github/-', value: 'workflow' }],
-      rationale: 'CI needs workflow scope',
-      proposer: 'did:key:agent',
-    });
-
-    const none = await e.apply(proposal.id);
-    expect(none).toMatchObject({ applied: false, code: 'approval_required' });
-
-    const forged = await e.apply(proposal.id, [signProposal(proposal, 'alice', generateApproverKeyPair().privateKey)]);
-    expect(forged).toMatchObject({ applied: false, code: 'approval_invalid' });
-
-    const unknownApprover = await e.apply(proposal.id, [signProposal(proposal, 'carol', alice.privateKey)]);
-    expect(unknownApprover).toMatchObject({ applied: false, code: 'approval_invalid' });
-
-    const result = await e.apply(proposal.id, [signProposal(proposal, 'alice', alice.privateKey)]);
-    expect(result).toMatchObject({ applied: true, approvers: ['alice'], rebuilt: ['scope-filter'], kept: ['rate-limit', 'url-allowlist', 'max-ttl'] });
-    const decision = await guard.evaluate(ctx({ requestedScopes: ['workflow'] }));
-    expect(decision.allowed).toBe(true);
-    expect(e.getProposal(proposal.id)).toBeUndefined();
-    expect(e.history()).toHaveLength(1);
-    expect(events.map((event) => event.type)).toEqual([
-      'policy.proposed', 'policy.rejected', 'policy.rejected', 'policy.rejected', 'policy.applied',
-    ]);
-    expect(events.at(-1)?.approvers).toEqual(['alice']);
-  });
-
-  it('keeps the rate-limit instance and its counters when a patch does not touch it', async () => {
-    const guard = buildGuard();
-    const { editor: e } = editor(guard);
-    await guard.evaluate(ctx());
-    await guard.evaluate(ctx());
-    const rateLimit = guard.getPolicies()[0] as ReturnType<typeof rateLimitPolicy>;
-    expect(rateLimit.getCount('hash-a', 'github')).toBe(2);
-    const proposal = await e.propose({ patch: [{ op: 'replace', path: '/max-ttl/maxTtlSeconds', value: 600 }], rationale: 'shorter', proposer: 'ops' });
-    const result = await e.apply(proposal.id, [signProposal(proposal, 'bob', bob.privateKey)]);
-    expect(result.applied).toBe(true);
-    expect(guard.getPolicies()[0]).toBe(rateLimit);
-    expect(rateLimit.getCount('hash-a', 'github')).toBe(2);
-  });
-
-  it('rejects self-approval, stale bases, expired and tampered proposals', async () => {
-    let now = new Date('2026-11-03T12:00:00Z');
-    const guard = buildGuard();
-    const { editor: e } = editor(guard, { clock: () => now, proposalTtlMs: 1000 });
-    const proposal = await e.propose({ patch: [{ op: 'replace', path: '/max-ttl/maxTtlSeconds', value: 600 }], rationale: 'x', proposer: 'alice' });
-
-    expect(await e.apply(proposal.id, [signProposal(proposal, 'alice', alice.privateKey)])).toMatchObject({ applied: false, code: 'self_approval' });
-
-    const tampered = { ...proposal, patch: [{ op: 'replace' as const, path: '/max-ttl/maxTtlSeconds', value: 60_000 }] };
-    expect(await e.apply(tampered, [signProposal(proposal, 'bob', bob.privateKey)])).toMatchObject({ applied: false, code: 'proposal_tampered' });
-
-    guard.addPolicy({ name: 'extra', evaluate: () => ({ decision: 'ALLOW', policy: 'extra' }) });
-    expect(await e.apply(proposal.id, [signProposal(proposal, 'bob', bob.privateKey)])).toMatchObject({ applied: false, code: 'base_mismatch' });
-    guard.removePolicy('extra');
-
-    now = new Date('2026-11-03T12:00:02Z');
-    expect(await e.apply(proposal.id, [signProposal(proposal, 'bob', bob.privateKey)])).toMatchObject({ applied: false, code: 'proposal_expired' });
-    expect(await e.apply('pp_missing')).toMatchObject({ applied: false, code: 'proposal_not_found' });
-  });
-
-  it('cannot apply anything without approvers, and lets narrowing through when configured', async () => {
-    const guard = buildGuard();
-    const locked = new PolicyWeightSpaceEditor(guard);
-    const p1 = await locked.propose({ patch: [{ op: 'replace', path: '/max-ttl/maxTtlSeconds', value: 600 }], rationale: 'x', proposer: 'agent' });
-    expect(await locked.apply(p1.id)).toMatchObject({ applied: false, code: 'approval_unavailable' });
-
-    const tightenOnly = new PolicyWeightSpaceEditor(guard, { requireApprovalFor: 'widening' });
-    const narrowing = await tightenOnly.propose({ patch: [{ op: 'replace', path: '/max-ttl/maxTtlSeconds', value: 600 }], rationale: 'x', proposer: 'agent' });
-    expect(await tightenOnly.apply(narrowing.id)).toMatchObject({ applied: true, approvers: [] });
-    const widening = await tightenOnly.propose({ patch: [{ op: 'replace', path: '/max-ttl/maxTtlSeconds', value: 6000 }], rationale: 'x', proposer: 'agent' });
-    expect(await tightenOnly.apply(widening.id)).toMatchObject({ applied: false, code: 'approval_unavailable' });
-    const unknown = await tightenOnly.propose({ patch: [{ op: 'replace', path: '/scope-filter/allowedScopes', value: { github: ['repo'] } }], rationale: 'x', proposer: 'agent' });
-    expect(unknown.classification.effect).toBe('unknown');
-    expect(await tightenOnly.apply(unknown.id)).toMatchObject({ applied: false, code: 'approval_unavailable' });
-  });
-
-  it('requires minApprovals distinct approvers and rolls back through the same flow', async () => {
-    const guard = buildGuard();
-    const { editor: e } = editor(guard, { minApprovals: 2 });
-    const proposal = await e.propose({ patch: [{ op: 'remove', path: '/scope-filter/allowedScopes/github/2' }], rationale: 'x', proposer: 'agent' });
-    const a = signProposal(proposal, 'alice', alice.privateKey);
-    const b = signProposal(proposal, 'bob', bob.privateKey);
-    expect(await e.apply(proposal.id, [a, a])).toMatchObject({ applied: false, code: 'approval_required' });
-    expect(await e.apply(proposal.id, [a, b])).toMatchObject({ applied: true, approvers: ['alice', 'bob'] });
-    expect((await guard.evaluate(ctx({ requestedScopes: ['gist'] }))).allowed).toBe(false);
-
-    const rollback = await e.proposeRollback(proposal.id, 'ops');
-    expect(rollback.patch).toEqual([{ op: 'add', path: '/scope-filter/allowedScopes/github/-', value: 'gist' }]);
-    expect(rollback.classification.effect).toBe('widening');
-    const restored = await e.apply(rollback.id, [signProposal(rollback, 'alice', alice.privateKey), signProposal(rollback, 'bob', bob.privateKey)]);
-    expect(restored.applied).toBe(true);
-    expect((await guard.evaluate(ctx({ requestedScopes: ['gist'] }))).allowed).toBe(true);
-  });
-
-  it('refuses a patch whose parameters the policy rejects, before anyone signs', async () => {
-    const { editor: e } = editor(buildGuard());
-    await expect(e.propose({ patch: [{ op: 'replace', path: '/rate-limit/maxRequests', value: -1 }], rationale: 'x', proposer: 'agent' }))
-      .rejects.toThrow(/positive integer/);
-    await expect(e.propose({ patch: [{ op: 'add', path: '/url-allowlist/allowedUrls/github/-', value: 'http://api.github.com/' }], rationale: 'x', proposer: 'agent' }))
-      .rejects.toThrow(/https/);
-    await expect(e.propose({ patch: [{ op: 'add', path: '/mystery', value: { kind: 'mystery', parameters: {} } }], rationale: 'x', proposer: 'agent' }))
-      .rejects.toThrow(/no factory/);
   });
 });
 

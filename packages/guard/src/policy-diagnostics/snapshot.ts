@@ -5,9 +5,8 @@
  * itself and hashes the result canonically, so two guards with the same
  * configuration produce the same hash and a patch can name the exact state
  * it was written against. `materializePolicies()` is the inverse: it builds
- * a chain from a snapshot, reusing every instance whose parameters did not
- * change, so an edit to one policy leaves the others, and their runtime
- * state, untouched.
+ * a chain from a snapshot for dry-run replay, reusing every instance whose
+ * parameters did not change.
  */
 
 import { createHash } from 'node:crypto';
@@ -20,7 +19,6 @@ import { TimeWindowPolicy } from '../policies/time-window.js';
 import { UrlAllowlistPolicy } from '../policies/url-allowlist.js';
 import { parseWebBotAuthParameters, webBotAuthPolicy } from '../policies/web-bot-auth.js';
 import { parseReceiptClaimsParameters, receiptClaimsPolicy } from '../policies/receipt-claims.js';
-import { WeightArtifactPolicy } from '../policies/weight-artifact.js';
 import { cloneParameters, countLeaves, isPlainObject } from './params.js';
 import type { PolicyEntry, PolicySnapshot } from './types.js';
 
@@ -109,7 +107,6 @@ const BUILTIN_FACTORIES: Record<string, (parameters: Record<string, ParameterVal
   'max-ttl': (parameters) => new MaxTtlPolicy(MaxTtlPolicy.parseParameters(parameters)),
   'web-bot-auth': (parameters) => webBotAuthPolicy(parseWebBotAuthParameters(parameters)),
   'receipt-claims': (parameters) => receiptClaimsPolicy(parseReceiptClaimsParameters(parameters)),
-  'weight-artifact': (parameters) => new WeightArtifactPolicy(WeightArtifactPolicy.parseParameters(parameters)),
 };
 
 export function builtinPolicyKinds(): string[] {
@@ -120,7 +117,8 @@ export interface MaterializeOptions {
   /**
    * The live chain the snapshot was derived from. Entries whose parameters
    * are unchanged reuse their instance; changed entries are rebuilt through
-   * the instance's `withParameters`, which carries opaque values over.
+   * the instance's `withParameters`, which carries opaque values over. Needed
+   * whenever the chain holds an opaque policy or an opaque value.
    */
   previous?: readonly CredPolicy[];
   /** Extra factories for custom kinds, keyed by kind. */

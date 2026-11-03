@@ -156,23 +156,22 @@ Mock all HTTP calls. Cover: successful code exchange, token refresh, refresh fai
 
 A policy in `packages/guard/src/policies/` implements `CredPolicy`: a `name`
 and an `evaluate(ctx)` that returns `ALLOW`, `DENY` or `SKIP`. Two more
-methods make it readable and editable by the weight-space tooling
-(`snapshotGuard`, `PolicyWeightSpaceEditor`, the `cred_policy_*` tools):
+methods make it readable by the policy diagnostics (`snapshotGuard`,
+`diagnosePolicies`, `replayDecisions`, `GET /admin/policy`):
 
 - `describe()` returns `{ kind, parameters }`, the configuration as plain JSON.
   Encode a RegExp with `encodeRegExp()`; show a function as `OPAQUE` and list
   its pointer in `opaquePaths`.
-- `withParameters(parameters)` builds a new instance from an edited tree. It
-  must validate every field and throw on anything invalid; the editor calls it
-  before a proposal can be signed, so a bad patch fails there, not at apply.
+- `withParameters(parameters)` builds a new instance from an edited tree for
+  dry-run replay. It must validate every field and throw on anything invalid.
   Reattach opaque values from `this` (see `UrlAllowlistPolicy.parseParameters`).
 
 A policy without them still works and is recorded as `opaque`: it is carried
-over by reference on every edit and no patch can touch it. Register a new
-kind in `BUILTIN_FACTORIES` (`src/weightspace/snapshot.ts`) so a patch can add
-it by name, and add its widening/narrowing rules to `classifyOp`
-(`src/weightspace/patch.ts`); an edit with no rule is classified `unknown`,
-which every approval rule treats as widening.
+over by reference in a dry run and no patch can touch it. Register a new kind
+in `BUILTIN_FACTORIES` (`src/policy-diagnostics/snapshot.ts`) so a patch can
+add it by name, and add its widening/narrowing rules to `classifyOp`
+(`src/policy-diagnostics/patch.ts`); an edit with no rule is classified
+`unknown`, which callers treat as widening.
 
 ---
 
