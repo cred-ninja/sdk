@@ -104,6 +104,7 @@ export async function handleDelegate(
         }
       : {
           accessToken: (result as Awaited<ReturnType<Cred['delegate']>>).accessToken,
+          ...((result as Awaited<ReturnType<Cred['delegate']>>).unnarrowed ? { unnarrowed: true } : {}),
           ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,

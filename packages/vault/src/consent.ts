@@ -43,6 +43,7 @@ export interface ConsentRevocationFilter {
   consentIds?: readonly string[];
   subject?: string;
   agentDid?: string;
+  service?: string;
 }
 
 /** A consent is never edited; its revocation is a separate, append-only record. */
@@ -58,6 +59,7 @@ export function consentMatches(record: ConsentRecord, filter: ConsentRevocationF
   if (filter.consentIds?.length && !filter.consentIds.includes(record.id)) return false;
   if (filter.subject && record.subject !== filter.subject) return false;
   if (filter.agentDid && record.agentDid !== filter.agentDid) return false;
+  if (filter.service && record.service !== filter.service) return false;
   return true;
 }
 

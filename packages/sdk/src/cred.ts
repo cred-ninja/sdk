@@ -5,6 +5,7 @@
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
+import { withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 import {
   CredConfig,
   CredLocalConfig,
@@ -31,6 +32,7 @@ import {
   GetConsentUrlParams,
   RevokeParams,
   LocalUseParams,
+  LocalRefusalParams,
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
@@ -919,19 +921,25 @@ export class Cred {
 
     const delegationId = `local_${params.service}_${params.userId}`;
     const grantedScopes = entry.scopes ?? [];
+    const requested = params.scopes && params.scopes.length > 0 ? params.scopes : null;
+    const ceiling = !requested && agentRecord && agentRecord.scopeCeiling.length > 0 ? agentRecord.scopeCeiling : null;
+    const unnarrowed = !permission && !requested && !ceiling;
     let delegatedScopes = grantedScopes;
 
-    if (permission) {
-      delegatedScopes = delegatedScopes.filter((scope) => permission!.allowedScopes.includes(scope));
-    }
-
-    if (params.scopes && params.scopes.length > 0) {
-      const permittedRequestedScopes = permission
-        ? params.scopes.filter((scope) => permission!.allowedScopes.includes(scope))
-        : params.scopes;
-      delegatedScopes = delegatedScopes.filter((scope) => permittedRequestedScopes.includes(scope));
-    } else if (agentRecord && agentRecord.scopeCeiling.length > 0) {
-      delegatedScopes = delegatedScopes.filter((scope) => agentRecord.scopeCeiling.includes(scope));
+    if (!unnarrowed) {
+      // Read scopes derived from what is stored are available to a narrowed
+      // delegation, and an empty result is a refusal, never the whole connection.
+      delegatedScopes = withStoredDerivedScopes(params.service, grantedScopes);
+      if (permission) {
+        const allowed = withDerivedScopesUnder(params.service, permission.allowedScopes, grantedScopes);
+        delegatedScopes = delegatedScopes.filter((scope) => allowed.includes(scope));
+      }
+      if (requested) delegatedScopes = delegatedScopes.filter((scope) => requested.includes(scope));
+      if (ceiling) delegatedScopes = delegatedScopes.filter((scope) => ceiling.includes(scope));
+      if (!requested) delegatedScopes = withoutRedundantDerivedScopes(params.service, delegatedScopes);
+      if (delegatedScopes.length === 0) {
+        throw new CredError('This request or Permission leaves no scope to delegate', 'invalid_scope', 400);
+      }
     }
 
     // Build HMAC of token for audit (raw token never stored)
@@ -973,6 +981,7 @@ export class Cred {
       expiresAt,
       service: params.service,
       scopes: delegatedScopes,
+      ...(unnarrowed ? { unnarrowed: true } : {}),
       delegationId,
       receipt,
     };
@@ -1531,6 +1540,24 @@ export class Cred {
     const entry = entries.find((candidate) => candidate.provider === params.service);
     const connected = entry !== undefined
       && (params.accessToken === undefined || sameSecret(entry.accessToken, params.accessToken));
+    // Any *.salesforce.com or *.force.com host passes the URL allowlist, and
+    // anyone can have one, so the token goes only to the stored instance.
+    if (connected && params.service === 'salesforce') {
+      const instance = (entry as { instanceUrl?: string }).instanceUrl;
+      let targetOrigin: string | null = null;
+      try {
+        targetOrigin = params.targetUrl ? new URL(params.targetUrl).origin : null;
+      } catch {
+        targetOrigin = null;
+      }
+      if (!instance || targetOrigin !== new URL(instance).origin) {
+        const error = instance ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
+        await this.recordLocalRefusal({ service: params.service, userId: params.userId, error, ...(params.agentId ? { agentId: params.agentId } : {}) });
+        throw new CredError(instance
+          ? 'This Salesforce connection belongs to another instance'
+          : 'This Salesforce connection has no stored instance. Store it again with instanceUrl.', error, 403);
+      }
+    }
     this.writeAuditEvent({
       id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
       timestamp: new Date(),
@@ -1540,10 +1567,28 @@ export class Cred {
       outcome: connected ? 'success' : 'denied',
       correlationId: crypto.randomUUID(),
       ...(connected ? {} : { errorMessage: 'connection_revoked' }),
+      ...(params.auditMetadata ? { metadata: params.auditMetadata } : {}),
     });
     if (!connected) {
       throw new CredError(`The ${params.service} connection has been revoked`, 'connection_revoked', 401);
     }
+  }
+
+  /** Audit a local-mode call refused before it left the process. */
+  async recordLocalRefusal(params: LocalRefusalParams): Promise<void> {
+    if (!this.isLocal) return;
+    await this.ensureVault();
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentId ?? 'local-agent' },
+      action: 'deny',
+      resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: params.error,
+      ...(params.metadata ? { metadata: params.metadata } : {}),
+    });
   }
 
   async revoke(params: RevokeParams): Promise<void> {

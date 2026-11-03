@@ -30,6 +30,9 @@ import {
   type DelegationRevocationResult,
   type DelegationRevocationSeed,
   type RecordDelegationInput,
+  type AgentRevocation,
+  type AgentRevocationFilter,
+  MemoryAgentRevocationStore,
 } from './delegation-revocation.js';
 import { MemoryConsentStore } from './consent.js';
 import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from './consent.js';
@@ -79,6 +82,7 @@ export class CredVault {
   private permissionStore: PermissionStore | null = null;
   private memoryDelegations: MemoryDelegationStore | null = null;
   private memoryConsents: MemoryConsentStore | null = null;
+  private memoryAgentRevocations: MemoryAgentRevocationStore | null = null;
 
   constructor(options: VaultOptions) {
     genuineVaults.add(this);
@@ -213,6 +217,7 @@ export class CredVault {
       accessTokenTag: accessEnc.tag,
       expiresAt: input.expiresAt?.toISOString(),
       scopes: input.scopes ? JSON.stringify(input.scopes) : undefined,
+      ...(input.instanceUrl ? { instanceUrl: input.instanceUrl } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -289,6 +294,8 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          // A refresh never moves a connection to another instance.
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         });
 
         return {
@@ -298,6 +305,7 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
           createdAt: new Date(row.createdAt),
           updatedAt: new Date(),
         };
@@ -319,6 +327,7 @@ export class CredVault {
       refreshToken,
       expiresAt,
       scopes,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };
@@ -364,6 +373,7 @@ export class CredVault {
       refreshToken,
       expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
       scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };
@@ -410,6 +420,7 @@ export class CredVault {
         refreshToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
         scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         createdAt: new Date(row.createdAt),
         updatedAt: new Date(row.updatedAt),
       };
@@ -595,7 +606,20 @@ export class CredVault {
     seed: DelegationRevocationSeed,
     options: DelegationRevocationOptions,
   ): Promise<DelegationRevocationResult> {
-    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, new Date().toISOString(), options);
+    const revokedAt = new Date().toISOString();
+    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, revokedAt, options);
+    // A backend with a delegation table does this in its own transaction.
+    if (options.hold && !this.backend.revokeDelegationTree) {
+      const holds: AgentRevocation[] = [];
+      for (const row of revoked) {
+        const link = (await this.delegationStore().getDelegation(row.id))?.grant?.link?.agentId;
+        for (const agentId of [row.agentDid, typeof link === 'string' ? link : null]) {
+          if (agentId) holds.push({ agentId, service: row.service, userId: row.userId, cause: options.hold.cause, revokedAt });
+        }
+        if (row.agentDid) await this.revokeConsents({ agentDid: row.agentDid, service: row.service, subject: row.userId }, options.hold.cause);
+      }
+      await this.recordAgentRevocations(holds);
+    }
     return {
       revoked,
       revokedIds: revoked.map((r) => r.id),
@@ -622,19 +646,72 @@ export class CredVault {
     return this.getPermissionStore().list(agentId);
   }
 
-  async revokePermission(permissionId: string): Promise<void> {
+  /**
+   * Remove a Permission and record that the agent's access was revoked, so
+   * the agent is not treated as simply having no Permission. Returns the
+   * Permission removed, or null when there was none.
+   */
+  async revokePermission(permissionId: string): Promise<Permission | null> {
     await this.ensureInit();
-    await this.getPermissionStore().revoke(permissionId);
+    return this.getPermissionStore().revoke(permissionId);
+  }
+
+  /** One Permission by its id, or null. */
+  async getPermissionById(id: string): Promise<Permission | null> {
+    await this.ensureInit();
+    return this.getPermissionStore().getById(id);
+  }
+
+  private agentRevocationStore(): Required<Pick<StorageBackend, 'storeAgentRevocations' | 'getAgentRevocation' | 'clearAgentRevocations' | 'listAgentRevocations'>> {
+    const backend = this.backend;
+    if (backend.storeAgentRevocations && backend.getAgentRevocation && backend.clearAgentRevocations && backend.listAgentRevocations) {
+      return {
+        storeAgentRevocations: backend.storeAgentRevocations.bind(backend),
+        getAgentRevocation: backend.getAgentRevocation.bind(backend),
+        clearAgentRevocations: backend.clearAgentRevocations.bind(backend),
+        listAgentRevocations: backend.listAgentRevocations.bind(backend),
+      };
+    }
+    this.memoryAgentRevocations ??= new MemoryAgentRevocationStore();
+    const memory = this.memoryAgentRevocations;
+    return {
+      storeAgentRevocations: memory.storeAgentRevocations.bind(memory),
+      getAgentRevocation: memory.getAgentRevocation.bind(memory),
+      clearAgentRevocations: memory.clearAgentRevocations.bind(memory),
+      listAgentRevocations: memory.listAgentRevocations.bind(memory),
+    };
+  }
+
+  /** Record that these agents' access was revoked (see AgentRevocation). */
+  async recordAgentRevocations(rows: readonly AgentRevocation[]): Promise<void> {
+    await this.ensureInit();
+    if (rows.length > 0) await this.agentRevocationStore().storeAgentRevocations(rows);
+  }
+
+  /** The newest revocation holding for any of these ids of one agent, or null. */
+  async getAgentRevocation(agentIds: readonly string[], service: string, userId: string): Promise<AgentRevocation | null> {
+    await this.ensureInit();
+    return this.agentRevocationStore().getAgentRevocation(agentIds, service, userId);
+  }
+
+  /** End an agent's revocations on a service, for one user or all. Returns how many ended. */
+  async clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): Promise<number> {
+    await this.ensureInit();
+    return this.agentRevocationStore().clearAgentRevocations(agentIds, service, options);
+  }
+
+  /** Current agent revocations, for an operator to review. */
+  async listAgentRevocations(filter: AgentRevocationFilter = {}): Promise<AgentRevocation[]> {
+    await this.ensureInit();
+    return this.agentRevocationStore().listAgentRevocations(filter);
   }
 
   /**
    * Atomically update a subset of an existing permission's fields (scope
    * ceiling, rate limit, TTL override, etc). Cannot move the permission to a
-   * different (agentId, connectionId) pair. Prospective-only: narrowing
-   * `allowedScopes` constrains future delegate()/subdelegate() calls but has
-   * no effect on a delegation handle already brokered through
-   * `POST /api/v1/use` — that route resolves scopes from an in-memory
-   * snapshot taken at delegation time and never re-reads the Permission row.
+   * different (agentId, connectionId) pair. Narrowing `allowedScopes` constrains
+   * future delegations, and `POST /api/v1/use` re-reads the Permission on each
+   * exercise, so it reaches live ones too.
    */
   async updatePermission(id: string, input: UpdatePermissionInput): Promise<Permission> {
     await this.ensureInit();

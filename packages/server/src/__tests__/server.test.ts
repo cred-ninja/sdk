@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -33,6 +33,7 @@ function makeTestConfig(overrides?: Partial<ServerConfig>): ServerConfig {
     tofuPath: TEST_TOFU_PATH,
     adminToken: TEST_ADMIN_TOKEN,
     agentToken: TEST_TOKEN,
+    allowAgentsWithoutPermission: true,
     allowRawTokens: true,
     providers: [
       {
@@ -191,6 +192,14 @@ function signWebBotAuthRequest(input: {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('@credninja/server', () => {
+  // A revocation holds in the vault, so each test starts from a vault of its own.
+  beforeEach(() => {
+    for (const suffix of ['', '.salt', '.check', '-wal', '-shm']) {
+      const p = TEST_SQLITE_VAULT_PATH + suffix;
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  });
+
   afterAll(() => {
     // Cleanup test vault files
     for (const base of [TEST_VAULT_PATH, TEST_SQLITE_VAULT_PATH, TEST_TOFU_PATH, TEST_SQLITE_TOFU_PATH, TEST_SQLITE_NONCE_PATH]) {
@@ -262,6 +271,7 @@ describe('@credninja/server', () => {
     it('supports a custom request verifier without a static agent token', async () => {
       const { app, tofu } = createServer(makeTestConfig({
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         agentRequestVerifier: (req) => {
           if (req.get('X-Test-Agent') === 'external-agent') {
@@ -297,6 +307,7 @@ describe('@credninja/server', () => {
     it('throws when no agent auth mode is configured', () => {
       expect(() => createServer(makeTestConfig({
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         agentRequestVerifier: undefined,
       }))).toThrow('Either agentToken or agentRequestVerifier is required');
@@ -1594,6 +1605,8 @@ describe('@credninja/server', () => {
         provider: 'salesforce',
         userId: 'sf-user',
         accessToken: '00D.sf-token',
+        // A token goes only to its connection's stored instance; these cases are about the host grammar in front of that.
+        instanceUrl: allowed ? new URL(targetUrl).origin : 'https://acme.my.salesforce.com',
         expiresAt: new Date(Date.now() + 3600 * 1000),
         scopes: ['api'],
       });
@@ -2305,6 +2318,7 @@ describe('@credninja/server', () => {
       const config = makeTestConfig({
         requireAgentIdentity: false,
         agentToken: undefined,
+        allowAgentsWithoutPermission: true,
         allowRawTokens: true,
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,
@@ -4026,9 +4040,8 @@ describe('@credninja/server', () => {
         headers: { 'content-type': 'application/json' },
       }));
 
-      // Narrow the permission to an empty scope set through the new admin
-      // route — if /api/v1/use re-checked the Permission row live, the
-      // second call below would now be denied.
+      // Narrow the permission to an empty scope set: /api/v1/use re-reads it, so
+      // the live delegation it authorized stops too.
       const narrowRes = await request(app)
         .patch(`/admin/permissions/${permission.id}`)
         .set('Authorization', `Bearer ${TEST_ADMIN_TOKEN}`)
@@ -4041,8 +4054,9 @@ describe('@credninja/server', () => {
         method: 'GET',
       });
 
-      expect(useRes.status).toBe(200);
-      expect(useRes.body.body).toEqual({ items: [] });
+      expect(useRes.status).toBe(403);
+      expect(useRes.body.error).toBe('scope_insufficient');
+      expect(fetchSpy).not.toHaveBeenCalled();
       fetchSpy.mockRestore();
     });
   });

@@ -144,6 +144,26 @@ export interface ServerConfig {
   // brokers calls. true is deprecated and logs a warning at startup.
   allowRawTokens?: boolean;
 
+  // Issue delegations to an agent that holds no Permission, up to the whole
+  // connection (env CRED_ALLOW_AGENTS_WITHOUT_PERMISSION). Default false: a
+  // did:key agent gets only what a Permission grants it. true is deprecated,
+  // logs a warning at startup and marks each affected audit event.
+  allowAgentsWithoutPermission?: boolean;
+
+  // Keep issuing to an agent whose delegation or Permission was revoked (env
+  // CRED_ALLOW_REDELEGATION_AFTER_REVOCATION). Default false: the agent gets
+  // nothing new on that service until it is granted a Permission again. true
+  // is deprecated, logs a warning at startup and marks each affected audit
+  // event.
+  allowRedelegationAfterRevocation?: boolean;
+
+  // Forward brokered calls without classifying them (env
+  // CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS). Default false: a call the operation
+  // tables do not map is refused, and so is one the grant does not cover. true
+  // is deprecated, logs a warning at startup and marks every /api/v1/use audit
+  // event. The URL allowlist still applies.
+  allowUnclassifiedBrokerCalls?: boolean;
+
   // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
   delegationGrantTtlSeconds?: number;
 
@@ -210,6 +230,14 @@ const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
   { env: 'LINEAR', slug: 'linear' },
   { env: 'HUBSPOT', slug: 'hubspot' },
 ];
+
+function booleanEnv(name: string): boolean | undefined {
+  const raw = (process.env[name] ?? '').trim().toLowerCase();
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  if (raw !== '') throw new Error(`${name} must be true or false`);
+  return undefined;
+}
 
 export function loadConfig(): ServerConfig {
   const port = parseInt(process.env.PORT ?? '3456', 10);
@@ -289,6 +317,9 @@ export function loadConfig(): ServerConfig {
   if (allowRawTokensRaw === 'true' || allowRawTokensRaw === '1') allowRawTokens = true;
   else if (allowRawTokensRaw === 'false' || allowRawTokensRaw === '0') allowRawTokens = false;
   else if (allowRawTokensRaw !== '') throw new Error('CRED_ALLOW_RAW_TOKENS must be true or false');
+  const allowAgentsWithoutPermission = booleanEnv('CRED_ALLOW_AGENTS_WITHOUT_PERMISSION');
+  const allowRedelegationAfterRevocation = booleanEnv('CRED_ALLOW_REDELEGATION_AFTER_REVOCATION');
+  const allowUnclassifiedBrokerCalls = booleanEnv('CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS');
   const retentionRaw = (process.env.CONSENT_RETENTION_DAYS ?? '').trim();
   const consentRetentionDays = retentionRaw === '' ? undefined : Number(retentionRaw);
   const cibaTtlRaw = (process.env.CRED_CIBA_CONSENT_TTL_SECONDS ?? '').trim();
@@ -365,6 +396,9 @@ export function loadConfig(): ServerConfig {
     ...(process.env.CRED_APPROVAL_WEBHOOK_URL?.trim() ? { approvalWebhookUrl: process.env.CRED_APPROVAL_WEBHOOK_URL.trim() } : {}),
     ...(cibaSet === 4 ? { cibaProvider: cibaEnv } : {}),
     ...(allowRawTokens !== undefined ? { allowRawTokens } : {}),
+    ...(allowAgentsWithoutPermission !== undefined ? { allowAgentsWithoutPermission } : {}),
+    ...(allowRedelegationAfterRevocation !== undefined ? { allowRedelegationAfterRevocation } : {}),
+    ...(allowUnclassifiedBrokerCalls !== undefined ? { allowUnclassifiedBrokerCalls } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

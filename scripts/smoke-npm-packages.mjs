@@ -307,6 +307,20 @@ try {
     // Delegation Tokens are bound to the agent's key (DPoP): issued only to an
     // agent that proves it, and usable only with a fresh proof by that key.
     const agent = await generateAgentIdentity();
+    // An agent is issued nothing without a Permission.
+    await assert.rejects(
+      cred.delegateHandle({ service: 'google', userId: 'sdk-user', appClientId: 'app_smoke', scopes: ['calendar.readonly'], agentIdentity: agent }),
+      (err) => err.code === 'permission_required',
+    );
+    await vault.createPermission({
+      agentId: agent.did,
+      connectionId: 'google',
+      allowedScopes: ['calendar.readonly'],
+      requiresApproval: false,
+      delegatable: false,
+      maxDelegationDepth: 1,
+      createdBy: 'smoke',
+    });
     const credential = await cred.delegateHandle({
       service: 'google',
       userId: 'sdk-user',
@@ -338,6 +352,11 @@ try {
     });
     assert.equal(used.ok, true);
     assert.deepEqual(used.body, { items: [{ id: 'evt_smoke' }] });
+    // A read-only grant does not write, on the same host.
+    await assert.rejects(
+      cred.use({ token: credential.token, agentIdentity: agent, url: driveUrl, method: 'POST', body: { summary: 'x' } }),
+      (err) => err.code === 'scope_insufficient',
+    );
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -398,6 +417,10 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   try {
     const health = await waitForHealth(port, child);
     if (health.status !== 'ok') throw new Error('bad generated app health: ' + JSON.stringify(health));
+    // The generated grant script reaches the generated server.
+    const generatedEnv = join(generatedDir, '.env');
+    writeFileSync(generatedEnv, readFileSync(generatedEnv, 'utf8').replace(/^PORT=.*$/m, `PORT=${port}`));
+    run('node', ['grant-agent.mjs', 'github', 'github.read'], { cwd: generatedDir, stdio: 'pipe' });
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${output}`);
   } finally {

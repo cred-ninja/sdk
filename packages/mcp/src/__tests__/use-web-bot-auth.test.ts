@@ -18,7 +18,7 @@ describe('handleUse Web Bot Auth integration', () => {
       accessToken: 'ya29.test-token',
       service: 'google',
       userId: 'default',
-      scopes: ['calendar.readonly'],
+      scopes: ['calendar.events'],
       expiresAt: Date.now() + 60_000,
     });
 

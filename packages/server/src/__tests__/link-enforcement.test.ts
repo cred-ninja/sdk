@@ -7,6 +7,7 @@ import { LINK_OPAQUE_FAILURE_BODY } from '@credninja/protocol';
 import { createServer } from '../server.js';
 import {
   ADMIN_TOKEN,
+  LINK_AGENT_ID,
   AGENT_TOKEN,
   BASE,
   Browser,
@@ -125,6 +126,32 @@ describe('Link delegation enforcement without a Guard', () => {
     expect(res.body).toMatchObject({ error: 'insufficient_scope', scope: 'gmail.send' });
   });
 
+  it('a revocation holds the Link agent against a new key, until it is granted again', async () => {
+    const { app, server } = await harness();
+    const client = await registerClient(app);
+    const connectionId = await connectAndActivate(app, client);
+    const firstKey = await agentFor(app);
+    const first = await delegate(app, { connection_id: connectionId });
+    expect(first.status).toBe(200);
+    const now = new Date().toISOString();
+    await server.vault.registerAgent!({ id: 'agt_key', did: firstKey.did, name: 'k', fingerprint: 'fp_k', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: now, updatedAt: now });
+    const revoked = await request(app).delete('/admin/agents/agt_key').set('Authorization', `Bearer ${ADMIN_TOKEN}`);
+    expect(revoked.status).toBe(204);
+
+    const freshKey = await newAgent();
+    const ask = () => delegateAs(app, freshKey, { connection_id: connectionId }, { bearer: AGENT_TOKEN });
+    const held = await ask();
+    expect(held.status, JSON.stringify(held.body)).toBe(403);
+    expect(held.body.error).toBe('permission_required');
+
+    const set = await request(app).post(`/link/v1/connections/${connectionId}/permissions`).set('Authorization', client.auth)
+      .send({ agent_id: LINK_AGENT_ID, scopes: ['calendar.readonly'] });
+    expect(set.status).toBe(200);
+    const after = await ask();
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(after.body.scopes).toEqual(['calendar.readonly']);
+  });
+
   it('is deny-by-default per agent: permission_required until the backend grants the agent', async () => {
     const { app } = await harness();
     const client = await registerClient(app);
@@ -238,6 +265,12 @@ describe('Link delegation enforcement without a Guard', () => {
     const own = await use(app, { delegation_id: handle.body.delegation_id, url: 'https://acme.my.salesforce.com/services/data/v60.0/sobjects', method: 'GET' });
     expect(own.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.authorization).toBe('Bearer 00Dsf-access');
+    // The audit log names the instance stored for this connection, and no other host.
+    const events = server.vault.queryAuditEvents({ limit: 100 });
+    expect(events.find((e) => e.action === 'access' && e.outcome === 'success')?.metadata?.origin).toBe('https://acme.my.salesforce.com');
+    const refused = events.find((e) => e.errorMessage === 'url_refused');
+    expect(refused?.metadata?.origin).toBe('refused');
+    expect(JSON.stringify(refused)).not.toContain('evil.my.salesforce.com');
   });
 
   it('refuses a Salesforce instance_url outside the host grammar', async () => {
@@ -628,7 +661,7 @@ describe('Configuration and pre-existing gap fixes', () => {
   });
 
   it('brokers Linear and HubSpot API calls (SERVICE_ALLOWLIST)', async () => {
-    const { app, server } = await harness({ linkEnabled: false });
+    const { app, server } = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     const agent = await newAgent();

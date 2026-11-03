@@ -34,6 +34,8 @@ export interface TokenEntry {
   service: string;
   userId: string;
   scopes?: string[];
+  /** Nothing narrowed this delegation: it is everything the stored connection holds. */
+  unnarrowed?: boolean;
   constraints?: unknown[];
   brokered?: boolean;
   expiresAt: number; // Unix ms

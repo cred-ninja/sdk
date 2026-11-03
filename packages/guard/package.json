@@ -30,7 +30,8 @@
   },
   "dependencies": {
     "@credninja/protocol": "^2.0.0",
-    "@types/express": "^5.0.5"
+    "@types/express": "^5.0.5",
+    "graphql": "^16.14.2"
   },
   "devDependencies": {
     "@credninja/vault": "^2.0.0",

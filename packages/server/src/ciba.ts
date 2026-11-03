@@ -180,13 +180,14 @@ export class ApprovalStore {
    * consent revocation does (Section 8.3): an approval given before the
    * security event is not redeemable after it. Returns the ids ended.
    */
-  cancel(filter: { subject?: string; agentDid?: string }, by: string, now = Date.now()): string[] {
+  cancel(filter: { subject?: string; agentDid?: string; service?: string }, by: string, now = Date.now()): string[] {
     const ended: string[] = [];
     for (const request of this.requests.values()) {
       const status = this.get(request.authReqId, now)?.status;
       if (status !== 'pending' && status !== 'approved') continue;
       if (filter.subject !== undefined && request.subject !== filter.subject) continue;
       if (filter.agentDid !== undefined && request.agentDid !== filter.agentDid) continue;
+      if (filter.service !== undefined && request.service !== filter.service) continue;
       request.status = 'denied';
       request.deniedBy = by;
       request.finishedAt = now;

@@ -66,6 +66,12 @@ export class PermissionStore {
     return this.rowToPermission(row);
   }
 
+  async getById(id: string): Promise<Permission | null> {
+    if (!this.backend.getPermissionById) return null;
+    const row = await this.backend.getPermissionById(id);
+    return row ? this.rowToPermission(row) : null;
+  }
+
   async get(agentId: string, connectionId: string): Promise<Permission | null> {
     const storage = this.ensureBackend();
     const row = await storage.getPermission(agentId, connectionId);
@@ -78,9 +84,11 @@ export class PermissionStore {
     return rows.map((row) => this.rowToPermission(row));
   }
 
-  async revoke(permissionId: string): Promise<void> {
+  /** Returns the Permission removed, or null when there was none. */
+  async revoke(permissionId: string): Promise<Permission | null> {
     const storage = this.ensureBackend();
-    await storage.revokePermission(permissionId);
+    const row = await storage.revokePermission(permissionId);
+    return row ? this.rowToPermission(row) : null;
   }
 
   /** Cred Link: all permissions on one connection, any agent. */

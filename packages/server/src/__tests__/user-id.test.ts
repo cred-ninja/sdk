@@ -47,6 +47,7 @@ function makeConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN_TOKEN,
     agentToken: AGENT_TOKEN,
+    allowAgentsWithoutPermission: true,
     allowRawTokens: true,
     providers: [
       { slug: 'google', clientId: 'g-id', clientSecret: 'g-secret', defaultScopes: ['openid', 'email'] },

@@ -14,6 +14,7 @@
  * Signing Input only. Both bind the child to one specific parent; changing
  * Cred's convention is a wire change and belongs in an ADR, not here.
  */
+import { withDerivedScopes } from '@credninja/guard';
 import { createHash, type KeyObject } from 'node:crypto';
 import { verifyDelegationChain, parseStrictJson } from '@credninja/vault';
 import type { ChainVerifyReason, ChainVerifyResult, DelegationChainHop } from '@credninja/vault';
@@ -155,7 +156,8 @@ export function verifyReceiptChain(
       agentDid: p.sub,
       delegationId: p.delegationId,
       chainDepth: p.chainDepth,
-      scopes: p.scopes,
+      // A hop's wider scope covers the read scope derived from it, as at issuance.
+      scopes: withDerivedScopes(p.service, p.scopes),
       ...(p.iat !== undefined ? { iat: p.iat } : {}),
       ...(p.exp !== undefined ? { exp: p.exp } : {}),
       signatureValid: valid,

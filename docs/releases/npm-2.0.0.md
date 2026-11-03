@@ -1,6 +1,10 @@
 # npm 2.0.0 release and migration notes
 
-Status: prepared, not published. First prepared at `ff00421` on 2026-09-24;
+Status: published to npm on 2026-10-31. Later changes are in
+[CHANGELOG.md](../../CHANGELOG.md), including ones a 2.0.0 deployment must act on
+when it upgrades. The rest of this document is the release record as prepared.
+
+First prepared at `ff00421` on 2026-09-24;
 refreshed on 2026-10-13 at `09f9488` to cover Cred Link Phase 1 (#46, #48) and
 the explicit-user-id break on the legacy routes (#47).
 Release preparation refreshed on 2026-10-30 for the Delegation Token stack
@@ -9,8 +13,8 @@ of the Python packages; this release does not publish to PyPI.
 
 ## Registry inventory
 
-Checked against the public npm registry on 2026-10-30: none of the thirteen
-packages has a published 2.0.0 version.
+As checked against the public npm registry on 2026-10-30, before publication.
+On 2026-11-02 the registry showed 2.0.0 as the latest version of all thirteen.
 
 | Package | Public latest | Prepared |
 | --- | --- | --- |

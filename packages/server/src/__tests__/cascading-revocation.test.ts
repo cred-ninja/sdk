@@ -325,7 +325,7 @@ describe('cascading revocation', () => {
   });
 
   it('cascades the same way on the file vault backend', async () => {
-    const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'file', vaultPath: path.join(tmpDir, 'vault.json') }));
+    const { app, vault } = createServer(makeTestConfig({ vaultStorage: 'file', vaultPath: path.join(tmpDir, 'vault.json'), allowAgentsWithoutPermission: true }));
     await vault.init();
     await vault.store({ provider: 'google', userId: 'default', accessToken: 'ya29.test-access-token', scopes: ['openid', 'email'] });
 

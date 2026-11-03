@@ -22,7 +22,7 @@ async function setup() {
     port: 0, host: '127.0.0.1', vaultPassphrase: 'constraint-fixture-only',
     vaultStorage: 'sqlite', vaultPath: join(directory, 'vault.sqlite'),
     tofuStorage: 'sqlite', tofuPath: join(directory, 'tofu.sqlite'),
-    adminToken: 'cred_admin_constraint_fixture', agentToken: token,
+    adminToken: 'cred_admin_constraint_fixture', agentToken: token, allowAgentsWithoutPermission: true,
     providers: [{ slug: 'github', clientId: 'fixture', clientSecret: 'fixture', defaultScopes: ['repo'] }],
     redirectBaseUri: 'http://localhost:3456',
   });
@@ -96,7 +96,7 @@ it('exposes unknown-constraint exercise denial only in the owning user audit fee
   expect(denials[0]).toMatchObject({
     service: 'github', userId: 'owner', metadata: {
       errorMessage: 'unknown_constraint', outcome: 'denied',
-      webBotAuth: { delegationId: issued.body.delegation_id },
+      details: { delegationId: issued.body.delegation_id },
     },
   });
   expect((await audit('other')).body.entries).toEqual([]);

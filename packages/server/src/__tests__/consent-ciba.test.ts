@@ -228,7 +228,7 @@ describe('consent retention', () => {
 
   it('purges only consents past retention, and audits the purge', async () => {
     const agent = await newAgent();
-    const { app, vault, purgeExpiredConsents } = await setup(agent, null);
+    const { app, vault, purgeExpiredConsents } = await setup(agent, null, { allowAgentsWithoutPermission: true });
     mockNetwork();
     const minted = await delegate(app, agent);
     const consentId = claimsOf(minted.body.access_token).consent_id;
@@ -247,6 +247,48 @@ describe('review regressions', () => {
     await approveViaLink(app, hooks.at(-1)!.approve_url, 'approve');
     return asked.body.auth_req_id as string;
   }
+
+  it('a revocation ends the approval: after a restore the agent is asked for again', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const id = await approved(app, agent, hooks);
+    const redeemed = await poll(app, agent, id);
+    expect(redeemed.status).toBe(200);
+    expect((await delegate(app, agent)).status).toBe(200);
+
+    expect((await request(app).delete(`/api/v1/delegations/${redeemed.body.delegation_id}`).set('Authorization', `Bearer ${TOKEN}`).query({ user_id: 'alice' })).status).toBe(200);
+    const permission = await vault.getPermission!(agent.did, 'google');
+    const restored = await request(app).post(`/admin/permissions/${permission!.id}/restore`).set('Authorization', `Bearer ${ADMIN}`).send({});
+    expect(restored.status).toBe(200);
+    expect((await vault.getPermission!(agent.did, 'google'))?.requiresApproval).toBe(true);
+    const again = await delegate(app, agent);
+    expect(again.status).toBe(403);
+    expect(again.body.error).toBe('approval_required');
+  });
+
+  it('a redeemed approval is itself an audit event', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    const hooks = mockNetwork();
+    const id = await approved(app, agent, hooks);
+    expect((await poll(app, agent, id)).status).toBe(200);
+    const events = vault.queryAuditEvents({ limit: 50 }) as Array<{ metadata?: Record<string, unknown> }>;
+    expect(events.some((e) => e.metadata?.stage === 'ciba_redemption')).toBe(true);
+  });
+
+  it('with the revocation opt-out, redeeming through a hold is marked', async () => {
+    const agent = await newAgent();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app, vault } = await setup(agent, 'subject', { allowRedelegationAfterRevocation: true });
+    warn.mockRestore();
+    const hooks = mockNetwork();
+    const id = await approved(app, agent, hooks);
+    await vault.recordAgentRevocations([{ agentId: agent.did, service: 'google', userId: 'alice', cause: 'delegation:x', revokedAt: new Date().toISOString() }]);
+    expect((await poll(app, agent, id)).status).toBe(200);
+    const events = vault.queryAuditEvents({ limit: 50 }) as Array<{ metadata?: Record<string, unknown> }>;
+    expect(events.find((e) => e.metadata?.stage === 'ciba_redemption')?.metadata?.enforcementOptOuts).toEqual(['redelegation_after_revocation']);
+  });
 
   it('TOFU fields beside a gated did:key do not step around its approval', async () => {
     const agent = await newAgent();

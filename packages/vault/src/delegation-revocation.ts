@@ -59,6 +59,10 @@ export interface DelegationGrant {
   prf?: string[];
   /** Cred Link binding, for delegations of a Link connection. */
   link?: Record<string, unknown>;
+  /** The Permission that authorized this delegation: it limits every exercise, as it stands then. */
+  permissionId?: string;
+  /** Salesforce: the instance this delegation was issued for. Its token is good nowhere else. */
+  instanceOrigin?: string;
 }
 
 /** Input for recording a new delegation. Status is always 'active' at issue. */
@@ -84,6 +88,38 @@ export interface DelegationRevocationSeed {
    * with a credential stored later for the same service and user.
    */
   connection?: { service: string; userId: string };
+  /**
+   * Revokes every delegation issued to one agent on one service: used when
+   * the Permission that authorized them is revoked.
+   */
+  agentOnService?: { agentDid: string; service: string };
+}
+
+/** Which holds to read. Absent fields match any; a user also matches holds for every user. */
+export interface AgentRevocationFilter {
+  agentIds?: readonly string[];
+  service?: string;
+  userId?: string;
+}
+
+/** `userId` of an agent revocation that holds for every user of the service. */
+export const AGENT_REVOCATION_ALL_USERS = '*';
+
+/**
+ * A durable record that an agent's access to a service was revoked. It stops
+ * the agent being issued anything new on that service until an operator
+ * grants it a Permission again. A revoked delegation or Permission row alone
+ * cannot do that: the agent could simply ask again.
+ */
+export interface AgentRevocation {
+  /** The agent's DID or its agent record id: whichever the revocation named. */
+  agentId: string;
+  service: string;
+  /** The user it holds for, or AGENT_REVOCATION_ALL_USERS. */
+  userId: string;
+  /** What was revoked, e.g. `permission:<id>` or `delegation:<id>`. */
+  cause: string;
+  revokedAt: string;
 }
 
 export interface RevokedDelegation {
@@ -111,6 +147,13 @@ export interface DelegationRevocationResult {
 export interface DelegationRevocationOptions {
   /** Hops below a seed the walk may follow. Defaults to DEFAULT_MAX_REVOCATION_DEPTH. */
   maxDepth?: number;
+  /**
+   * Hold each agent whose delegation this call revoked out of that user's service,
+   * and revoke its consents there, in the same commit as the revocation. So a retry
+   * finds them already done, and replaying a revocation changes nothing: it cannot
+   * undo a restore or re-grant made since.
+   */
+  hold?: { cause: string };
 }
 
 /**
@@ -256,7 +299,12 @@ export class MemoryDelegationStore {
           .filter((r) => r.service === seed.connection!.service && r.userId === seed.connection!.userId)
           .map((r) => r.id)
       : [];
-    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : []), ...byConnection];
+    const byAgentOnService = seed.agentOnService
+      ? [...this.records.values()]
+          .filter((r) => r.agentDid === seed.agentOnService!.agentDid && r.service === seed.agentOnService!.service)
+          .map((r) => r.id)
+      : [];
+    const seeds = [...(seed.delegationIds ?? []), ...(seed.agentDid ? this.byAgent.get(seed.agentDid) ?? [] : []), ...byConnection, ...byAgentOnService];
     const { nodes, truncated } = collectDelegationSubtree(seeds, (id) => this.children.get(id) ?? [], options);
     const revoked: RevokedDelegation[] = [];
     for (const node of nodes) {
@@ -287,4 +335,37 @@ export function toRevoked(record: Pick<DelegationRecord, 'id' | 'parentId' | 'ag
     depth: node.depth,
     revokedAncestorId: node.rootId,
   };
+}
+
+/** Agent revocations for backends with no table for them (the file backend): process memory, like its delegation records. */
+export class MemoryAgentRevocationStore {
+  private readonly rows = new Map<string, AgentRevocation>();
+
+  storeAgentRevocations(rows: readonly AgentRevocation[]): void {
+    for (const row of rows) this.rows.set(JSON.stringify([row.agentId, row.service, row.userId]), row);
+  }
+
+  getAgentRevocation(agentIds: readonly string[], service: string, userId: string): AgentRevocation | null {
+    const found = [...this.rows.values()].filter((row) => agentIds.includes(row.agentId)
+      && row.service === service
+      && (row.userId === userId || row.userId === AGENT_REVOCATION_ALL_USERS));
+    return found.sort((a, b) => b.revokedAt.localeCompare(a.revokedAt))[0] ?? null;
+  }
+
+  listAgentRevocations(filter: AgentRevocationFilter): AgentRevocation[] {
+    return [...this.rows.values()].filter((row) => (!filter.agentIds || filter.agentIds.includes(row.agentId))
+      && (!filter.service || row.service === filter.service)
+      && (!filter.userId || row.userId === filter.userId || row.userId === AGENT_REVOCATION_ALL_USERS));
+  }
+
+  clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): number {
+    let cleared = 0;
+    for (const [key, row] of this.rows) {
+      if (agentIds.includes(row.agentId) && row.service === service && (!options.userId || row.userId === options.userId)) {
+        this.rows.delete(key);
+        cleared += 1;
+      }
+    }
+    return cleared;
+  }
 }

@@ -46,3 +46,10 @@ export function exerciseAs(
 export function actorTokenFor(agent: AgentIdentity, path: string, base = 'http://localhost:3456'): string {
   return createActorToken(agent, `${base}${path}`);
 }
+
+// Suites whose subject is not authorization (DPoP, metering, capabilities,
+// and so on) delegate to agents they did not grant, so their config sets the
+// deprecated allowAgentsWithoutPermission. Default deny itself is covered by
+// default-deny.test.ts and by the suites that create Permissions. A suite whose
+// subject comes after the classifier sets allowUnclassifiedBrokerCalls the same
+// way; classification itself is covered by operation-enforcement.test.ts.

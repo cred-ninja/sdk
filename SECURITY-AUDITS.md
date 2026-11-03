@@ -1,6 +1,8 @@
-# Security Audits
+# Security Review Notes
 
-Cred was built security-first. This document summarizes audits conducted on the SDK, MCP, integration, and self-hosted server packages. Published before launch, not after.
+Last updated 2026-11-02.
+
+These are notes from security reviews Cred's maintainers ran on the SDK, MCP, integration, and self-hosted server packages. They are not independent audits: no third party has audited Cred. Each note describes the code on its date, and later changes can make it out of date. The current code is authoritative.
 
 Found something we missed? See [SECURITY.md](./SECURITY.md).
 
@@ -19,7 +21,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 1. SDK Static Analysis
+## Review 1. SDK Static Analysis
 
 **Date:** 2026-03-03
 **Scope:** `packages/sdk`, `packages/sdk-python`, `packages/integrations/*`
@@ -36,7 +38,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 2. Transport Security
+## Review 2. Transport Security
 
 **Date:** 2026-03-03
 **Scope:** `packages/sdk`, `packages/sdk-python`, `packages/mcp`
@@ -52,7 +54,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 3. MCP Token Relay Security
+## Review 3. MCP Token Relay Security
 
 **Date:** 2026-03-03
 **Scope:** `packages/mcp`. Token relay, SSRF protection, response handling
@@ -70,7 +72,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 7. Self-Hosted Server Cleanup
+## Review 7. Self-Hosted Server Cleanup
 
 **Date:** 2026-05-26
 **Scope:** `packages/server`, `packages/mcp`, `packages/create-cred-app`
@@ -88,7 +90,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 4. DID Agent Identity
+## Review 4. DID Agent Identity
 
 **Date:** 2026-03-03
 **Scope:** `packages/sdk/src/identity.ts`, `packages/sdk-python/cred/identity.py`
@@ -103,7 +105,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 5. Spec-vs-Implementation Gap Analysis
+## Review 5. Spec-vs-Implementation Gap Analysis
 
 **Date:** 2026-03-04
 **Scope:** DID identity (3 tasks) and MCP server (3 tasks). 50 spec items verified
@@ -120,7 +122,7 @@ These invariants are enforced across the SDK-facing packages in this repo:
 
 ---
 
-## Audit 6. Adversarial Input Testing
+## Review 6. Adversarial Input Testing
 
 **Date:** 2026-03-04
 **Scope:** DID identity edge cases and MCP tool handler boundaries
@@ -152,19 +154,20 @@ These invariants are enforced across the SDK-facing packages in this repo:
 | Integrations | Per-framework unit tests | `pytest` in each integration package |
 
 Key test suites:
-- **45 SSRF bypass tests**. `packages/mcp/src/__tests__/ssrf-dynamic.test.ts`
+- **47 SSRF bypass tests**. `packages/mcp/src/__tests__/ssrf-dynamic.test.ts`
 - **Token cache isolation tests**. `packages/mcp/src/__tests__/token-cache.test.ts`
 - **DID identity parity tests**. `packages/sdk/src/__tests__/identity.test.ts` + `packages/sdk-python/tests/test_identity.py`
 
 ---
 
-## Dependency Audit
+## Dependencies
 
 | Package | Runtime Dependencies | Status |
 |---------|---------------------|--------|
 | `@credninja/sdk` | 0 | Stateless TypeScript client; verify with `npm audit` |
 | `cred-auth` (Python) | 2 (`httpx`, `cryptography`) | Minimal Python client; verify with Python audit tooling |
-| `@credninja/mcp` | 2 (`@modelcontextprotocol/sdk`, `@credninja/sdk`) | Scope-aware relay; verify with `npm audit` |
+| `@credninja/mcp` | 3 (`@modelcontextprotocol/sdk`, `@credninja/sdk`, `@credninja/guard`) | Scope-aware relay; verify with `npm audit` |
+| `@credninja/guard` | 3 (`@credninja/protocol`, `@types/express`, `graphql`) | Policy engine and operation classifier; verify with `npm audit` |
 | `cred-langchain` | 2 (`langchain-core`, `cred-auth`) | Integration package; verify with Python audit tooling |
 | `cred-crewai` | 3 (`crewai`, `langchain-core`, `cred-auth`) | Integration package; verify with Python audit tooling |
 | `cred-openai-agents` | 2 (`agents`, `cred-auth`) | Integration package; verify with Python audit tooling |
@@ -175,9 +178,9 @@ Key test suites:
 
 | Item | Status |
 |------|--------|
-| Receipt signing | Ships with API v1.0. SDK verification code is ready |
+| Receipt signing | Shipped |
 | CI dependency scanning | `npm audit` in CI; Python audit tooling pending constraints/lockfile setup |
-| Independent third-party audit | Planned before v1.0 GA |
+| Independent third-party audit | Not done |
 
 ---
 

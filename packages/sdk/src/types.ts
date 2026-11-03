@@ -69,6 +69,12 @@ export interface DelegationResult {
   expiresAt: Date;
   service: string;
   scopes: string[];
+  /**
+   * Local mode: no request, Permission or ceiling narrowed this delegation, so it
+   * is everything the stored connection holds. An empty `scopes` means the whole
+   * connection only when this is set.
+   */
+  unnarrowed?: boolean;
   delegationId: string;
   /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
   receipt?: string;
@@ -202,6 +208,15 @@ export interface RevokeParams {
 }
 
 /** A local-mode exercise of a cached token, checked and audited before the call. */
+/** A local-mode cred_use call refused before it left the process. */
+export interface LocalRefusalParams {
+  service: string;
+  userId: string;
+  agentId?: string;
+  error: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface LocalUseParams {
   service: string;
   userId: string;
@@ -213,6 +228,10 @@ export interface LocalUseParams {
   accessToken?: string;
   /** Agent making the call, for the audit trail. */
   agentId?: string;
+  /** The URL about to be called. Salesforce: it must be the connection's stored instance. */
+  targetUrl?: string;
+  /** Added to the audit event, such as a marker that a deprecated opt-out applied. */
+  auditMetadata?: Record<string, unknown>;
   /** Constraints carried by the cached delegation being exercised. */
   constraints?: unknown[];
 }
@@ -222,7 +241,10 @@ export interface AuditEntry {
   action: string;
   service: string;
   userId: string;
+  /** Who acted: an agent's DID where one is known. */
+  actor?: { type: string; id: string; fingerprint?: string };
   timestamp: string;
+  /** `details` holds the event's own fields, such as `delegationId` and `route`. */
   metadata?: Record<string, unknown>;
 }
 

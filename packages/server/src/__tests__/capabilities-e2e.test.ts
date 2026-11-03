@@ -30,7 +30,7 @@ async function setup(agents: AgentIdentity[] = []) {
   const config: ServerConfig = {
     port: 0, host: '127.0.0.1', vaultPassphrase: 'test-passphrase-not-for-production', vaultStorage: 'sqlite',
     vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'file', tofuPath: path.join(dir, 'tofu.json'),
-    adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN,
+    adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN, allowAgentsWithoutPermission: true,
     providers: [{ slug: 'google', clientId: 'cid', clientSecret: 'secret', defaultScopes: [DRIVE] }],
     redirectBaseUri: BASE,
   };
@@ -106,14 +106,13 @@ describe('capabilities at exercise', () => {
     const viaHeader = await exerciseAs(app, agent, token, {
       url: FILE_URL('abc'), method: 'GET', extra_headers: { 'X-HTTP-Method-Override': 'DELETE' },
     }, { base: BASE });
-    expect(viaHeader.status).toBe(200);
-    const [, init] = upstream.mock.calls[0]!;
-    expect(new Headers(init!.headers).get('x-http-method-override')).toBeNull();
+    expect(viaHeader.status).toBe(400);
+    expect(viaHeader.body.error).toBe('invalid_request');
     for (const key of ['$httpMethod', '_HttpMethod', '_method', 'X-HTTP-Method-Override', 'method']) {
       const viaQuery = await exerciseAs(app, agent, token, { url: `${FILE_URL('abc')}?${key}=DELETE`, method: 'GET' }, { base: BASE });
       expect(viaQuery.status).toBe(400);
     }
-    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(upstream).not.toHaveBeenCalled();
   });
 
   it('keeps a token issued without capabilities as broad as its scopes', async () => {
@@ -177,7 +176,7 @@ describe('GitHub capabilities end to end', () => {
     const { app, vault } = createServer({
       port: 0, host: '127.0.0.1', vaultPassphrase: 'test-passphrase-not-for-production', vaultStorage: 'sqlite',
       vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'file', tofuPath: path.join(dir, 'tofu.json'),
-      adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN,
+      adminToken: `cred_admin_${crypto.randomBytes(32).toString('hex')}`, agentToken: TOKEN, allowAgentsWithoutPermission: true,
       providers: [{ slug: 'github', clientId: 'cid', clientSecret: 'secret', defaultScopes: ['repo'] }],
       redirectBaseUri: BASE, ...extra,
     });
