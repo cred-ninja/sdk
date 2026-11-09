@@ -130,12 +130,21 @@ export function validateSubDelegation(
     throw new DelegationChainError('Child delegation app must match parent delegation', 'app_mismatch');
   }
 
-  if (!permission.delegatable) {
+  // The delegatable/depth gate belongs to the agent DOING the delegating
+  // (the grantor, named by parent.agentDid), not the agent receiving the
+  // child delegation: a Permission's delegatable/maxDelegationDepth say what
+  // its own holder may pass on. Callers that hold the grantor's Permission
+  // pass it as `grantorPermission`; the recipient's Permission contributes
+  // only its allowedScopes below. Without `grantorPermission`, `permission`
+  // keeps its legacy meaning and is treated as the grantor's.
+  const gate = input.grantorPermission ?? permission;
+
+  if (!gate.delegatable) {
     throw new DelegationChainError('Permission is not delegatable', 'delegation_not_allowed');
   }
 
   const nextDepth = parent.chainDepth + 1;
-  if (nextDepth > permission.maxDelegationDepth) {
+  if (nextDepth > gate.maxDelegationDepth) {
     throw new DelegationChainError('Sub-delegation exceeds max delegation depth', 'depth_exceeded');
   }
 

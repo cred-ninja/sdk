@@ -6602,10 +6602,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // behavior for the child check below).
 
       const ancestorDids = Array.from(new Set([...parent.lineage, parent.sub]));
+      // The immediate parent's agent record, captured for the grantor
+      // Permission lookup below (this loop already loads it).
+      let parentAgentRecord: AgentRecord | null = null;
       for (const ancestorDid of ancestorDids) {
         let ancestorAgentRecord: AgentRecord | null = null;
         if (vault.getAgentByDid) {
           ancestorAgentRecord = await vault.getAgentByDid(ancestorDid);
+        }
+        if (ancestorDid === parent.sub) {
+          parentAgentRecord = ancestorAgentRecord;
         }
         if (ancestorAgentRecord?.status === 'revoked' || ancestorAgentRecord?.status === 'suspended') {
           const errorCode = ancestorAgentRecord.status === 'revoked' ? 'ancestor_agent_revoked' : 'ancestor_agent_suspended';
@@ -6698,6 +6704,22 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // ── Grantor Permission ───────────────────────────────────────────────
+      // The Permission above is the RECEIVING agent's: it decides which
+      // scopes the child may hold. The delegatable/depth gate belongs to
+      // the DELEGATING agent (the parent receipt's agent, parent.sub,
+      // whose identity the caller proved with its actor_token): a
+      // Permission's delegatable/maxDelegationDepth say what its own holder
+      // may pass on. When the grantor holds no Permission row, no grantor
+      // gate is passed and validateSubDelegation falls back to the
+      // recipient Permission — the pre-fix behaviour for that configuration
+      // only (a grantor with a row is now gated by its own row).
+      const grantorPermission = await permissionForDidAgent(
+        parent.sub,
+        parentAgentRecord,
+        service,
+      );
+
       // ── Validate delegation chain ────────────────────────────────────────
 
       let validation;
@@ -6730,6 +6752,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             delegatable: permission.delegatable,
             maxDelegationDepth: permission.maxDelegationDepth,
           },
+          ...(grantorPermission
+            ? {
+                grantorPermission: {
+                  delegatable: grantorPermission.delegatable,
+                  maxDelegationDepth: grantorPermission.maxDelegationDepth,
+                },
+              }
+            : {}),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Delegation chain validation failed';

@@ -58,6 +58,7 @@ export type {
 export type {
   DelegationAuthority,
   DelegationValidationPermission,
+  DelegationGrantorPermission,
   ValidateSubDelegationInput,
   ValidateSubDelegationResult,
 } from './types.js';

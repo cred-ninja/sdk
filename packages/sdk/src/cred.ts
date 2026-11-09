@@ -109,6 +109,10 @@ interface VaultModule {
       delegatable: boolean;
       maxDelegationDepth: number;
     };
+    grantorPermission?: {
+      delegatable: boolean;
+      maxDelegationDepth: number;
+    };
   }) => {
     parentDelegationId: string;
     chainDepth: number;
@@ -1030,10 +1034,16 @@ export class Cred {
     // lineage. Legacy receipts minted before the `lineage` claim existed
     // carry an empty lineage and degrade to a parent-only check.
     const ancestorDids = Array.from(new Set([...parent.lineage, parent.sub]));
+    // The immediate parent's agent record, captured for the grantor
+    // Permission lookup below (the ancestor loop already loads it).
+    let parentAgentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
     for (const ancestorDid of ancestorDids) {
       let ancestorAgentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
       if (vault.getAgentByDid) {
         ancestorAgentRecord = await vault.getAgentByDid(ancestorDid);
+      }
+      if (ancestorDid === parent.sub) {
+        parentAgentRecord = ancestorAgentRecord;
       }
       if (ancestorAgentRecord?.status === 'revoked') {
         throw new CredError(`Ancestor agent ${ancestorDid} has been revoked`, 'ancestor_agent_revoked', 403);
@@ -1060,6 +1070,36 @@ export class Cred {
       throw new CredError(`Agent ${params.agentDid} has no permission for ${params.service}`, 'no_permission', 403);
     }
 
+    // ── Grantor Permission ────────────────────────────────────────────────
+    // The delegatable/depth gate belongs to the agent DOING the delegating
+    // (the parent receipt's agent, parent.sub), not the receiving agent
+    // above: a Permission's delegatable/maxDelegationDepth say what its own
+    // holder may pass on. The grantor's Permission may be stored under its
+    // agent record id or under its DID; when both name different rows,
+    // neither may widen the other, so the gate takes the tighter of the two.
+    // When the grantor holds no Permission row at all (a legacy local vault
+    // with no Permission for the parent agent), no grantor gate is passed
+    // and validateSubDelegation falls back to the recipient Permission —
+    // the pre-fix behaviour for that configuration only.
+    let grantorPermission: { delegatable: boolean; maxDelegationDepth: number } | undefined;
+    if (vault.getPermission) {
+      const grantorIds = Array.from(new Set(
+        [parentAgentRecord?.id, parent.sub].filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ));
+      const grantorRows = (await Promise.all(
+        grantorIds.map((id) => vault.getPermission!(id, params.service)),
+      )).filter((row): row is NonNullable<typeof row> => row !== null && row !== undefined);
+      const distinctRows = grantorRows.filter(
+        (row, index) => grantorRows.findIndex((other) => other.id === row.id) === index,
+      );
+      if (distinctRows.length > 0) {
+        grantorPermission = {
+          delegatable: distinctRows.every((row) => row.delegatable),
+          maxDelegationDepth: Math.min(...distinctRows.map((row) => row.maxDelegationDepth)),
+        };
+      }
+    }
+
     const validation = vaultModule.validateSubDelegation({
       parent: {
         delegationId: parent.delegationId,
@@ -1080,6 +1120,7 @@ export class Cred {
         delegatable: permission.delegatable,
         maxDelegationDepth: permission.maxDelegationDepth,
       },
+      ...(grantorPermission ? { grantorPermission } : {}),
     });
 
     const parentScopeSet = new Set(parent.scopes);

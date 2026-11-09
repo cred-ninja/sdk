@@ -87,6 +87,7 @@ export type UpdatePermissionInput = Partial<
 export type {
   DelegationAuthority,
   DelegationValidationPermission,
+  DelegationGrantorPermission,
   ValidateSubDelegationInput,
   ValidateSubDelegationResult,
 } from '@credninja/attenuation';

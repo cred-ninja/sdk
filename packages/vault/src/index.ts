@@ -104,6 +104,7 @@ export type {
   PermissionRowUpdate,
   DelegationAuthority,
   DelegationValidationPermission,
+  DelegationGrantorPermission,
   ValidateSubDelegationInput,
   ValidateSubDelegationResult,
   Rotation,
