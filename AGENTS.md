@@ -69,7 +69,7 @@ rate-limit headroom.
 
 ## REST endpoints (`packages/server`)
 
-From `packages/server/src/server.ts`, current as of this plan's U9. Auth
+From `packages/server/src/server.ts`. Auth
 column: `None` (no auth), `Admin` (`requireAdminAuth`, admin token/session),
 `Bearer` (`requireAgentAuth`, agent Bearer token), `Bearer+VI` (Bearer plus
 `requireVerifiedIdentityRegardlessOfMode`, i.e. Web Bot Auth-verified). `Link client` = Cred
