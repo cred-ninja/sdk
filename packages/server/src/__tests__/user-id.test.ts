@@ -16,11 +16,16 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createServer } from '../server.js';
+import { newAgent, delegateAs } from './token-helpers.js';
 import type { RequestAgentPrincipal, ServerConfig } from '../config.js';
 
 const AGENT_TOKEN = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const ADMIN_TOKEN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 const BASE = 'http://localhost:3456';
+// /api/v1/delegate needs a real did:key and a DPoP proof by its key before
+// anything else, so the delegate call sites go through this identity.
+const AGENT = await newAgent();
+const delegate = (app: App, body: Record<string, unknown>) => delegateAs(app, AGENT, body, { bearer: AGENT_TOKEN });
 
 const dirs: string[] = [];
 
@@ -42,6 +47,8 @@ function makeConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     tofuPath: path.join(dir, 'tofu.json'),
     adminToken: ADMIN_TOKEN,
     agentToken: AGENT_TOKEN,
+    allowAgentsWithoutPermission: true,
+    allowRawTokens: true,
     providers: [
       { slug: 'google', clientId: 'g-id', clientSecret: 'g-secret', defaultScopes: ['openid', 'email'] },
       { slug: 'github', clientId: 'gh-id', clientSecret: 'gh-secret', defaultScopes: ['repo'] },
@@ -86,8 +93,8 @@ function callSites(app: App, extra: { query?: string; body?: Record<string, unkn
     ['POST /connect/:provider/start', () => admin(request(app).post('/connect/google/start').send({ scopes: ['openid'], ...b }))],
     ['GET /api/token/:provider', () => agent(request(app).get(`/api/token/google${q}`))],
     ['GET /api/v1/connections', () => agent(request(app).get(`/api/v1/connections${q}`))],
-    ['POST /api/v1/delegate', () => agent(request(app).post('/api/v1/delegate').send({ service: 'google', ...b }))],
-    ['POST /api/v1/subdelegate', () => agent(request(app).post('/api/v1/subdelegate').send({ parent_receipt: 'a.b.c', agent_did: 'did:key:z', service: 'google', ...b }))],
+    ['POST /api/v1/delegate', () => delegate(app, { service: 'google', ...b })],
+    ['POST /api/v1/subdelegate', () => agent(request(app).post('/api/v1/subdelegate').send({ parent_receipt: 'a.b.c', agent_did: AGENT.did, service: 'google', ...b }))],
     ['GET /api/v1/audit', () => agent(request(app).get(`/api/v1/audit${q}`))],
     ['GET /api/v1/audit/stream', () => agent(request(app).get(`/api/v1/audit/stream${q}`))],
     ['DELETE /api/token/:provider', () => agent(request(app).delete(`/api/token/google${q}`))],
@@ -152,7 +159,7 @@ describe('rule 1: SINGLE_USER_MODE', () => {
       await vault.store({ provider: 'google', userId: 'default', accessToken: 'ya29.default', scopes: ['openid'] });
       const explicit = await agent(request(app).get('/api/token/google?user_id=default'));
       expect({ singleUserMode, status: explicit.status, token: explicit.body.accessToken }).toEqual({ singleUserMode, status: 200, token: 'ya29.default' });
-      const delegated = await agent(request(app).post('/api/v1/delegate').send({ service: 'google', user_id: 'default' }));
+      const delegated = await delegate(app, { service: 'google', user_id: 'default' });
       expect({ singleUserMode, status: delegated.status }).toEqual({ singleUserMode, status: 200 });
       const implicit = await agent(request(app).get('/api/token/google'));
       expect({ singleUserMode, status: implicit.status }).toEqual({ singleUserMode, status: singleUserMode ? 200 : 400 });
@@ -204,7 +211,7 @@ describe('rule 2: a principal bound to a user id', () => {
       expect({ singleUserMode, token: token.body.accessToken }).toEqual({ singleUserMode, token: 'ya29.alice' });
       const named = await agent(request(app).get('/api/token/google?user_id=alice'));
       expect(named.body.accessToken).toBe('ya29.alice');
-      const delegated = await agent(request(app).post('/api/v1/delegate').send({ service: 'google' }));
+      const delegated = await agent(request(app).post('/api/v1/delegate').send({ service: 'google', token_format: 'raw' }));
       expect(delegated.status).toBe(200);
       expect(delegated.body.user_id).toBe('alice');
       expect(delegated.body.access_token).toBe('ya29.alice');
@@ -233,7 +240,7 @@ describe('rule 2: a principal bound to a user id', () => {
 
   it('the consent_url of a bound principal is a connect request for that user', async () => {
     const { app, vault } = await server({ agentRequestVerifier: verifierFor({ type: 'custom', principalId: 'agent-1', userId: 'alice' }) });
-    const res = await agent(request(app).post('/api/v1/delegate').send({ service: 'google', scopes: ['calendar.readonly'] }));
+    const res = await delegate(app, { service: 'google', scopes: ['calendar.readonly'] });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('consent_required');
     const consent = new URL(res.body.consent_url);
@@ -258,7 +265,7 @@ describe('rule 2: a principal bound to a user id', () => {
 
 describe('rule 3: connect requests', () => {
   async function consentUrl(app: App, userId = 'alice', service = 'google'): Promise<URL> {
-    const res = await agent(request(app).post('/api/v1/delegate').send({ service, user_id: userId, appClientId: 'app_1', scopes: ['calendar.readonly'] }));
+    const res = await delegate(app, { service, user_id: userId, appClientId: 'app_1', scopes: ['calendar.readonly'] });
     expect(res.body.error).toBe('consent_required');
     return new URL(res.body.consent_url);
   }

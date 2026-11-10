@@ -100,3 +100,28 @@ describe('verifyReceiptChain', () => {
     expect(verifyReceiptChain([], publicKey, { now: NOW })).toMatchObject({ ok: false, reason: 'empty_chain' });
   });
 });
+
+describe('verifyReceiptChain: derived read scopes', () => {
+  const three = (a: string[], b: string[], c: string[]) => {
+    const scoped = { ...base, service: 'github' };
+    const r0 = mint({ ...scoped, sub: 'did:key:z6MkRoot', delegationId: 'del_r', chainDepth: 0, scopes: a, iat: NOW, exp: NOW + 3600 });
+    const r1 = mint({ ...scoped, sub: 'did:key:z6MkMid', delegationId: 'del_m', chainDepth: 1, scopes: b, iat: NOW, exp: NOW + 900, parentDelegationId: 'del_r', parentReceiptHash: receiptHash(r0), lineage: ['did:key:z6MkRoot'] });
+    const r2 = mint({ ...scoped, sub: 'did:key:z6MkLeaf', delegationId: 'del_l', chainDepth: 2, scopes: c, iat: NOW, exp: NOW + 300, parentDelegationId: 'del_m', parentReceiptHash: receiptHash(r1), lineage: ['did:key:z6MkRoot', 'did:key:z6MkMid'] });
+    return [r0, r1, r2];
+  };
+  const verify = (chainOf: string[]) => verifyReceiptChain(chainOf, publicKey, { now: NOW });
+
+  it('repo then github.read then github.read verifies', () => {
+    expect(verify(three(['repo'], ['github.read'], ['github.read'])).ok).toBe(true);
+  });
+
+  it('a child with repo under a github.read parent fails, and so does another provider\'s name', () => {
+    expect(verify(three(['repo'], ['github.read'], ['repo'])).ok).toBe(false);
+    expect(verify(three(['read:user'], ['github.read'], ['github.read'])).ok).toBe(false);
+    expect(verify(three(['repo'], ['salesforce.read'], ['salesforce.read'])).ok).toBe(false);
+  });
+
+  it('an empty hop stays empty: nothing below it can hold a scope', () => {
+    expect(verify(three(['repo'], [], ['github.read'])).ok).toBe(false);
+  });
+});

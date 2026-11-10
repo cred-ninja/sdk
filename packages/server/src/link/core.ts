@@ -35,6 +35,8 @@ import { newId, newSecret, nowIso, sha256Hex } from './util.js';
 
 /** Everything the Link routes share. */
 export interface LinkContext {
+  /** False under CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS. Absent means true. */
+  classifyBrokerCalls?: boolean;
   store: SqliteLinkStore;
   secrets: LinkSecretStore;
   hooks: LinkHooks;

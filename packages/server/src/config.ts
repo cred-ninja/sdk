@@ -9,6 +9,7 @@ import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
+import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -77,6 +78,95 @@ export interface ServerConfig {
   // when unset.
   receiptAudience?: string;
 
+  // Receipt signing. Default: an Ed25519 (EdDSA) key derived from the vault
+  // passphrase, as before. `receiptSigner` takes any signer (an HSM or KMS
+  // adapter, for instance); `receiptSigningKeyPem` (env
+  // RECEIPT_SIGNING_KEY_PEM) takes a PKCS#8 Ed25519 or P-256 private key,
+  // giving EdDSA or ES256. The header always carries `kid`.
+  receiptSigner?: JwsSigner;
+  receiptSigningKeyPem?: string;
+  // Further keys receipts may verify under (for example the key a rotation
+  // replaced), matched by `kid`. With a custom `receiptSigner`, its own
+  // public key MUST be listed here under the signer's `kid`; createServer
+  // throws otherwise.
+  receiptVerificationKeys?: JwsVerificationKey[];
+  // The verifier's accepted algorithms (env RECEIPT_ACCEPTED_ALGS, comma
+  // separated). Defaults to EdDSA and ES256. A receipt whose header alg is
+  // not on the list, or differs from its key's algorithm, is rejected.
+  receiptAcceptedAlgs?: string[];
+  // Claim layout of newly minted receipts (env RECEIPT_CLAIM_LAYOUT).
+  // 'draft-02' (the default): the principal in `sub`, the agent in
+  // `client_id` and `act.sub`, prior agents in nested `act`, plus `jti` and
+  // `cnf`. 'legacy': the agent in `sub`, for verifiers that key on it.
+  // Receipts in either layout are always accepted.
+  receiptClaimLayout?: 'draft-02' | 'legacy';
+
+  // SQLite file for the running totals of cumulative constraints (env
+  // CUMULATIVE_LEDGER_PATH). Unset keeps them in memory for the life of the
+  // process; a delegation whose ancestors the ledger does not hold is
+  // refused at exercise, so a restart fails closed rather than resetting a
+  // budget.
+  cumulativeLedgerPath?: string;
+
+  // Ignored and deprecated (env CRED_REQUIRE_AGENT_IDENTITY): the caller of
+  // /api/v1/subdelegate must always prove it is the agent the parent receipt
+  // names, with an RFC 7523 actor_token signed by that agent's did:key.
+  requireAgentIdentity?: boolean;
+
+  // Consent records (draft Section 8.2) are kept for this many days after
+  // the later of their grant and expiry, then purged (env
+  // CONSENT_RETENTION_DAYS). At least 90, the draft's minimum; default 90.
+  consentRetentionDays?: number;
+
+  // CIBA approvals (draft Section 8.1). The subject is asked through the
+  // built-in signed-link approval page, announced by a POST to this webhook
+  // (env CRED_APPROVAL_WEBHOOK_URL), or through an external OpenID
+  // Provider's CIBA endpoints when cibaProvider is set (env
+  // CRED_CIBA_BACKCHANNEL_ENDPOINT, CRED_CIBA_TOKEN_ENDPOINT,
+  // CRED_CIBA_CLIENT_ID, CRED_CIBA_CLIENT_SECRET).
+  approvalWebhookUrl?: string;
+  cibaProvider?: {
+    backchannelAuthenticationEndpoint: string;
+    tokenEndpoint: string;
+    clientId: string;
+    clientSecret: string;
+  };
+  // How long an approved consent is reused for later requests it covers
+  // before the subject is asked again (env CRED_CIBA_CONSENT_TTL_SECONDS).
+  // Default one day.
+  cibaConsentTtlSeconds?: number;
+
+  // Hand a provider's access token to the caller (token_format "raw" on
+  // /api/v1/delegate, and GET /api/token/:provider) (env
+  // CRED_ALLOW_RAW_TOKENS). Default false: a provider token is a bearer
+  // credential with the connection's full scope that cannot be bound to an
+  // agent key, narrowed, or revoked per delegation, so the server only
+  // brokers calls. true is deprecated and logs a warning at startup.
+  allowRawTokens?: boolean;
+
+  // Issue delegations to an agent that holds no Permission, up to the whole
+  // connection (env CRED_ALLOW_AGENTS_WITHOUT_PERMISSION). Default false: a
+  // did:key agent gets only what a Permission grants it. true is deprecated,
+  // logs a warning at startup and marks each affected audit event.
+  allowAgentsWithoutPermission?: boolean;
+
+  // Keep issuing to an agent whose delegation or Permission was revoked (env
+  // CRED_ALLOW_REDELEGATION_AFTER_REVOCATION). Default false: the agent gets
+  // nothing new on that service until it is granted a Permission again. true
+  // is deprecated, logs a warning at startup and marks each affected audit
+  // event.
+  allowRedelegationAfterRevocation?: boolean;
+
+  // Forward brokered calls without classifying them (env
+  // CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS). Default false: a call the operation
+  // tables do not map is refused, and so is one the grant does not cover. true
+  // is deprecated, logs a warning at startup and marks every /api/v1/use audit
+  // event. The URL allowlist still applies.
+  allowUnclassifiedBrokerCalls?: boolean;
+
+  // Lifetime of a Sub-Delegation Exchange grant, in seconds. Default 60.
+  delegationGrantTtlSeconds?: number;
+
   // Guard — optional policy engine for credential delegation guardrails
   // When provided, evaluates policies before serving delegated tokens.
   guard?: CredGuard;
@@ -141,6 +231,14 @@ const KNOWN_PROVIDERS: { env: string; slug: BuiltinAdapterSlug }[] = [
   { env: 'HUBSPOT', slug: 'hubspot' },
 ];
 
+function booleanEnv(name: string): boolean | undefined {
+  const raw = (process.env[name] ?? '').trim().toLowerCase();
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  if (raw !== '') throw new Error(`${name} must be true or false`);
+  return undefined;
+}
+
 export function loadConfig(): ServerConfig {
   const port = parseInt(process.env.PORT ?? '3456', 10);
   const host = process.env.HOST ?? '127.0.0.1';
@@ -195,11 +293,52 @@ export function loadConfig(): ServerConfig {
   let receiptTtlSeconds: number | undefined;
   if (receiptTtlSecondsRaw !== undefined) {
     receiptTtlSeconds = parseInt(receiptTtlSecondsRaw, 10);
-    if (!Number.isFinite(receiptTtlSeconds) || receiptTtlSeconds <= 0) {
-      throw new Error('RECEIPT_TTL_SECONDS must be a positive integer');
+    if (!Number.isFinite(receiptTtlSeconds) || receiptTtlSeconds <= 0 || receiptTtlSeconds > 3600) {
+      throw new Error('RECEIPT_TTL_SECONDS must be a positive integer of at most 3600 (1 hour)');
     }
   }
   const receiptAudience = process.env.RECEIPT_AUDIENCE || undefined;
+  const receiptSigningKeyPem = process.env.RECEIPT_SIGNING_KEY_PEM || undefined;
+  const receiptAcceptedAlgs = process.env.RECEIPT_ACCEPTED_ALGS
+    ? process.env.RECEIPT_ACCEPTED_ALGS.split(',').map((a) => a.trim()).filter(Boolean)
+    : undefined;
+  const receiptClaimLayoutRaw = process.env.RECEIPT_CLAIM_LAYOUT || undefined;
+  if (receiptClaimLayoutRaw !== undefined && receiptClaimLayoutRaw !== 'draft-02' && receiptClaimLayoutRaw !== 'legacy') {
+    throw new Error('RECEIPT_CLAIM_LAYOUT must be one of: draft-02, legacy');
+  }
+  const cumulativeLedgerPath = process.env.CUMULATIVE_LEDGER_PATH || undefined;
+  const requireAgentIdentityRaw = (process.env.CRED_REQUIRE_AGENT_IDENTITY ?? '').trim().toLowerCase();
+  let requireAgentIdentity: boolean | undefined;
+  if (requireAgentIdentityRaw === 'true' || requireAgentIdentityRaw === '1') requireAgentIdentity = true;
+  else if (requireAgentIdentityRaw === 'false' || requireAgentIdentityRaw === '0') requireAgentIdentity = false;
+  else if (requireAgentIdentityRaw !== '') throw new Error('CRED_REQUIRE_AGENT_IDENTITY must be true or false');
+  const allowRawTokensRaw = (process.env.CRED_ALLOW_RAW_TOKENS ?? '').trim().toLowerCase();
+  let allowRawTokens: boolean | undefined;
+  if (allowRawTokensRaw === 'true' || allowRawTokensRaw === '1') allowRawTokens = true;
+  else if (allowRawTokensRaw === 'false' || allowRawTokensRaw === '0') allowRawTokens = false;
+  else if (allowRawTokensRaw !== '') throw new Error('CRED_ALLOW_RAW_TOKENS must be true or false');
+  const allowAgentsWithoutPermission = booleanEnv('CRED_ALLOW_AGENTS_WITHOUT_PERMISSION');
+  const allowRedelegationAfterRevocation = booleanEnv('CRED_ALLOW_REDELEGATION_AFTER_REVOCATION');
+  const allowUnclassifiedBrokerCalls = booleanEnv('CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS');
+  const retentionRaw = (process.env.CONSENT_RETENTION_DAYS ?? '').trim();
+  const consentRetentionDays = retentionRaw === '' ? undefined : Number(retentionRaw);
+  const cibaTtlRaw = (process.env.CRED_CIBA_CONSENT_TTL_SECONDS ?? '').trim();
+  const cibaConsentTtlSeconds = cibaTtlRaw === '' ? undefined : Number(cibaTtlRaw);
+  const cibaEnv = {
+    backchannelAuthenticationEndpoint: process.env.CRED_CIBA_BACKCHANNEL_ENDPOINT?.trim() ?? '',
+    tokenEndpoint: process.env.CRED_CIBA_TOKEN_ENDPOINT?.trim() ?? '',
+    clientId: process.env.CRED_CIBA_CLIENT_ID?.trim() ?? '',
+    clientSecret: process.env.CRED_CIBA_CLIENT_SECRET ?? '',
+  };
+  const cibaSet = Object.values(cibaEnv).filter((v) => v !== '').length;
+  if (cibaSet > 0 && cibaSet < 4) {
+    throw new Error('CRED_CIBA_BACKCHANNEL_ENDPOINT, CRED_CIBA_TOKEN_ENDPOINT, CRED_CIBA_CLIENT_ID and CRED_CIBA_CLIENT_SECRET must be set together');
+  }
+  // Removed: every delegation, Cred Link's included, is a DPoP-bound
+  // Delegation Token. Setting it changes nothing; say so once.
+  if ((process.env.CRED_REQUIRE_DPOP ?? '').trim() !== '') {
+    console.warn('[cred] CRED_REQUIRE_DPOP is ignored: every delegation, Cred Link\'s included, is a Delegation Token bound to the agent\'s key (DPoP). Remove the setting.');
+  }
 
   // Discover configured providers from environment
   const providers: ProviderConfig[] = [];
@@ -247,6 +386,19 @@ export function loadConfig(): ServerConfig {
     singleUserMode,
     receiptTtlSeconds,
     receiptAudience,
+    ...(receiptSigningKeyPem ? { receiptSigningKeyPem } : {}),
+    ...(receiptAcceptedAlgs ? { receiptAcceptedAlgs } : {}),
+    ...(receiptClaimLayoutRaw ? { receiptClaimLayout: receiptClaimLayoutRaw as 'draft-02' | 'legacy' } : {}),
+    ...(cumulativeLedgerPath ? { cumulativeLedgerPath } : {}),
+    ...(requireAgentIdentity !== undefined ? { requireAgentIdentity } : {}),
+    ...(consentRetentionDays !== undefined ? { consentRetentionDays } : {}),
+    ...(cibaConsentTtlSeconds !== undefined ? { cibaConsentTtlSeconds } : {}),
+    ...(process.env.CRED_APPROVAL_WEBHOOK_URL?.trim() ? { approvalWebhookUrl: process.env.CRED_APPROVAL_WEBHOOK_URL.trim() } : {}),
+    ...(cibaSet === 4 ? { cibaProvider: cibaEnv } : {}),
+    ...(allowRawTokens !== undefined ? { allowRawTokens } : {}),
+    ...(allowAgentsWithoutPermission !== undefined ? { allowAgentsWithoutPermission } : {}),
+    ...(allowRedelegationAfterRevocation !== undefined ? { allowRedelegationAfterRevocation } : {}),
+    ...(allowUnclassifiedBrokerCalls !== undefined ? { allowUnclassifiedBrokerCalls } : {}),
     webBotAuthMode,
     webBotAuthNonceStore,
     webBotAuthNoncePath,

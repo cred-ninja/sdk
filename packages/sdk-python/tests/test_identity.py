@@ -69,6 +69,23 @@ class TestVerifyDelegationReceipt:
             cred_public_key=public_key_hex,
         ) is True
 
+    def test_draft02_layout_reads_the_agent_from_act_sub(self):
+        private_key = Ed25519PrivateKey.generate()
+        public_key_hex = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+
+        def signed(claims):
+            header = _b64url_json({"alg": "EdDSA", "kid": "k1", "typ": "JWT"})
+            payload = _b64url_json({"iss": "did:web:cred.ninja", "iat": 1234567890, **claims})
+            signature = private_key.sign(f"{header}.{payload}".encode("utf-8"))
+            return f"{header}.{payload}.{_b64url_bytes(signature)}"
+
+        ok = signed({"sub": "user_1", "client_id": self.agent_did, "act": {"sub": self.agent_did}})
+        assert verify_delegation_receipt(ok, expected_did=self.agent_did, cred_public_key=public_key_hex) is True
+        mismatch = signed({"sub": "user_1", "client_id": self.agent_did, "act": {"sub": "did:key:z6MkOther"}})
+        assert verify_delegation_receipt(mismatch, expected_did=self.agent_did, cred_public_key=public_key_hex) is False
+        principal_as_agent = signed({"sub": self.agent_did, "client_id": "did:key:z6MkOther", "act": {"sub": "did:key:z6MkOther"}})
+        assert verify_delegation_receipt(principal_as_agent, expected_did=self.agent_did, cred_public_key=public_key_hex) is False
+
     def test_exported_public_key_constant_is_real_hex(self):
         assert CRED_PUBLIC_KEY_HEX != "PLACEHOLDER_REPLACE_BEFORE_LAUNCH" and len(CRED_PUBLIC_KEY_HEX) == 64
 

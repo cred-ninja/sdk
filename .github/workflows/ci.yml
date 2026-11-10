@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci
       - run: npm run lint
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
@@ -59,26 +59,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci
       - run: npm audit --audit-level=moderate
 
+  # 26 is the version we develop and deploy on (.nvmrc); 22 is the oldest
+  # release line still supported and the floor in every package's engines.
   test:
-    name: Test
+    name: Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '26']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: 'npm'
       - run: npm ci
 
       # Build dependencies first — SDK and server tests import vault/oauth at runtime
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
+
+      - name: Build @credninja/attenuation
+        run: npm run build --workspace=packages/attenuation
 
       - name: Build @credninja/link
         run: npm run build --workspace=packages/link
@@ -103,6 +112,9 @@ jobs:
 
       - name: Test @credninja/protocol
         run: npm test --workspace=packages/protocol
+
+      - name: Test @credninja/attenuation
+        run: npm test --workspace=packages/attenuation
 
       - name: Test @credninja/link
         run: npm test --workspace=packages/link
@@ -142,12 +154,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci
 
       - name: Build @credninja/protocol
         run: npm run build --workspace=packages/protocol
+
+      - name: Build @credninja/attenuation
+        run: npm run build --workspace=packages/attenuation
 
       - name: Build @credninja/link
         run: npm run build --workspace=packages/link
@@ -190,7 +205,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci
       - name: Smoke fresh npm package installs

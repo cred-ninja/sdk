@@ -7,6 +7,21 @@ so an agent can discover what it can do without guessing. It is generated
 from source, not aspirational; if something here doesn't match the code,
 the code is authoritative.
 
+## What never goes in this repo
+
+This repository is public. Standards-work registers, sweep reports and
+anything else built from private mail live in the private
+`cred-ninja/standards-private` repository, never here. Do not put the
+content of private mail, mailbox message or draft identifiers, or stances
+on named people into files, commit messages, or PR titles and bodies. Cite only public archives (mailarchive.ietf.org,
+datatracker.ietf.org). `.github/workflows/public-leak-guard.yml` enforces
+this on every PR and push to `main`.
+
+## When docs and code disagree
+
+When docs or marketing describe behavior the code doesn't have, fix the code in
+the same change, or file an issue for it. Don't add a caveat to the docs instead.
+
 ## What this repo does
 
 Cred is OAuth2 credential delegation middleware for AI agents. An agent
@@ -65,7 +80,7 @@ failure is the opaque `401 {"error":"access_denied"}`). The `/link/v1/*` and
 User ids on the legacy routes: every route that acts on stored provider
 tokens resolves its user id through one resolver (`requestUserId` in
 server.ts). Without `user_id` it refuses with `400 user_id_required` unless
-`SINGLE_USER_MODE=true`, which acts on the shared user `default`. A custom
+`SINGLE_USER_MODE=true`, which acts on the shared user `default`; a generated app sets it to `false`. A custom
 `agentRequestVerifier` principal with `userId` binds agent requests to that
 user (`403 user_id_mismatch` for another). Never add a route that falls
 back to `default` on its own.
@@ -77,11 +92,20 @@ back to `default` on its own.
 | GET | `/admin/login` | None | Admin login form |
 | POST | `/admin/login` | None | Create admin session cookie |
 | GET | `/providers` | Admin | List configured providers |
-| POST | `/admin/permissions` | Admin | Create a Permission record |
+| POST | `/admin/permissions` | Admin | Create or replace a Permission record. A did:key agent is issued nothing without one (`403 permission_required`), and this ends a revocation that holds it out (`403 agent_access_revoked`). `409 permission_limits_would_drop` rather than silently drop an approval gate or rate limit |
+| POST | `/admin/permissions/:id/restore` | Admin | End the holds on this Permission's agent, for one user (`user_id`) or all, leaving the Permission as it is |
+| GET | `/admin/agent-holds` | Admin | List the revocations holding agents out (`agent_id`, `service`, `user_id`) |
 | GET | `/admin/permissions` | Admin | List/fetch Permission records |
-| PATCH | `/admin/permissions/:id` | Admin | Update a Permission record |
-| DELETE | `/admin/permissions/:id` | Admin | Delete a Permission record |
+| PATCH | `/admin/permissions/:id` | Admin | Update a Permission record. Narrowing reaches live delegations at their next `/api/v1/use` |
+| DELETE | `/admin/permissions/:id` | Admin | Revoke a Permission: the agent's live delegations on the service end, and it is issued nothing new until granted again |
 | GET | `/admin/audit` | Admin | Audit events across all agents (not scoped to one user) |
+| POST | `/bc-authorize` | Bearer + DPoP | CIBA backchannel authentication request for a delegation whose Permission requires approval; returns `auth_req_id`, `expires_in`, `interval`; the agent polls `/api/v1/token` with `grant_type=urn:openid:params:grant-type:ciba` and a DPoP proof by the same key |
+| GET | `/approve/:authReqId` | None (signed link) | Built-in approval page for the subject, reached by the signed link the approval webhook carries |
+| POST | `/approve/:authReqId` | None (signed link) | The subject's approve or deny decision |
+| GET | `/admin/approvals` | Admin | Pending approvals that need an admin |
+| POST | `/admin/approvals/:authReqId` | Admin | An admin's approve or deny decision |
+| POST | `/admin/consents/revoke` | Admin | Security event: revoke consents by id, subject or agent; their tokens are refused at exercise and the next request asks again |
+| GET | `/admin/audit/verify` | Admin | Recompute the tamper-evident audit chain; `200` with `entries`, `unchained` and the `head` (`seq`, `hash`) to record outside the host, or `409` naming the first broken entry (`501` on storage without the chain) |
 | GET | `/admin/agents` | Admin | List registered agent identities and status |
 | DELETE | `/admin/agents/:agentId` | Admin | Revoke an agent identity as an operator |
 | GET | `/connect` | Admin | Browser UI for managing provider connections |
@@ -94,9 +118,11 @@ back to `default` on its own.
 | GET | `/api/v1/providers` | Bearer | List configured provider slugs |
 | GET | `/api/v1/connections` | Bearer | List stored connections |
 | DELETE | `/api/v1/connections/:provider` | Bearer | Revoke a stored connection |
-| POST | `/api/v1/use` | Bearer | Brokered upstream API call via a delegation handle |
-| POST | `/api/v1/delegate` | Bearer | Primary v1 delegation endpoint |
-| POST | `/api/v1/subdelegate` | Bearer | Sub-delegate from a verified parent receipt; always returns a brokered handle |
+| POST | `/api/v1/use` | Delegation Token + DPoP | Brokered upstream API call: `Authorization: DPoP <Delegation Token>` and a DPoP proof by the key the token is bound to, naming the token (`ath`) and the exact body (`cred_req`), Cred Link delegations included. Each call is classified against the grant (`packages/guard/src/operations.ts`): `403 operation_not_mapped` when the tables do not map it, `403 scope_insufficient` when the grant does not cover it |
+| DELETE | `/api/v1/delegations/:delegationId` (also `/delegation/:delegationId`) | Bearer | Revoke a delegation and, transitively, every delegation derived from it; returns `revoked_count`, `revoked_ids`, `elapsed_ms` |
+| POST | `/api/v1/delegate` | Bearer + DPoP | Primary v1 delegation endpoint; issues a Delegation Token (DPoP-bound JWT: `authorization_details` as requested (granted scopes or catalogue operations with resources) or the granted scopes, `prf`, `consent_id`, `credential_handle`) to the did:key agent that proves its key with a DPoP proof, and records the consent behind it; raw-token requests take no proof |
+| POST | `/api/v1/subdelegate` | Bearer + actor token | Sub-delegate from a verified parent receipt; the caller proves it is the receipt's agent with an RFC 7523 `actor_token`; always required; returns the child's Delegation Token, bound to the receiving agent's key, or with `exchange: "grant"` a single-use delegation grant |
+| POST | `/api/v1/token` | Bearer + actor token, or DPoP (CIBA) | RFC 8693 token exchange redeeming a delegation grant, or a CIBA poll (`grant_type=urn:openid:params:grant-type:ciba`) redeeming an approved request; the receiving agent proves its did:key with an RFC 7523 `actor_token` and receives its Delegation Token (`token_type` DPoP) |
 | POST | `/api/v1/tofu/register` | Bearer | Register a TOFU identity |
 | GET | `/api/v1/web-bot-auth/keys` | Bearer | List registered Web Bot Auth identities |
 | POST | `/api/v1/web-bot-auth/keys` | Bearer | Register or import a Web Bot Auth public key |
@@ -120,7 +146,7 @@ back to `default` on its own.
 | POST | `/link/v1/connections/:id/refresh` | Link client | Force a token refresh; returns status only |
 | POST | `/link/v1/connections/:id/reauth` | Link client | Reauth pushed request for this connection |
 | POST | `/link/v1/connections/:id/permissions` | Link client | Grant an agent scopes within the grant |
-| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker` only for Google when whole API families were removed, else `record`: family level, not read versus write) |
+| POST | `/link/v1/connections/:id/narrow` | Link client | Narrow the grant to a subset of itself (no provider round trip; `enforcement` is `broker`, since every brokered call is classified against the grant as it now stands; `record` for GitHub, whose table does not separate every scope, and with `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS` set) |
 
 `GET /api/v1/audit` and `GET /admin/audit` are separate routes: the former
 is scoped to the requesting agent's own `userId`; the latter is
@@ -155,10 +181,11 @@ use flow, exposed under that framework's own tool-registration convention.
 | Package | Role |
 |---|---|
 | `packages/protocol` | Shared wire-protocol constants/types (version negotiation, error shapes). |
+| `packages/attenuation` | Dependency-free attenuation: scope grammar, constraint ceilings, chain verification, JWS signer interface, and the draft-asor -02 `agent_delegation` token format. Re-exported by `packages/vault`. |
 | `packages/oauth` | Provider OAuth adapters (Google, GitHub, Slack, Notion, Salesforce, ...). |
 | `packages/tofu` | Trust-on-first-use agent identity registry (Web Bot Auth keys, DIDs). |
-| `packages/vault` | Encrypted credential storage, Permission records, audit log. |
-| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express. |
+| `packages/vault` | Encrypted credential storage, Permission records, audit log, cumulative-constraint ledger. |
+| `packages/guard` | Composable policy engine (rate limit, scope filter, TTL, time window, URL allowlist) for MCP and Express, and the operation classifier the broker uses to decide whether a grant covers a call. |
 | `packages/sdk` | `Cred` client class — the shared surface both `packages/mcp` and `packages/server` build on. |
 | `packages/sdk-python` | Python port of the SDK client, used by the Python framework integrations. |
 | `packages/server` | Hosted REST API (cloud mode) — see endpoint table above. |

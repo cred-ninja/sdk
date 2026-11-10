@@ -38,6 +38,7 @@ import {
   use,
 } from './link-harness.js';
 import type { Harness } from './link-harness.js';
+import { actorTokenFor, delegateAs, exerciseAs, newAgent } from './token-helpers.js';
 
 let h: Harness | null = null;
 
@@ -475,7 +476,7 @@ describe('small hardening items (review item 8)', () => {
   it('refuses a Link base URL with a path, query or fragment at startup', () => {
     const base = {
       port: 0, host: '127.0.0.1', vaultPassphrase: 'x', vaultStorage: 'sqlite' as const, vaultPath: '/tmp/x-vault.sqlite',
-      tofuStorage: 'file' as const, tofuPath: '/tmp/x-tofu.json', adminToken: ADMIN_TOKEN, agentToken: AGENT_TOKEN, providers: [],
+      tofuStorage: 'file' as const, tofuPath: '/tmp/x-tofu.json', adminToken: ADMIN_TOKEN, agentToken: AGENT_TOKEN, allowRawTokens: true, providers: [],
       redirectBaseUri: BASE, linkEnabled: true,
     };
     for (const linkBaseUrl of ['https://cred.example.com/link', 'https://cred.example.com/?x=1', 'https://cred.example.com/#f']) {
@@ -505,7 +506,8 @@ describe('small hardening items (review item 8)', () => {
   });
 
   it('a ReservedVaultUserIdError that reaches the vault is a 400, never a 500', async () => {
-    const hx = await harness({ linkEnabled: false });
+    // The raw route reaches the vault only with this opt-out.
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     vi.spyOn(hx.server.vault, 'get').mockRejectedValue(new ReservedVaultUserIdError('get'));
     vi.spyOn(hx.server.vault, 'delete').mockRejectedValue(new ReservedVaultUserIdError('delete'));
     vi.spyOn(hx.server.vault, 'list').mockRejectedValue(new ReservedVaultUserIdError('list'));
@@ -515,7 +517,7 @@ describe('small hardening items (review item 8)', () => {
       await agent(request(hx.app).delete('/api/token/google?user_id=default')),
       await agent(request(hx.app).get('/api/v1/connections?user_id=default')),
       await agent(request(hx.app).delete('/api/v1/connections/google?user_id=default')),
-      await agent(request(hx.app).post('/api/v1/delegate').send({ service: 'google', user_id: 'default' })),
+      await delegateAs(hx.app, await newAgent(), { service: 'google', user_id: 'default' }, { bearer: AGENT_TOKEN }),
       await request(hx.app).get('/providers?user_id=default').set('Authorization', `Bearer ${ADMIN_TOKEN}`),
     ];
     for (const res of responses) {
@@ -528,20 +530,24 @@ describe('small hardening items (review item 8)', () => {
     const hx = await harness({ linkEnabled: false });
     const vault = hx.server.vault;
     const nowIso = new Date().toISOString();
-    await vault.registerAgent!({ id: 'agt_child', did: 'did:key:z6MkChild', name: 'child', fingerprint: 'fp_child', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: nowIso, updatedAt: nowIso });
+    const [parentAgent, childAgent] = [await newAgent(), await newAgent()];
+    await vault.registerAgent!({ id: 'agt_child', did: childAgent.did, name: 'child', fingerprint: 'fp_child', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: nowIso, updatedAt: nowIso });
     await vault.createPermission!({ agentId: 'agt_child', connectionId: 'google', allowedScopes: ['calendar.readonly'], delegatable: true, maxDelegationDepth: 3, requiresApproval: false, createdBy: 'admin' });
     const seed = crypto.scryptSync('link-test-passphrase', 'cred:local-receipt:v1', 32);
     const key = crypto.createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8' });
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({
-      iss: 'did:key:local-cred', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600,
-      sub: 'did:key:z6MkParent', service: 'google', scopes: ['calendar.readonly'], userId: 'default', appClientId: 'local',
+      iss: 'did:key:local-cred', iat: Math.floor(Date.now() / 1000) - 60, exp: Math.floor(Date.now() / 1000) + 600,
+      sub: parentAgent.did, service: 'google', scopes: ['calendar.readonly'], userId: 'default', appClientId: 'local',
       delegationId: 'del_parent', chainDepth: 0,
     })).toString('base64url');
     const receipt = `${header}.${payload}.${crypto.sign(null, Buffer.from(`${header}.${payload}`), key).toString('base64url')}`;
     vi.spyOn(vault, 'get').mockRejectedValue(new ReservedVaultUserIdError('get'));
     const res = await request(hx.app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
-      .send({ parent_receipt: receipt, agent_did: 'did:key:z6MkChild', service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+      .send({
+        parent_receipt: receipt, actor_token: actorTokenFor(parentAgent, '/api/v1/subdelegate'),
+        agent_did: childAgent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'],
+      });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_user_id');
   });
@@ -549,15 +555,17 @@ describe('small hardening items (review item 8)', () => {
 
 describe('broker allowlist (review item 9)', () => {
   it('Link off: Linear only at GraphQL, HubSpot only at data APIs, Slack never at auth.revoke', async () => {
-    const hx = await harness({ linkEnabled: false });
+    // The URL allowlist itself: it holds with classification off too.
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true, allowUnclassifiedBrokerCalls: true });
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'slack', userId: 'default', accessToken: 'xoxb-legacy', scopes: ['chat:write'] });
-    const handle = async (service: string) => (await delegate(hx.app, { service, user_id: 'default', token_format: 'handle' })).body.delegation_id as string;
+    const agent = await newAgent();
+    const handle = async (service: string) => (await delegateAs(hx.app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN, base: BASE })).body.access_token as string;
     const lin = await handle('linear');
     const hub = await handle('hubspot');
     const slk = await handle('slack');
-    const call = (id: string, url: string, method = 'POST') => use(hx.app, { delegation_id: id, url, method, ...(method === 'GET' ? {} : { body: {} }) });
+    const call = (token: string, url: string, method = 'POST') => exerciseAs(hx.app, agent, token, { url, method, ...(method === 'GET' ? {} : { body: {} }) }, { base: BASE });
 
     expect((await call(lin, 'https://api.linear.app/graphql')).status).toBe(200);
     expect((await call(lin, 'https://api.linear.app/graphql?x=1')).status).toBe(200);
@@ -735,14 +743,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('broker URLs cannot hide segments with percent-encoding (v2 item 1)', () => {
   it('refuses encoded dot, slash, backslash and percent in any case, and dot or empty segments', async () => {
-    const hx = await harness({ linkEnabled: false });
+    const hx = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await hx.server.vault.store({ provider: 'slack', userId: 'default', accessToken: 'xoxb-legacy', scopes: ['chat:write'] });
     await hx.server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
     await hx.server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await hx.server.vault.store({ provider: 'google', userId: 'default', accessToken: 'g_tok', scopes: ['calendar.readonly'] });
-    const handle = async (service: string) => (await delegate(hx.app, { service, user_id: 'default', token_format: 'handle' })).body.delegation_id as string;
+    const agent = await newAgent();
+    const handle = async (service: string) => (await delegateAs(hx.app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN, base: BASE })).body.access_token as string;
     const ids = { slack: await handle('slack'), hubspot: await handle('hubspot'), linear: await handle('linear'), google: await handle('google') };
-    const call = (service: keyof typeof ids, url: string, method = 'GET') => use(hx.app, { delegation_id: ids[service], url, method });
+    const call = (service: keyof typeof ids, url: string, method = 'GET') => exerciseAs(hx.app, agent, ids[service], { url, method }, { base: BASE });
 
     const refused: Array<[keyof typeof ids, string]> = [
       ['slack', 'https://slack.com/api/auth%2Erevoke'],
@@ -1022,13 +1031,9 @@ describe('polish review: narrowing', () => {
     expect((await hx.server.link!.context.store.getGrantForConnection(conn))!.scopes).toEqual(['calendar.readonly', 'gmail.send']);
   });
 
-  it('Slack (enforcement record): records shrink, but a brokered call still reaches upstream', async () => {
-    // Known Phase 1 limit, documented in the README and in
-    // NarrowConnectionResponse.enforcement: narrowing never changes the
-    // provider token, and the broker cannot tell which Slack scope a URL
-    // needs, so a still-valid handle can reach any allowlisted Slack URL.
-    // To really remove access, run an update or reauth for fewer scopes, or
-    // delete the connection.
+  it('Slack (enforcement broker): a call only the removed scope covered is refused before upstream', async () => {
+    // Narrowing never changes the provider token, but every brokered call is
+    // classified against the grant as it now stands.
     const hx = await harness();
     const { app } = hx;
     const client = await registerClient(app);
@@ -1042,7 +1047,7 @@ describe('polish review: narrowing', () => {
     const n = await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['channels:read'] });
     expect(n.status).toBe(200);
     expect(n.body.removed_scopes).toEqual(['chat:write']);
-    expect(n.body.enforcement).toBe('record');
+    expect(n.body.enforcement).toBe('broker');
 
     // The records: an agent can no longer request or be issued the scope.
     const named = await delegate(app, { connection_id: r.connection_id, scopes: ['chat:write'] });
@@ -1051,11 +1056,67 @@ describe('polish review: narrowing', () => {
     expect(fresh.status).toBe(200);
     expect(fresh.body.scopes).toEqual(['channels:read']);
 
-    // The limit: the brokered call still reaches Slack through either handle.
+    // Refused through the handle issued before the narrow, and a fresh one.
     const post = (id: string) => use(app, { delegation_id: id, url: 'https://slack.com/api/chat.postMessage', method: 'POST', body: { channel: 'C1', text: 'hi' } });
-    expect((await post(oldHandle)).status).toBe(200);
-    expect((await post(fresh.body.delegation_id)).status).toBe(200);
-    expect(hx.fake.upstream.filter((u) => u.url === 'https://slack.com/api/chat.postMessage')).toHaveLength(2);
+    for (const id of [oldHandle, fresh.body.delegation_id]) {
+      const refused = await post(id);
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toBe('scope_insufficient');
+    }
+    expect(hx.fake.upstream.filter((u) => u.url === 'https://slack.com/api/chat.postMessage')).toHaveLength(0);
+    // What stayed still works, through both.
+    for (const id of [oldHandle, fresh.body.delegation_id]) {
+      expect((await use(app, { delegation_id: id, url: 'https://slack.com/api/conversations.list', method: 'POST', body: {} })).status).toBe(200);
+    }
+  });
+
+  it('GitHub answers record, whose table does not separate every scope, and its calls are still classified', async () => {
+    const hx = await harness();
+    hx.fake.githubScope = 'repo,read:user';
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['github'], scopes: { github: ['repo', 'read:user'] }, required_scopes: {} }), { provider: 'github', scopes: ['repo', 'read:user'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'github')).text, ['repo', 'read:user']));
+    if (r.outcome !== 'success') throw new Error('github flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    const handle = (await delegate(app, { connection_id: r.connection_id })).body.delegation_id;
+    const n = await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['read:user'] });
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['repo']);
+    expect(n.body.enforcement).toBe('record');
+    const write = await use(app, { delegation_id: handle, url: 'https://api.github.com/repos/o/r/issues', method: 'POST', body: { title: 't' } });
+    expect(write.status).toBe(403);
+    expect(write.body.error).toBe('scope_insufficient');
+    expect(hx.fake.upstream.map((u) => u.url)).not.toContain('https://api.github.com/repos/o/r/issues');
+  });
+
+  it('Slack: a kept read scope with a sibling still on the token answers record', async () => {
+    const hx = await harness();
+    hx.fake.slackScope = 'chat:write,channels:read,groups:read';
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['slack'], scopes: { slack: ['chat:write', 'channels:read'] }, required_scopes: {} }), { provider: 'slack', scopes: ['chat:write', 'channels:read'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'slack')).text, ['chat:write', 'channels:read']));
+    if (r.outcome !== 'success') throw new Error('slack flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    expect((await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['channels:read'] })).body.enforcement).toBe('record');
+  });
+
+  it('Slack with classification off (deprecated) answers record, and the call still reaches upstream', async () => {
+    const hx = await harness({ allowUnclassifiedBrokerCalls: true });
+    const { app } = hx;
+    const client = await registerClient(app);
+    const b = new Browser();
+    const pu = await toProvider(app, b, await par(app, client, { providers: ['slack'], scopes: { slack: ['chat:write', 'channels:read'] }, required_scopes: {} }), { provider: 'slack', scopes: ['chat:write', 'channels:read'] });
+    const r = resultOf(await confirm(app, b, (await callback(app, b, pu, 'slack')).text, ['chat:write', 'channels:read']));
+    if (r.outcome !== 'success') throw new Error('slack flow failed');
+    expect((await activate(app, client, r.connection_id, r.code)).status).toBe(200);
+    const handle = (await delegate(app, { connection_id: r.connection_id })).body.delegation_id;
+    const n = await narrow(hx, client, r.connection_id, { subject: 'user-a', scopes: ['channels:read'] });
+    expect(n.body.enforcement).toBe('record');
+    expect((await use(app, { delegation_id: handle, url: 'https://slack.com/api/chat.postMessage', method: 'POST', body: { channel: 'C1', text: 'hi' } })).status).toBe(200);
   });
 
   it('Google (enforcement broker): a call to a removed scope\'s endpoint is refused before upstream', async () => {
@@ -1190,10 +1251,54 @@ describe('second review: Google narrowing is enforced per API family only', () =
     return request(hx.app).post(`/link/v1/connections/${id}/narrow`).set('Authorization', client.auth).send({ subject: 'user-a', scopes });
   }
 
-  it('a same-family narrow answers record, and the call still reaches Google (known limit)', async () => {
-    // Known Phase 1 limit: the broker tells Google API families apart, not
-    // scopes inside a family, so gmail.readonly still unlocks gmail send.
+  it('a same-family narrow answers broker, and sending is refused before Google', async () => {
     const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['gmail.readonly', 'gmail.send']);
+    const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, ['gmail.readonly']);
+    expect(n.status).toBe(200);
+    expect(n.body.removed_scopes).toEqual(['gmail.send']);
+    expect(n.body.enforcement).toBe('broker');
+    const fresh = (await delegate(hx.app, { connection_id: conn })).body;
+    expect(fresh.scopes).toEqual(['gmail.readonly']);
+    for (const id of [old, fresh.delegation_id]) {
+      const refused = await use(hx.app, { delegation_id: id, url: GMAIL_SEND_WWW, method: 'POST', body: { raw: 'x' } });
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toBe('scope_insufficient');
+    }
+    expect(hx.fake.upstream.map((u) => u.url)).not.toContain(GMAIL_SEND_WWW);
+    expect((await narrow(hx, client, conn, ['gmail.readonly'])).body).toMatchObject({ changed: false, enforcement: 'broker' });
+  });
+
+  it('keeping a resource-partitioned scope while the token holds a wider one answers record', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['drive', 'drive.file']);
+    const n = await narrow(hx, client, conn, ['drive.file']);
+    expect(n.status, JSON.stringify(n.body)).toBe(200);
+    expect(n.body.enforcement).toBe('record');
+    expect((await narrow(hx, client, conn, ['drive.file'])).body).toMatchObject({ changed: false, enforcement: 'record' });
+  });
+
+  it('keeping a read scope whose wider scope was removed still answers broker', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['drive', 'drive.readonly']);
+    expect((await narrow(hx, client, conn, ['drive.readonly'])).body.enforcement).toBe('broker');
+  });
+
+  it('a mixed removal answers broker, and each removed scope is closed', async () => {
+    const hx = await harness();
+    const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly', 'gmail.send']);
+    const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
+    const n = await narrow(hx, client, conn, ['gmail.readonly']);
+    expect(n.body.removed_scopes).toEqual(['calendar.readonly', 'gmail.send']);
+    expect(n.body.enforcement).toBe('broker');
+    expect((await use(hx.app, { delegation_id: old, url: CALENDAR_URL, method: 'GET' })).status).not.toBe(200);
+    expect((await use(hx.app, { delegation_id: old, url: GMAIL_SEND_WWW, method: 'POST', body: { raw: 'x' } })).status).toBe(403);
+  });
+
+  it('with classification off (deprecated), a same-family narrow answers record, and the call still reaches Google', async () => {
+    // The broker then tells Google API families apart, not scopes inside one.
+    const hx = await harness({ allowUnclassifiedBrokerCalls: true });
     const { client, conn } = await googleConnection(hx, ['gmail.readonly', 'gmail.send']);
     const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
     const n = await narrow(hx, client, conn, ['gmail.readonly']);
@@ -1212,6 +1317,13 @@ describe('second review: Google narrowing is enforced per API family only', () =
     expect(again.body).toMatchObject({ changed: false, enforcement: 'record' });
   });
 
+  it('with classification off (deprecated), a whole-family narrow still answers broker', async () => {
+    const hx = await harness({ allowUnclassifiedBrokerCalls: true });
+    const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly']);
+    const n = await narrow(hx, client, conn, ['calendar.readonly']);
+    expect(n.body.enforcement).toBe('broker');
+  });
+
   it('a whole-family narrow answers broker, and the call is refused before Google', async () => {
     const hx = await harness();
     const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly', 'gmail.send']);
@@ -1228,8 +1340,8 @@ describe('second review: Google narrowing is enforced per API family only', () =
     expect(again.body).toMatchObject({ changed: false, enforcement: 'broker' });
   });
 
-  it('a mixed removal (one whole family plus one same-family scope) answers record', async () => {
-    const hx = await harness();
+  it('with classification off (deprecated), a mixed removal answers record', async () => {
+    const hx = await harness({ allowUnclassifiedBrokerCalls: true });
     const { client, conn } = await googleConnection(hx, ['calendar.readonly', 'gmail.readonly', 'gmail.send']);
     const old = (await delegate(hx.app, { connection_id: conn })).body.delegation_id;
     const n = await narrow(hx, client, conn, ['gmail.readonly']);

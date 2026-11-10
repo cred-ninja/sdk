@@ -5,16 +5,15 @@
   "license": "Apache-2.0",
   "author": "Cred",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "main": "./dist/cjs/index.js",
-  "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.js",
-      "types": "./dist/cjs/index.d.ts"
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/cjs/index.js",
+      "require": "./dist/cjs/index.js"
     }
   },
   "files": [
@@ -31,6 +30,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@credninja/attenuation": "^2.0.0",
     "@credninja/protocol": "^2.0.0",
     "better-sqlite3": "^12.6.2"
   },
@@ -46,7 +46,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.11.5",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.12"
   },
   "publishConfig": {
     "access": "public"

@@ -40,7 +40,7 @@ jobs:
         if: matrix.language == 'javascript-typescript'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '26'
           cache: npm
 
       - name: Install Node dependencies
@@ -51,6 +51,7 @@ jobs:
         if: matrix.language == 'javascript-typescript'
         run: |
           npm run build --workspace=packages/protocol
+          npm run build --workspace=packages/attenuation
           npm run build --workspace=packages/oauth
           npm run build --workspace=packages/tofu
           npm run build --workspace=packages/vault

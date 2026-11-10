@@ -24,9 +24,19 @@ import { UrlAllowlistPolicy } from '@credninja/guard';
 export interface TokenEntry {
   accessToken?: string;
   serverDelegationId?: string;
+  /**
+   * The server's Delegation Token for a brokered delegation. It stays in
+   * this process: the model only ever sees the cache's own id.
+   */
+  delegationToken?: string;
+  /** The agent the Delegation Token is bound to: only that agent can exercise it. */
+  tokenAgentDid?: string;
   service: string;
   userId: string;
   scopes?: string[];
+  /** Nothing narrowed this delegation: it is everything the stored connection holds. */
+  unnarrowed?: boolean;
+  constraints?: unknown[];
   brokered?: boolean;
   expiresAt: number; // Unix ms
 }
@@ -150,7 +160,7 @@ export class TokenCache {
   /** Store a token and return a delegation handle */
   store(entry: TokenEntry): string {
     const id = `del_${crypto.randomBytes(10).toString('hex')}`;
-    this.entries.set(id, { ...entry });
+    this.entries.set(id, { ...entry, ...(entry.constraints !== undefined ? { constraints: structuredClone(entry.constraints) } : {}) });
 
     const ttl = entry.expiresAt - Date.now();
     if (ttl > 0) {
@@ -169,12 +179,24 @@ export class TokenCache {
       this.entries.delete(id);
       return undefined;
     }
-    return { ...entry };
+    return { ...entry, ...(entry.constraints !== undefined ? { constraints: structuredClone(entry.constraints) } : {}) };
   }
 
   /** Revoke a handle early (e.g. after cred_revoke) */
   delete(id: string): boolean {
     return this.entries.delete(id);
+  }
+
+  /** Drop every handle for one user's connection to a service (after cred_revoke). */
+  deleteForConnection(service: string, userId: string): number {
+    let removed = 0;
+    for (const [id, entry] of this.entries) {
+      if (entry.service === service && entry.userId === userId) {
+        this.entries.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   /**

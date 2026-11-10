@@ -7,10 +7,13 @@ import { LINK_OPAQUE_FAILURE_BODY } from '@credninja/protocol';
 import { createServer } from '../server.js';
 import {
   ADMIN_TOKEN,
+  LINK_AGENT_ID,
   AGENT_TOKEN,
+  BASE,
   Browser,
   CALENDAR_URL,
   activate,
+  agentFor,
   authorizePath,
   basic,
   callback,
@@ -27,6 +30,7 @@ import {
   use,
 } from './link-harness.js';
 import type { Harness } from './link-harness.js';
+import { delegateAs, exerciseAs, newAgent } from './token-helpers.js';
 
 let h: Harness | null = null;
 
@@ -41,6 +45,38 @@ async function harness(overrides: Parameters<typeof makeHarness>[0] = {}): Promi
 }
 
 describe('Link delegation enforcement without a Guard', () => {
+  it('hands out no Link raw token while CRED_ALLOW_RAW_TOKENS is off, even with the client flag', async () => {
+    const { app } = await harness({ allowRawTokens: false });
+    const client = await registerClient(app, { allow_raw_tokens: true });
+    const connectionId = await connectAndActivate(app, client);
+    const raw = await delegate(app, { connection_id: connectionId, token_format: 'raw' });
+    expect(raw.status).toBe(400);
+    expect(raw.body.access_token).toBeUndefined();
+    expect(JSON.stringify(raw.body)).not.toContain('ya29.access-1');
+  });
+
+  it('issues no Link Delegation Token to the shared static Bearer identity, or without a key proof', async () => {
+    const staticBearer = await harness({ agentRequestVerifier: undefined });
+    const client = await registerClient(staticBearer.app);
+    const connectionId = await connectAndActivate(staticBearer.app, client);
+    const res = await delegate(staticBearer.app, { connection_id: connectionId });
+    expect(res.status).toBe(400);
+    expect(res.body.delegation_id).toBeUndefined();
+    expect(JSON.stringify(res.body)).toMatch(/identified agent/);
+
+    const { app } = await harness();
+    const keyed = await registerClient(app);
+    const keyedConnection = await connectAndActivate(app, keyed);
+    const noProof = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ connection_id: keyedConnection, agent_did: (await newAgent()).did });
+    expect(noProof.status).toBe(401);
+    expect(noProof.body.access_token).toBeUndefined();
+    const noKey = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ connection_id: keyedConnection });
+    expect(noKey.status).toBe(400);
+    expect(noKey.body.error).toBe('agent_key_required');
+  });
+
   it('refuses pending, needs_reauth and revoked connections on delegate and use with typed codes', async () => {
     const { app, server } = await harness();
     const store = server.link!.context.store;
@@ -88,6 +124,32 @@ describe('Link delegation enforcement without a Guard', () => {
     const res = await use(app, { delegation_id: handle.body.delegation_id, url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', method: 'POST', body: {} });
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ error: 'insufficient_scope', scope: 'gmail.send' });
+  });
+
+  it('a revocation holds the Link agent against a new key, until it is granted again', async () => {
+    const { app, server } = await harness();
+    const client = await registerClient(app);
+    const connectionId = await connectAndActivate(app, client);
+    const firstKey = await agentFor(app);
+    const first = await delegate(app, { connection_id: connectionId });
+    expect(first.status).toBe(200);
+    const now = new Date().toISOString();
+    await server.vault.registerAgent!({ id: 'agt_key', did: firstKey.did, name: 'k', fingerprint: 'fp_k', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: now, updatedAt: now });
+    const revoked = await request(app).delete('/admin/agents/agt_key').set('Authorization', `Bearer ${ADMIN_TOKEN}`);
+    expect(revoked.status).toBe(204);
+
+    const freshKey = await newAgent();
+    const ask = () => delegateAs(app, freshKey, { connection_id: connectionId }, { bearer: AGENT_TOKEN });
+    const held = await ask();
+    expect(held.status, JSON.stringify(held.body)).toBe(403);
+    expect(held.body.error).toBe('permission_required');
+
+    const set = await request(app).post(`/link/v1/connections/${connectionId}/permissions`).set('Authorization', client.auth)
+      .send({ agent_id: LINK_AGENT_ID, scopes: ['calendar.readonly'] });
+    expect(set.status).toBe(200);
+    const after = await ask();
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(after.body.scopes).toEqual(['calendar.readonly']);
   });
 
   it('is deny-by-default per agent: permission_required until the backend grants the agent', async () => {
@@ -145,8 +207,8 @@ describe('Link delegation enforcement without a Guard', () => {
     expect(raw.body.error).toBe('invalid_request');
     expect(raw.body.access_token).toBeUndefined();
     const def = await delegate(app, { connection_id: connectionId });
-    expect(def.body.token_type).toBe('Delegation');
-    expect(def.body.access_token).toBeUndefined();
+    expect(def.body.token_type).toBe('DPoP');
+    expect(JSON.stringify(def.body)).not.toContain('ya29');
   });
 
   it('issues raw tokens only with allow_raw_tokens and a refreshable provider, with an audit event each', async () => {
@@ -203,6 +265,12 @@ describe('Link delegation enforcement without a Guard', () => {
     const own = await use(app, { delegation_id: handle.body.delegation_id, url: 'https://acme.my.salesforce.com/services/data/v60.0/sobjects', method: 'GET' });
     expect(own.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.authorization).toBe('Bearer 00Dsf-access');
+    // The audit log names the instance stored for this connection, and no other host.
+    const events = server.vault.queryAuditEvents({ limit: 100 });
+    expect(events.find((e) => e.action === 'access' && e.outcome === 'success')?.metadata?.origin).toBe('https://acme.my.salesforce.com');
+    const refused = events.find((e) => e.errorMessage === 'url_refused');
+    expect(refused?.metadata?.origin).toBe('refused');
+    expect(JSON.stringify(refused)).not.toContain('evil.my.salesforce.com');
   });
 
   it('refuses a Salesforce instance_url outside the host grammar', async () => {
@@ -224,10 +292,73 @@ describe('Link delegation enforcement without a Guard', () => {
   });
 });
 
+describe('Link Delegation Tokens', () => {
+  it('apply the did:key agent checks, write no success audit on a refused issue, and stop when the agent is revoked', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const agent = await agentFor(hx.app);
+    const suspendedAgent = await newAgent();
+    const now = new Date().toISOString();
+    const register = (id: string, did: string, status: 'active' | 'suspended', scopeCeiling: string[] = []) => hx.server.vault.registerAgent!({
+      id, did, name: id, fingerprint: `fp_${id}`, scopeCeiling, status, createdBy: 'admin', createdAt: now, updatedAt: now,
+    });
+    await register('agt_suspended', suspendedAgent.did, 'suspended');
+    const successes = () => (hx.server.vault.queryAuditEvents({ limit: 500 }) as Array<{ action: string; outcome: string }>)
+      .filter((e) => e.action === 'delegate' && e.outcome === 'success').length;
+    const before = successes();
+    const suspended = await delegateAs(hx.app, suspendedAgent, { connection_id: connectionId, scopes: ['calendar.readonly'] }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(suspended.status).toBe(403);
+    expect(suspended.body.error).toBe('agent_suspended');
+    const ceilinged = await newAgent();
+    await register('agt_ceiling', ceilinged.did, 'active', ['gmail.readonly']);
+    const overCeiling = await delegateAs(hx.app, ceilinged, { connection_id: connectionId, scopes: ['calendar.readonly'] }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(overCeiling.status).toBe(403);
+    expect(overCeiling.body.error).toBe('scope_ceiling_exceeded');
+    expect(successes()).toBe(before);
+
+    await register('agt_link', agent.did, 'active');
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    expect(successes()).toBe(before + 1);
+    const call = { delegation_id: minted.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+    expect((await use(hx.app, call)).status).toBe(200);
+    expect((await request(hx.app).delete('/admin/agents/agt_link').set('Authorization', `Bearer ${ADMIN_TOKEN}`)).status).toBeLessThan(300);
+    expect((await use(hx.app, call)).status).toBe(401);
+  });
+
+  it('last no longer than a receipt', async () => {
+    const hx = await harness({ receiptTtlSeconds: 60 });
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    expect(minted.body.expires_in).toBe(60);
+  });
+
+  it('are restored from the vault after a restart with their Link binding, so the grant still decides', async () => {
+    const hx = await harness();
+    const client = await registerClient(hx.app);
+    const connectionId = await connectAndActivate(hx.app, client);
+    const minted = await delegate(hx.app, { connection_id: connectionId, scopes: ['calendar.readonly'] });
+    expect(minted.status).toBe(200);
+    const call = { delegation_id: minted.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+
+    const next = await hx.restart();
+    expect((await use(next.app, call)).status).toBe(200);
+    // Revoking the connection's grant refuses the restored token.
+    await next.link!.context.store.setConnectionStatus({ connection_id: connectionId, status: 'revoked', now: new Date().toISOString() });
+    const refused = await use(next.app, call);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('grant_revoked');
+  });
+});
+
 describe('Agent identity for Link checks (decision 6)', () => {
   it('uses the verified principal of a custom verifier; another agent cannot use the handle', async () => {
     const { app } = await harness({
       agentToken: undefined,
+      allowRawTokens: true,
       agentRequestVerifier: (req) => {
         const id = req.get('x-test-agent');
         return id ? { ok: true, principal: { type: 'test', principalId: id } } : { ok: false };
@@ -235,32 +366,34 @@ describe('Agent identity for Link checks (decision 6)', () => {
     });
     const client = await registerClient(app);
     const connectionId = await connectAndActivate(app, client, { parOverrides: { agent_id: 'agent-a' } });
-    const asA = await request(app).post('/api/v1/delegate').set('x-test-agent', 'agent-a').send({ connection_id: connectionId });
+    const [keyA, keyB] = [await newAgent(), await newAgent()];
+    const asA = await delegateAs(app, keyA, { connection_id: connectionId }, { bearer: 'unused', base: BASE, headers: { 'x-test-agent': 'agent-a' } });
     expect(asA.status).toBe(200);
-    const asB = await request(app).post('/api/v1/delegate').set('x-test-agent', 'agent-b').send({ connection_id: connectionId, agent_id: 'agent-a' });
+    const asB = await delegateAs(app, keyB, { connection_id: connectionId, agent_id: 'agent-a' }, { bearer: 'unused', base: BASE, headers: { 'x-test-agent': 'agent-b' } });
     expect(asB.status).toBe(403);
     expect(asB.body.error).toBe('permission_required');
-    const useAsB = await request(app).post('/api/v1/use').set('x-test-agent', 'agent-b')
-      .send({ delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(useAsB.status).toBe(403);
-    expect(useAsB.body.error).toBe('permission_required');
-    const useAsA = await request(app).post('/api/v1/use').set('x-test-agent', 'agent-a')
-      .send({ delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(useAsA.status).toBe(200);
+    const call = { delegation_id: asA.body.delegation_id, url: CALENDAR_URL, method: 'GET' };
+    // Agent B has neither the token nor its key: the id alone is refused,
+    // and A's token with B's key fails the proof.
+    expect((await request(app).post('/api/v1/use').set('x-test-agent', 'agent-b').send(call)).status).toBe(401);
+    expect((await exerciseAs(app, keyB, asA.body.access_token, call, { base: BASE })).status).toBe(401);
+    expect((await exerciseAs(app, keyA, asA.body.access_token, call, { base: BASE })).status).toBe(200);
   });
 });
 
 describe('TOFU identity for Link checks', () => {
   it('maps a verified TOFU proof (bound to the connection_id) to tofu:<agentId>', async () => {
-    const { app, server } = await harness();
+    // TOFU identifies the caller of the static Bearer: no custom verifier.
+    const { app, server } = await harness({ agentRequestVerifier: undefined });
     const client = await registerClient(app);
     const connectionId = await connectAndActivate(app, client, { parOverrides: { agent_id: null } });
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
     const raw = new Uint8Array(publicKey.export({ type: 'spki', format: 'der' }).subarray(-32));
     const registration = await server.tofu.registerAgent({ publicKey: raw, initialScopes: [] });
     const tofuId = `tofu:${registration.agentId}`;
-    const proof = (userId: string) => {
-      const payload = Buffer.from(JSON.stringify({ service: 'google', userId, appClientId: 'local', scopes: ['calendar.readonly'], timestamp: new Date().toISOString() }));
+    const agentDid = (await agentFor(app)).did;
+    const proof = (userId: string, boundDid: string | null = agentDid) => {
+      const payload = Buffer.from(JSON.stringify({ service: 'google', userId, appClientId: 'local', scopes: ['calendar.readonly'], timestamp: new Date().toISOString(), ...(boundDid ? { agent_did: boundDid } : {}) }));
       return { tofu_fingerprint: registration.fingerprint, tofu_payload: payload.toString('base64'), tofu_signature: sign(null, payload, privateKey).toString('base64') };
     };
     const body = { connection_id: connectionId, service: 'google', scopes: ['calendar.readonly'] };
@@ -273,14 +406,25 @@ describe('TOFU identity for Link checks', () => {
       .send({ agent_id: tofuId, scopes: ['calendar.readonly'] });
     const ok = await delegate(app, { ...body, ...proof(connectionId) });
     expect(ok.status).toBe(200);
+    // The same signed proof replayed beside another key binds nothing: the
+    // payload names the key the token is bound to.
+    const thief = await newAgent();
+    const replayed = await delegateAs(app, thief, { ...body, ...proof(connectionId) }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(replayed.status).toBe(400);
+    expect(replayed.body.access_token).toBeUndefined();
+    const unbound = await delegate(app, { ...body, ...proof(connectionId, null) });
+    expect(unbound.status).toBe(400);
     // A proof signed for another userId does not establish identity.
     const wrongBinding = await delegate(app, { ...body, ...proof('default') });
     expect(wrongBinding.status).toBe(403);
     expect(wrongBinding.body.error).toBe('permission_required');
-    // The static bearer alone is 'server-agent', not the TOFU principal.
-    const asBearer = await use(app, { delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
-    expect(asBearer.status).toBe(403);
-    expect(asBearer.body.error).toBe('permission_required');
+    // The static Bearer alone, naming the delegation, exercises nothing.
+    const asBearer = await request(app).post('/api/v1/use').set('Authorization', `Bearer ${AGENT_TOKEN}`)
+      .send({ delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' });
+    expect(asBearer.status).toBe(401);
+    expect(asBearer.body.error).toBe('invalid_token');
+    // The TOFU agent's token, proven by its key, does.
+    expect((await use(app, { delegation_id: ok.body.delegation_id, url: CALENDAR_URL, method: 'GET' })).status).toBe(200);
   });
 });
 
@@ -502,6 +646,7 @@ describe('Configuration and pre-existing gap fixes', () => {
       tofuPath: '/tmp/never-created-tofu.json',
       adminToken: ADMIN_TOKEN,
       agentToken: AGENT_TOKEN,
+      allowRawTokens: true,
       providers: [],
       redirectBaseUri: 'http://localhost:3456',
       linkEnabled: true,
@@ -516,19 +661,21 @@ describe('Configuration and pre-existing gap fixes', () => {
   });
 
   it('brokers Linear and HubSpot API calls (SERVICE_ALLOWLIST)', async () => {
-    const { app, server } = await harness({ linkEnabled: false });
+    const { app, server } = await harness({ linkEnabled: false, allowAgentsWithoutPermission: true });
     await server.vault.store({ provider: 'linear', userId: 'default', accessToken: 'lin_tok', scopes: ['read'] });
     await server.vault.store({ provider: 'hubspot', userId: 'default', accessToken: 'hub_tok', scopes: ['crm.objects.contacts.read'] });
-    const lin = await delegate(app, { service: 'linear', user_id: 'default', token_format: 'handle' });
+    const agent = await newAgent();
+    const mint = (service: string) => delegateAs(app, agent, { service, user_id: 'default' }, { bearer: AGENT_TOKEN });
+    const lin = await mint('linear');
     expect(lin.status).toBe(200);
-    const linUse = await use(app, { delegation_id: lin.body.delegation_id, url: 'https://api.linear.app/graphql', method: 'POST', body: { query: '{ viewer { id } }' } });
+    const linUse = await exerciseAs(app, agent, lin.body.access_token, { url: 'https://api.linear.app/graphql', method: 'POST', body: { query: '{ viewer { id } }' } });
     expect(linUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)).toEqual({ url: 'https://api.linear.app/graphql', authorization: 'Bearer lin_tok' });
-    const hub = await delegate(app, { service: 'hubspot', user_id: 'default', token_format: 'handle' });
-    const hubUse = await use(app, { delegation_id: hub.body.delegation_id, url: 'https://api.hubapi.com/crm/v3/objects/contacts', method: 'GET' });
+    const hub = await mint('hubspot');
+    const hubUse = await exerciseAs(app, agent, hub.body.access_token, { url: 'https://api.hubapi.com/crm/v3/objects/contacts', method: 'GET' });
     expect(hubUse.status).toBe(200);
     expect(h!.fake.upstream.at(-1)!.url).toBe('https://api.hubapi.com/crm/v3/objects/contacts');
-    const offHost = await use(app, { delegation_id: hub.body.delegation_id, url: 'https://evil.example.com/crm/v3/objects/contacts', method: 'GET' });
+    const offHost = await exerciseAs(app, agent, hub.body.access_token, { url: 'https://evil.example.com/crm/v3/objects/contacts', method: 'GET' });
     expect(offHost.status).toBe(400);
   });
 });

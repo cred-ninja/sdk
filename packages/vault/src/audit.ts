@@ -87,6 +87,70 @@ export function hmacAuditField(value: string, secret: string): string {
   return crypto.createHmac('sha256', secret).update(value).digest('hex');
 }
 
+// ── Tamper-evident chain ──────────────────────────────────────────────────────
+
+/**
+ * Result of checking the audit chain. Each chained entry carries an
+ * HMAC-SHA256, under a key derived from the vault passphrase, over the
+ * previous entry's hash and its own stored fields, so editing, deleting or
+ * reordering a chained entry breaks every later one. Rows written before
+ * the chain existed are counted as `unchained`.
+ */
+export type AuditChainVerification =
+  | { ok: true; entries: number; unchained: number; head: AuditChainHead | null }
+  | { ok: false; entries: number; unchained: number; brokenAt: number; reason: string };
+
+/**
+ * The newest chained entry. Record it somewhere the vault's host cannot
+ * rewrite (an external log, a ticket, a time-stamp service): the chain
+ * proves nothing against an attacker who also holds the vault passphrase,
+ * except relative to a head recorded earlier.
+ */
+export interface AuditChainHead {
+  seq: number;
+  hash: string;
+}
+
+/** The value the first chained entry links to. */
+export const AUDIT_CHAIN_GENESIS = 'cred-audit-chain-v1';
+
+/**
+ * What the first chained entry links to: the genesis value and the number
+ * of unchained rows (written before the chain existed) at that moment. The
+ * count is bound into every hash after it, so an unchained row added later,
+ * or a chained row stripped of its chain columns, breaks the chain at
+ * entry 1 instead of passing as a pre-upgrade row.
+ */
+export function auditChainGenesis(unchainedBefore: number): string {
+  return `${AUDIT_CHAIN_GENESIS}:${unchainedBefore}`;
+}
+
+/**
+ * The stored audit columns the chain hash covers, in hash order. Every
+ * AuditRow field must be listed (checked below at compile time); a new
+ * column goes at the end so existing chains keep verifying.
+ */
+export const AUDIT_CHAIN_FIELDS = [
+  'id', 'timestamp', 'actor_type', 'actor_id', 'actor_fingerprint',
+  'action', 'resource_type', 'resource_id', 'outcome',
+  'delegation_chain', 'scopes_requested', 'scopes_granted',
+  'correlation_id', 'sensitive_hmac', 'metadata_json', 'error_message', 'created_at',
+] as const satisfies readonly (keyof AuditRow)[];
+
+// Fails to compile when AuditRow gains a field the chain does not hash.
+const auditChainCoversAuditRow: Exclude<keyof AuditRow, (typeof AUDIT_CHAIN_FIELDS)[number]> extends never ? true : never = true;
+void auditChainCoversAuditRow;
+
+/**
+ * Chain hash of one stored row: HMAC-SHA256(key, previousHash "\n" JSON of
+ * the sequence number and AUDIT_CHAIN_FIELDS, in order). Exported for
+ * verifiers.
+ */
+export function auditChainHash(key: Buffer, previousHash: string, seq: number, row: AuditRow): string {
+  const fields = [seq, ...AUDIT_CHAIN_FIELDS.map((field) => row[field])];
+  return crypto.createHmac('sha256', key).update(`${previousHash}\n${JSON.stringify(fields)}`, 'utf8').digest('base64url');
+}
+
 // ── Raw DB row type ───────────────────────────────────────────────────────────
 
 /** Raw audit_events DB row — used by SQLite backends. */
@@ -112,6 +176,11 @@ export interface AuditRow {
 
 // ── SQLite audit backend ──────────────────────────────────────────────────────
 
+/**
+ * Standalone audit log in its own SQLite file. Its rows are not chained:
+ * do not point it at a vault database, whose chain verification would
+ * report them as tampering.
+ */
 export class SQLiteAuditBackend implements AuditBackend {
   private db: import('better-sqlite3').Database | null = null;
 

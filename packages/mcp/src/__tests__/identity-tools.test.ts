@@ -241,7 +241,7 @@ describe('identity lifecycle tools registration (integration)', () => {
   );
 
   afterEach(() => {
-    for (const suffix of ['', '.salt']) {
+    for (const suffix of ['', '.salt', '.check']) {
       const p = TEST_VAULT_PATH + suffix;
       if (fs.existsSync(p)) fs.unlinkSync(p);
     }

@@ -32,6 +32,19 @@
 // Core
 export { CredGuard } from './guard.js';
 
+// Operation classification
+export {
+  evaluateOperation,
+  canonicalBrokerUrl,
+  methodOverrideChannel,
+  contentTypeMismatch,
+  narrowedScopeStaysExposed,
+  hasOperationTable,
+  SLACK_MAPPED_METHODS,
+} from './operations.js';
+export type { OperationAccess, OperationRequest, OperationVerdict } from './operations.js';
+export { withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, isBrokerOnlyScope, providerScopesFor } from '@credninja/protocol';
+
 // Types
 export type {
   GuardContext,

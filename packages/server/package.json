@@ -36,24 +36,25 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "dependencies": {
+    "@credninja/attenuation": "^2.0.0",
     "@credninja/guard": "^2.0.0",
     "@credninja/oauth": "^2.0.0",
     "@credninja/protocol": "^2.0.0",
     "@credninja/tofu": "^2.0.0",
     "@credninja/vault": "^2.0.0",
-    "better-sqlite3": "^11.8.1",
+    "@types/express": "^5.0.5",
+    "better-sqlite3": "^12.6.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2"
   },
   "devDependencies": {
-    "@types/express": "^5.0.5",
     "@types/node": "^20.10.6",
     "typescript": "^5.3.3",
     "tsx": "^4.7.0",
-    "vitest": "^4.1.7",
+    "vitest": "^4.1.12",
     "supertest": "^7.0.0",
     "@types/supertest": "^6.0.2",
     "jsdom": "^26.1.0"

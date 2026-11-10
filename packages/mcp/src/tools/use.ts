@@ -13,7 +13,8 @@
  */
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Cred } from '@credninja/sdk';
+import { Cred, CredError } from '@credninja/sdk';
+import { canonicalBrokerUrl, contentTypeMismatch, evaluateOperation, methodOverrideChannel, withDerivedScopes, withStoredDerivedScopes } from '@credninja/guard';
 import { TokenCache } from '../token-cache.js';
 import type { WebBotAuthSigner } from '../web-bot-auth.js';
 import { summarizeGuardDecision } from '../guard-wiring.js';
@@ -99,6 +100,17 @@ export interface UseToolContext {
   tokenCache: TokenCache;
   cred?: Cred;
   webBotAuthSigner?: WebBotAuthSigner;
+  /** True in cloud mode, where every cached entry is a server handle. */
+  useServerBroker?: boolean;
+  agentDid?: string;
+  /**
+   * Local mode: forward calls without classifying them, and follow redirects
+   * (CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS). Deprecated: a read-only scope can
+   * then reach a write endpoint. Each call's audit event says so.
+   */
+  allowUnclassifiedCalls?: boolean;
+  /** This agent's own identity; signs the DPoP proof for each brokered call. */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleUse(
@@ -114,6 +126,24 @@ export async function handleUse(
     };
   }
 
+  if (!entry.brokered && entry.constraints !== undefined) {
+    try {
+      // Vault is an optional peer: cloud handles rely on the server's
+      // authoritative constraint list. Never ignore a local list.
+      const { parseConstraints, unknownConstraints } = await import('@credninja/vault');
+      const parsed = parseConstraints(entry.constraints);
+      if (!parsed.ok) throw new CredError(parsed.message, 'invalid_constraints', 400);
+      if (unknownConstraints(parsed.constraints).length > 0) {
+        throw new CredError('This delegation carries an unimplemented constraint type', 'unknown_constraint', 403);
+      }
+      if (parsed.constraints.length > 0) {
+        throw new CredError('Local mode cannot enforce delegation constraints', 'unsupported_constraint', 403);
+      }
+    } catch (err) {
+      return toolErrorResult(err, 'Constraint evaluation failed');
+    }
+  }
+
   if (entry.brokered) {
     if (!context.cred) {
       return {
@@ -121,9 +151,22 @@ export async function handleUse(
         isError: true,
       };
     }
+    if (entry.tokenAgentDid && context.delegatorIdentity && entry.tokenAgentDid !== context.delegatorIdentity.did) {
+      return {
+        content: [{ type: 'text', text: `Error: this delegation is bound to ${entry.tokenAgentDid}; only that agent can use it.` }],
+        isError: true,
+      };
+    }
+    if (!entry.delegationToken || !context.delegatorIdentity) {
+      return {
+        content: [{ type: 'text', text: 'Error: a brokered call needs the Delegation Token and this agent\'s identity (CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX).' }],
+        isError: true,
+      };
+    }
     try {
       const result = await context.cred.use({
-        delegationId: entry.serverDelegationId ?? input.delegation_id,
+        token: entry.delegationToken,
+        agentIdentity: context.delegatorIdentity,
         url: input.url,
         method: input.method,
         body: input.body,
@@ -145,8 +188,30 @@ export async function handleUse(
     };
   }
 
+  const classify = context.allowUnclassifiedCalls !== true;
+  const refuse = async (error: string, text: string, metadata: Record<string, unknown>): Promise<CallToolResult> => {
+    try {
+      await context.cred?.recordLocalRefusal?.({
+        service: entry.service,
+        userId: entry.userId,
+        error,
+        metadata,
+        ...(context.agentDid ? { agentId: context.agentDid } : {}),
+      });
+    } catch {
+      // The call stays refused whether or not the refusal could be recorded.
+    }
+    return { content: [{ type: 'text', text }], isError: true };
+  };
+
+  // Canonicalize once: what is checked below is exactly what is forwarded.
+  const targetUrl = classify ? canonicalBrokerUrl(input.url) : input.url;
+  if (targetUrl === null) {
+    return refuse('url_refused', `Error: URL is not a valid ${entry.service} API endpoint.`, { method: input.method });
+  }
+
   // ── 2. Validate target URL (SSRF protection) ───────────────────────────────
-  if (!context.tokenCache.isAllowedUrl(entry.service, input.url, entry.scopes)) {
+  if (!context.tokenCache.isAllowedUrl(entry.service, targetUrl, entry.scopes)) {
     return {
       content: [{
         type: 'text',
@@ -166,7 +231,56 @@ export async function handleUse(
     };
   }
 
-  // ── 4. Build and execute the upstream request ──────────────────────────────
+  // ── 3b. Classify the exact call: the same refusal the server broker gives ──
+  if (classify) {
+    if (methodOverrideChannel({ url: targetUrl, ...(input.extra_headers ? { headers: input.extra_headers } : {}), body: input.body })) {
+      return refuse('method_override_refused', 'Error: invalid_request: a method override is not allowed. The call runs the method it names.', { method: input.method });
+    }
+    const verdict = contentTypeMismatch(input.extra_headers)
+      ? { outcome: 'not_mapped' as const, reason: 'content_type' }
+      : evaluateOperation(
+          { service: entry.service, method: input.method, url: targetUrl, body: input.body },
+          // Only an unnarrowed delegation is the whole stored connection: a list
+          // narrowed to nothing covers nothing.
+          entry.unnarrowed ? withStoredDerivedScopes(entry.service, entry.scopes ?? []) : withDerivedScopes(entry.service, entry.scopes ?? []),
+        );
+    if (verdict.outcome === 'not_mapped') {
+      return refuse('operation_not_mapped', `Error: operation_not_mapped: this ${entry.service} call is not mapped to a scope, so it is refused.`, { method: input.method, reason: verdict.reason });
+    }
+    if (verdict.outcome === 'insufficient') {
+      return refuse('scope_insufficient', `Error: scope_insufficient: this delegation's scopes do not cover this ${verdict.access} call.`, { method: input.method, access: verdict.access });
+    }
+  }
+
+  // The check against the stored Salesforce instance is in authorizeLocalUse:
+  // with nothing to run it, no host can be trusted with the token.
+  if (entry.service === 'salesforce' && !(context.cred && context.useServerBroker === false)) {
+    return refuse('salesforce_instance_unknown', 'Error: salesforce_instance_unknown: this call cannot be checked against the connection\'s Salesforce instance.', { method: input.method });
+  }
+
+  // ── 4. Local mode: re-check the connection and audit the exercise ─────────
+  // The cached token outlives a revocation made by another process sharing
+  // the vault, so the connection is checked on every call, not only at
+  // cred_delegate time.
+  if (context.cred && context.useServerBroker === false) {
+    try {
+      await context.cred.authorizeLocalUse({
+        service: entry.service,
+        userId: entry.userId,
+        accessToken: entry.accessToken,
+        ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
+        ...(entry.service === 'salesforce' ? { targetUrl } : {}),
+        ...(context.agentDid ? { agentId: context.agentDid } : {}),
+        ...(classify ? {} : { auditMetadata: { enforcementOptOuts: ['unclassified_broker_calls'] } }),
+      });
+    } catch (err) {
+      // A wrong host says nothing about the handle: only a revoked connection ends it.
+      if (!(err instanceof CredError && err.code.startsWith('salesforce_instance_'))) context.tokenCache.delete(input.delegation_id);
+      return toolErrorResult(err, 'Local use was refused');
+    }
+  }
+
+  // ── 5. Build and execute the upstream request ──────────────────────────────
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${entry.accessToken}`,
     'Accept': 'application/json',
@@ -177,7 +291,8 @@ export async function handleUse(
     ...(input.extra_headers
       ? Object.fromEntries(
           Object.entries(input.extra_headers).filter(
-            ([key, value]) => isForwardableExtraHeader(key, value),
+            // Content-Type was checked above and is always JSON: set here, not by the caller.
+            ([key, value]) => isForwardableExtraHeader(key, value) && !(classify && key.trim().toLowerCase() === 'content-type'),
           ),
         )
       : {}),
@@ -186,12 +301,13 @@ export async function handleUse(
   // Execute with manual redirect handling. fetch() follows redirects by
   // default, which would forward the Authorization: Bearer token to whatever
   // Location a (possibly compromised or DNS-hijacked) allowed host returns —
-  // exfiltrating the token to an arbitrary URL. We re-validate every hop
-  // against the same per-service allowlist and refuse to follow a redirect to
-  // a non-allowlisted target.
+  // exfiltrating the token to an arbitrary URL. A redirect is not followed: its
+  // target would be a call nobody classified, so the agent gets the 3xx. Only
+  // the deprecated opt-out follows, re-validating every hop against the
+  // per-service allowlist.
   const MAX_REDIRECTS = 5;
   let response: Response;
-  let currentUrl = input.url;
+  let currentUrl = targetUrl;
   try {
     for (let hop = 0; ; hop++) {
       const hopHeaders = context.webBotAuthSigner
@@ -211,7 +327,7 @@ export async function handleUse(
 
       const isRedirect =
         response.status >= 300 && response.status < 400 && response.headers.has('location');
-      if (!isRedirect) {
+      if (!isRedirect || classify) {
         break;
       }
 
@@ -223,7 +339,8 @@ export async function handleUse(
       }
 
       const nextUrl = new URL(response.headers.get('location')!, currentUrl).toString();
-      if (!context.tokenCache.isAllowedUrl(entry.service, nextUrl, entry.scopes)) {
+      const leavesInstance = entry.service === 'salesforce' && new URL(nextUrl).origin !== new URL(targetUrl).origin;
+      if (leavesInstance || !context.tokenCache.isAllowedUrl(entry.service, nextUrl, entry.scopes)) {
         // Refuse to forward the token to a redirect target outside the allowlist.
         return {
           content: [{
@@ -245,7 +362,7 @@ export async function handleUse(
     };
   }
 
-  // ── 5. Read and truncate response ──────────────────────────────────────────
+  // ── 6. Read and truncate response ──────────────────────────────────────────
   const contentType = response.headers.get('content-type') ?? '';
   const raw = await response.text();
   const truncated = raw.length > MAX_RESPONSE_BYTES;

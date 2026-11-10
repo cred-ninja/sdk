@@ -203,6 +203,8 @@ describe('SQLiteBackend — vault_agents', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'cred-sqlite-agent-'));
     backend = new SQLiteBackend(join(tmpDir, 'vault.db'));
     backend.init();
+    // CredVault.init() derives this from the passphrase; a bare backend needs one.
+    backend.setAuditChainKey(Buffer.alloc(32, 7));
   });
 
   afterEach(() => {
@@ -287,5 +289,23 @@ describe('SQLiteBackend — vault_agents', () => {
     const agent = backend.getAgent('agt_001');
     expect(agent!.status).toBe('suspended');
     expect(agent!.revokedAt).toBeNull();
+  });
+
+  it('writes a batch of audit events in one transaction, all or nothing', () => {
+    const event = (id: string) => ({
+      id,
+      timestamp: new Date(),
+      actor: { type: 'system' as const, id: 'admin' },
+      action: 'revoke' as const,
+      resource: { type: 'token' as const, id: 'google/user-123' },
+      outcome: 'success' as const,
+      correlationId: 'corr_1',
+    });
+    backend.writeAuditEvents([event('evt_1'), event('evt_2')]);
+    expect(backend.queryAuditEvents({ action: 'revoke' }).map((e) => e.id).sort()).toEqual(['evt_1', 'evt_2']);
+
+    // evt_1 again violates the primary key: evt_3 must not be kept either.
+    expect(() => backend.writeAuditEvents([event('evt_3'), event('evt_1')])).toThrow();
+    expect(backend.queryAuditEvents({ action: 'revoke' })).toHaveLength(2);
   });
 });
