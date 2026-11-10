@@ -71,6 +71,10 @@ describe('Cred constructor', () => {
     expect(local).toBeInstanceOf(Cred);
   });
 
+  it.each(['http://127.0.0.1:3456', 'http://[::1]:3456'])('allows HTTP for loopback %s', (baseUrl) => {
+    expect(new Cred({ agentToken: TOKEN, baseUrl })).toBeInstanceOf(Cred);
+  });
+
   it('rejects HTTP for non-localhost', () => {
     expect(() => new Cred({ agentToken: TOKEN, baseUrl: 'http://remote.example.com' })).toThrow('HTTPS');
   });

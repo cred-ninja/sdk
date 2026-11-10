@@ -25,6 +25,14 @@
 - `SECURITY-AUDITS.md` is now titled Security Review Notes and dated: these are
   maintainer reviews, not independent audits.
 - `docs/releases/npm-2.0.0.md` records that 2.0.0 is published.
+- `SECURITY-AUDITS.md` scopes each review result to its date and scope, and its
+  dependency, test-count and transport statements match the code.
+
+### Fixed: the TypeScript SDK accepts `http://[::1]` for local development
+
+- `@credninja/sdk`: `new Cred({ baseUrl: 'http://[::1]:3456' })` no longer throws.
+  The loopback check compared the hostname with `::1`, but a parsed URL keeps the
+  brackets. The Python SDK already accepted it.
 
 ### BREAKING: a Salesforce token goes only to its connection's instance
 
