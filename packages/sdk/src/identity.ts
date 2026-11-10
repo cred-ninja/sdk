@@ -5,7 +5,8 @@
  * Zero external dependencies — Node.js crypto module only.
  */
 
-import { generateKeyPair, KeyObject, verify, createPrivateKey, createPublicKey } from 'node:crypto';
+import { generateKeyPair, KeyObject, verify, sign, randomUUID, createHash, createPrivateKey, createPublicKey } from 'node:crypto';
+import { canonicalJson } from '@credninja/attenuation';
 import { promisify } from 'node:util';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
@@ -101,6 +102,10 @@ export interface DelegationReceiptPayload {
   exp?: number;
   /** Intended audience for the receipt (e.g. the issuing server's base URI) */
   aud?: string;
+  /** The acting agent DID (draft-02 layout; legacy receipts carry it in `sub`). */
+  client_id?: string;
+  /** Current actor, `{ sub: <agent DID> }`, with prior actors nested (draft-02 layout). */
+  act?: { sub: string; act?: unknown };
 }
 
 // ── Base58btc alphabet (Bitcoin) ─────────────────────────────────────────────
@@ -295,7 +300,18 @@ export async function verifyDelegationReceipt(
     const payload: DelegationReceiptPayload = JSON.parse(
       base64UrlDecode(payloadB64).toString('utf8'),
     );
-    if (payload.sub !== opts.expectedDid) {
+    // The acting agent: `act.sub` (which must equal `client_id`) on a
+    // receipt in the draft-02 claim layout, where `sub` names the principal;
+    // `sub` on a legacy receipt.
+    const act = (payload as { act?: unknown }).act;
+    let agentDid: unknown = payload.sub;
+    if (act !== undefined) {
+      if (typeof act !== 'object' || act === null || (act as { sub?: unknown }).sub !== payload.client_id) {
+        return false;
+      }
+      agentDid = payload.client_id;
+    }
+    if (agentDid !== opts.expectedDid) {
       return false;
     }
 
@@ -355,6 +371,73 @@ function createIdentity(
       };
     },
   };
+}
+
+/**
+ * An RFC 7523 JWT assertion signed with the agent's own did:key: `iss` and
+ * `sub` are the agent DID, `aud` the endpoint it is presented to. The Cred
+ * server takes it as `actor_token` on `/api/v1/subdelegate` (proving the
+ * caller is the agent its parent receipt names) and on `/api/v1/token`.
+ * Valid for two minutes; the server rejects a replayed `jti`.
+ */
+export function createActorToken(identity: Pick<AgentIdentity, 'did' | 'privateKey'>, audience: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const signingInput = `${encode({ alg: 'EdDSA', typ: 'JWT' })}.${encode({
+    iss: identity.did,
+    sub: identity.did,
+    aud: audience,
+    iat: now,
+    exp: now + 120,
+    jti: randomUUID(),
+  })}`;
+  const key = createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(identity.privateKey)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  return `${signingInput}.${sign(null, Buffer.from(signingInput, 'utf8'), key).toString('base64url')}`;
+}
+
+/**
+ * A DPoP proof (RFC 9449) signed with the agent's own did:key, for one
+ * request to the Cred server. `htm` and `htu` name the method and URL
+ * (without query or fragment). With `handle`, the proof also commits to that
+ * delegation handle (`ath`, base64url SHA-256 of the handle id), so it cannot
+ * be replayed against another handle. With `requestBody`, it also commits to
+ * that exact request (`cred_req`, base64url SHA-256 of its RFC 8785 form):
+ * a /api/v1/use proof authorizes one upstream call, with this URL, method,
+ * body and headers. The server rejects a proof older than two
+ * minutes or a replayed `jti`; make a new one per request.
+ */
+export function createDpopProof(
+  identity: Pick<AgentIdentity, 'did' | 'privateKey'>,
+  htm: string,
+  htu: string,
+  handle?: string,
+  requestBody?: unknown,
+): string {
+  const key = createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(identity.privateKey)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const publicJwk = createPublicKey(key).export({ format: 'jwk' }) as { kty: string; crv: string; x: string };
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const signingInput = `${encode({ alg: 'EdDSA', typ: 'dpop+jwt', jwk: { kty: publicJwk.kty, crv: publicJwk.crv, x: publicJwk.x } })}.${encode({
+    htm,
+    htu,
+    iat: Math.floor(Date.now() / 1000),
+    jti: randomUUID(),
+    ...(handle !== undefined ? { ath: createHash('sha256').update(handle, 'ascii').digest('base64url') } : {}),
+    ...(requestBody !== undefined ? { cred_req: createHash('sha256').update(canonicalJson(requestBody), 'utf8').digest('base64url') } : {}),
+  })}`;
+  return `${signingInput}.${sign(null, Buffer.from(signingInput, 'utf8'), key).toString('base64url')}`;
+}
+
+/** The did:key naming an Ed25519 public key. */
+export function didKeyForPublicKey(publicKey: KeyObject): string {
+  return publicKeyToDid(extractRawPublicKey(publicKey));
 }
 
 function publicKeyToDid(publicKey: Uint8Array): string {

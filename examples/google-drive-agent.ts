@@ -1,4 +1,4 @@
-// Demonstrates: agent receives a scoped Google delegation handle via Cred.
+// Demonstrates: agent receives a scoped, key-bound Google Delegation Token via Cred.
 // Raw OAuth credentials and provider access tokens never touch the agent host.
 //
 // Prerequisites:
@@ -8,7 +8,7 @@
 //
 // Run: npx tsx examples/google-drive-agent.ts
 
-import { Cred } from "@credninja/sdk";
+import { Cred, generateAgentIdentity } from "@credninja/sdk";
 
 async function main() {
   const baseUrl = process.env.CRED_BASE_URL;
@@ -31,19 +31,25 @@ async function main() {
     agentToken,
   });
 
-  // Delegate to Google. The returned handle is used through Cred's broker.
+  // The Delegation Token is bound to this agent's key (DPoP): only this
+  // identity can exercise it, and each call carries a fresh proof.
+  const agentIdentity = await generateAgentIdentity();
+
+  // Delegate to Google. The returned token is used through Cred's broker.
   const credential = await cred.delegateHandle({
     service: "google",
     userId: "default",
     appClientId,
     scopes: ["drive.readonly"],
+    agentIdentity,
   });
 
-  console.log(`✓ Got Google delegation handle (expires in ${credential.expiresIn}s)`);
+  console.log(`✓ Got Google Delegation Token (expires in ${credential.expiresIn}s)`);
   console.log(`  Scopes: ${credential.scopes.join(", ")}`);
 
   const result = await cred.use({
-    delegationId: credential.delegationId,
+    token: credential.token,
+    agentIdentity,
     url: "https://www.googleapis.com/drive/v3/files?pageSize=10&fields=files(id,name,mimeType)",
     method: "GET",
   });

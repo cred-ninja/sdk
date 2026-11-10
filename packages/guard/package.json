@@ -6,7 +6,7 @@
   "author": "CredNinja",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -29,14 +29,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@credninja/protocol": "^2.0.0"
+    "@credninja/protocol": "^2.0.0",
+    "@types/express": "^5.0.5",
+    "graphql": "^16.14.2"
   },
   "devDependencies": {
     "@credninja/vault": "^2.0.0",
-    "@types/express": "^5.0.5",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.12"
   },
   "publishConfig": {
     "access": "public"

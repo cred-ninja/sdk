@@ -6,15 +6,21 @@ Uses `cryptography` package for Ed25519 operations.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import time
+import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives import serialization
+
+from .jcs import canonical_json
 
 # ── Cred Public Key (pinned at build time) ───────────────────────────────────
 
@@ -248,6 +254,103 @@ def generate_agent_identity() -> AgentIdentity:
     return AgentIdentity(did, public_key_bytes, private_key_bytes)
 
 
+# ── DPoP proofs (RFC 9449) ───────────────────────────────────────────────────
+
+
+class DpopSigningIdentity(Protocol):
+    """The part of an agent identity that signs DPoP proofs."""
+
+    @property
+    def did(self) -> str: ...
+
+    @property
+    def private_key(self) -> bytes: ...
+
+
+def _base64url_encode(data: bytes) -> str:
+    """Encode bytes as base64url without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _compact_json(value: dict[str, object]) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+def dpop_ath(handle: str) -> str:
+    """``ath`` for a delegation handle: base64url SHA-256 of the handle id."""
+    return _base64url_encode(hashlib.sha256(handle.encode("ascii")).digest())
+
+
+def dpop_request_hash(request_body: Any) -> str:
+    """``cred_req`` for a request body: base64url SHA-256 of its RFC 8785 (JCS) form."""
+    return _base64url_encode(hashlib.sha256(canonical_json(request_body).encode("utf-8")).digest())
+
+
+def create_dpop_proof(
+    identity: DpopSigningIdentity,
+    htm: str,
+    htu: str,
+    handle: Optional[str] = None,
+    request_body: Optional[Any] = None,
+) -> str:
+    """Create a DPoP proof (RFC 9449) signed with the agent's own did:key.
+
+    ``htm`` and ``htu`` name the HTTP method and URL (without query or
+    fragment) of the one request the proof is for. With ``handle``, the proof
+    also commits to that delegation handle (``ath``, base64url SHA-256 of the
+    handle id), so it cannot be replayed against another handle. The server
+    rejects a proof older than two minutes or a replayed ``jti``; make a new
+    one per request.
+
+    Args:
+        identity: The agent identity (``did`` and raw 32-byte ``private_key``).
+        htm: HTTP method, e.g. ``"POST"``.
+        htu: Request URL without query or fragment.
+        handle: Delegation handle id to bind the proof to, if any.
+        request_body: The whole JSON request body, exactly as sent. When
+            given, the proof carries ``cred_req``, the base64url SHA-256 of
+            its RFC 8785 (JCS) serialization, so it authorizes this one
+            request and no other. Raises :class:`CanonicalJsonError` (a
+            ``ValueError``) when the body has no JCS form.
+
+    Returns:
+        The proof as a compact JWS, for the ``DPoP`` request header.
+    """
+    private_key = bytes(identity.private_key)
+    if len(private_key) != 32:
+        raise ValueError("Invalid private key: must be 32 bytes")
+    if "?" in htu or "#" in htu:
+        raise ValueError("htu must not carry a query or fragment")
+    private_key_obj = Ed25519PrivateKey.from_private_bytes(private_key)
+    public_key = private_key_obj.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if identity.did.startswith("did:key:") and _public_key_to_did(public_key) != identity.did:
+        raise ValueError("Identity DID does not match its private key")
+
+    header: dict[str, object] = {
+        "alg": "EdDSA",
+        "typ": "dpop+jwt",
+        # Public key only: never the private member "d".
+        "jwk": {"kty": "OKP", "crv": "Ed25519", "x": _base64url_encode(public_key)},
+    }
+    claims: dict[str, object] = {
+        "htm": htm,
+        "htu": htu,
+        "iat": int(time.time()),
+        "jti": str(uuid.uuid4()),
+    }
+    if handle is not None:
+        claims["ath"] = dpop_ath(handle)
+    if request_body is not None:
+        claims["cred_req"] = dpop_request_hash(request_body)
+
+    signing_input = f"{_base64url_encode(_compact_json(header))}.{_base64url_encode(_compact_json(claims))}"
+    signature = private_key_obj.sign(signing_input.encode("ascii"))
+    return f"{signing_input}.{_base64url_encode(signature)}"
+
+
 # ── Receipt Verification ─────────────────────────────────────────────────────
 
 
@@ -310,7 +413,16 @@ def verify_delegation_receipt(
 
         # Decode payload and verify DID matches
         payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
-        if payload.get("sub") != expected_did:
+        # The acting agent: act.sub (equal to client_id) on a receipt in the
+        # draft-02 claim layout, where sub names the principal; sub on a
+        # legacy receipt.
+        act = payload.get("act")
+        agent_did = payload.get("sub")
+        if act is not None:
+            if not isinstance(act, dict) or act.get("sub") != payload.get("client_id"):
+                return False
+            agent_did = payload.get("client_id")
+        if agent_did != expected_did:
             return False
 
         # Verify signature

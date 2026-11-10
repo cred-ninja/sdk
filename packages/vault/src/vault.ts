@@ -1,4 +1,6 @@
 import fs from 'fs';
+import crypto from 'crypto';
+import { performance } from 'perf_hooks';
 import { generateSalt, encryptWithKey, decryptWithKey, deriveKey } from './crypto.js';
 import { SQLiteBackend } from './storage/sqlite.js';
 import { FileBackend } from './storage/file.js';
@@ -19,8 +21,21 @@ import type {
   Rotation,
   RotationStrategy,
 } from './types.js';
-import type { AuditEvent, AuditFilter } from './audit.js';
+import type { AuditEvent, AuditFilter, AuditChainHead, AuditChainVerification } from './audit.js';
 import { RotationEngine } from './rotation.js';
+import {
+  MemoryDelegationStore,
+  type DelegationRecord,
+  type DelegationRevocationOptions,
+  type DelegationRevocationResult,
+  type DelegationRevocationSeed,
+  type RecordDelegationInput,
+  type AgentRevocation,
+  type AgentRevocationFilter,
+  MemoryAgentRevocationStore,
+} from './delegation-revocation.js';
+import { MemoryConsentStore } from './consent.js';
+import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from './consent.js';
 import { PermissionStore, type CreatePermissionInput } from './permissions.js';
 import { isReservedLinkVaultUserId, ReservedVaultUserIdError } from './link/vault-ids.js';
 import { LINK_VAULT_ACCESS, type LinkVaultAccess } from './link/vault-access.js';
@@ -60,16 +75,21 @@ export class CredVault {
   // Passphrase held only in this field — never serialized or logged
   private readonly passphrase: string;
   private readonly saltPath: string;
+  private readonly checkPath: string;
   private derivedKey: Buffer | null = null;
   private initPromise: Promise<void> | null = null;
   private rotationEngine: RotationEngine | null = null;
   private permissionStore: PermissionStore | null = null;
+  private memoryDelegations: MemoryDelegationStore | null = null;
+  private memoryConsents: MemoryConsentStore | null = null;
+  private memoryAgentRevocations: MemoryAgentRevocationStore | null = null;
 
   constructor(options: VaultOptions) {
     genuineVaults.add(this);
     this.passphrase = options.passphrase;
     // Salt stored adjacent to the vault data file
     this.saltPath = options.path + '.salt';
+    this.checkPath = options.path + '.check';
 
     if (options.storage === 'sqlite') {
       this.backend = new SQLiteBackend(options.path);
@@ -90,8 +110,13 @@ export class CredVault {
    */
   async init(): Promise<void> {
     await this.backend.init();
-    const salt = this.loadOrCreateSalt();
-    this.derivedKey = deriveKey(this.passphrase, salt);
+    const { salt, created } = this.loadOrCreateSalt();
+    const derivedKey = deriveKey(this.passphrase, salt);
+    this.checkPassphrase(derivedKey, created);
+    this.derivedKey = derivedKey;
+    // The audit chain key is derived from the passphrase-derived key and is
+    // never stored, so a copy of the database alone cannot forge the chain.
+    this.backend.setAuditChainKey?.(crypto.createHmac('sha256', this.derivedKey).update('cred:audit-chain:v1').digest());
   }
 
   /**
@@ -105,15 +130,44 @@ export class CredVault {
     await this.initPromise;
   }
 
-  private loadOrCreateSalt(): Buffer {
-    if (fs.existsSync(this.saltPath)) {
-      const hex = fs.readFileSync(this.saltPath, 'utf8').trim();
-      return Buffer.from(hex, 'hex');
+  /**
+   * Load the salt, or create it. Two processes creating the same vault at
+   * once converge on one salt: only the first write lands, and the other
+   * reads it.
+   */
+  private loadOrCreateSalt(): { salt: Buffer; created: boolean } {
+    if (!fs.existsSync(this.saltPath)) {
+      const salt = generateSalt();
+      if (writeFileIfAbsent(this.saltPath, salt.toString('hex'))) return { salt, created: true };
     }
+    const hex = fs.readFileSync(this.saltPath, 'utf8').trim();
+    return { salt: Buffer.from(hex, 'hex'), created: false };
+  }
 
-    const salt = generateSalt();
-    fs.writeFileSync(this.saltPath, salt.toString('hex'), { encoding: 'utf8', mode: 0o600 });
-    return salt;
+  /**
+   * Refuse a passphrase other than the one this vault was created with,
+   * before anything is read or written: a wrong one would decrypt nothing
+   * and extend the audit chain under the wrong key. A new vault (its salt was
+   * just created) or one created before the check existed gets one now.
+   */
+  private checkPassphrase(derivedKey: Buffer, saltCreated: boolean): void {
+    const expected = crypto.createHmac('sha256', derivedKey).update('cred:passphrase-check:v1').digest();
+    if (saltCreated) {
+      // A new salt is a new vault: any check value left beside it is stale.
+      replaceFile(this.checkPath, expected.toString('hex'));
+      return;
+    }
+    if (writeFileIfAbsent(this.checkPath, expected.toString('hex'))) return;
+    const stored = fs.readFileSync(this.checkPath, 'utf8').trim();
+    if (!/^[0-9a-f]{64}$/.test(stored)) {
+      throw new Error(`Vault passphrase check value at ${this.checkPath} is malformed`);
+    }
+    if (!crypto.timingSafeEqual(Buffer.from(stored, 'hex'), expected)) {
+      throw new Error(
+        `Vault passphrase does not match the passphrase this vault was created with (check value in ${this.checkPath}). `
+        + 'If that file was written by a start with a mistaken passphrase, remove it and start again with the correct one.',
+      );
+    }
   }
 
   private ensureKey(): Buffer {
@@ -163,6 +217,7 @@ export class CredVault {
       accessTokenTag: accessEnc.tag,
       expiresAt: input.expiresAt?.toISOString(),
       scopes: input.scopes ? JSON.stringify(input.scopes) : undefined,
+      ...(input.instanceUrl ? { instanceUrl: input.instanceUrl } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -239,6 +294,8 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          // A refresh never moves a connection to another instance.
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         });
 
         return {
@@ -248,6 +305,7 @@ export class CredVault {
           refreshToken: newRefreshToken,
           expiresAt: newExpiresAt,
           scopes: newScopes,
+          ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
           createdAt: new Date(row.createdAt),
           updatedAt: new Date(),
         };
@@ -269,6 +327,7 @@ export class CredVault {
       refreshToken,
       expiresAt,
       scopes,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };
@@ -314,6 +373,7 @@ export class CredVault {
       refreshToken,
       expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
       scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
     };
@@ -360,6 +420,7 @@ export class CredVault {
         refreshToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
         scopes: row.scopes ? (JSON.parse(row.scopes) as string[]) : undefined,
+      ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
         createdAt: new Date(row.createdAt),
         updatedAt: new Date(row.updatedAt),
       };
@@ -428,6 +489,146 @@ export class CredVault {
     await this.backend.updateAgentStatus(agentId, 'revoked', now);
   }
 
+  /**
+   * Revoke an agent and cascade: every delegation issued to the agent's DID
+   * and every delegation derived from those is revoked too. The agent is
+   * marked revoked first, so a delegation recorded for it after this point
+   * is refused (see recordDelegation()). An agent without a DID has no
+   * delegations to reach and returns an empty result.
+   */
+  async revokeAgentCascade(agentId: string, options: DelegationRevocationOptions = {}): Promise<DelegationRevocationResult> {
+    const started = performance.now();
+    await this.ensureInit();
+    const agent = await this.getAgent(agentId);
+    await this.revokeAgent(agentId);
+    if (!agent?.did) {
+      return { revoked: [], revokedIds: [], count: 0, elapsedMs: performance.now() - started, truncated: false };
+    }
+    return this.revokeDelegationsSince(started, { agentDid: agent.did }, options);
+  }
+
+  // ── Delegation records ───────────────────────────────────────────────────
+
+  /**
+   * Backends with a delegation table persist records; the others (the file
+   * backend) keep them in process memory, alongside the in-memory brokered
+   * handles they describe.
+   */
+  private delegationStore(): Required<Pick<StorageBackend, 'storeDelegation' | 'getDelegation' | 'revokeDelegationTree'>> {
+    const backend = this.backend;
+    if (backend.storeDelegation && backend.getDelegation && backend.revokeDelegationTree) {
+      return {
+        storeDelegation: backend.storeDelegation.bind(backend),
+        getDelegation: backend.getDelegation.bind(backend),
+        revokeDelegationTree: backend.revokeDelegationTree.bind(backend),
+      };
+    }
+    this.memoryDelegations ??= new MemoryDelegationStore();
+    const memory = this.memoryDelegations;
+    return {
+      storeDelegation: memory.storeDelegation.bind(memory),
+      getDelegation: memory.getDelegation.bind(memory),
+      revokeDelegationTree: memory.revokeDelegationTree.bind(memory),
+    };
+  }
+
+  /**
+   * Record an issued delegation and its parent linkage. Throws
+   * DelegationRevokedError when the parent delegation (or, on SQLite, the
+   * agent) is already revoked; the caller must not hand the delegation out.
+   */
+  async recordDelegation(input: RecordDelegationInput): Promise<DelegationRecord> {
+    await this.ensureInit();
+    return this.delegationStore().storeDelegation(input, new Date().toISOString());
+  }
+
+  /** Record a consent event once (draft Section 8.2); a replayed id keeps the first record. */
+  async recordConsent(input: RecordConsentInput): Promise<ConsentRecord> {
+    await this.ensureInit();
+    const now = new Date().toISOString();
+    if (this.backend.storeConsent) return this.backend.storeConsent(input, now);
+    this.memoryConsents ??= new MemoryConsentStore();
+    return this.memoryConsents.storeConsent(input, now);
+  }
+
+  async getConsent(id: string): Promise<ConsentRecord | null> {
+    await this.ensureInit();
+    if (this.backend.getConsent) return this.backend.getConsent(id);
+    return this.memoryConsents?.getConsent(id) ?? null;
+  }
+
+  /** Revoke consents after a security event (draft Section 8.3); returns the revoked ids. */
+  async revokeConsents(filter: ConsentRevocationFilter, reason: string): Promise<string[]> {
+    await this.ensureInit();
+    const now = new Date().toISOString();
+    if (this.backend.revokeConsents) return this.backend.revokeConsents(filter, reason, now);
+    this.memoryConsents ??= new MemoryConsentStore();
+    return this.memoryConsents.revokeConsents(filter, reason, now);
+  }
+
+  /** Consent records of one subject, agent and service, newest first. */
+  async findConsents(filter: { subject: string; agentDid: string; service: string }): Promise<ConsentRecord[]> {
+    await this.ensureInit();
+    if (this.backend.findConsents) return this.backend.findConsents(filter);
+    return (this.memoryConsents?.findConsents(filter) ?? []).reverse();
+  }
+
+  async getConsentRevocation(id: string): Promise<ConsentRevocation | null> {
+    await this.ensureInit();
+    if (this.backend.getConsentRevocation) return this.backend.getConsentRevocation(id);
+    return this.memoryConsents?.getConsentRevocation(id) ?? null;
+  }
+
+  /** Delete consent records whose retention (from the later of grant and expiry) ended before `before`. */
+  async purgeConsents(before: Date): Promise<number> {
+    await this.ensureInit();
+    if (this.backend.purgeConsents) return this.backend.purgeConsents(before.toISOString());
+    return this.memoryConsents?.purgeConsents(before.toISOString()) ?? 0;
+  }
+
+  async getDelegation(id: string): Promise<DelegationRecord | null> {
+    await this.ensureInit();
+    return this.delegationStore().getDelegation(id);
+  }
+
+  /**
+   * Revoke delegations and, transitively, every delegation derived from
+   * them. Idempotent: delegations already revoked are not counted again.
+   */
+  async revokeDelegations(seed: DelegationRevocationSeed, options: DelegationRevocationOptions = {}): Promise<DelegationRevocationResult> {
+    const started = performance.now();
+    await this.ensureInit();
+    return this.revokeDelegationsSince(started, seed, options);
+  }
+
+  private async revokeDelegationsSince(
+    started: number,
+    seed: DelegationRevocationSeed,
+    options: DelegationRevocationOptions,
+  ): Promise<DelegationRevocationResult> {
+    const revokedAt = new Date().toISOString();
+    const { revoked, truncated } = await this.delegationStore().revokeDelegationTree(seed, revokedAt, options);
+    // A backend with a delegation table does this in its own transaction.
+    if (options.hold && !this.backend.revokeDelegationTree) {
+      const holds: AgentRevocation[] = [];
+      for (const row of revoked) {
+        const link = (await this.delegationStore().getDelegation(row.id))?.grant?.link?.agentId;
+        for (const agentId of [row.agentDid, typeof link === 'string' ? link : null]) {
+          if (agentId) holds.push({ agentId, service: row.service, userId: row.userId, cause: options.hold.cause, revokedAt });
+        }
+        if (row.agentDid) await this.revokeConsents({ agentDid: row.agentDid, service: row.service, subject: row.userId }, options.hold.cause);
+      }
+      await this.recordAgentRevocations(holds);
+    }
+    return {
+      revoked,
+      revokedIds: revoked.map((r) => r.id),
+      count: revoked.length,
+      elapsedMs: performance.now() - started,
+      truncated,
+    };
+  }
+
   // ── Permission methods ───────────────────────────────────────────────────
 
   async createPermission(permission: CreatePermissionInput): Promise<Permission> {
@@ -445,19 +646,72 @@ export class CredVault {
     return this.getPermissionStore().list(agentId);
   }
 
-  async revokePermission(permissionId: string): Promise<void> {
+  /**
+   * Remove a Permission and record that the agent's access was revoked, so
+   * the agent is not treated as simply having no Permission. Returns the
+   * Permission removed, or null when there was none.
+   */
+  async revokePermission(permissionId: string): Promise<Permission | null> {
     await this.ensureInit();
-    await this.getPermissionStore().revoke(permissionId);
+    return this.getPermissionStore().revoke(permissionId);
+  }
+
+  /** One Permission by its id, or null. */
+  async getPermissionById(id: string): Promise<Permission | null> {
+    await this.ensureInit();
+    return this.getPermissionStore().getById(id);
+  }
+
+  private agentRevocationStore(): Required<Pick<StorageBackend, 'storeAgentRevocations' | 'getAgentRevocation' | 'clearAgentRevocations' | 'listAgentRevocations'>> {
+    const backend = this.backend;
+    if (backend.storeAgentRevocations && backend.getAgentRevocation && backend.clearAgentRevocations && backend.listAgentRevocations) {
+      return {
+        storeAgentRevocations: backend.storeAgentRevocations.bind(backend),
+        getAgentRevocation: backend.getAgentRevocation.bind(backend),
+        clearAgentRevocations: backend.clearAgentRevocations.bind(backend),
+        listAgentRevocations: backend.listAgentRevocations.bind(backend),
+      };
+    }
+    this.memoryAgentRevocations ??= new MemoryAgentRevocationStore();
+    const memory = this.memoryAgentRevocations;
+    return {
+      storeAgentRevocations: memory.storeAgentRevocations.bind(memory),
+      getAgentRevocation: memory.getAgentRevocation.bind(memory),
+      clearAgentRevocations: memory.clearAgentRevocations.bind(memory),
+      listAgentRevocations: memory.listAgentRevocations.bind(memory),
+    };
+  }
+
+  /** Record that these agents' access was revoked (see AgentRevocation). */
+  async recordAgentRevocations(rows: readonly AgentRevocation[]): Promise<void> {
+    await this.ensureInit();
+    if (rows.length > 0) await this.agentRevocationStore().storeAgentRevocations(rows);
+  }
+
+  /** The newest revocation holding for any of these ids of one agent, or null. */
+  async getAgentRevocation(agentIds: readonly string[], service: string, userId: string): Promise<AgentRevocation | null> {
+    await this.ensureInit();
+    return this.agentRevocationStore().getAgentRevocation(agentIds, service, userId);
+  }
+
+  /** End an agent's revocations on a service, for one user or all. Returns how many ended. */
+  async clearAgentRevocations(agentIds: readonly string[], service: string, options: { userId?: string } = {}): Promise<number> {
+    await this.ensureInit();
+    return this.agentRevocationStore().clearAgentRevocations(agentIds, service, options);
+  }
+
+  /** Current agent revocations, for an operator to review. */
+  async listAgentRevocations(filter: AgentRevocationFilter = {}): Promise<AgentRevocation[]> {
+    await this.ensureInit();
+    return this.agentRevocationStore().listAgentRevocations(filter);
   }
 
   /**
    * Atomically update a subset of an existing permission's fields (scope
    * ceiling, rate limit, TTL override, etc). Cannot move the permission to a
-   * different (agentId, connectionId) pair. Prospective-only: narrowing
-   * `allowedScopes` constrains future delegate()/subdelegate() calls but has
-   * no effect on a delegation handle already brokered through
-   * `POST /api/v1/use` — that route resolves scopes from an in-memory
-   * snapshot taken at delegation time and never re-reads the Permission row.
+   * different (agentId, connectionId) pair. Narrowing `allowedScopes` constrains
+   * future delegations, and `POST /api/v1/use` re-reads the Permission on each
+   * exercise, so it reaches live ones too.
    */
   async updatePermission(id: string, input: UpdatePermissionInput): Promise<Permission> {
     await this.ensureInit();
@@ -549,11 +803,39 @@ export class CredVault {
     this.backend.writeAuditEvent(event);
   }
 
+  /**
+   * Write several audit events, in one transaction where the backend
+   * supports it (a cascading revocation writes one per revoked delegation).
+   */
+  writeAuditEvents(events: readonly AuditEvent[]): void {
+    if (this.backend.writeAuditEvents) {
+      this.backend.writeAuditEvents(events);
+      return;
+    }
+    for (const event of events) this.writeAuditEvent(event);
+  }
+
   queryAuditEvents(filter: AuditFilter): AuditEvent[] {
     if (!this.backend.queryAuditEvents) {
       return [];
     }
     return this.backend.queryAuditEvents(filter) as AuditEvent[];
+  }
+
+  /**
+   * Recompute the tamper-evident audit chain (SQLite storage). Reports the
+   * first entry that is missing or does not match its hash.
+   */
+  verifyAuditChain(): AuditChainVerification {
+    if (!this.backend.verifyAuditChain) {
+      throw new Error('The audit chain is not supported by this storage backend');
+    }
+    return this.backend.verifyAuditChain();
+  }
+
+  /** The newest chained audit entry, to record outside the vault host. */
+  auditChainHead(): AuditChainHead | null {
+    return this.backend.auditChainHead ? this.backend.auditChainHead() : null;
   }
 
   // ── Rotation methods ────────────────────────────────────────────────────
@@ -661,4 +943,37 @@ export async function createVault(options: VaultOptions): Promise<CredVault> {
   const vault = new CredVault(options);
   await vault.init();
   return vault;
+}
+
+/**
+ * Write a small file, mode 0600, only if nothing is at `path` yet: the
+ * content is written to a temporary file and linked into place, so the
+ * file appears complete or not at all. Returns false when it already exists.
+ */
+function writeFileIfAbsent(path: string, content: string): boolean {
+  const tmp = `${path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.linkSync(tmp, path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    // Filesystems without hard links: an exclusive create instead.
+    try {
+      fs.writeFileSync(path, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      return true;
+    } catch (fallback) {
+      if ((fallback as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw fallback;
+    }
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** Replace a small file atomically, mode 0600. */
+function replaceFile(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tmp, path);
 }

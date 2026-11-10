@@ -35,6 +35,11 @@ export const DELEGATE_TOOL_DEFINITION = {
         items: { type: 'string' },
         description: 'OAuth scopes to request',
       },
+      constraints: {
+        type: 'array',
+        items: { type: 'object' },
+        description: 'Constraint wire objects. Unknown types are preserved but cannot be exercised.',
+      },
     },
     required: ['user_id', 'service'],
   },
@@ -44,6 +49,7 @@ export interface DelegateToolInput {
   user_id: string;
   service: string;
   scopes?: string[];
+  constraints?: unknown[];
 }
 
 export interface DelegateToolContext {
@@ -52,6 +58,12 @@ export interface DelegateToolContext {
   agentDid?: string;
   tokenCache: TokenCache;
   useServerBroker?: boolean;
+  /**
+   * This agent's own identity (cloud mode, CRED_AGENT_PRIVATE_KEY_HEX).
+   * A brokered handle is bound to its key: the server requires a DPoP proof
+   * by it when the handle is issued and each time it is used.
+   */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleDelegate(
@@ -65,9 +77,13 @@ export async function handleDelegate(
       appClientId: context.appClientId,
       scopes: input.scopes,
       agentDid: context.agentDid,
+      ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
     };
     const result = context.useServerBroker
-      ? await context.cred.delegateHandle(request)
+      ? await context.cred.delegateHandle({
+        ...request,
+        ...(context.delegatorIdentity ? { agentIdentity: context.delegatorIdentity } : {}),
+      })
       : await context.cred.delegate(request);
 
     // Store either the local token or the server-side broker handle in the local
@@ -78,6 +94,9 @@ export async function handleDelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          delegationToken: (result as { token: string }).token,
+          ...(context.delegatorIdentity ? { tokenAgentDid: context.delegatorIdentity.did } : {}),
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,
@@ -85,6 +104,8 @@ export async function handleDelegate(
         }
       : {
           accessToken: (result as Awaited<ReturnType<Cred['delegate']>>).accessToken,
+          ...((result as Awaited<ReturnType<Cred['delegate']>>).unnarrowed ? { unnarrowed: true } : {}),
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,

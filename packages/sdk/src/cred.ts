@@ -1,10 +1,11 @@
 /**
  * Cred SDK — Main client class
  *
- * Cloud mode: Uses fetch (Node 18+ built-in). Zero runtime dependencies.
+ * Cloud mode: Uses fetch (Node 18+) and dependency-free Cred protocol/attenuation packages.
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
+import { withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 import {
   CredConfig,
   CredLocalConfig,
@@ -17,6 +18,8 @@ import {
   SubDelegateParams,
   SubDelegationResult,
   SubDelegationHandleResult,
+  DelegationGrantResult,
+  DpopSigningIdentity,
   Connection,
   ProviderInfo,
   AuditEntry,
@@ -28,6 +31,8 @@ import {
   RotatedWebBotAuthIdentity,
   GetConsentUrlParams,
   RevokeParams,
+  LocalUseParams,
+  LocalRefusalParams,
   RotateParams,
   ScheduleRotationParams,
   RotationStatus,
@@ -37,6 +42,7 @@ import {
   UpdatePermissionParams,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
+import { parseConstraints, unknownConstraints } from '@credninja/attenuation';
 import {
   CRED_PROTOCOL_SUPPORTED_VERSIONS,
   CRED_PROTOCOL_VERSION,
@@ -46,6 +52,7 @@ import {
   isCredProtocolVersionSupported,
 } from './protocol.js';
 import { createWebBotAuthSigner, WebBotAuthSigner } from './web-bot-auth.js';
+import { createActorToken, createDpopProof, didKeyForPublicKey } from './identity.js';
 import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
 // No default base URL — users must explicitly set their server URL.
@@ -56,6 +63,10 @@ import crypto, { createPrivateKey, createPublicKey, sign, verify } from 'node:cr
 // (packages/server/src/server.ts).
 const DEFAULT_LOCAL_RECEIPT_TTL_SECONDS = 3600;
 const LOCAL_RECEIPT_CLOCK_SKEW_SECONDS = 60;
+// The fixed issuer local receipts carried before they named their signing
+// key. Accepted only on a receipt issued before this Cred instance was
+// created, so the allowance ends one receipt lifetime after an upgrade.
+const LEGACY_LOCAL_RECEIPT_ISSUER = 'did:key:local-cred';
 
 /**
  * Type helpers for dynamic imports (avoids requiring these at module load).
@@ -103,6 +114,12 @@ interface VaultModule {
     chainDepth: number;
     grantedScopes: string[];
   };
+}
+
+/** Constant-time comparison of two secrets, by their SHA-256 digests. */
+function sameSecret(a: string, b: string): boolean {
+  const digest = (value: string) => crypto.createHash('sha256').update(value).digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
 }
 
 interface VaultInstance {
@@ -236,6 +253,8 @@ export class Cred {
   private vault?: VaultInstance;
   private vaultInitPromise?: Promise<void>;
   private readonly isLocal: boolean;
+  private readonly createdAtSeconds = Math.floor(Date.now() / 1000);
+  private localReceiptIssuer: string | undefined;
 
   // ── Audit fields ────────────────────────────────────────────────────────────
   private auditHmacSecret?: Buffer;
@@ -368,6 +387,7 @@ export class Cred {
    * connected the service yet (cloud mode only).
    */
   async delegate(params: DelegateParams): Promise<DelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       return this.delegateLocal(params);
     }
@@ -380,6 +400,7 @@ export class Cred {
    * through the Cred server.
    */
   async delegateHandle(params: DelegateParams): Promise<DelegationHandleResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'delegateHandle() is only supported with a Cred server. Local mode has no broker process.',
@@ -391,6 +412,7 @@ export class Cred {
   }
 
   async tofuDelegate(params: TofuDelegateParams): Promise<DelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'tofuDelegate() is not supported in local mode. TOFU proof verification is server-side only.',
@@ -428,10 +450,12 @@ export class Cred {
       tofu_fingerprint: params.fingerprint,
       tofu_payload: payloadBytes.toString('base64'),
       tofu_signature: signature.toString('base64'),
+      token_format: 'raw',
     };
     if (sortedScopes) {
       body.scopes = sortedScopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
 
     const data = await this.post<{
       access_token: string;
@@ -473,6 +497,7 @@ export class Cred {
    * of that check.
    */
   async subDelegate(params: SubDelegateParams): Promise<SubDelegationResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       return this.subDelegateLocal(params);
     }
@@ -483,10 +508,13 @@ export class Cred {
       user_id: params.userId,
       appClientId: params.appClientId,
       agent_did: params.agentDid,
+      ...this.actorTokenFor(params),
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
 
     const data = await this.post<{
       access_token: string;
@@ -518,7 +546,14 @@ export class Cred {
     };
   }
 
+  /** `actor_token` for a cloud sub-delegation, when the delegating agent's identity is given. */
+  private actorTokenFor(params: SubDelegateParams): { actor_token?: string } {
+    if (!params.delegatorIdentity) return {};
+    return { actor_token: createActorToken(params.delegatorIdentity, `${this.baseUrl}/api/v1/subdelegate`) };
+  }
+
   async subDelegateHandle(params: SubDelegateParams): Promise<SubDelegationHandleResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
     if (this.isLocal) {
       throw new CredError(
         'subDelegateHandle() is only supported with a Cred server. Local mode has no broker process.',
@@ -534,36 +569,78 @@ export class Cred {
       appClientId: params.appClientId,
       agent_did: params.agentDid,
       token_format: 'handle',
+      ...this.actorTokenFor(params),
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
 
-    const data = await this.post<{
-      token_type: 'Delegation';
-      expires_in?: number;
-      service: string;
-      user_id?: string;
-      scopes: string[];
-      delegation_id: string;
-      receipt: string;
-      chain_depth: number;
-      parent_delegation_id: string;
-    }>('/api/v1/subdelegate', body);
-
-    const DEFAULT_TTL_SECONDS = 900;
-    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
+    const data = await this.post<DelegationTokenWire & { chain_depth: number; parent_delegation_id: string }>('/api/v1/subdelegate', body);
     return {
-      tokenType: 'Delegation',
-      expiresIn,
-      expiresAt: new Date(Date.now() + expiresIn * 1000),
-      service: data.service,
-      userId: data.user_id ?? params.userId,
-      scopes: data.scopes,
-      delegationId: data.delegation_id,
-      receipt: data.receipt,
+      ...delegationTokenResult(data, params.userId),
       chainDepth: data.chain_depth,
       parentDelegationId: data.parent_delegation_id,
+    };
+  }
+
+  /**
+   * Step 2 of the Sub-Delegation Exchange: the receiving agent redeems the
+   * grant from subDelegateGrant() for its own Delegation Token (RFC 8693),
+   * proving its did:key with an RFC 7523 actor token.
+   */
+  async redeemDelegationGrant(params: { delegationGrant: string; agentIdentity: DpopSigningIdentity }): Promise<SubDelegationHandleResult> {
+    if (this.isLocal) {
+      throw new CredError('redeemDelegationGrant() is only supported with a Cred server.', 'local_mode_unsupported', 0);
+    }
+    const data = await this.post<DelegationTokenWire & { chain_depth: number; parent_delegation_id: string }>('/api/v1/token', {
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: params.delegationGrant,
+      subject_token_type: 'urn:credninja:params:oauth:token-type:delegation-grant',
+      actor_token: createActorToken(params.agentIdentity, `${this.baseUrl}/api/v1/token`),
+      actor_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+    });
+    return {
+      ...delegationTokenResult(data, data.user_id ?? ''),
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+    };
+  }
+
+  /**
+   * Step 1 of the Sub-Delegation Exchange: the delegating agent authorizes
+   * a hop and receives a single-use grant for the receiving agent, which
+   * alone can redeem it (redeemDelegationGrant()).
+   */
+  async subDelegateGrant(params: SubDelegateParams): Promise<DelegationGrantResult> {
+    params = { ...params, constraints: this.validateConstraints(params.constraints) };
+    if (this.isLocal) {
+      throw new CredError('subDelegateGrant() is only supported with a Cred server.', 'local_mode_unsupported', 0);
+    }
+    const body: Record<string, unknown> = {
+      parent_receipt: params.parentReceipt,
+      service: params.service,
+      user_id: params.userId,
+      appClientId: params.appClientId,
+      agent_did: params.agentDid,
+      exchange: 'grant',
+      ...this.actorTokenFor(params),
+    };
+    if (params.scopes && params.scopes.length > 0) body.scopes = params.scopes;
+    if (params.constraints !== undefined) body.constraints = params.constraints;
+    const data = await this.post<{
+      delegation_grant: string; delegation_id: string; agent_did: string; expires_in: number;
+      chain_depth: number; parent_delegation_id: string; scopes: string[];
+    }>('/api/v1/subdelegate', body);
+    return {
+      delegationGrant: data.delegation_grant,
+      delegationId: data.delegation_id,
+      agentDid: data.agent_did,
+      expiresIn: data.expires_in,
+      chainDepth: data.chain_depth,
+      parentDelegationId: data.parent_delegation_id,
+      scopes: data.scopes,
     };
   }
 
@@ -576,16 +653,44 @@ export class Cred {
       );
     }
 
-    return this.post<BrokeredUseResult>('/api/v1/use', {
-      delegation_id: params.delegationId,
+    // Round-trip through JSON first, so the proof hashes exactly what the
+    // server receives (a Date, say, travels as its ISO string).
+    if (!params.token || !params.agentIdentity) {
+      throw new CredError('use() needs the Delegation Token and the identity of the agent it was issued to', 'invalid_config', 0);
+    }
+    const requestBody = JSON.parse(JSON.stringify({
       url: params.url,
       method: params.method,
       ...(params.body !== undefined ? { body: params.body } : {}),
       ...(params.extraHeaders ? { extra_headers: params.extraHeaders } : {}),
+    })) as Record<string, unknown>;
+    // RFC 9449: the token goes in Authorization, and the proof commits to
+    // the token (ath) and to this exact request body (cred_req), so it
+    // authorizes this one upstream call and no other.
+    return this.post<BrokeredUseResult>('/api/v1/use', requestBody, {
+      Authorization: `DPoP ${params.token}`,
+      DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/use`, params.token, requestBody),
     });
   }
 
+  private validateConstraints(value: unknown) {
+    const parsed = parseConstraints(value);
+    if (!parsed.ok) throw new CredError(parsed.message, 'invalid_constraints', 400);
+    return value === undefined ? undefined : parsed.constraints;
+  }
+
+  private async assertLocalConstraintsEnforceable(value: unknown): Promise<void> {
+    const constraints = this.validateConstraints(value) ?? [];
+    if (unknownConstraints(constraints).length > 0) {
+      throw new CredError('An unimplemented constraint cannot authorize token export or use', 'unknown_constraint', 403);
+    }
+    if (constraints.length > 0) {
+      throw new CredError('Local mode cannot enforce delegation constraints', 'unsupported_constraint', 403);
+    }
+  }
+
   private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
+    await this.assertLocalConstraintsEnforceable(params.constraints);
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
     let agentRecord: { id: string; status: string; scopeCeiling: string[] } | null = null;
@@ -816,19 +921,25 @@ export class Cred {
 
     const delegationId = `local_${params.service}_${params.userId}`;
     const grantedScopes = entry.scopes ?? [];
+    const requested = params.scopes && params.scopes.length > 0 ? params.scopes : null;
+    const ceiling = !requested && agentRecord && agentRecord.scopeCeiling.length > 0 ? agentRecord.scopeCeiling : null;
+    const unnarrowed = !permission && !requested && !ceiling;
     let delegatedScopes = grantedScopes;
 
-    if (permission) {
-      delegatedScopes = delegatedScopes.filter((scope) => permission!.allowedScopes.includes(scope));
-    }
-
-    if (params.scopes && params.scopes.length > 0) {
-      const permittedRequestedScopes = permission
-        ? params.scopes.filter((scope) => permission!.allowedScopes.includes(scope))
-        : params.scopes;
-      delegatedScopes = delegatedScopes.filter((scope) => permittedRequestedScopes.includes(scope));
-    } else if (agentRecord && agentRecord.scopeCeiling.length > 0) {
-      delegatedScopes = delegatedScopes.filter((scope) => agentRecord.scopeCeiling.includes(scope));
+    if (!unnarrowed) {
+      // Read scopes derived from what is stored are available to a narrowed
+      // delegation, and an empty result is a refusal, never the whole connection.
+      delegatedScopes = withStoredDerivedScopes(params.service, grantedScopes);
+      if (permission) {
+        const allowed = withDerivedScopesUnder(params.service, permission.allowedScopes, grantedScopes);
+        delegatedScopes = delegatedScopes.filter((scope) => allowed.includes(scope));
+      }
+      if (requested) delegatedScopes = delegatedScopes.filter((scope) => requested.includes(scope));
+      if (ceiling) delegatedScopes = delegatedScopes.filter((scope) => ceiling.includes(scope));
+      if (!requested) delegatedScopes = withoutRedundantDerivedScopes(params.service, delegatedScopes);
+      if (delegatedScopes.length === 0) {
+        throw new CredError('This request or Permission leaves no scope to delegate', 'invalid_scope', 400);
+      }
     }
 
     // Build HMAC of token for audit (raw token never stored)
@@ -870,6 +981,7 @@ export class Cred {
       expiresAt,
       service: params.service,
       scopes: delegatedScopes,
+      ...(unnarrowed ? { unnarrowed: true } : {}),
       delegationId,
       receipt,
     };
@@ -887,7 +999,11 @@ export class Cred {
       );
     }
 
-    const parent = this.parseDelegationReceipt(params.parentReceipt);
+    const parent = await this.parseDelegationReceipt(params.parentReceipt);
+    // Local delegation returns a raw token, not a brokered handle. Checking
+    // the parent as well as the request prevents dropping an opaque ceiling.
+    await this.assertLocalConstraintsEnforceable(parent.constraints);
+    await this.assertLocalConstraintsEnforceable(params.constraints);
     if (parent.service !== params.service) {
       throw new CredError('Parent receipt service does not match request', 'service_mismatch', 403);
     }
@@ -1077,9 +1193,18 @@ export class Cred {
     const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
     const nowSeconds = Math.floor(Date.now() / 1000);
     const aud = this.getLocalReceiptAudience();
+    // draft-sweeney-wimse-credential-delegation-02 claim layout: the
+    // principal in `sub`, the acting agent in `client_id` and `act.sub`, the
+    // ancestors as nested `act`, root innermost. parseDelegationReceipt()
+    // also reads receipts minted before this layout (agent in `sub`).
+    let act: { sub: string; act?: unknown } | undefined;
+    for (const did of input.lineage ?? []) act = act ? { sub: did, act } : { sub: did };
     const payload = Buffer.from(JSON.stringify({
-      iss: 'did:key:local-cred',
-      sub: input.agentDid,
+      iss: this.getLocalReceiptIssuer(),
+      sub: input.userId,
+      client_id: input.agentDid,
+      act: act ? { sub: input.agentDid, act } : { sub: input.agentDid },
+      jti: input.delegationId,
       iat: nowSeconds,
       exp: nowSeconds + this.getLocalReceiptTtlSeconds(),
       ...(aud ? { aud } : {}),
@@ -1103,7 +1228,7 @@ export class Cred {
     return `${header}.${payload}.${signature}`;
   }
 
-  private parseDelegationReceipt(receipt: string): {
+  private async parseDelegationReceipt(receipt: string): Promise<{
     sub: string;
     service: string;
     scopes: string[];
@@ -1112,9 +1237,10 @@ export class Cred {
     delegationId: string;
     chainDepth?: number;
     receiptClaims: string[];
+    constraints?: unknown[];
     /** Ancestor DIDs above `sub`, oldest (root) first. See createLocalDelegationReceipt(). */
     lineage: string[];
-  } {
+  }> {
     const parts = receipt.split('.');
     if (parts.length !== 3) {
       throw new CredError('Invalid parent receipt format', 'invalid_parent', 400);
@@ -1130,10 +1256,18 @@ export class Cred {
         delegationId?: string;
         chainDepth?: number;
         receiptClaims?: string[];
+        constraints?: unknown[];
         iat?: number;
         exp?: number;
         lineage?: string[];
       };
+
+      if (payload.constraints !== undefined) {
+        const { parseStrictJson } = await import('@credninja/vault');
+        // Reject duplicate members and unsafe numbers before interpreting
+        // any constraint, including nested opaque values.
+        parseStrictJson(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      }
 
       const publicKey = this.getLocalReceiptPublicKeyHex();
       const publicKeyObject = createPublicKey({
@@ -1152,6 +1286,12 @@ export class Cred {
       );
       if (!valid) {
         throw new CredError('Invalid parent receipt signature', 'invalid_parent', 403);
+      }
+      const iss = (payload as { iss?: unknown }).iss;
+      const legacyIssuer = iss === LEGACY_LOCAL_RECEIPT_ISSUER
+        && typeof payload.iat === 'number' && payload.iat <= this.createdAtSeconds;
+      if (iss !== this.getLocalReceiptIssuer() && !legacyIssuer) {
+        throw new CredError('Parent receipt was not issued by this local signer', 'invalid_parent', 403);
       }
       if (!payload.delegationId) {
         throw new CredError('Parent receipt is missing delegationId', 'invalid_parent', 400);
@@ -1173,8 +1313,21 @@ export class Cred {
         }
       }
 
+      // The acting agent: act.sub (equal to client_id) on a draft-02
+      // receipt, sub on a legacy one.
+      const act = (payload as { act?: unknown }).act;
+      let agentDid = payload.sub;
+      if (act !== undefined) {
+        const client = (payload as { client_id?: unknown }).client_id;
+        if (typeof act !== 'object' || act === null || (act as { sub?: unknown }).sub !== client || typeof client !== 'string') {
+          throw new CredError('Parent receipt actor claims are malformed', 'invalid_parent', 400);
+        }
+        agentDid = client;
+      }
+
       return {
         ...payload,
+        sub: agentDid,
         delegationId: payload.delegationId,
         receiptClaims: Array.isArray(payload.receiptClaims)
           ? payload.receiptClaims.filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0)
@@ -1205,6 +1358,12 @@ export class Cred {
     });
   }
 
+  /** The did:key of the local receipt signing key: the `iss` of every local receipt. */
+  private getLocalReceiptIssuer(): string {
+    this.localReceiptIssuer ??= didKeyForPublicKey(createPublicKey(this.getLocalReceiptSigningKey()));
+    return this.localReceiptIssuer;
+  }
+
   private getLocalReceiptPublicKeyHex(): string {
     const publicKey = createPublicKey(this.getLocalReceiptSigningKey());
     const spki = publicKey.export({ type: 'spki', format: 'der' });
@@ -1219,10 +1378,13 @@ export class Cred {
       service: params.service,
       user_id: params.userId,
       appClientId: params.appClientId,
+      // delegate() returns the provider token; the server's default is a handle.
+      token_format: 'raw',
     };
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
+    if (params.constraints !== undefined) body.constraints = params.constraints;
     if (params.agentDid) {
       body.agent_did = params.agentDid;
     }
@@ -1266,32 +1428,23 @@ export class Cred {
     if (params.scopes && params.scopes.length > 0) {
       body.scopes = params.scopes;
     }
-    if (params.agentDid) {
-      body.agent_did = params.agentDid;
+    if (params.constraints !== undefined) body.constraints = params.constraints;
+    if (params.authorizationDetails !== undefined) body.authorization_details = params.authorizationDetails;
+    if (params.agentIdentity && params.agentDid && params.agentDid !== params.agentIdentity.did) {
+      throw new CredError('agentDid and agentIdentity.did name different agents', 'invalid_config', 0);
+    }
+    const agentDid = params.agentIdentity?.did ?? params.agentDid;
+    if (agentDid) {
+      body.agent_did = agentDid;
     }
 
-    const data = await this.post<{
-      token_type: 'Delegation';
-      expires_in?: number;
-      service: string;
-      user_id?: string;
-      scopes: string[];
-      delegation_id: string;
-      receipt?: string;
-    }>('/api/v1/delegate', body);
-
-    const DEFAULT_TTL_SECONDS = 900;
-    const expiresIn = data.expires_in ?? DEFAULT_TTL_SECONDS;
-    return {
-      tokenType: 'Delegation',
-      expiresIn,
-      expiresAt: new Date(Date.now() + expiresIn * 1000),
-      service: data.service,
-      userId: data.user_id ?? params.userId,
-      scopes: data.scopes,
-      delegationId: data.delegation_id,
-      receipt: data.receipt,
-    };
+    if (!params.agentIdentity) {
+      throw new CredError('delegateHandle() needs agentIdentity: the Delegation Token is bound to the agent\'s key', 'invalid_config', 0);
+    }
+    const data = await this.post<DelegationTokenWire>('/api/v1/delegate', body, {
+      DPoP: createDpopProof(params.agentIdentity, 'POST', `${this.baseUrl}/api/v1/delegate`),
+    });
+    return delegationTokenResult(data, params.userId);
   }
 
   /**
@@ -1371,6 +1524,73 @@ export class Cred {
    * Cloud mode: Calls the Cred API.
    * Local mode: Deletes from the local vault.
    */
+  /**
+   * Local mode: confirm the connection behind a cached token still exists and
+   * record the exercise, before the caller uses the token. A connection
+   * revoked by any process sharing the vault stops the call here. Throws
+   * `connection_revoked` when it is gone.
+   */
+  async authorizeLocalUse(params: LocalUseParams): Promise<void> {
+    if (!this.isLocal) {
+      throw new CredError('authorizeLocalUse() is only supported in local mode', 'not_supported', 0);
+    }
+    await this.assertLocalConstraintsEnforceable(params.constraints);
+    const vault = await this.ensureVault();
+    const entries = await vault.list({ userId: params.userId });
+    const entry = entries.find((candidate) => candidate.provider === params.service);
+    const connected = entry !== undefined
+      && (params.accessToken === undefined || sameSecret(entry.accessToken, params.accessToken));
+    // Any *.salesforce.com or *.force.com host passes the URL allowlist, and
+    // anyone can have one, so the token goes only to the stored instance.
+    if (connected && params.service === 'salesforce') {
+      const instance = (entry as { instanceUrl?: string }).instanceUrl;
+      let targetOrigin: string | null = null;
+      try {
+        targetOrigin = params.targetUrl ? new URL(params.targetUrl).origin : null;
+      } catch {
+        targetOrigin = null;
+      }
+      if (!instance || targetOrigin !== new URL(instance).origin) {
+        const error = instance ? 'salesforce_instance_mismatch' : 'salesforce_instance_unknown';
+        await this.recordLocalRefusal({ service: params.service, userId: params.userId, error, ...(params.agentId ? { agentId: params.agentId } : {}) });
+        throw new CredError(instance
+          ? 'This Salesforce connection belongs to another instance'
+          : 'This Salesforce connection has no stored instance. Store it again with instanceUrl.', error, 403);
+      }
+    }
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentId ?? 'local-agent' },
+      action: connected ? 'access' : 'deny',
+      resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+      outcome: connected ? 'success' : 'denied',
+      correlationId: crypto.randomUUID(),
+      ...(connected ? {} : { errorMessage: 'connection_revoked' }),
+      ...(params.auditMetadata ? { metadata: params.auditMetadata } : {}),
+    });
+    if (!connected) {
+      throw new CredError(`The ${params.service} connection has been revoked`, 'connection_revoked', 401);
+    }
+  }
+
+  /** Audit a local-mode call refused before it left the process. */
+  async recordLocalRefusal(params: LocalRefusalParams): Promise<void> {
+    if (!this.isLocal) return;
+    await this.ensureVault();
+    this.writeAuditEvent({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: params.agentId ?? 'local-agent' },
+      action: 'deny',
+      resource: { type: 'connection', id: `${params.service}/${params.userId}` },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      errorMessage: params.error,
+      ...(params.metadata ? { metadata: params.metadata } : {}),
+    });
+  }
+
   async revoke(params: RevokeParams): Promise<void> {
     if (this.isLocal) {
       const vault = await this.ensureVault();
@@ -1652,8 +1872,8 @@ export class Cred {
     };
   }
 
-  private requestHeaders(path: string, method: string): Record<string, string> {
-    const headers = this.headers();
+  private requestHeaders(path: string, method: string, extra?: Record<string, string>): Record<string, string> {
+    const headers = { ...this.headers(), ...(extra ?? {}) };
     if (!this.webBotAuthSigner || !this.baseUrl) return headers;
     return this.webBotAuthSigner.signRequest({
       url: `${this.baseUrl}${path}`,
@@ -1662,10 +1882,10 @@ export class Cred {
     });
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: this.requestHeaders(path, 'POST'),
+      headers: this.requestHeaders(path, 'POST', extraHeaders),
       body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);
@@ -1883,4 +2103,32 @@ export class Cred {
       failureAction: rotation.failureAction,
     };
   }
+}
+
+/** A Delegation Token response from /api/v1/delegate, /subdelegate or /token. */
+interface DelegationTokenWire {
+  access_token: string;
+  token_type: 'DPoP';
+  cnf: { jkt: string };
+  expires_in: number;
+  service: string;
+  user_id?: string;
+  scopes: string[];
+  delegation_id: string;
+  receipt?: string;
+}
+
+function delegationTokenResult(data: DelegationTokenWire, userId: string): DelegationHandleResult {
+  return {
+    tokenType: 'DPoP',
+    token: data.access_token,
+    jkt: data.cnf.jkt,
+    expiresIn: data.expires_in,
+    expiresAt: new Date(Date.now() + data.expires_in * 1000),
+    service: data.service,
+    userId: data.user_id ?? userId,
+    scopes: data.scopes,
+    delegationId: data.delegation_id,
+    receipt: data.receipt,
+  };
 }

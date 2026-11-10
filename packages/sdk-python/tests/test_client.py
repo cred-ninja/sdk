@@ -20,6 +20,7 @@ from cred import (
     DelegationHandleResult,
     DelegationResult,
 )
+from cred import generate_agent_identity
 from cred.exceptions import AgentRevokedException, RateLimitException, ScopeCeilingException
 
 BASE_URL = "https://cred.example.com"
@@ -192,7 +193,9 @@ class TestDelegateHandleAndUse:
         route = respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
             200,
             json={
-                "token_type": "Delegation",
+                "access_token": "jwt.delegation.token",
+                "token_type": "DPoP",
+                "cnf": {"jkt": "jkt_1"},
                 "expires_in": 900,
                 "expires_at": "2026-03-20T00:00:00Z",
                 "service": "google",
@@ -207,10 +210,14 @@ class TestDelegateHandleAndUse:
             user_id="user_1",
             app_client_id="app_1",
             scopes=["calendar.readonly"],
+            agent_identity=generate_agent_identity(),
         )
 
         assert isinstance(result, DelegationHandleResult)
-        assert result.token_type == "Delegation"
+        assert result.token_type == "DPoP"
+        assert result.token == "jwt.delegation.token"
+        assert result.jkt == "jkt_1"
+        assert "jwt.delegation.token" not in repr(result)
         assert result.delegation_id == "del_handle"
         assert result.user_id == "user_1"
 
@@ -232,10 +239,11 @@ class TestDelegateHandleAndUse:
         ))
 
         result = cred.use(
-            delegation_id="del_handle",
+            "jwt.delegation.token",
             url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
             method="GET",
             extra_headers={"X-Test": "1"},
+            agent_identity=generate_agent_identity(),
         )
 
         assert isinstance(result, BrokeredUseResult)
@@ -246,8 +254,9 @@ class TestDelegateHandleAndUse:
 
         import json
         parsed = json.loads(route.calls[0].request.read())
-        assert parsed["delegation_id"] == "del_handle"
+        assert "delegation_id" not in parsed
         assert parsed["extra_headers"] == {"X-Test": "1"}
+        assert route.calls[0].request.headers["Authorization"] == "DPoP jwt.delegation.token"
 
 
 # ── get_user_connections() ────────────────────────────────────────────────────
@@ -429,7 +438,9 @@ class TestAsyncCred:
         respx.post(f"{BASE_URL}/api/v1/delegate").mock(return_value=httpx.Response(
             200,
             json={
-                "token_type": "Delegation",
+                "access_token": "jwt.async.token",
+                "token_type": "DPoP",
+                "cnf": {"jkt": "jkt_async"},
                 "expires_in": 1200,
                 "expires_at": "2026-03-20T00:20:00Z",
                 "service": "google",
@@ -450,10 +461,14 @@ class TestAsyncCred:
 
         async def scenario():
             async with AsyncCred(agent_token=TOKEN, base_url=BASE_URL) as client:
-                handle = await client.delegate_handle(service="google", user_id="u1", app_client_id="app1")
+                identity = generate_agent_identity()
+                handle = await client.delegate_handle(
+                    service="google", user_id="u1", app_client_id="app1", agent_identity=identity,
+                )
                 used = await client.use(
-                    delegation_id=handle.delegation_id,
+                    handle.token,
                     url="https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    agent_identity=identity,
                 )
                 return handle, used
 

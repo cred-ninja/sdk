@@ -38,6 +38,14 @@ export interface CredDelegateToolOptions {
    * token to the LLM context and defeats the brokered security model.
    */
   tokenFormat?: 'raw' | 'handle';
+  /**
+   * The agent's own identity (`did` and Ed25519 `privateKey`, e.g. from
+   * `importAgentIdentity` in `@credninja/sdk`). Brokered handles are bound to
+   * this key: the Cred server requires a DPoP proof by it to issue a handle
+   * and to use one. The key stays in your process; it is never sent to the
+   * model or the server.
+   */
+  agentIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export interface CredUseToolOptions {
@@ -45,6 +53,14 @@ export interface CredUseToolOptions {
   agentToken: string;
   /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl: string;
+  /**
+   * The agent's own identity (`did` and Ed25519 `privateKey`, e.g. from
+   * `importAgentIdentity` in `@credninja/sdk`). Brokered handles are bound to
+   * this key: the Cred server requires a DPoP proof by it to issue a handle
+   * and to use one. The key stays in your process; it is never sent to the
+   * model or the server.
+   */
+  agentIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 interface CredUseToolInput {
@@ -80,8 +96,28 @@ interface CredUseToolInput {
  * });
  * ```
  */
+/**
+ * Delegation Tokens by delegation id, so the model passes only the id
+ * between cred_delegate and cred_use and never sees the token.
+ */
+interface RememberedToken {
+  token: string;
+  expiresAtMs: number;
+  /** Which server and agent the token was issued for: cred_use refuses any other. */
+  baseUrl: string | undefined;
+  agentDid: string;
+}
+
+const delegationTokens = new Map<string, RememberedToken>();
+
+function rememberDelegationToken(delegationId: string, entry: RememberedToken): void {
+  const now = Date.now();
+  for (const [id, old] of delegationTokens) if (old.expiresAtMs <= now) delegationTokens.delete(id);
+  delegationTokens.set(delegationId, entry);
+}
+
 export function credDelegateTool(options: CredDelegateToolOptions): Tool {
-  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle' } = options;
+  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle', agentIdentity } = options;
   const inputSchema = z.object({
     service: z
       .string()
@@ -147,6 +183,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
             userId,
             appClientId,
             scopes: resolvedScopes,
+            ...(agentIdentity ? { agentIdentity } : {}),
           })
         : await cred.delegate({
             service,
@@ -158,6 +195,9 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
       const expiresAtMs = result.expiresAt instanceof Date
         ? result.expiresAt.getTime()
         : Date.now() + result.expiresIn * 1000;
+      if ('token' in result && agentIdentity) {
+        rememberDelegationToken(result.delegationId, { token: result.token, expiresAtMs, baseUrl, agentDid: agentIdentity.did });
+      }
       cachedResult = {
         ...('accessToken' in result ? { accessToken: result.accessToken } : {}),
         tokenType: result.tokenType,
@@ -192,7 +232,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
  * Use this with `credDelegateTool({ tokenFormat: 'handle', ... })`.
  */
 export function credUseTool(options: CredUseToolOptions): Tool {
-  const { agentToken, baseUrl } = options;
+  const { agentToken, baseUrl, agentIdentity } = options;
   const cred = new Cred({
     agentToken,
     baseUrl,
@@ -212,13 +252,18 @@ export function credUseTool(options: CredUseToolOptions): Tool {
       'The provider access token stays on the Cred server.',
     inputSchema,
     execute: async ({ delegationId, url, method, body, extraHeaders }: CredUseToolInput) => {
-      return cred.use({
-        delegationId,
-        url,
-        method,
-        body,
-        extraHeaders,
-      });
+      const entry = delegationTokens.get(delegationId);
+      if (!entry || entry.expiresAtMs <= Date.now()) {
+        throw new Error('Unknown or expired delegation: call cred_delegate first');
+      }
+      if (!agentIdentity) {
+        throw new Error('cred_use needs agentIdentity: the Delegation Token is bound to the agent\'s key');
+      }
+      // Tool instances in one process may serve different servers or agents.
+      if (entry.agentDid !== agentIdentity.did || entry.baseUrl !== baseUrl) {
+        throw new Error('This delegation was issued for another agent or server');
+      }
+      return cred.use({ token: entry.token, agentIdentity, url, method, body, extraHeaders });
     },
   } as any);
 }

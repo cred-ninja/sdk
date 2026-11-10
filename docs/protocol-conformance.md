@@ -4,9 +4,9 @@
 > This SDK is named as the protocol's reference implementation. This document maps
 > what the SDK actually implements to the protocol's capabilities and the six RFCs
 > it profiles, and tracks the gaps. It should be reconciled with the protocol
-> repo's formal conformance section as that stabilizes. The spec was submitted as
-> [`draft-sweeney-wimse-credential-delegation-00`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
-> (2026-07-27, individual I-D, not yet adopted). Its offline companion is
+> repo's formal conformance section as that stabilizes. The spec is at
+> [`draft-sweeney-wimse-credential-delegation-01`](https://datatracker.ietf.org/doc/draft-sweeney-wimse-credential-delegation/)
+> (posted 2026-10-13; individual I-D, not yet adopted). Its offline companion is
 > `draft-asor-wimse-agent-delegation-chain`, and the WIMSE WG has since adopted
 > `draft-ietf-wimse-aims` (AI Identity Management System, formerly
 > draft-klrc-aiagent-auth), whose Section 10.3 claim conventions this document
@@ -29,11 +29,18 @@ The protocol README advertises these capabilities. Against the SDK:
 | Protocol capability | Status | Where in this repo |
 |---|---|---|
 | Ephemeral agent identity via `did:key` | **Implemented** | `packages/sdk/src/identity.ts` (`generateAgentIdentity`, Ed25519 → `did:key:z…` multicodec) |
-| Multi-hop delegation with attenuation | **Implemented** | `packages/vault/src/delegation-chain.ts` (`validateSubDelegation`), server `/api/v1/subdelegate`. Attenuation is enforced end-to-end at chain depth ≥ 1: `/api/v1/subdelegate` always returns a brokered handle (never the raw provider token), regardless of the requested `token_format`, so scope attenuation can't be bypassed by exfiltrating a raw token. |
+| Multi-hop delegation with attenuation | **Implemented** | `packages/attenuation/src/delegation-chain.ts` (`validateSubDelegation`, re-exported by `@credninja/vault`), server `/api/v1/subdelegate`. Attenuation is enforced end-to-end at chain depth ≥ 1: `/api/v1/subdelegate` always returns a brokered handle (never the raw provider token), regardless of the requested `token_format`, so scope attenuation can't be bypassed by exfiltrating a raw token. |
 | Credential wrapping (agents never handle raw secrets) | **Implemented** | Brokered `cred_use` keeps the token server-side: `packages/mcp/src/tools/use.ts`, server `/api/v1/use` |
-| Proof of possession | **Adjacent** | TOFU payload signing (`packages/tofu`, `cred.tofuDelegate`) + Web Bot Auth / HTTP Message Signatures (`packages/sdk/src/web-bot-auth.ts`). See RFC 9449 row. |
-| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Receipts now also carry per-delegation `constraints` ceilings covering all six asor-01 §4.2 types (`max`, `min`, `one_of`, `not_one_of`, `prefix`, `rank` with numeric or label values; fail-closed, monotonic down the chain per §4.3: `packages/vault/src/constraints.ts`), plus the -02 cumulative types `max_lifetime` and `max_subtree`. A label `rank` carrying an on-wire `order` (asor-02 §4.2) compares through that order; a legacy label without `order` compares through a per-key ordering (`DEFAULT_RANK_ORDERINGS` seeds the draft's `egress` none < internal < any; callers add their own via `rankOrderings`). Still scope strings + constraints, not RFC 9396 `authorization_details`. |
-| Fast revocation (<5s propagation) | **Partial** | Revoke endpoints exist (`/api/v1/agents/:agentId/revoke-all`, `DELETE /api/token/:provider`, `DELETE /api/v1/connections/:provider`). `/api/v1/subdelegate` checks the status of *every* ancestor agent in the delegation chain — not just the immediate parent — before minting a child receipt. There is no persisted table of delegations to walk for this, so the check instead walks a `lineage` claim (ancestor DIDs, root first) that each receipt carries and that is extended and re-signed by the trusted issuer at every hop; a requesting agent cannot forge or truncate it. This closes the "revoke a grandparent, an still-active parent keeps minting new descendants" gap, *as long as every receipt in that chain was minted after this claim was introduced* — receipts minted before it carry no lineage and degrade to a parent-only check for that hop, until they age out under `RECEIPT_TTL_SECONDS`. Propagation latency (how fast a revocation is checked, not full historical-chain migration) is not measured or asserted by tests. |
+| Proof of possession | **Partial** | DPoP (RFC 9449) binds every brokered Delegation Token to the agent's key: `Authorization: DPoP <token>` plus a proof whose `ath` is the SHA-256 of the token and whose `cred_req` covers the request body, see the RFC 9449 row; also TOFU payload signing (`packages/tofu`, `cred.tofuDelegate`) + Web Bot Auth / HTTP Message Signatures (`packages/sdk/src/web-bot-auth.ts`). See RFC 9449 row. |
+| Fine-grained capability tokens (not broad grants) | **Partial** | Scope-filter + max-ttl + url-allowlist policies (`packages/guard/src/policies`). Receipts now also carry per-delegation `constraints` ceilings covering all six asor-01 §4.2 types (`max`, `min`, `one_of`, `not_one_of`, `prefix`, `rank` with numeric or label values; fail-closed, monotonic down the chain per §4.3: `packages/attenuation/src/constraints.ts`), plus the -02 cumulative types `max_lifetime` and `max_subtree`. A label `rank` carrying an on-wire `order` (asor-02 §4.2) compares through that order; a legacy label without `order` compares through a per-key ordering (`DEFAULT_RANK_ORDERINGS` seeds the draft's `egress` none < internal < any; callers add their own via `rankOrderings`). Delegation Tokens carry RFC 9396 `authorization_details` of type `cred_delegation`: granted scopes, or catalogue operations with resources for GitHub and Google Drive (`packages/server/src/capabilities.ts`), checked at issuance, at every hop (subset) and at exercise. |
+| Fast revocation (<5s propagation) | **Implemented** (within one server) | Cascading revocation: every issued delegation is recorded with its parent (`vault_delegations`), and `DELETE /api/v1/delegations/:delegationId` or an agent revocation revokes the whole subtree in one SQLite transaction (iterative, cycle-safe, bounded walk in `packages/vault/src/delegation-revocation.ts`). `/api/v1/use` answers `401 delegation_revoked` for a revoked handle, including one already in flight, and one `revoke` audit event per delegation names the revoked ancestor. Tests assert 1,111 descendants revoke in under 5 s (measured around 12 ms). Raw tokens already handed out and delegations issued before this release are not reached. Before that: revoke endpoints exist (`/api/v1/agents/:agentId/revoke-all`, `DELETE /api/token/:provider`, `DELETE /api/v1/connections/:provider`). `/api/v1/subdelegate` checks the status of *every* ancestor agent in the delegation chain — not just the immediate parent — before minting a child receipt. There is no persisted table of delegations to walk for this, so the check instead walks a `lineage` claim (ancestor DIDs, root first) that each receipt carries and that is extended and re-signed by the trusted issuer at every hop; a requesting agent cannot forge or truncate it. This closes the "revoke a grandparent, an still-active parent keeps minting new descendants" gap, *as long as every receipt in that chain was minted after this claim was introduced* — receipts minted before it carry no lineage and degrade to a parent-only check for that hop, until they age out under `RECEIPT_TTL_SECONDS`. Propagation latency (how fast a revocation is checked, not full historical-chain migration) is not measured or asserted by tests. |
+| Tamper-evident audit log | **Implemented** (SQLite storage) | Each audit row carries an HMAC-SHA256 over the previous row's hash and its own stored fields, under a key derived from the vault passphrase and never stored (`packages/vault/src/storage/sqlite.ts`, `auditChainHash` in `audit.ts`). `CredVault.verifyAuditChain()` and `GET /admin/audit/verify` report the first missing, edited or reordered entry; a copy of the database cannot be re-chained without the passphrase. Truncating the newest entries is detected only against a head recorded earlier outside the host (`auditChainHead()`). Rows written before this release are reported as unchained; their number is bound into the first chained entry, so an unchained row added later is reported as a break. The file storage backend keeps no audit log. |
+| Cumulative constraints with a single writer (`max_lifetime`, `max_subtree`) | **Implemented** | `packages/vault/src/cumulative-ledger.ts` (`SqliteCumulativeLedger`). `/api/v1/use` debits the delegation's own `max_lifetime` and every `max_subtree` held by it or an ancestor in one transaction before the upstream call; quantities are measured by the server (`packages/server/src/metering.ts`), never declared by the agent; response-side totals are debited after the response, which is withheld past a bound; a delegation whose ancestors the ledger does not hold is refused. |
+| Per-exercise ceilings (`max`, `min`, `one_of`, `not_one_of`, `prefix`, `rank`) | **Implemented** | Decided at `/api/v1/use` from server measurements (`packages/server/src/metering.ts`, `exerciseConstraintViolation` in `packages/attenuation/src/constraints.ts`): request-side keys before the upstream call, response-side keys after it (an over-limit response is withheld); a catalogue listing's page size is capped at an item bound up front. A key with no meter is denied (`unmetered_constraint`). |
+| Signed receipts behind a signer interface | **Implemented** | `packages/attenuation/src/jws.ts` (`JwsSigner`, EdDSA default, ES256 by key, `kid` in the header), `packages/server/src/receipt-signing.ts`. Verifiers hold an accepted-algorithm list; the header `alg` must equal the resolved key's algorithm. |
+| Principal in `sub`, agent in `client_id` and `act.sub` | **Implemented** | Receipt claim layout `draft-02` (default): `sub` = principal, `client_id` = `act.sub` = agent, ancestors as nested `act`, `jti`, `cnf.jkt` from the agent's did:key (`packages/attenuation/src/receipt-claims.ts`, `did-key.ts`). Old-layout receipts are still read. |
+| Sub-Delegation Exchange (single-use grant) | **Implemented** | `exchange: "grant"` on `/api/v1/subdelegate`, then `POST /api/v1/token` (RFC 8693) with the grant as `subject_token` and an RFC 7523 `actor_token` signed by the receiving agent's did:key (`packages/server/src/delegation-grants.ts`). Second redemption and wrong actor are rejected. Proof of possession is the actor token, not DPoP. |
+| Chain-Verifiable Profile | **Implemented** | `token_profile: "agent_delegation"` on `/api/v1/delegate` and `/api/v1/subdelegate` mints an asor -02 token unchanged (`mintAgentDelegationToken`); `verifyAgentDelegationChain` checks one offline. The receipt records the token's `jti` and the scope mapping. Not yet accepted at `/api/v1/use`. |
 | Cross-provider interoperability | **Implemented** | OAuth provider adapters in `packages/oauth/src/adapters` (Google, GitHub, Slack, Notion, Salesforce, Linear, HubSpot, …) |
 | Protocol-version handshake | **Implemented** | `packages/sdk/src/protocol.ts` (`CRED_PROTOCOL_VERSION`, `CRED_PROTOCOL_VERSION_HEADER`, supported-version set); SDK advertises via `Cred.headers()`, server selects/rejects via early middleware. See section below. |
 
@@ -44,11 +51,13 @@ through adjacent mechanisms rather than the profiled RFC itself:
 
 | Profiled standard | Status | Notes |
 |---|---|---|
-| **RFC 8693** — Token Exchange | **Adjacent** | Delegation uses the custom `POST /api/v1/delegate` flow, not `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`. Adapter token calls use standard `authorization_code` / `refresh_token` grants only. |
-| **RFC 9449** — DPoP | **Adjacent** | No DPoP headers. PoP is achieved via TOFU payload signatures and Web Bot Auth (RFC 9421 HTTP Message Signatures). |
-| **RFC 9396** — Rich Authorization Requests | **Gap** | No `authorization_details`; authorization is expressed as scope-string arrays. |
-| **RFC 7523** — JWT Bearer | **Gap** | Agent auth uses opaque `cred_at_` bearer tokens plus TOFU-signed payloads, not a JWT bearer assertion grant. |
-| **OIDC-CIBA** — Backchannel consent | **Gap** | Async consent is a redirect/poll flow surfaced via `ConsentRequiredError` + `consent_url`, not CIBA `auth_req_id` backchannel. |
+| **RFC 8693** — Token Exchange | **Partial** | The Sub-Delegation Exchange issuance step is an RFC 8693 token exchange at `POST /api/v1/token`. Root delegation still uses the custom `POST /api/v1/delegate` flow. Every flow issues a DPoP-bound JWT Delegation Token (`packages/attenuation/src/delegation-token.ts`), the exchange with `issued_token_type` `access_token`. |
+| **RFC 9449** — DPoP | **Partial** | Delegation Tokens are bound to the did:key of the agent they are issued to (`cnf.jkt`). `/api/v1/delegate` requires a DPoP proof by that key, and every `/api/v1/use` presents `Authorization: DPoP <token>` with a proof whose `ath` is the SHA-256 of the token (RFC 9449 Section 4.2) and whose `cred_req` covers the exact body (`packages/server/src/dpop.ts`). No server `DPoP-Nonce`. Cred Link delegations are DPoP-bound Delegation Tokens too; raw provider tokens are not DPoP-bound. |
+| **RFC 9396** — Rich Authorization Requests | **Partial** | Chain-Verifiable Profile tokens carry one `agent_delegation` detail. Receipts still carry scope strings plus `constraints`, not a `cred_delegation` detail. |
+| **RFC 7523** — JWT Bearer | **Partial** | The receiving agent's `actor_token` at `POST /api/v1/token` is an RFC 7523 assertion signed with its did:key (`iss` = `sub` = DID, `aud`, `exp` at most 300 seconds after `iat`, `jti` replay-checked). Other agent auth is still opaque `cred_at_` bearer tokens plus TOFU-signed payloads. |
+| **OIDC-CIBA** — Backchannel consent | **Implemented** (poll mode) | A delegation under a Permission that requires approval is asked for at `POST /bc-authorize` (agent DPoP-bound) and redeemed at the token endpoint with `grant_type=urn:openid:params:grant-type:ciba` (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`). The approver is per Permission (subject, admin, or both); the subject is asked through the built-in signed-link page announced by webhook, or through an external OpenID Provider's CIBA endpoints as its client (`packages/server/src/ciba.ts`). Requests are held in process memory (at most 10,000 live at once; 20 per agent, 50 per subject, 5 per agent for one subject); Guard policy applies at `/bc-authorize`. Ping and push modes are not implemented. Deviations from CIBA Core: the request names the Cred `service`, the `agent_did` and `scopes` (an array) instead of `scope`, and the agent authenticates as on `/api/v1/delegate` (agent bearer plus DPoP) rather than as an OAuth client; only `login_hint` is accepted (no `id_token_hint` or `login_hint_token`), resolved like `user_id` (a principal bound to another user gets `403 user_id_mismatch`); a subject with no connection gets `403 consent_required` rather than `unknown_user_id`, and a delegation that needs no approval gets `invalid_request` rather than `unauthorized_client`. An external provider's approval is taken from a successful token response; its `id_token` is not yet verified. |
+| Consent records (Section 8.2) | **Implemented** | Immutable records (`vault_consents`, update trigger) named by every token's `consent_id`; retained `CONSENT_RETENTION_DAYS` (at least 90) after the later of grant and expiry, then purged daily with an audited count. |
+| Re-consent triggers (Section 8.3) | **Partial** | Broader capabilities than a reusable CIBA consent covers, an expired consent, a request with looser ceilings or another app client, a Permission whose approver now needs a role that did not approve, and a security event (`POST /admin/consents/revoke`, refused at exercise as `consent_revoked`; it also ends approvals not yet redeemed) all require asking again. A security event matches consents by the agent that holds them, the root of a chain; a sub-agent's tokens fall with their root's consent, and a sub-agent alone is cut off with delegation revocation. The `agent_operator` trigger is not implemented: agent authentication carries no `agent_operator` claim yet. |
 | **W3C did:key** — Decentralized identifiers | **Implemented** | `did:key` generation + resolution (`packages/sdk/src/identity.ts`). |
 
 ## Divergence from the daemon
@@ -95,16 +104,18 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
 - [ ] Reconcile this table against the protocol repo's formal conformance section (needs that repo in scope, or its `CONFORMANCE` doc).
 - [ ] Decide biscuit vs Ed25519-receipt token profile (SDK ↔ daemon convergence).
 - [x] Fix the canonical `CRED_PROTOCOL_VERSION` string and wire the handshake. *(Done — `0.1.0` with explicit unsupported-version rejection.)*
-- [ ] Decide whether RAR (`authorization_details`) replaces or augments scope strings.
-- [ ] Add a revocation-propagation latency test to back the "<5s" claim.
-- [x] *(first step done)* Align the acting-agent identifier with adopted WG framing:
+- [x] Decide whether RAR (`authorization_details`) replaces or augments scope strings. *(Augments: a Delegation Token carries `authorization_details` of type `cred_delegation`, whose operations are the granted scopes or catalogue operations; scopes stay on the stored connection.)*
+- [x] Add a revocation-propagation latency test to back the "<5s" claim. *(Done: cascading revocation tests in `packages/vault` and `packages/server`.)*
+- [x] Align the acting-agent identifier with adopted WG framing (done in
+  the draft-02 receipt layout: principal in `sub`, agent in `client_id` and
+  `act.sub`; history below):
   `draft-ietf-wimse-aims-00` Section 10.3 puts the acting agent in `client_id` and
   the delegating principal in `sub` (per RFC 9068). Receipts now mint a `client_id`
   claim naming the agent DID alongside `sub`. Remaining (breaking, next wire
   version): move the delegating principal into `sub` and stop duplicating the agent
   there; mirror the split in audit records.
 - [x] Strict JSON for receipt payloads (Oct 7, 2026): `parseStrictJson` in
-  `packages/vault/src/strict-json.ts` rejects duplicate member names and
+  `packages/attenuation/src/strict-json.ts` (formerly in vault) rejects duplicate member names and
   integers outside the binary64 exact range (RFC 7493 2.2/2.3, RFC 8785);
   `/api/v1/subdelegate` receipt decoding and `receipt-chain.ts` use it. The
   asor runner decodes the same way, closing `reject_duplicate_member` and
@@ -123,17 +134,25 @@ via the `Cred-Protocol-Version` HTTP header. The protocol repo now fixes
   and a child's `order` must equal its parent's. Cred still resolves labels
   through `DEFAULT_RANK_ORDERINGS`; reading `order` from the token is a
   follow-up below.
-- [ ] Run the asor-02 vector set (35 files, published with attenu-guard
-  0.20.0 / attenu-guard-ts 0.14.0) through the conformance runner in
-  cred-ninja/protocol. Expected gaps against Cred main today, from the -02
-  text: principal invariance (§3, step 3: `sub` identical at every hop;
-  Cred receipts put the agent in `sub`), required `cnf` and `client_id` on
-  every token, `max_lifetime` / `max_subtree` (§4.2) and the rule that
-  `max` is per action only, closed detail and constraint objects with
-  uniqueness per (key, type) rather than per key, `rank` with on-wire
-  `order`, the leaf audience check (step 8), and rejection of an invalid
-  scope as malformed instead of the Cred-local exact-match allowance. The
-  -01 twenty stay byte-stable and Cred's 20 of 20 on them stands.
+- [x] asor-02 vector set (35 files, attenu-guard v0.20.0, byte-identical
+  in attenu-guard-ts v0.14.0): 35 of 35, scored natively rather than
+  through the hop-model mapping. `verifyAgentDelegationChain()` in
+  `packages/attenuation/src/agent-delegation.ts` implements Section 6
+  steps 1 to 5 and the audience half of step 8 over the -02 token format
+  unchanged, with the parse-time rules of Sections 3, 4, 4.2 and 4.4:
+  required `client_id`, `cnf` (`jkt`, `jwk` or `x5t#S256`), `aud` as a
+  string or non-empty array, a non-empty Principal in `sub` identical at
+  every hop, exactly one closed `agent_delegation` detail, every scope
+  literal, wildcard or opaque (an invalid scope is `malformed`), `rank`
+  with an `order`, unknown constraint types kept and subsumed only by an
+  identical constraint, per-hop `del_max_depth` (rule 5), and RFC 8785 JCS
+  bytes. Step 1 takes the algorithm from the verifier's own accepted list
+  and key, never from the header. The vectors are vendored under
+  `packages/attenuation/src/__tests__/fixtures/asor-02/` and run in CI
+  (`asor-02-vectors.test.ts`), with the hop and rule each reject vector
+  isolates pinned so a rejection for an unrelated reason fails. The -01
+  twenty stay byte-stable and Cred's 20 of 20 on them stands (they are not
+  -02 tokens: no `client_id`, no `cnf`).
 
 ## WIMSE composition tracking
 
@@ -163,13 +182,14 @@ Against `draft-asor-wimse-agent-delegation-chain-02` sections 4.2, 4.3 and
   calls them malformed).
 - [x] `max_lifetime` and `max_subtree` parse and subsume; no inference across
   types.
-- [x] Fail closed at exercise: `POST /api/v1/use` denies any action under a
-  cumulative constraint with `403 cumulative_constraint_unenforceable`, since
-  no running total is held. `token_format: "raw"` is refused under one.
+- [x] Cumulative constraints at exercise: `POST /api/v1/use` debits them
+  through `SqliteCumulativeLedger` and refuses with `403
+  cumulative_constraint_unenforceable` when the ledger does not hold the
+  delegation's ancestors. `token_format: "raw"` is refused under one.
 - [x] Producer rule: `max` is per action only; issuance refuses a new `max` on
   a running-count key (`max_calls`).
-- [ ] DS-side atomic check-and-debit for cumulative constraints.
+- [x] DS-side atomic check-and-debit for cumulative constraints.
 - [ ] Per-action constraint evaluation at `/api/v1/use`.
-- [ ] Breaking, next wire version: principal in `sub`; mandatory `cnf` and
+- [ ] Breaking, next wire version: mandatory `cnf` and
   `client_id`; one closed `agent_delegation` detail; reject legacy malformed
   scopes and label `rank` without `order`.

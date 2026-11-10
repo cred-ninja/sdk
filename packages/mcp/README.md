@@ -40,7 +40,8 @@ Add to your MCP client configuration:
       "args": ["-y", "@credninja/mcp"],
       "env": {
         "CRED_AGENT_TOKEN": "your_agent_token",
-        "CRED_AGENT_DID": "agent:release-engineer",
+        "CRED_AGENT_DID": "did:key:z6Mk...",
+        "CRED_AGENT_PRIVATE_KEY_HEX": "your_agent_private_key",
         "CRED_APP_CLIENT_ID": "your_app_client_id",
         "CRED_BASE_URL": "https://cred.example.com"
       }
@@ -48,6 +49,8 @@ Add to your MCP client configuration:
   }
 }
 ```
+
+The server binds every delegation to this agent's key, and issues nothing until an operator grants the DID a Permission (`POST /admin/permissions`).
 
 ### Local Mode
 
@@ -80,7 +83,8 @@ When your MCP client needs your calendar, you approve interactively. The token i
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CRED_AGENT_TOKEN` | Yes | | Agent token configured on your Cred server |
-| `CRED_AGENT_DID` | No | | Stable agent identifier used when Cred should return signed delegation receipts |
+| `CRED_AGENT_DID` | Cloud mode | | did:key of the agent. Brokered mode needs it together with `CRED_AGENT_PRIVATE_KEY_HEX`: the Delegation Token is bound to that key |
+| `CRED_AGENT_PRIVATE_KEY_HEX` | Cloud mode | | Cloud mode: 32-byte Ed25519 private key (hex) of the did:key in `CRED_AGENT_DID`. `cred_delegate` and `cred_use` sign a DPoP proof with it (servers always require one for agent delegations), and `cred_subdelegate` signs an `actor_token` with it (always required). The key stays in the MCP process |
 | `CRED_APP_CLIENT_ID` | Yes | | App client ID expected by your Cred server |
 | `CRED_BASE_URL` | Yes (remote mode) | — | Your Cred server URL |
 | `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing |
@@ -110,7 +114,7 @@ Get delegated OAuth access for a user's connected service.
 - `service` (string, required): Service name. One of `google`, `github`, `slack`, `notion`, `salesforce`.
 - `scopes` (string[], optional): OAuth scopes to request
 
-**Returns:** A local delegation handle and expiry, or a consent URL if the user hasn't authorized yet. In remote server mode the local handle maps to a server-side brokered handle, so provider tokens are not cached by MCP.
+**Returns:** A local delegation handle and expiry, or a consent URL if the user hasn't authorized yet. In remote server mode the local handle maps to a server-held, key-bound Delegation Token, so provider tokens are not cached by MCP.
 
 ### `cred_subdelegate`
 
@@ -202,8 +206,8 @@ Assistant: I'll need access to your Google Calendar.
 2. When the agent needs a credential, it calls `cred_delegate`
 3. If authority needs to move across agents, it calls `cred_subdelegate`
 4. The MCP server calls the Cred API with your agent token
-5. Cred returns brokered delegated access and, when configured with `CRED_AGENT_DID`, a signed receipt
-6. The agent uses the local delegation handle with `cred_use` to call the service API
+5. Cred returns a Delegation Token bound to the agent's key, within its Permission, and a signed receipt. The token stays in this process
+6. The agent uses the local delegation handle with `cred_use`, and each call is checked against what was granted
 
 ## Programmatic Usage
 
@@ -220,6 +224,7 @@ const server = createCredMcpServer(config);
 - Delegations are short-lived and scoped to the requested permissions
 - In remote server mode, provider access tokens stay on the Cred server and `cred_use` brokers calls through it
 - In local mode, the MCP server runs locally and keeps delegated access tokens only in its in-process cache
+- `cred_use` checks each call against the delegation's scopes in both modes: at the server in remote mode, and in this process in local mode, with the same refusals (`operation_not_mapped`, `scope_insufficient`). It does not follow upstream redirects. `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true` turns this off in local mode: it is deprecated, warns at startup and marks audit events
 - Refresh tokens are never exposed to agents
 - Local mode: AES-256-GCM encryption with PBKDF2 key derivation for vault storage
 
@@ -236,7 +241,7 @@ If `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` and `CRED_WEB_BOT_AUTH_SIGNATURE_AGENT` a
 
 This makes MCP mode the first Cred execution path that can speak Web Bot Auth directly. If those variables are not set, `cred_use` behaves exactly as before.
 
-`cred_use` strips caller-supplied auth, signature, host, cookie, proxy, forwarding, and hop-by-hop headers before signing or forwarding so the LLM cannot spoof transport identity or framing.
+`cred_use` strips caller-supplied auth, signature, host, cookie, proxy, forwarding, and hop-by-hop headers before signing or forwarding so the LLM cannot spoof transport identity or framing, and refuses a method override in the query, the headers or the body.
 
 ## Deployment Modes
 

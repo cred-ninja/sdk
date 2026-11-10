@@ -20,7 +20,7 @@ Cred is an agent credential delegation protocol — it lets AI agents receive an
 
 ## Development Setup
 
-**Requirements:** Node.js 20+, npm 10+
+**Requirements:** Node.js 22+ (develop on 26, see `.nvmrc`), npm 10+
 
 ```bash
 # Clone the repo

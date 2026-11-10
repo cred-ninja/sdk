@@ -1,0 +1,21 @@
+{
+  "description": "One constraint per (key, type): a 'min' and a 'max' on one key form a range, and each narrows on its own axis (floor 1 -> 2 tightened upward, ceiling 30 -> 10 tightened downward). MUST verify. A verifier that admits one constraint per KEY rejects this chain as malformed and is wrong under the -02.",
+  "draft": "02",
+  "expect": "accept",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6InRlbnVyZV95ZWFycyIsIm1heCI6MzB9LHsia2V5IjoidGVudXJlX3llYXJzIiwibWluIjoxfV0sInNjb3BlcyI6WyJoci5yZWFkIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJjbGllbnRfaWQiOiJvcmNoZXN0cmF0b3IiLCJjbmYiOnsiamt0IjoialBUZXdNaXpqZUd2cDB2aDlwd0l2T1VDSFE4V0NNbE1CUk5nblFYZmQzQSJ9LCJkZWxfZGVwdGgiOjAsImRlbF9tYXhfZGVwdGgiOjMsImV4cCI6MzYwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6ImFjY3Q6ZmluYW5jZS1vcHNAZXhhbXBsZS5jb20ifQ.C_eywkF0PXVvCIF47f-QG6rAbXIK5GBQ3Qrm3txNScg",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6InRlbnVyZV95ZWFycyIsIm1heCI6MTB9LHsia2V5IjoidGVudXJlX3llYXJzIiwibWluIjoyfV0sInNjb3BlcyI6WyJoci5yZWFkIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJjbGllbnRfaWQiOiJ3b3JrZXIiLCJjbmYiOnsiamt0IjoiWWdyU2dQY0Q4eF9pOFRDakVuYW9NMGRNNmVFcnNvRkV0emFvVTYtdHJxOCJ9LCJkZWxfZGVwdGgiOjEsImV4cCI6OTAwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImp0aSI6ImNoYWluOm4xIiwicGFyX2hhc2giOiJuTlJVakMwTDZ6LVpLcTVUZ3lZWWRuRlR2YXF1ZjZqTWx0S2JzYUFncVIwIiwic3ViIjoiYWNjdDpmaW5hbmNlLW9wc0BleGFtcGxlLmNvbSJ9.X9J-JZoYf5jQgEnNBb7dSq4aYmKmjJjH2xH-NWLKqj0"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

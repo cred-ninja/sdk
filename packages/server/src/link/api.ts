@@ -1,3 +1,4 @@
+import { linkVaultUserId } from '@credninja/vault';
 /**
  * Cred Link server: the client-authenticated API (PAR and connection
  * management, spec 2 and 4) and the admin client registration routes
@@ -9,6 +10,7 @@
  * status 401 and a Cred-Request-Id header.
  */
 
+import { narrowedScopeStaysExposed } from '@credninja/guard';
 import type { NextFunction, Request, Response } from 'express';
 import {
   LINK_API_ERROR_STATUS,
@@ -893,7 +895,7 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
         changed,
         removed_scopes: step.removed,
         // Narrowing never changes the provider token: say what enforces it.
-        enforcement: narrowEnforcement(current, step.grant, changed ? step.removed : null),
+        enforcement: narrowEnforcement(ctx.classifyBrokerCalls !== false, current, step.grant, changed ? step.removed : null),
       };
       res.setHeader('Cache-Control', 'no-store');
       res.json(response);
@@ -902,21 +904,31 @@ export async function handleNarrowConnection(ctx: LinkContext, req: Request, res
 }
 
 /**
- * What stops an agent from exercising the scopes a narrow removed. The
- * provider's upper bound comes from linkNarrowEnforcementFor; within it,
- * the broker only tells Google API families apart (google-scopes.ts, the
- * same table and matcher the broker uses). So 'broker' only when every
- * removed scope belongs to a family that no remaining scope unlocks; a
- * removed scope that shares a family with a remaining one (gmail.send
- * removed, gmail.readonly kept) or belongs to no family answers 'record'.
+ * What stops an agent from exercising the scopes a narrow removed. Every
+ * brokered call is classified against the grant as it now stands, so a call only
+ * the removed scopes covered is refused: 'broker'. That says nothing of a scope
+ * that stays and covers the same call (remove gmail.send, keep gmail.modify),
+ * which still sends because the grant still says so.
  *
- * An unchanged (idempotent) narrow removed nothing in this call, so it is
- * judged on what the provider token carries beyond the grant: the
- * non-hidden catalog scopes the provider granted that the grant lacks.
- * That matches the original narrow's answer when the grant was cut from
- * the token, and it never claims more than the broker enforces.
+ * A remaining scope that narrows by resource answers 'record' when the provider
+ * token still holds a wider or sibling one (keep drive.file, drop drive): the call
+ * is allowed, and what comes back depends on the whole token.
+ *
+ * GitHub answers 'record' for now. Its table follows scope descriptions, as GitHub
+ * publishes no scopes per endpoint, and it does not separate every scope: remove
+ * `workflow`, keep `repo`, and the broker cannot tell a workflow file from any
+ * other, while the provider token still holds both. Calls are still classified.
+ *
+ * With classification turned off, the broker tells only Google API families
+ * apart, so 'broker' only when every removed scope belongs to a family that no
+ * remaining scope unlocks. An unchanged (idempotent) narrow removed nothing in
+ * this call, so it is judged on what the provider token carries beyond the grant.
  */
-function narrowEnforcement(connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
+function narrowEnforcement(classifyBrokerCalls: boolean, connection: Connection, grant: ClientGrant, removed: string[] | null): LinkNarrowEnforcement {
+  if (classifyBrokerCalls) {
+    if (connection.provider === 'github') return 'record';
+    return narrowedScopeStaysExposed(connection.provider, grant.scopes, canonicalScopeSet(connection.provider_scopes)) ? 'record' : 'broker';
+  }
   if (linkNarrowEnforcementFor(connection.provider) !== 'broker') return 'record';
   if (connection.provider !== 'google') return 'record';
   const beyond = removed ?? scopeDifference(
@@ -949,7 +961,8 @@ export async function handleSetPermission(ctx: LinkContext, req: Request, res: R
     return;
   }
   // Ownership first, so the audit trail never names foreign connections.
-  if (!(await ctx.store.getClientConnection({ client_id: client.client_id, connection_id: id }))) {
+  const owned = await ctx.store.getClientConnection({ client_id: client.client_id, connection_id: id });
+  if (!owned) {
     sendOpaqueFailure(req, res);
     return;
   }
@@ -978,6 +991,9 @@ export async function handleSetPermission(ctx: LinkContext, req: Request, res: R
   });
   if (result.ok) {
     try {
+      // Granting is what ends a hold on this agent, on this connection only.
+      const connection = await ctx.store.getConnection(id);
+      if (connection) await ctx.vault.clearAgentRevocations([agentId], connection.provider, { userId: linkVaultUserId(id) });
       audit('success', { permission_id: result.permission.id });
     } catch {
       sendLinkError(req, res, 500, 'server_error');

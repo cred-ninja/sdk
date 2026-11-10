@@ -69,14 +69,27 @@ export interface DelegationResult {
   expiresAt: Date;
   service: string;
   scopes: string[];
+  /**
+   * Local mode: no request, Permission or ceiling narrowed this delegation, so it
+   * is everything the stored connection holds. An empty `scopes` means the whole
+   * connection only when this is set.
+   */
+  unnarrowed?: boolean;
   delegationId: string;
   /** JWS-signed delegation receipt from Cred (if agent provided agentDid) */
   receipt?: string;
 }
 
 export interface DelegationHandleResult {
-  tokenType: 'Delegation';
-  /** Seconds until handle expires. Always set — defaults to 900 (15 min). */
+  tokenType: 'DPoP';
+  /**
+   * The Delegation Token: a JWT bound to the agent's key (RFC 9449). Pass
+   * it to use() with the same agent identity; it is useless without the key.
+   */
+  token: string;
+  /** RFC 7638 thumbprint of the key the token is bound to. */
+  jkt: string;
+  /** Seconds until the token expires. */
   expiresIn: number;
   /** Absolute expiry timestamp. Always set. */
   expiresAt: Date;
@@ -89,11 +102,24 @@ export interface DelegationHandleResult {
 }
 
 export interface BrokeredUseParams {
-  delegationId: string;
+  /** The Delegation Token from delegateHandle(), subDelegateHandle() or redeemDelegationGrant(). */
+  token: string;
   url: string;
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
+  /**
+   * The identity of the agent the token was issued to. The client signs a
+   * DPoP proof (RFC 9449) with its key, naming the token and this exact
+   * request; the server refuses the call without it.
+   */
+  agentIdentity: DpopSigningIdentity;
+}
+
+/** The part of an agent identity that signs DPoP proofs. */
+export interface DpopSigningIdentity {
+  did: string;
+  privateKey: Uint8Array;
 }
 
 export interface BrokeredUseResult {
@@ -129,8 +155,25 @@ export interface DelegateParams {
   scopes?: string[];
   /** Agent's DID (did:key:...). If provided, Cred returns a signed receipt. */
   agentDid?: string;
+  /**
+   * The agent's identity, for `delegateHandle()`. The handle is issued to
+   * `agentIdentity.did` and bound to its key: the client proves the key with
+   * a DPoP proof (RFC 9449), and every `use()` of the handle needs the same
+   * identity. A server that binds handles to agent keys (the default)
+   * refuses a handle request without one.
+   */
+  agentIdentity?: DpopSigningIdentity;
   /** Optional trusted claims embedded into a local delegation receipt. */
   receiptClaims?: string[];
+  /** Wire constraint objects. Unknown types cannot authorize raw-token issuance. */
+  constraints?: unknown[];
+  /**
+   * RFC 9396 capabilities for a Delegation Token, type `cred_delegation`:
+   * operations are granted scopes or catalogue operations (such as
+   * `github.issues.create`), and resources narrow them (such as
+   * `repo:owner/name`). Default: the granted scopes.
+   */
+  authorizationDetails?: Array<{ type: 'cred_delegation'; provider: string; operations: string[]; resources?: string[] }>;
 }
 
 export interface TofuDelegateParams {
@@ -146,6 +189,8 @@ export interface TofuDelegateParams {
   appClientId?: string;
   /** Requested scopes. Empty = all consented scopes. */
   scopes?: string[];
+  /** Constraint wire objects, forwarded to the issuing server unchanged. */
+  constraints?: unknown[];
 }
 
 export interface GetConsentUrlParams {
@@ -162,12 +207,44 @@ export interface RevokeParams {
   appClientId?: string;
 }
 
+/** A local-mode exercise of a cached token, checked and audited before the call. */
+/** A local-mode cred_use call refused before it left the process. */
+export interface LocalRefusalParams {
+  service: string;
+  userId: string;
+  agentId?: string;
+  error: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LocalUseParams {
+  service: string;
+  userId: string;
+  /**
+   * The cached access token about to be used. When given, the current vault
+   * entry must still hold this token, so a cached token from a connection
+   * that was revoked and reconnected is refused.
+   */
+  accessToken?: string;
+  /** Agent making the call, for the audit trail. */
+  agentId?: string;
+  /** The URL about to be called. Salesforce: it must be the connection's stored instance. */
+  targetUrl?: string;
+  /** Added to the audit event, such as a marker that a deprecated opt-out applied. */
+  auditMetadata?: Record<string, unknown>;
+  /** Constraints carried by the cached delegation being exercised. */
+  constraints?: unknown[];
+}
+
 export interface AuditEntry {
   id: string;
   action: string;
   service: string;
   userId: string;
+  /** Who acted: an agent's DID where one is known. */
+  actor?: { type: string; id: string; fingerprint?: string };
   timestamp: string;
+  /** `details` holds the event's own fields, such as `delegationId` and `route`. */
   metadata?: Record<string, unknown>;
 }
 
@@ -312,6 +389,13 @@ export interface SubDelegateParams extends Omit<DelegateParams, 'agentDid'> {
   parentReceipt: string;
   /** DID of the child agent receiving the attenuated delegation. */
   agentDid: string;
+  /**
+   * Cloud mode: the identity of the delegating agent, the one the parent
+   * receipt names. The SDK signs an `actor_token` with it so the server can
+   * check the caller is that agent, which servers require unless they run
+   * with CRED_REQUIRE_AGENT_IDENTITY=false.
+   */
+  delegatorIdentity?: Pick<import('./identity.js').AgentIdentity, 'did' | 'privateKey'>;
 }
 
 export interface SubDelegationResult extends DelegationResult {
@@ -322,6 +406,20 @@ export interface SubDelegationResult extends DelegationResult {
 export interface SubDelegationHandleResult extends DelegationHandleResult {
   chainDepth: number;
   parentDelegationId: string;
+}
+
+/**
+ * Step 1 of the two-step Sub-Delegation Exchange: a single-use grant the
+ * receiving agent redeems for its own token with redeemDelegationGrant().
+ */
+export interface DelegationGrantResult {
+  delegationGrant: string;
+  delegationId: string;
+  agentDid: string;
+  expiresIn: number;
+  chainDepth: number;
+  parentDelegationId: string;
+  scopes: string[];
 }
 
 // ── Agent scope ceiling & revocation types ──────────────────────────────────

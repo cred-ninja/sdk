@@ -42,6 +42,11 @@ export const SUBDELEGATE_TOOL_DEFINITION = {
         items: { type: 'string' },
         description: 'Optional subset of the parent receipt scopes.',
       },
+      constraints: {
+        type: 'array',
+        items: { type: 'object' },
+        description: 'Optional child constraint list; omitted constraints inherit from the parent.',
+      },
     },
     required: ['parent_receipt', 'agent_did', 'user_id', 'service'],
   },
@@ -53,6 +58,7 @@ export interface SubdelegateToolInput {
   user_id: string;
   service: string;
   scopes?: string[];
+  constraints?: unknown[];
 }
 
 export interface SubdelegateToolContext {
@@ -60,6 +66,8 @@ export interface SubdelegateToolContext {
   appClientId: string;
   tokenCache: TokenCache;
   useServerBroker?: boolean;
+  /** This agent's identity, to sign the actor_token proving it holds the parent receipt. */
+  delegatorIdentity?: { did: string; privateKey: Uint8Array };
 }
 
 export async function handleSubdelegate(
@@ -74,6 +82,8 @@ export async function handleSubdelegate(
       service: input.service,
       appClientId: context.appClientId,
       scopes: input.scopes,
+      ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
+      ...(context.delegatorIdentity ? { delegatorIdentity: context.delegatorIdentity } : {}),
     };
     const result = context.useServerBroker
       ? await context.cred.subDelegateHandle(request)
@@ -85,6 +95,9 @@ export async function handleSubdelegate(
       ? {
           brokered: true,
           serverDelegationId: result.delegationId,
+          delegationToken: (result as { token: string }).token,
+          tokenAgentDid: input.agent_did,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,
@@ -92,6 +105,7 @@ export async function handleSubdelegate(
         }
       : {
           accessToken: (result as Awaited<ReturnType<Cred['subDelegate']>>).accessToken,
+          ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
           service: input.service,
           userId: input.user_id,
           scopes: result.scopes,
@@ -111,7 +125,11 @@ export async function handleSubdelegate(
             chainDepth: result.chainDepth,
             parentDelegationId: result.parentDelegationId,
             ...(guard ? { guard } : {}),
-            note: 'Pass delegationId to cred_use to make authenticated API calls.',
+            note: context.useServerBroker && input.agent_did !== context.delegatorIdentity?.did
+              // The child's token is bound to the receiving agent's key, so
+              // only that agent can exercise it; hand it the receipt.
+              ? `The child delegation is bound to ${input.agent_did}; only that agent can use it. Give it the receipt.`
+              : 'Pass delegationId to cred_use to make authenticated API calls.',
           }),
         },
       ],

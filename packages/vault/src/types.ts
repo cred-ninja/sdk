@@ -8,6 +8,8 @@ export interface VaultEntry {
   refreshToken?: string;
   expiresAt?: Date;
   scopes?: string[];
+  /** Salesforce: the org's `https://` instance origin. A token for this connection goes nowhere else. */
+  instanceUrl?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -22,6 +24,8 @@ export interface StoreInput {
   refreshToken?: string;
   expiresAt?: Date;
   scopes?: string[];
+  /** Salesforce: the org's `https://` instance origin. A token for this connection goes nowhere else. */
+  instanceUrl?: string;
 }
 
 /**
@@ -37,6 +41,8 @@ export interface PermissionRateLimit {
 /**
  * Permission granted to an agent for a given connection.
  */
+export type PermissionApprover = 'subject' | 'admin' | 'both';
+
 export interface Permission {
   id: string;
   agentId: string;
@@ -45,6 +51,12 @@ export interface Permission {
   rateLimit?: PermissionRateLimit;
   ttlOverride?: number;
   requiresApproval: boolean;
+  /**
+   * Who approves a delegation under a permission that requires approval
+   * (draft Section 8.1): the subject (the account owner, the default), an
+   * admin, or both. Ignored when requiresApproval is false.
+   */
+  approver?: PermissionApprover;
   delegatable: boolean;
   maxDelegationDepth: number;
   createdAt: Date;
@@ -70,56 +82,14 @@ export type UpdatePermissionInput = Partial<
   Omit<Permission, 'id' | 'agentId' | 'connectionId' | 'createdBy' | 'createdAt' | 'updatedAt'>
 >;
 
-export interface DelegationAuthority {
-  delegationId: string;
-  agentDid: string;
-  service: string;
-  userId: string;
-  appClientId: string;
-  scopesGranted: string[];
-  chainDepth: number;
-  /**
-   * Constraint ceilings carried by the parent's receipt, already validated
-   * (parseConstraints). Absent or empty means the parent carries none.
-   */
-  constraints?: import('./constraints.js').DelegationConstraint[];
-}
-
-export interface DelegationValidationPermission {
-  allowedScopes: string[];
-  delegatable: boolean;
-  maxDelegationDepth: number;
-}
-
-export interface ValidateSubDelegationInput {
-  parent: DelegationAuthority;
-  childAgentDid: string;
-  service: string;
-  userId: string;
-  appClientId: string;
-  requestedScopes?: string[];
-  /**
-   * Ceilings requested for the child, already validated (parseConstraints).
-   * Absent means inherit the parent's ceilings unchanged. When present,
-   * every parent ceiling must be restated at least as tight (asor-01 4.3),
-   * or validation throws 'constraint_escalation_denied'.
-   */
-  requestedConstraints?: import('./constraints.js').DelegationConstraint[];
-  /**
-   * Orderings for `rank` constraint labels (see constraints.ts). Merged over
-   * DEFAULT_RANK_ORDERINGS.
-   */
-  rankOrderings?: import('./constraints.js').RankOrderings;
-  permission: DelegationValidationPermission;
-}
-
-export interface ValidateSubDelegationResult {
-  parentDelegationId: string;
-  chainDepth: number;
-  grantedScopes: string[];
-  /** Ceilings the child receipt must carry. */
-  grantedConstraints: import('./constraints.js').DelegationConstraint[];
-}
+// Delegation validation types live in @credninja/attenuation; re-exported so
+// existing imports from '@credninja/vault' keep working.
+export type {
+  DelegationAuthority,
+  DelegationValidationPermission,
+  ValidateSubDelegationInput,
+  ValidateSubDelegationResult,
+} from '@credninja/attenuation';
 
 /**
  * Minimal OAuth adapter interface that vault uses for auto-refresh.
@@ -194,6 +164,7 @@ export interface StoredRow {
   refreshTokenTag?: string;
   expiresAt?: string; // ISO string
   scopes?: string; // JSON array string
+  instanceUrl?: string;
   createdAt: string; // ISO string
   updatedAt: string; // ISO string
 }

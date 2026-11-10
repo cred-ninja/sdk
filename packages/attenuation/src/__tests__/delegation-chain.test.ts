@@ -104,6 +104,39 @@ describe('validateSubDelegation', () => {
     }
   });
 
+  it('allows a child that expires with or before its parent', () => {
+    const parent = { ...makeInput().parent, expiresAt: 2_000 };
+    expect(validateSubDelegation(makeInput({ parent, requestedExpiresAt: 2_000 })).chainDepth).toBe(1);
+    expect(validateSubDelegation(makeInput({ parent, requestedExpiresAt: 1_500 })).chainDepth).toBe(1);
+  });
+
+  it('denies a child that would outlive its parent', () => {
+    const parent = { ...makeInput().parent, expiresAt: 2_000 };
+    expect(() => validateSubDelegation(makeInput({ parent, requestedExpiresAt: 2_001 }))).toThrow(DelegationChainError);
+    try {
+      validateSubDelegation(makeInput({ parent, requestedExpiresAt: 2_001 }));
+    } catch (error) {
+      expect((error as DelegationChainError).code).toBe('expiry_escalation_denied');
+    }
+  });
+
+  // A data classification is a rank ceiling: the child may hold the
+  // parent's level or a lower one, never a higher one.
+  it('denies a child with a higher classification rank than its parent', () => {
+    const order = ['public', 'internal', 'confidential', 'restricted'];
+    const parent = { ...makeInput().parent, constraints: [{ key: 'classification', rank: 'internal', order }] };
+    const lower = validateSubDelegation(makeInput({ parent, requestedConstraints: [{ key: 'classification', rank: 'public', order }] }));
+    expect(lower.grantedConstraints).toEqual([{ key: 'classification', rank: 'public', order }]);
+
+    try {
+      validateSubDelegation(makeInput({ parent, requestedConstraints: [{ key: 'classification', rank: 'restricted', order }] }));
+      throw new Error('expected rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(DelegationChainError);
+      expect((error as DelegationChainError).code).toBe('constraint_escalation_denied');
+    }
+  });
+
   it('denies non-delegatable permissions', () => {
     expect(() => validateSubDelegation(makeInput({
       permission: {

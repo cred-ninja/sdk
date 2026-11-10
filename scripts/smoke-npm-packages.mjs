@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2);
+const registryVersion = args[0] === '--registry-version' && args.length === 2 ? args[1] : undefined;
+if (args.length > 0 && (!registryVersion || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(registryVersion))) {
+  throw new Error('Usage: smoke-npm-packages.mjs [--registry-version VERSION]');
+}
 const tmp = mkdtempSync(join(tmpdir(), 'cred-npm-smoke.'));
 
 const workspaces = [
   'packages/protocol',
+  'packages/attenuation',
   'packages/link',
   'packages/link-react',
   'packages/oauth',
@@ -127,34 +133,122 @@ async function stopChild(child) {
   }
 }
 
+async function runCloudOnlySdkSmoke(tarballsByWorkspace) {
+  // Run before the full consumer install: no ancestor node_modules may supply
+  // an optional vault peer or conceal an undeclared attenuation dependency.
+  const cloudDir = join(tmp, 'cloud-only');
+  mkdirSync(cloudDir, { recursive: true });
+  writeFileSync(join(cloudDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  run('npm', ['install', '--omit=optional', '--no-audit', '--no-fund',
+    ...['packages/protocol', 'packages/attenuation', 'packages/sdk'].map((workspace) => tarballsByWorkspace[workspace]),
+  ], { cwd: cloudDir });
+  const smokeFile = join(cloudDir, 'smoke.mjs');
+  writeFileSync(smokeFile, `
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+for (const peer of ['@credninja/vault', '@credninja/oauth']) {
+  assert.throws(() => require.resolve(peer), { code: 'MODULE_NOT_FOUND' });
+}
+const sdkPackage = require('./node_modules/@credninja/sdk/package.json');
+assert.equal(sdkPackage.dependencies['@credninja/attenuation'], '^2.0.0');
+for (const { Cred, generateAgentIdentity } of [await import('@credninja/sdk'), require('@credninja/sdk')]) {
+  const agent = await generateAgentIdentity();
+  const cred = new Cred({ agentToken: 'cred_at_cloud_fixture', baseUrl: 'https://cred.example.com' });
+  let requests = 0;
+  let sent;
+  globalThis.fetch = async (_url, init) => {
+    requests++;
+    sent = JSON.parse(init.body);
+    return new Response(JSON.stringify({ access_token: 'fixture.token.value', token_type: 'DPoP', cnf: { jkt: 'fixture-jkt' }, expires_in: 900, service: 'github', scopes: ['repo'], delegation_id: 'fixture' }));
+  };
+  for (const method of ['delegate', 'delegateHandle', 'subDelegate', 'subDelegateHandle', 'tofuDelegate']) {
+    const params = { service: 'github', userId: 'owner', appClientId: 'local', agentDid: agent.did, agentIdentity: agent, parentReceipt: 'fixture', fingerprint: 'fixture', privateKeyBytes: new Uint8Array(32).fill(1) };
+    const before = requests;
+    await assert.rejects(cred[method]({ ...params, constraints: [{ key: 'x', future: { mandatory: undefined } }] }), { code: 'invalid_constraints' });
+    assert.equal(requests, before);
+    const constraints = [{ key: 'x', future: { nested: [true, null, 1] } }];
+    await cred[method]({ ...params, constraints });
+    assert.deepEqual(sent.constraints, constraints);
+  }
+}
+console.log('cloud-only ESM/CJS SDK constraint validation smoke ok (no vault/oauth)');
+`);
+  run('node', [smokeFile], { cwd: cloudDir });
+}
+
+function runInstalledTypeSmoke(consumerDir) {
+  // Only normal Node/React consumer types are supplied here. Public declarations
+  // must bring their own Express/SQLite dependencies through the packed packages.
+  const tsVersion = JSON.parse(readFileSync(join(repoRoot, 'node_modules/typescript/package.json'), 'utf8')).version;
+  run('npm', ['install', '--save-dev', '--no-audit', '--no-fund',
+    `typescript@${tsVersion}`, '@types/node@22', '@types/react@19'], { cwd: consumerDir });
+  const packages = ['protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'sdk', 'ai', 'guard', 'server', 'mcp', 'link', 'link-react'];
+  const imports = packages.map((name, i) => `import * as pkg${i} from '@credninja/${name}';`).join('\n');
+  const body = `${imports}\nexport const packages = [${packages.map((_, i) => `pkg${i}`).join(', ')}];\n`;
+  writeFileSync(join(consumerDir, 'consumer.mts'), body);
+  const dualPackages = ['protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'sdk', 'ai', 'link', 'link-react'];
+  writeFileSync(join(consumerDir, 'consumer.cts'), dualPackages.map((name, i) =>
+    `import pkg${i} = require('@credninja/${name}');\nexport { pkg${i} };`).join('\n'));
+  const options = { strict: true, skipLibCheck: false, noEmit: true, target: 'ES2022', types: ['node', 'react'] };
+  writeFileSync(join(consumerDir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { ...options, module: 'NodeNext', moduleResolution: 'NodeNext' },
+    files: ['consumer.mts', 'consumer.cts'],
+  }));
+  const tsc = join(consumerDir, 'node_modules/typescript/bin/tsc');
+  run('node', [tsc, '-p', 'tsconfig.json'], { cwd: consumerDir });
+  writeFileSync(join(consumerDir, 'browser.ts'), "export { link } from '@credninja/link';\nexport { CredConnect, useCredLink } from '@credninja/link-react';\n");
+  writeFileSync(join(consumerDir, 'tsconfig.browser.json'), JSON.stringify({
+    compilerOptions: { ...options, module: 'ESNext', moduleResolution: 'Bundler', types: ['react'], lib: ['ES2022', 'DOM'] },
+    files: ['browser.ts'],
+  }));
+  run('node', [tsc, '-p', 'tsconfig.browser.json'], { cwd: consumerDir });
+  console.log('strict installed NodeNext ESM/CJS and browser Bundler types ok');
+}
+
 async function runFreshInstallSmoke(tarballsByWorkspace) {
   const consumerDir = join(tmp, 'consumer');
   run('npm', ['init', '-y'], { cwd: tmp, stdio: 'pipe' });
   run('npm', ['install', '--no-audit', '--no-fund', ...Object.values(tarballsByWorkspace)], {
     cwd: tmp,
   });
+  runInstalledTypeSmoke(tmp);
+  const mixedModuleFile = join(tmp, 'mixed-modules.mjs');
+  copyFileSync(join(repoRoot, 'scripts/fixtures/mixed-modules.mjs'), mixedModuleFile);
+  run('node', [mixedModuleFile], { cwd: tmp });
 
   const smokeFile = join(consumerDir, 'smoke.mjs');
   mkdirSync(consumerDir, { recursive: true });
   writeFileSync(smokeFile, `
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import net from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
-for (const pkg of ['@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai']) {
+for (const pkg of ['@credninja/protocol', '@credninja/attenuation', '@credninja/oauth', '@credninja/tofu', '@credninja/vault', '@credninja/sdk', '@credninja/ai', '@credninja/link', '@credninja/link-react']) {
   const mod = await import(pkg);
   if (!mod || Object.keys(mod).length === 0) throw new Error(pkg + ' ESM import exported nothing');
   const cjs = require(pkg);
   if (!cjs || Object.keys(cjs).length === 0) throw new Error(pkg + ' CJS require exported nothing');
 }
 
-const { Cred } = await import('@credninja/sdk');
+const { Cred, generateAgentIdentity } = await import('@credninja/sdk');
 const { createServer } = await import('@credninja/server');
 const { createCredMcpServer } = await import('@credninja/mcp');
 const dataDir = mkdtempSync(join(tmpdir(), 'cred-installed-server.'));
+// DPoP proofs name the server URL (htu), which must equal REDIRECT_BASE_URI,
+// so the server listens on the port its configuration names.
+const port = await new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once('error', reject);
+  probe.listen(0, '127.0.0.1', () => {
+    const free = probe.address().port;
+    probe.close(() => resolve(free));
+  });
+});
 const config = {
   port: 0,
   host: '127.0.0.1',
@@ -171,7 +265,7 @@ const config = {
     clientSecret: 'test-google-client-secret',
     defaultScopes: ['openid', 'email', 'profile'],
   }],
-  redirectBaseUri: 'http://127.0.0.1:3456',
+  redirectBaseUri: 'http://127.0.0.1:' + port,
 };
 const { app, vault, tofu } = createServer(config);
 await vault.init();
@@ -184,9 +278,8 @@ await vault.store({
   scopes: ['calendar.readonly'],
 });
 const server = await new Promise((resolve) => {
-  const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+  const listener = app.listen(port, '127.0.0.1', () => resolve(listener));
 });
-const port = server.address().port;
 try {
   const health = await fetch('http://127.0.0.1:' + port + '/health').then((res) => res.json());
   if (health.status !== 'ok') throw new Error('bad installed server health: ' + JSON.stringify(health));
@@ -211,21 +304,59 @@ try {
     const connections = await cred.getUserConnections('sdk-user');
     assert.equal(connections.length, 1);
     assert.equal(connections[0].slug, 'google');
-    const handle = await cred.delegateHandle({
+    // Delegation Tokens are bound to the agent's key (DPoP): issued only to an
+    // agent that proves it, and usable only with a fresh proof by that key.
+    const agent = await generateAgentIdentity();
+    // An agent is issued nothing without a Permission.
+    await assert.rejects(
+      cred.delegateHandle({ service: 'google', userId: 'sdk-user', appClientId: 'app_smoke', scopes: ['calendar.readonly'], agentIdentity: agent }),
+      (err) => err.code === 'permission_required',
+    );
+    await vault.createPermission({
+      agentId: agent.did,
+      connectionId: 'google',
+      allowedScopes: ['calendar.readonly'],
+      requiresApproval: false,
+      delegatable: false,
+      maxDelegationDepth: 1,
+      createdBy: 'smoke',
+    });
+    const credential = await cred.delegateHandle({
       service: 'google',
       userId: 'sdk-user',
       appClientId: 'app_smoke',
       scopes: ['calendar.readonly'],
+      agentIdentity: agent,
     });
-    assert.equal(handle.tokenType, 'Delegation');
-    assert.ok(!('accessToken' in handle));
+    assert.equal(credential.tokenType, 'DPoP');
+    assert.ok(credential.token && credential.jkt);
+    assert.ok(!('accessToken' in credential));
+    const driveUrl = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+    // A stolen token is useless without the agent's key: a proof from another
+    // key is refused.
+    const thief = await generateAgentIdentity();
+    await assert.rejects(
+      cred.use({ token: credential.token, agentIdentity: thief, url: driveUrl, method: 'GET' }),
+      (err) => err.code === 'invalid_dpop_proof',
+    );
+    // Without a proof the SDK refuses to send the call at all.
+    await assert.rejects(
+      cred.use({ token: credential.token, url: driveUrl, method: 'GET' }),
+      (err) => err.code === 'invalid_config',
+    );
     const used = await cred.use({
-      delegationId: handle.delegationId,
-      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      token: credential.token,
+      agentIdentity: agent,
+      url: driveUrl,
       method: 'GET',
     });
     assert.equal(used.ok, true);
     assert.deepEqual(used.body, { items: [{ id: 'evt_smoke' }] });
+    // A read-only grant does not write, on the same host.
+    await assert.rejects(
+      cred.use({ token: credential.token, agentIdentity: agent, url: driveUrl, method: 'POST', body: { summary: 'x' } }),
+      (err) => err.code === 'scope_insufficient',
+    );
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -259,12 +390,10 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   const packageJsonPath = join(generatedDir, 'package.json');
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
   packageJson.dependencies = {
-    '@credninja/server': `file:${tarballsByWorkspace['packages/server']}`,
-    '@credninja/protocol': `file:${tarballsByWorkspace['packages/protocol']}`,
-    '@credninja/oauth': `file:${tarballsByWorkspace['packages/oauth']}`,
-    '@credninja/tofu': `file:${tarballsByWorkspace['packages/tofu']}`,
-    '@credninja/vault': `file:${tarballsByWorkspace['packages/vault']}`,
-    '@credninja/guard': `file:${tarballsByWorkspace['packages/guard']}`,
+    ...Object.fromEntries(['server', 'protocol', 'attenuation', 'oauth', 'tofu', 'vault', 'guard'].map((name) => {
+      const artifact = tarballsByWorkspace[`packages/${name}`];
+      return [`@credninja/${name}`, isAbsolute(artifact) ? `file:${artifact}` : registryVersion];
+    })),
   };
   writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
   run('npm', ['install', '--no-audit', '--no-fund'], { cwd: generatedDir });
@@ -288,6 +417,10 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
   try {
     const health = await waitForHealth(port, child);
     if (health.status !== 'ok') throw new Error('bad generated app health: ' + JSON.stringify(health));
+    // The generated grant script reaches the generated server.
+    const generatedEnv = join(generatedDir, '.env');
+    writeFileSync(generatedEnv, readFileSync(generatedEnv, 'utf8').replace(/^PORT=.*$/m, `PORT=${port}`));
+    run('node', ['grant-agent.mjs', 'github', 'github.read'], { cwd: generatedDir, stdio: 'pipe' });
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${output}`);
   } finally {
@@ -297,10 +430,14 @@ async function runCreateCredAppSmoke(tarballsByWorkspace) {
 }
 
 try {
-  run('npm', ['run', 'build']);
+  if (!registryVersion) run('npm', ['run', 'build']);
   const tarballsByWorkspace = Object.fromEntries(
-    workspaces.map((workspace) => [workspace, packWorkspace(workspace)]),
+    workspaces.map((workspace) => {
+      const name = JSON.parse(readFileSync(join(repoRoot, workspace, 'package.json'), 'utf8')).name;
+      return [workspace, registryVersion ? `${name}@${registryVersion}` : packWorkspace(workspace)];
+    }),
   );
+  await runCloudOnlySdkSmoke(tarballsByWorkspace);
   await runFreshInstallSmoke(tarballsByWorkspace);
   await runCreateCredAppSmoke(tarballsByWorkspace);
 } finally {

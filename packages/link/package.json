@@ -40,7 +40,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "dependencies": {
     "@credninja/protocol": "^2.0.0"
@@ -48,7 +48,7 @@
   "devDependencies": {
     "jsdom": "^26.1.0",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.12"
   },
   "repository": {
     "type": "git",

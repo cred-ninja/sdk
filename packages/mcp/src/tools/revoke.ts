@@ -8,6 +8,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { summarizeGuardDecision } from '../guard-wiring.js';
 import { toolErrorResult } from '../tool-errors.js';
+import type { TokenCache } from '../token-cache.js';
 
 export const REVOKE_TOOL_NAME = 'cred_revoke';
 
@@ -40,6 +41,8 @@ export interface RevokeToolInput {
 export interface RevokeToolContext {
   cred: Cred;
   appClientId: string;
+  /** Handles cached for the revoked connection are dropped with it. */
+  tokenCache?: TokenCache;
 }
 
 export async function handleRevoke(
@@ -52,6 +55,7 @@ export async function handleRevoke(
       service: input.service,
       appClientId: context.appClientId,
     });
+    context.tokenCache?.deleteForConnection(input.service, input.user_id);
 
     const guard = summarizeGuardDecision(context);
     return {

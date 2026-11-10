@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/cred-ninja/sdk)](https://github.com/cred-ninja/sdk)
 [![Website](https://img.shields.io/badge/website-cred.ninja-00ff88)](https://cred.ninja)
 
-**OAuth2 credential delegation for AI agents. Refresh tokens stay vaulted; agents receive scoped access or brokered delegation handles.**
+**OAuth2 credential delegation for AI agents. Refresh tokens stay vaulted; agents get key-bound Delegation Tokens, and each call is checked against what they were granted.**
 
 *Delegation, not exposure.*
 
@@ -41,7 +41,13 @@ cd my-cred-server
 npm start
 ```
 
-Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to connect OAuth providers. Give your agent the `AGENT_TOKEN` from `.env`.
+Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to connect OAuth providers. Grant your agent what it may do, then give it `agent.env`, which holds the server URL, the agent token and a new agent identity:
+
+```bash
+npm run grant -- github github.read
+```
+
+An agent with no Permission is issued nothing. Under `github.read` a read reaches GitHub and a write is refused at the broker.
 
 ### 2. Self-Hosted Server
 
@@ -104,6 +110,8 @@ Your MCP config should be shareable. Credentials shouldn't be in it.
       "env": {
         "CRED_BASE_URL": "https://cred.example.com",
         "CRED_AGENT_TOKEN": "your-agent-token",
+        "CRED_AGENT_DID": "did:key:z6Mk...",
+        "CRED_AGENT_PRIVATE_KEY_HEX": "your-agent-private-key",
         "CRED_APP_CLIENT_ID": "your-app-client-id"
       }
     }
@@ -111,14 +119,14 @@ Your MCP config should be shareable. Credentials shouldn't be in it.
 }
 ```
 
-When your MCP client needs your calendar, it requests a brokered handle from your Cred server. Provider tokens stay on the server and are never stored in your MCP config file.
+When your MCP client needs your calendar, it requests a Delegation Token from your Cred server, bound to the agent's key and limited to what its Permission grants. Provider tokens stay on the server and are never stored in your MCP config file.
 
 ## How It Works
 
 1. **User consents** once, via a standard OAuth flow
 2. **Cred stores the refresh token** encrypted at rest (AES-256-GCM), never returned to agents
-3. **Agent requests access.** Cred validates identity, checks consent, returns a fresh short-lived token or brokered handle
-4. **Access is used and discarded.** Agents do not need to persist credentials, and brokered handles keep provider access tokens on the server
+3. **Agent requests access.** Cred checks the agent's key, its Permission and the user's consent, and returns a short-lived Delegation Token bound to that key
+4. **Each call goes through the broker.** Cred checks the call against what was granted, then makes it. The provider token stays on the server, and revoking the delegation or the Permission ends the agent's access
 
 ## Packages
 
@@ -150,13 +158,15 @@ When your MCP client needs your calendar, it requests a brokered handle from you
 
 | Service | Scopes | PKCE |
 |---------|--------|------|
-| Google | Gmail, Calendar, Drive, all Google OAuth scopes | S256 |
-| GitHub | repo, read:user, all GitHub OAuth scopes | |
-| Slack | channels:read, chat:write, all Slack OAuth scopes | |
-| Notion | read_content, update_content, all Notion OAuth scopes | |
-| Salesforce | api, refresh_token, all Salesforce OAuth scopes | S256 |
+| Google | Gmail, Calendar, Drive, Sheets, Docs, People, Directory | S256 |
+| GitHub | repo, read:user; `github.read` at the broker | |
+| Slack | channels:read, chat:write and others | |
+| Notion | Capabilities are set on the integration; `content`, and `notion.read` at the broker | |
+| Salesforce | api, refresh_token; `salesforce.read` at the broker | S256 |
 | Linear | read, write, issues:create, comments:create, admin | S256 |
-| HubSpot | crm.objects.contacts.read/write, content, automation, all HubSpot OAuth scopes | |
+| HubSpot | crm.objects.contacts.read/write and other CRM objects | |
+
+These seven are the services the server brokers, `SERVICE_ALLOWLIST` in `packages/server`. A brokered call must also be one the operation tables map; the [server docs](./packages/server#operation-enforcement) list what is. MCP local mode calls Google, GitHub, Slack, Notion and Salesforce directly.
 
 Need a provider that's not listed? [Adding an adapter](./CONTRIBUTING.md#adding-an-oauth-provider-adapter) is the most common contribution.
 
@@ -168,7 +178,8 @@ Need a provider that's not listed? [Adding an adapter](./CONTRIBUTING.md#adding-
 - **Audit trail where supported.** SQLite vaults record append-only audit events; file vaults do not.
 - **Delegation receipts.** Receipt chains are signed as Ed25519 JWS values.
 - **Zero runtime dependencies.** TypeScript SDK and OAuth package use only Node.js built-ins.
-- **Pre-launch audits.** 7 security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
+- **Default deny.** An agent gets only what a Permission grants, each brokered call is checked against it, and a revocation holds until an operator grants access again.
+- **Review notes.** Maintainer security reviews, each dated, are in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md). They are not independent audits.
 
 ## Guard — Policy Engine
 
@@ -205,7 +216,7 @@ const guardedHandler = guard.wrapMcpTool(handleUse);
 
 - **Not an auth provider.** Cred never handles login. It receives verified identity from your existing provider (WorkOS, Supabase, Clerk, NextAuth) and manages outbound credential lifecycle from there.
 - **Not a vault/secret manager.** HashiCorp Vault manages infrastructure secrets (DB passwords, API keys you own). Cred manages user-delegated OAuth tokens: credentials users grant to your agent.
-- **Not a general-purpose API proxy.** Raw-token delegation can stay out of the hot path. Brokered handle modes intentionally relay scoped upstream calls through Cred or MCP so provider tokens stay hidden, with service allowlists, delegated-scope checks, and Guard policies applied before forwarding.
+- **Not a general-purpose API proxy.** Brokered calls go through Cred or MCP so provider tokens stay hidden, and only calls the operation tables map and the grant covers are forwarded, with service allowlists and Guard policies applied first.
 
 ## Web Bot Auth
 
@@ -241,7 +252,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md). SDK, integration, and documentation co
 
 ## Security
 
-See [SECURITY.md](./SECURITY.md) for vulnerability disclosure. Pre-launch security audits documented in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
+See [SECURITY.md](./SECURITY.md) for vulnerability disclosure. Maintainer review notes are in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
 
 ## License
 

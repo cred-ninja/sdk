@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { canonicalJson } from '@credninja/attenuation';
 import { createHash, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
 import {
   CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
   Cred,
   CredError,
   ConsentRequiredError,
+  generateAgentIdentity,
 } from '../index';
 
 // Mock global fetch
@@ -295,8 +297,11 @@ describe('Cred.delegate()', () => {
 
 describe('Cred.delegateHandle() and use()', () => {
   it('requests a brokered handle without an access token', async () => {
+    const agent = await generateAgentIdentity();
     mockFetch.mockResolvedValue(mockResponse(200, {
-      token_type: 'Delegation',
+      access_token: 'dt.jwt.token',
+      token_type: 'DPoP',
+      cnf: { jkt: 'jkt_1' },
       expires_in: 900,
       service: 'google',
       user_id: 'user_1',
@@ -309,9 +314,12 @@ describe('Cred.delegateHandle() and use()', () => {
       userId: 'user_1',
       appClientId: 'app_1',
       scopes: ['calendar.readonly'],
+      agentIdentity: agent,
     });
 
-    expect(result.tokenType).toBe('Delegation');
+    expect(result.tokenType).toBe('DPoP');
+    expect(result.token).toBe('dt.jwt.token');
+    expect(result.jkt).toBe('jkt_1');
     expect(result.delegationId).toBe('del_handle');
     expect(result.userId).toBe('user_1');
     const [, init] = mockFetch.mock.calls[0];
@@ -320,7 +328,61 @@ describe('Cred.delegateHandle() and use()', () => {
       user_id: 'user_1',
       appClientId: 'app_1',
       token_format: 'handle',
+      agent_did: agent.did,
     });
+    expect(init.headers.DPoP).toBeTruthy();
+  });
+
+  it('authorizes a hop as a grant, and redeems it as the receiving agent (RFC 8693)', async () => {
+    const [delegator, child] = [await generateAgentIdentity(), await generateAgentIdentity()];
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      delegation_grant: 'grant_1', delegation_id: 'del_child', agent_did: child.did, expires_in: 60,
+      chain_depth: 1, parent_delegation_id: 'del_root', scopes: ['openid'],
+    }));
+    const grant = await cred.subDelegateGrant({
+      parentReceipt: 'receipt', service: 'google', userId: 'user_1', appClientId: 'app_1',
+      agentDid: child.did, scopes: ['openid'], delegatorIdentity: delegator,
+    });
+    expect(grant).toMatchObject({ delegationGrant: 'grant_1', delegationId: 'del_child', agentDid: child.did });
+    const [authUrl, authInit] = mockFetch.mock.calls[0];
+    expect(authUrl).toBe(`${BASE_URL}/api/v1/subdelegate`);
+    const authBody = JSON.parse(authInit.body);
+    expect(authBody).toMatchObject({ exchange: 'grant', agent_did: child.did, parent_receipt: 'receipt' });
+    expect(JSON.parse(Buffer.from(authBody.actor_token.split('.')[1], 'base64url').toString('utf8')))
+      .toMatchObject({ iss: delegator.did, aud: `${BASE_URL}/api/v1/subdelegate` });
+
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      access_token: 'dt.child', token_type: 'DPoP', cnf: { jkt: 'jkt_child' }, expires_in: 60, service: 'google',
+      user_id: 'user_1', scopes: ['openid'], delegation_id: 'del_child', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_root',
+    }));
+    const redeemed = await cred.redeemDelegationGrant({ delegationGrant: 'grant_1', agentIdentity: child });
+    expect(redeemed).toMatchObject({ tokenType: 'DPoP', token: 'dt.child', jkt: 'jkt_child', chainDepth: 1, parentDelegationId: 'del_root' });
+    const [redeemUrl, redeemInit] = mockFetch.mock.calls[1];
+    expect(redeemUrl).toBe(`${BASE_URL}/api/v1/token`);
+    const redeemBody = JSON.parse(redeemInit.body);
+    expect(redeemBody).toMatchObject({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: 'grant_1',
+      actor_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+    });
+    expect(JSON.parse(Buffer.from(redeemBody.actor_token.split('.')[1], 'base64url').toString('utf8')))
+      .toMatchObject({ iss: child.did, aud: `${BASE_URL}/api/v1/token` });
+  });
+
+  it('sends requested capabilities as authorization_details', async () => {
+    const agent = await generateAgentIdentity();
+    mockFetch.mockResolvedValue(mockResponse(200, {
+      access_token: 'dt', token_type: 'DPoP', cnf: { jkt: 'j' }, expires_in: 900, service: 'github', user_id: 'u', scopes: ['repo'], delegation_id: 'd',
+    }));
+    const authorizationDetails = [{ type: 'cred_delegation' as const, provider: 'github', operations: ['github.issues.create'], resources: ['repo:acme/app'] }];
+    await cred.delegateHandle({ service: 'github', userId: 'u', appClientId: 'app', agentIdentity: agent, authorizationDetails });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).authorization_details).toEqual(authorizationDetails);
+  });
+
+  it('refuses to request a Delegation Token without the agent identity it is bound to', async () => {
+    await expect(cred.delegateHandle({ service: 'google', userId: 'user_1', appClientId: 'app_1' }))
+      .rejects.toMatchObject({ code: 'invalid_config' });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('uses a brokered handle through the server', async () => {
@@ -331,8 +393,10 @@ describe('Cred.delegateHandle() and use()', () => {
       body: { items: [] },
     }));
 
+    const agent = await generateAgentIdentity();
     const result = await cred.use({
-      delegationId: 'del_handle',
+      token: 'dt.jwt.token',
+      agentIdentity: agent,
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
       extraHeaders: { 'X-Test': '1' },
@@ -342,11 +406,32 @@ describe('Cred.delegateHandle() and use()', () => {
     expect(result.body).toEqual({ items: [] });
     const [url, init] = mockFetch.mock.calls[0];
     expect(url).toBe(`${BASE_URL}/api/v1/use`);
-    expect(JSON.parse(init.body)).toMatchObject({
-      delegation_id: 'del_handle',
+    expect(init.headers.Authorization).toBe('DPoP dt.jwt.token');
+    const sent = JSON.parse(init.body);
+    expect(sent).toEqual({
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
       extra_headers: { 'X-Test': '1' },
     });
+    const claims = JSON.parse(Buffer.from(String(init.headers.DPoP).split('.')[1]!, 'base64url').toString('utf8'));
+    expect(claims.ath).toBe(createHash('sha256').update('dt.jwt.token', 'ascii').digest('base64url'));
+  });
+
+  it('binds the DPoP proof to exactly the body it sends, including values JSON converts', async () => {
+    const agent = await generateAgentIdentity();
+    mockFetch.mockResolvedValue(mockResponse(200, { status: 200, ok: true, contentType: 'application/json', body: {} }));
+    await cred.use({
+      token: 'dt.jwt.token',
+      url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      method: 'POST',
+      body: { start: new Date('2026-11-01T10:00:00Z') as unknown as string, skip: undefined },
+      agentIdentity: agent,
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const sent = JSON.parse(init.body);
+    expect(sent.body).toEqual({ start: '2026-11-01T10:00:00.000Z' });
+    const claims = JSON.parse(Buffer.from(String(init.headers.DPoP).split('.')[1]!, 'base64url').toString('utf8'));
+    expect(claims.cred_req).toBe(createHash('sha256').update(canonicalJson(sent), 'utf8').digest('base64url'));
   });
 
   it('signs brokered server requests when Web Bot Auth is configured', async () => {
@@ -369,13 +454,14 @@ describe('Cred.delegateHandle() and use()', () => {
     }));
 
     await signedCred.use({
-      delegationId: 'del_handle',
+      token: 'dt.jwt.token',
+      agentIdentity: await generateAgentIdentity(),
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    expect(init.headers['Authorization']).toBe(`Bearer ${TOKEN}`);
+    expect(init.headers['Authorization']).toBe('DPoP dt.jwt.token');
     expect(init.headers['Signature-Agent']).toBe('"https://agent.example.com/.well-known/http-message-signatures-directory"');
     expect(init.headers['Signature-Input']).toContain('tag="web-bot-auth"');
     expect(init.headers['Signature']).toMatch(/^sig1=:[^:]+:$/);
@@ -936,5 +1022,36 @@ describe('Cred local mode', () => {
 
     await expect(local.revokePermission('perm_1'))
       .rejects.toMatchObject({ code: 'not_supported', statusCode: 501 });
+  });
+});
+
+describe('subDelegate() caller identity', () => {
+  it('sends an actor_token signed by the delegating agent when its identity is given', async () => {
+    const { generateAgentIdentity } = await import('../identity.js');
+    const delegator = await generateAgentIdentity();
+    const client = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      token_type: 'Delegation', service: 'google', scopes: ['openid'], delegation_id: 'del_1', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_0',
+    }));
+    await client.subDelegate({
+      parentReceipt: 'parent', service: 'google', userId: 'u', appClientId: 'local', agentDid: 'did:key:z6MkChild', delegatorIdentity: delegator,
+    });
+    const body = JSON.parse(mockFetch.mock.calls.at(-1)![1].body);
+    const [h, p, sig] = body.actor_token.split('.');
+    const claims = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    expect(claims).toMatchObject({ iss: delegator.did, sub: delegator.did, aud: `${BASE_URL}/api/v1/subdelegate` });
+    expect(claims.exp - claims.iat).toBeLessThanOrEqual(300);
+    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(delegator.publicKey)]);
+    const { createPublicKey } = await import('node:crypto');
+    expect(verifySignature(null, Buffer.from(`${h}.${p}`), createPublicKey({ key: spki, format: 'der', type: 'spki' }), Buffer.from(sig, 'base64url'))).toBe(true);
+  });
+
+  it('sends no actor_token without one', async () => {
+    const client = new Cred({ agentToken: TOKEN, baseUrl: BASE_URL });
+    mockFetch.mockResolvedValueOnce(mockResponse(200, {
+      token_type: 'Delegation', service: 'google', scopes: ['openid'], delegation_id: 'del_1', receipt: 'r', chain_depth: 1, parent_delegation_id: 'del_0',
+    }));
+    await client.subDelegate({ parentReceipt: 'parent', service: 'google', userId: 'u', appClientId: 'local', agentDid: 'did:key:z6MkChild' });
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)![1].body).actor_token).toBeUndefined();
   });
 });

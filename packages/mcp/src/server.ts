@@ -11,7 +11,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { Cred } from '@credninja/sdk';
+import { Cred, importAgentIdentity } from '@credninja/sdk';
 import type { CredGuard } from '@credninja/guard';
 
 import { CredMcpConfig } from './config.js';
@@ -146,7 +146,14 @@ function buildServerState(config: CredMcpConfig) {
         ? agentTokenHashForLocalMode(config.agentDid)
         : undefined;
 
+  const allowUnclassifiedRaw = (process.env.CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS ?? '').trim().toLowerCase();
+  const allowUnclassifiedCalls = allowUnclassifiedRaw === 'true' || allowUnclassifiedRaw === '1';
+  if (allowUnclassifiedCalls && config.mode !== 'cloud') {
+    console.error('[cred] DEPRECATED: CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS=true forwards local cred_use calls without checking them against the grant and follows redirects, so a read-only scope can reach a write endpoint. Remove it; this setting will be removed.');
+  }
+
   const toolContext = {
+    allowUnclassifiedCalls,
     cred,
     appClientId: config.mode === 'cloud' ? config.appClientId : 'local',
     agentDid: config.agentDid,
@@ -154,6 +161,10 @@ function buildServerState(config: CredMcpConfig) {
     tokenCache,
     webBotAuthSigner,
     useServerBroker: config.mode === 'cloud',
+    // Throws when the key does not belong to agentDid, so a misconfiguration fails at startup.
+    ...(config.mode === 'cloud' && config.agentPrivateKeyHex && config.agentDid
+      ? { delegatorIdentity: importAgentIdentity({ did: config.agentDid, privateKeyHex: config.agentPrivateKeyHex }) }
+      : {}),
     guard,
     ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
     ...(agentTokenHash ? { agentTokenHash } : {}),
@@ -389,4 +400,7 @@ export async function startServer(config: CredMcpConfig): Promise<void> {
   await server.connect(transport);
   const modeLabel = config.mode === 'local' ? 'local vault' : 'cloud API';
   console.error(`Cred MCP server started in ${modeLabel} mode (tokens never enter LLM context)`);
+  if (config.mode === 'cloud' && !(config.agentDid && config.agentPrivateKeyHex)) {
+    console.error('[cred] Warning: CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX are not both set. Cred servers bind every Delegation Token to the agent\'s key (DPoP), so cred_delegate and cred_use will be refused until both are set.');
+  }
 }

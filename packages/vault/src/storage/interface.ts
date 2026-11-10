@@ -1,5 +1,15 @@
 import type { StoredRow, AgentRow, PermissionRow, PermissionRowUpdate, Rotation, RotationRow } from '../types.js';
-import type { AuditEvent, AuditFilter } from '../audit.js';
+import type { AuditEvent, AuditFilter, AuditChainVerification, AuditChainHead } from '../audit.js';
+import type { ConsentRecord, ConsentRevocation, ConsentRevocationFilter, RecordConsentInput } from '../consent.js';
+import type {
+  DelegationRecord,
+  DelegationRevocationOptions,
+  DelegationRevocationSeed,
+  RecordDelegationInput,
+  RevokedDelegation,
+  AgentRevocation,
+  AgentRevocationFilter,
+} from '../delegation-revocation.js';
 
 /**
  * StorageBackend — the interface that all vault storage backends must implement.
@@ -54,8 +64,14 @@ export interface StorageBackend {
 
   storePermission?(row: PermissionRow): void | Promise<void>;
   getPermission?(agentId: string, connectionId: string): PermissionRow | null | Promise<PermissionRow | null>;
+  getPermissionById?(id: string): PermissionRow | null | Promise<PermissionRow | null>;
   listPermissions?(agentId: string): PermissionRow[] | Promise<PermissionRow[]>;
-  revokePermission?(permissionId: string): void | Promise<void>;
+  /**
+   * Delete a permission row and, in the same transaction, record that the
+   * agent's access was revoked (an AgentRevocation for every user of the
+   * connection). Returns the row removed, or null when there was none.
+   */
+  revokePermission?(permissionId: string): PermissionRow | null | Promise<PermissionRow | null>;
   /**
    * Atomically apply a partial update to a single permission row, keyed
    * strictly by `id` (never by agent_id/connection_id). Must be a single
@@ -86,10 +102,54 @@ export interface StorageBackend {
     now?: Date,
   ): boolean | Promise<boolean>;
 
+  // ── Agent revocations (optional; CredVault falls back to process memory) ──
+
+  storeAgentRevocations?(rows: readonly AgentRevocation[]): void | Promise<void>;
+  /** The newest revocation holding for any of these agent ids, on this service and user. */
+  getAgentRevocation?(agentIds: readonly string[], service: string, userId: string): AgentRevocation | null | Promise<AgentRevocation | null>;
+  /** Remove them for a re-grant; returns how many there were. */
+  clearAgentRevocations?(agentIds: readonly string[], service: string, options?: { userId?: string }): number | Promise<number>;
+  listAgentRevocations?(filter: AgentRevocationFilter): AgentRevocation[] | Promise<AgentRevocation[]>;
+
   // ── Audit methods (optional — not all backends need these) ─────────────────
 
   writeAuditEvent?(event: AuditEvent): void | Promise<void>;
+  /** Write several events at once, in one transaction where the backend can. */
+  writeAuditEvents?(events: readonly AuditEvent[]): void | Promise<void>;
   queryAuditEvents?(filter: AuditFilter): AuditEvent[] | Promise<AuditEvent[]>;
+  /** Key for the tamper-evident audit chain (set by CredVault.init()). */
+  setAuditChainKey?(key: Buffer): void;
+  verifyAuditChain?(): AuditChainVerification;
+  auditChainHead?(): AuditChainHead | null;
+
+  // ── Delegation methods (optional; CredVault falls back to process memory) ─
+
+  /**
+   * Record an issued delegation. Must refuse, with DelegationRevokedError,
+   * a record whose parent is revoked, atomically with the insert. An id that
+   * already exists is kept as first written.
+   */
+  storeDelegation?(input: RecordDelegationInput, now: string): DelegationRecord | Promise<DelegationRecord>;
+  /** Store a consent record once; an id that already exists is left as first written. */
+  storeConsent?(input: RecordConsentInput, now: string): ConsentRecord | Promise<ConsentRecord>;
+  getConsent?(id: string): ConsentRecord | null | Promise<ConsentRecord | null>;
+  /** Record a revocation for every matching consent not yet revoked; returns their ids. */
+  revokeConsents?(filter: ConsentRevocationFilter, reason: string, now: string): string[] | Promise<string[]>;
+  getConsentRevocation?(id: string): ConsentRevocation | null | Promise<ConsentRevocation | null>;
+  /** Consent records of one subject, agent and service, newest first. */
+  findConsents?(filter: { subject: string; agentDid: string; service: string }): ConsentRecord[] | Promise<ConsentRecord[]>;
+  /** Delete consent records whose retention ended before `before` (ISO); returns how many. */
+  purgeConsents?(before: string): number | Promise<number>;
+  getDelegation?(id: string): DelegationRecord | null | Promise<DelegationRecord | null>;
+  /**
+   * Revoke the seeds and all their descendants, atomically where the
+   * backend can. Returns only the delegations this call revoked.
+   */
+  revokeDelegationTree?(
+    seed: DelegationRevocationSeed,
+    revokedAt: string,
+    options?: DelegationRevocationOptions,
+  ): { revoked: RevokedDelegation[]; truncated: boolean } | Promise<{ revoked: RevokedDelegation[]; truncated: boolean }>;
 
   // ── Rotation methods (optional — not all backends need these) ───────────────
 

@@ -1,0 +1,20 @@
+{
+  "description": "exp is 2^53, one past the largest integer a binary64 number represents exactly. Section 3 of the -02 makes such an integer malformed (JCS numbers are IEEE 754 doubles). MUST be rejected: malformed.",
+  "draft": "02",
+  "expect_reject_reason": "malformed",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-02",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d647261667430322d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLTAyIiwidHlwIjoiYXQrand0In0.eyJhdWQiOiJodHRwczovL2NybS5leGFtcGxlLmNvbSIsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiY2xpZW50X2lkIjoicGFyc2VyLXByb2JlIiwiY25mIjp7ImprdCI6Ii03bXVhSERqVzA5azV5azJfRGRseEZxUDM3cHl5TTl2SF9Ncmg0WGxzQlkifSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjkwMDcxOTkyNTQ3NDA5OTIsImlhdCI6MCwiaXNzIjoiYXR0ZW51LWd1YXJkIiwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJhY2N0OmZpbmFuY2Utb3BzQGV4YW1wbGUuY29tIn0.oJVN0YWT0Kau2jahFEUhNa7oF468JtFDdH8wF_vftao"
+  ],
+  "verifier": {
+    "accepted_algs": [
+      "HS256"
+    ],
+    "audience": "https://crm.example.com"
+  }
+}

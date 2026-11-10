@@ -10,6 +10,7 @@ const expectedVersion = rootPackage.version;
 const failures = [];
 
 const npmPackagePaths = [
+  'packages/attenuation/package.json',
   'packages/create-cred-app/package.json',
   'packages/guard/package.json',
   'packages/integrations/vercel-ai/package.json',
