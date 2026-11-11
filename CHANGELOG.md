@@ -626,7 +626,7 @@ change: Cred Link, which is moving to `cred-ninja/link`.
   `requestedExpiresAt` and throws `expiry_escalation_denied` for a child that
   would outlive its parent.
 
-## [2.0.0] - prepared 2026-10-13, not yet published to npm
+## [2.0.0] - 2026-10-31
 
 npm only; Python package versions are unchanged. Nothing between 1.0.0 and
 2.0.0 was ever published, so everything below ships in this one major. Read
