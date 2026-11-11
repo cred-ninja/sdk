@@ -298,12 +298,13 @@ export class Cred {
     } catch {
       throw new CredError(`Invalid baseUrl: "${url}" — must be a valid URL`, 'invalid_config', 0);
     }
-    // Allow HTTP for localhost/127.0.0.1 (standard secure context),
-    // require HTTPS for all other hosts.
+    // Allow HTTP for localhost/127.0.0.1/::1 (standard secure context),
+    // require HTTPS for all other hosts. WHATWG URL keeps the brackets on an
+    // IPv6 hostname, so ::1 arrives as '[::1]'.
     const isLocalhost =
       parsed.hostname === 'localhost' ||
       parsed.hostname === '127.0.0.1' ||
-      parsed.hostname === '::1';
+      parsed.hostname === '[::1]';
 
     if (parsed.protocol !== 'https:' && !isLocalhost) {
       throw new CredError(

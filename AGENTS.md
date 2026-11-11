@@ -69,7 +69,7 @@ rate-limit headroom.
 
 ## REST endpoints (`packages/server`)
 
-From `packages/server/src/server.ts`, current as of this plan's U9. Auth
+From `packages/server/src/server.ts`. Auth
 column: `None` (no auth), `Admin` (`requireAdminAuth`, admin token/session),
 `Bearer` (`requireAgentAuth`, agent Bearer token), `Bearer+VI` (Bearer plus
 `requireVerifiedIdentityRegardlessOfMode`, i.e. Web Bot Auth-verified). `Link client` = Cred
@@ -172,7 +172,7 @@ use flow, exposed under that framework's own tool-registration convention.
 - **Semantic Kernel** (`cred-semantic-kernel`): a single `cred` plugin
   (`kernel.add_plugin(plugin, plugin_name="cred")`) exposing kernel
   functions `delegate` and `use` (invoked as `cred.delegate` / `cred.use`).
-- **Vercel AI SDK** (`@credninja/vercel-ai`): `credDelegateTool()` /
+- **Vercel AI SDK** (`@credninja/ai`): `credDelegateTool()` /
   `credUseTool()` factories, conventionally registered under the tool keys
   `cred_delegate` and `cred_use`.
 
