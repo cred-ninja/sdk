@@ -8,6 +8,10 @@
 //	    authority, use "wit-svid"), signs a WIT with go-jose (go-spiffe's JOSE
 //	    library), and accepts it only if go-spiffe's witsvid.ParseAndValidate
 //	    does; writes <dir>/svid.json {wit, key} and <dir>/bundle.json.
+//	go run . fetch <agent-socket> <dir>
+//	    fetches a WIT-SVID and the WIT bundles from a SPIRE agent's Workload
+//	    API (SPIRE main with enable_wit_svids) with go-spiffe's workloadapi;
+//	    writes <dir>/svid.json and <dir>/bundle.json (spiffebundle form).
 //	go run . validate <bundle.json> <trust-domain> <wit>
 //	    validates a WIT issued elsewhere (e.g. by Cred's demo issuer) with
 //	    go-spiffe's witsvid.ParseAndValidate against a bundle parsed by
@@ -28,12 +32,38 @@ import (
 	"path/filepath"
 	"time"
 
+	"context"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/exp/svid/witsvid"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
+
+func fetch(socket, dir string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	addr := workloadapi.WithAddr("unix://" + socket)
+	svid, err := workloadapi.FetchWITSVID(ctx, "", addr)
+	check(err)
+	bundles, err := workloadapi.FetchWITBundles(ctx, addr)
+	check(err)
+	b, err := bundles.GetWITBundleForTrustDomain(svid.ID.TrustDomain())
+	check(err)
+	bundleJSON, err := spiffebundle.FromWITBundle(b).Marshal()
+	check(err)
+	check(os.WriteFile(filepath.Join(dir, "bundle.json"), bundleJSON, 0o644))
+	// Check the fetched SVID against the fetched bundle with go-spiffe itself.
+	checked, err := witsvid.ParseAndValidate(svid.Marshal(), bundles)
+	check(err)
+	der, err := x509.MarshalPKCS8PrivateKey(svid.PrivateKey)
+	check(err)
+	out, _ := json.Marshal(map[string]string{"wit": svid.Marshal(), "key": base64.StdEncoding.EncodeToString(der)})
+	check(os.WriteFile(filepath.Join(dir, "svid.json"), out, 0o600))
+	fmt.Printf("fetched WIT-SVID from the SPIRE agent: id=%s kid=%s exp=%s (go-spiffe ParseAndValidate OK for %s)\n", svid.ID, svid.KeyID, svid.Expiry.Format(time.RFC3339), checked.ID)
+	fmt.Printf("bundle (SPIRE via workload API, go-spiffe spiffebundle.Marshal): %s\n", bundleJSON)
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -42,6 +72,8 @@ func main() {
 	switch os.Args[1] {
 	case "issue":
 		issue(os.Args[2], os.Args[3], os.Args[4])
+	case "fetch":
+		fetch(os.Args[2], os.Args[3])
 	case "validate":
 		td := spiffeid.RequireTrustDomainFromString(os.Args[3])
 		raw, err := os.ReadFile(os.Args[2])

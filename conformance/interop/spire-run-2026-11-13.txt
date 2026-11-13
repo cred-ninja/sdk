@@ -1,0 +1,23 @@
+spire-server: 1.16.1-dev-unk
+SPIFFE ID               : spiffe://domain-b.example/ns/agents/sa/planner
+Selector                : unix:uid:501
+spire-server log: time="2026-11-13T15:22:56-05:00" level=info msg="WIT key activated" expiration="2026-11-14 15:22:56.862994 -0500 EST" issued_at="2026-11-13 15:22:56.862994 -0500 EST" local_authority_id=lgmp5gSxeBgEaef4BU5wknAgycUJ6Apf slot=A subsystem_name=ca_manager
+rpc error: code = PermissionDenied desc = no identity issued
+exit status 1
+rpc error: code = PermissionDenied desc = no identity issued
+exit status 1
+rpc error: code = PermissionDenied desc = no identity issued
+exit status 1
+fetched WIT-SVID from the SPIRE agent: id=spiffe://domain-b.example/ns/agents/sa/planner kid=lgmp5gSxeBgEaef4BU5wknAgycUJ6Apf exp=2026-11-13T21:23:02Z (go-spiffe ParseAndValidate OK for spiffe://domain-b.example/ns/agents/sa/planner)
+bundle (SPIRE via workload API, go-spiffe spiffebundle.Marshal): {"keys":[{"use":"wit-svid","kty":"EC","kid":"lgmp5gSxeBgEaef4BU5wknAgycUJ6Apf","crv":"P-256","x":"sgYpgJumd-a0HZbxitHFaDZCc-YhspSfkq5nkMBNPXI","y":"TVLp5h5wxGkSPJsIST7qqiu5DXNAwgTTqP0B0ZZrS5U"}]}
+WIT header {"alg":"ES256","kid":"lgmp5gSxeBgEaef4BU5wknAgycUJ6Apf","typ":"wit+jwt"}
+spire-server bundle show -format spiffe: x509-svid, jwt-svid, wit-svid
+Cred http://127.0.0.1:60292; trusted domain-b.example from $RUN/spire-bundle.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkiVrc8ZpDXPk7kwGeQ23amf1w4nkvFmLQLsW813nWMamh
+POST /api/v1/delegate (WIT + WPT): 200 DPoP
+POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
+provider calls 1; WIMSE headers at provider: none
+audit:
+  2026-11-13T20:23:03.940Z create success actor=admin {"agentId":"did:key:z6MkiVrc8ZpDXPk7kwGeQ23amf1w4nkvFmLQLsW813nWMamh","connectionId":"google"}
+  2026-11-13T20:23:03.971Z delegate success actor=did:key:z6MkiVrc8ZpDXPk7kwGeQ23amf1w4nkvFmLQLsW813nWMamh {"identitySource":"did","agentDid":"did:key:z6MkiVrc8ZpDXPk7kwGeQ23amf1w4nkvFmLQLsW813nWMamh","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T20:23:03.979Z access success actor=did:key:z6MkiVrc8ZpDXPk7kwGeQ23amf1w4nkvFmLQLsW813nWMamh {"delegationId":"del_f2178a60634546f88a4cd9f23c5cb283","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+RESULT: PASS

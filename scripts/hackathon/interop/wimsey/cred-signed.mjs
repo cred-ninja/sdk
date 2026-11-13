@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const { witIssuer, es256Jws, sha256b64url } = await import(path.join(root, 'scripts/hackathon/lib/issuers.mjs'));
 const { signWimseRequest } = await import(path.join(root, 'packages/server/dist/index.js'));
-const [dir, authority, p, query, aud] = process.argv.slice(2);
+const [dir, _authority, p, query, aud] = process.argv.slice(2);
 const issuer = witIssuer('domain-b.example', dir);
 const w = issuer.workload('/ns/agents/sa/planner');
 const issuerJwk = JSON.parse(fs.readFileSync(issuer.bundlePath, 'utf8')).keys[0];
