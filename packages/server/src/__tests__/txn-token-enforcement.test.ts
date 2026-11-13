@@ -184,6 +184,22 @@ describe('authority only narrows', () => {
     expect(res.body.error).toBe('txn_user_mismatch');
   });
 
+  it('an agent whose domain requires Txn-Tokens cannot obtain a delegation with the agent token instead', async () => {
+    const s = await setup();
+    const res = await request(s.app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`)
+      .set('DPoP', createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`))
+      .send({ token_format: 'handle', agent_did: s.agent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_token_required');
+  });
+
+  it('inside a transaction only a handle is issued, never a raw provider token', async () => {
+    const s = await setup({ config: { allowRawTokens: true } });
+    const res = await delegateWithHttpSig(s.app, s.agent, s.w, { token_format: 'raw' }, { 'txn-token': s.tts.mint() });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_handle_required');
+  });
+
   it('delegation in a transaction may not ask for scopes beyond what the transaction maps to', async () => {
     const s = await setup({ scopes: ['calendar.readonly', 'calendar.events'] });
     const res = await delegateWithHttpSig(s.app, s.agent, s.w, { scopes: ['calendar.events'] }, { 'txn-token': s.tts.mint({ scope: 'calendar.read' }) });

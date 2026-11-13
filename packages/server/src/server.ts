@@ -5175,6 +5175,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseRawToken(res);
         return;
       }
+      // A workload whose trust domain requires Txn-Tokens never receives a raw token.
+      const compatWorkload = provenExternalAgent.get(req);
+      if (compatWorkload && txnTrustRequiredFor(compatWorkload.agentDid)) {
+        res.status(403).json({ error: 'txn_handle_required', message: 'This agent obtains credentials only as brokered handles inside a transaction' });
+        return;
+      }
       const userId = requestUserId(req, res, { agent: true });
       if (userId === null) return;
       if (rejectReservedUserId(res, userId)) return;
@@ -6231,6 +6237,18 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // must be the user named here, and every requested scope must be one
       // its scope maps to. Refused, never silently narrowed.
       const txnForDelegate = verifiedTxnTokens.get(req);
+      // An agent whose trust domain requires Txn-Tokens obtains credentials
+      // only inside a verified transaction, and only as a handle: a raw
+      // provider token would escape the per-call narrowing on /api/v1/use.
+      const delegatingAgent = agentDid ?? provenExternalAgent.get(req)?.agentDid;
+      if (!txnForDelegate && delegatingAgent && txnTrustRequiredFor(delegatingAgent)) {
+        res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token to obtain a delegation" });
+        return;
+      }
+      if (txnForDelegate && tokenFormatFromBody(req) !== 'handle') {
+        res.status(403).json({ error: 'txn_handle_required', message: 'Within a transaction only a brokered handle is issued, so each call can be narrowed' });
+        return;
+      }
       if (txnForDelegate) {
         const { token, trust } = txnForDelegate;
         if (token.userId === undefined) {
