@@ -3976,7 +3976,7 @@ describe('@credninja/server', () => {
       expect(revokeRes.body.error).toMatch(/sqlite/);
     });
 
-    it('narrowing allowedScopes via PATCH does not retroactively affect an already-brokered /api/v1/use handle (prospective-only)', async () => {
+    it('narrowing allowedScopes via PATCH reaches an already-brokered /api/v1/use handle at its next use', async () => {
       const config = makeTestConfig({
         vaultStorage: 'sqlite',
         vaultPath: TEST_SQLITE_VAULT_PATH,

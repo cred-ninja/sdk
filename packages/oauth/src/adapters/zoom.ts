@@ -81,7 +81,7 @@ export class ZoomAdapter extends BaseServiceAdapter {
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeRefreshResponse(data);
+    return this.finishRefreshResponse(data, response.status);
   }
 
   async revokeToken(params: RevokeTokenParams): Promise<void> {

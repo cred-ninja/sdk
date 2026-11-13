@@ -1,12 +1,13 @@
 // Default deny and sticky revocation on the legacy (non-Link) delegation
 // paths: a did:key agent gets what it was granted, and a revocation holds
 // against a new key, a new delegation and a sub-delegation.
-import { describe, it, expect, vi, afterAll } from 'vitest';
+import { describe, it, expect, vi, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+import { CredGuard } from '@credninja/guard';
 import { createServer } from '../server.js';
 import { createDpopProof } from '@credninja/sdk';
 import { actorTokenFor, delegateAs, exerciseAs, newAgent, type AgentIdentity, type App } from './token-helpers.js';
@@ -15,6 +16,8 @@ import type { ServerConfig } from '../config.js';
 const BEARER = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
 const ADMIN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 const tmpDirs: string[] = [];
+
+afterEach(() => vi.restoreAllMocks());
 
 afterAll(() => {
   for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
@@ -126,8 +129,7 @@ describe('default deny', () => {
   it('a raw-token request naming an agent is held to the same rule', async () => {
     const { app } = await setup({ allowRawTokens: true });
     const agent = await newAgent();
-    const res = await request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`)
-      .send({ service: 'google', user_id: 'alice', token_format: 'raw', agent_did: agent.did });
+    const res = await delegate(app, agent, { token_format: 'raw' });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('permission_required');
     expect(res.body.access_token).toBeUndefined();
@@ -179,6 +181,70 @@ describe('default deny', () => {
     await delegate(app, agent);
     const events = await vault.queryAuditEvents({ limit: 50 });
     expect(events.find((e) => e.action === 'delegate')?.metadata?.enforcementOptOuts).toBeUndefined();
+  });
+});
+
+describe('raw did:key proof of possession', () => {
+  for (const withGuard of [false, true]) {
+    it.each(['missing', 'wrong-agent', 'invalid-signature'])(`refuses %s before credentials, refresh or issuance (Guard ${withGuard})`, async (kind) => {
+      const { app, vault } = await setup({ allowRawTokens: true, ...(withGuard ? { guard: new CredGuard({ policies: [] }) } : {}) });
+      const agent = await newAgent();
+      await grant(app, agent, STORED);
+      await vault.store({ provider: 'google', userId: 'alice', accessToken: 'EXAMPLE_EXPIRED_ACCESS', refreshToken: 'EXAMPLE_REFRESH', expiresAt: new Date(0), scopes: STORED });
+      const stored = vi.spyOn(vault, 'getStored');
+      const issued = vi.spyOn(vault, 'recordDelegation');
+      const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'EXAMPLE_REFRESHED', expires_in: 3600, token_type: 'Bearer' })));
+      let proof: string | undefined;
+      if (kind === 'wrong-agent') proof = createDpopProof(await newAgent(), 'POST', 'http://localhost:3456/api/v1/delegate');
+      if (kind === 'invalid-signature') {
+        const valid = createDpopProof(agent, 'POST', 'http://localhost:3456/api/v1/delegate').split('.');
+        proof = `${valid[0]}.${valid[1]}.${Buffer.alloc(64).toString('base64url')}`;
+      }
+      const req = request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`);
+      if (proof) req.set('DPoP', proof);
+      const res = await req.send({ service: 'google', user_id: 'alice', agent_did: agent.did, token_format: 'raw' });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_dpop_proof');
+      expect(res.body.access_token).toBeUndefined();
+      expect(stored).not.toHaveBeenCalled();
+      expect(upstream).not.toHaveBeenCalled();
+      expect(issued).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+  }
+
+  it('accepts a valid proof once and refuses replay before credential retrieval', async () => {
+    const { app, vault } = await setup({ allowRawTokens: true });
+    const agent = await newAgent();
+    await grant(app, agent, STORED);
+    const proof = createDpopProof(agent, 'POST', 'http://localhost:3456/api/v1/delegate');
+    const send = () => request(app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`).set('DPoP', proof)
+      .send({ service: 'google', user_id: 'alice', agent_did: agent.did, token_format: 'raw' });
+    const first = await send();
+    expect(first.status).toBe(200);
+    expect(first.body.scopes).toEqual(STORED);
+    const stored = vi.spyOn(vault, 'getStored');
+    const replay = await send();
+    expect(replay.status).toBe(401);
+    expect(replay.body.error).toBe('invalid_dpop_proof');
+    expect(stored).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it('a valid proof does not widen the Permission and raw remains disabled by default', async () => {
+    const agent = await newAgent();
+    const enabled = await setup({ allowRawTokens: true });
+    await grant(enabled.app, agent, ['calendar.readonly']);
+    const narrowed = await delegate(enabled.app, agent, { token_format: 'raw' });
+    expect(narrowed.status).toBe(403);
+    expect(narrowed.body.error).toBe('raw_token_wider_than_grant');
+    const escalation = await delegate(enabled.app, agent, { token_format: 'raw', scopes: ['gmail.send'] });
+    expect(escalation.status).toBe(403);
+    expect(escalation.body.error).toBe('scope_escalation_denied');
+    const disabled = await setup();
+    const denied = await delegate(disabled.app, agent, { token_format: 'raw' });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('raw_token_disabled');
   });
 });
 

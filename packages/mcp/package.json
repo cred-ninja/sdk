@@ -1,13 +1,13 @@
 {
   "name": "@credninja/mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "MCP server for OAuth2 credential delegation. Secure token brokering for AI agents",
   "private": false,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "cred-mcp": "./dist/cli.js"
+    "cred-mcp": "dist/cli.js"
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && npx tsc",
@@ -38,12 +38,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@credninja/sdk": "^2.0.0",
-    "@credninja/guard": "^2.0.0"
+    "@credninja/sdk": "^2.1.0",
+    "@credninja/guard": "^2.1.0"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^2.0.0",
-    "@credninja/vault": "^2.0.0"
+    "@credninja/oauth": "^2.1.0",
+    "@credninja/vault": "^2.1.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

@@ -5,6 +5,9 @@ import { join } from 'path';
 import Database from 'better-sqlite3';
 import { SQLiteBackend } from '../storage/sqlite.js';
 import { CredVault } from '../vault.js';
+import { PermissionStore } from '../permissions.js';
+import type { StorageBackend } from '../storage/interface.js';
+import type { PermissionRow } from '../types.js';
 import {
   AGENT_REVOCATION_ALL_USERS,
   collectDelegationSubtree,
@@ -350,6 +353,21 @@ describe('agent revocations', () => {
     const vault = await sqliteVault();
     expect(await vault.revokePermission('perm_missing')).toBeNull();
     expect(await vault.getAgentRevocation(['perm_missing'], 'google', 'alice')).toBeNull();
+  });
+
+  it('a backend written for 2.0.0, whose revokePermission returns nothing, still revokes', async () => {
+    const rows = new Map<string, PermissionRow>();
+    const legacy: Pick<StorageBackend, 'storePermission' | 'getPermission' | 'listPermissions' | 'revokePermission' | 'checkPermissionRateLimit'> = {
+      storePermission: (row) => { rows.set(row.id, row); },
+      getPermission: (agentId, connectionId) => [...rows.values()].find((row) => row.agent_id === agentId && row.connection_id === connectionId) ?? null,
+      listPermissions: (agentId) => [...rows.values()].filter((row) => row.agent_id === agentId),
+      revokePermission: async (id: string): Promise<void> => { rows.delete(id); },
+      checkPermissionRateLimit: () => true,
+    };
+    const store = new PermissionStore(legacy as StorageBackend);
+    const created = await store.create(permission);
+    expect(await store.revoke(created.id)).toBeNull();
+    expect(await store.get('did:key:zAgent', 'google')).toBeNull();
   });
 
   it('creating a Permission ends the revocation it answers, on that connection only', async () => {

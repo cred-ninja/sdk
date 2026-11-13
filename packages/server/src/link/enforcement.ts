@@ -237,6 +237,12 @@ export function linkDelegatePrecheck(deps: LinkEnforcementDeps) {
         await sendLinkDenial(deps, req, res, access, connectionId, identity.agentId);
         return;
       }
+      // A verifier that binds this caller to a user binds it here too.
+      const principal = (req as unknown as { agentPrincipal?: { type?: string; userId?: unknown } }).agentPrincipal;
+      if (principal && principal.type !== 'static-bearer' && typeof principal.userId === 'string' && principal.userId !== access.connection.subject) {
+        res.status(403).json({ error: 'user_id_mismatch', message: 'This connection belongs to another user than the one the authenticated agent is bound to' });
+        return;
+      }
       (req as LinkRequest).credLinkDelegate = { access, agentId: identity.agentId as string };
       // Name the provider for the Guard middleware when the call did not.
       if (body.service === undefined) body.service = access.connection.provider;

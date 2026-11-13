@@ -17,12 +17,18 @@ interface DerivedReadScope {
   scope: string;
   /** Grant-list scopes that cover it. */
   from: readonly string[];
+  /**
+   * `[narrower, wider]`: a token holding the wider scope reaches past a grant
+   * that names only the narrower one, so the read may not be derived from it.
+   * Naming the read itself, or the wider scope, is how an operator allows it.
+   */
+  outgrown: readonly [string, string];
 }
 
 const DERIVED_READ_SCOPES: Readonly<Record<string, DerivedReadScope>> = {
-  github: { scope: 'github.read', from: ['repo', 'public_repo'] },
-  salesforce: { scope: 'salesforce.read', from: ['api', 'full'] },
-  notion: { scope: 'notion.read', from: ['content', 'read_content'] },
+  github: { scope: 'github.read', from: ['repo', 'public_repo'], outgrown: ['public_repo', 'repo'] },
+  salesforce: { scope: 'salesforce.read', from: ['api', 'full'], outgrown: ['api', 'full'] },
+  notion: { scope: 'notion.read', from: ['content', 'read_content'], outgrown: ['read_content', 'content'] },
 };
 
 /** Cred's name for all a Notion connection can do. */
@@ -40,14 +46,38 @@ export function withDerivedScopes(service: string, scopes: readonly string[]): s
 }
 
 /**
- * A grant list plus what its scopes derive, over a token that holds `held`. A
- * derived read reaches whatever the token can, and github.read over a `repo` token
- * reaches private repositories, so `public_repo` cannot derive it there. Only `repo`
- * can. Naming github.read itself is what an operator does to allow that.
+ * A grant list plus what its scopes derive, over a token that holds `held`.
+ *
+ * A derived read is Cred's name for access the raw token already carries, so it
+ * can only mean what the token can reach and no more than the grant names. Where
+ * a narrower grant scope and a wider token scope both exist, a read backed by the
+ * wider one reaches past the grant: `public_repo` cannot derive `github.read`
+ * over a `repo` token, `api` cannot derive `salesforce.read` over a `full` token,
+ * and `read_content` cannot derive `notion.read` over a `content` token. Naming
+ * the read itself, or the wider scope, is what an operator does to allow it.
  */
 export function withDerivedScopesUnder(service: string, scopes: readonly string[], held: readonly string[]): string[] {
-  if (service === 'github' && held.includes('repo') && !scopes.includes('repo')) return [...scopes];
+  const derived = derivedFor(service);
+  if (!derived) return [...scopes];
+  // Naming the read itself is an explicit grant: it needs no source scope.
+  if (scopes.includes(derived.scope)) return [...scopes];
+  const [narrower, wider] = derived.outgrown;
+  if (scopes.includes(narrower) && !scopes.includes(wider) && held.includes(wider)) return [...scopes];
   return withDerivedScopes(service, scopes);
+}
+
+/** Whether this service has a delegation-only read scope derived from a stored scope. */
+export function hasDerivedReadScope(service: string): boolean {
+  return derivedFor(service) !== undefined;
+}
+
+/**
+ * Every scope a derived read can come from: what a connection whose stored
+ * scopes cannot be read might hold. Nothing is derived from a narrow grant over
+ * one, so an unverifiable derivation is refused rather than assumed.
+ */
+export function widestDerivedReadSources(): string[] {
+  return [...new Set(Object.values(DERIVED_READ_SCOPES).flatMap((entry) => entry.from))];
 }
 
 /** What a stored connection covers: its scopes, what they derive, and Notion's whole-connection rule. */

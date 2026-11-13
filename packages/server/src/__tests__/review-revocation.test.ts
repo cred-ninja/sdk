@@ -194,7 +194,7 @@ describe('raw tokens', () => {
     const server = await setup({ allowRawTokens: true });
     const agent = await newAgent();
     await grant(server, agent, { allowedScopes: ['drive.readonly'] });
-    const res = await raw(server, { agent_did: agent.did });
+    const res = await ask(server, agent, 'alice', { token_format: 'raw' });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('no_scopes_granted');
     expect(res.body.access_token).toBeUndefined();
@@ -204,8 +204,9 @@ describe('raw tokens', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const server = await setup({ allowRawTokens: true });
     const agent = await newAgent();
-    await grant(server, agent, {});
-    expect((await raw(server, { agent_did: agent.did })).status).toBe(200);
+    const stored = (await server.vault.getStored({ provider: 'google', userId: 'alice' }))!.scopes;
+    await grant(server, agent, { allowedScopes: stored });
+    expect((await ask(server, agent, 'alice', { token_format: 'raw' })).status).toBe(200);
     expect(server.vault.queryAuditEvents({ limit: 50 }).find((e) => e.action === 'delegate')?.metadata?.enforcementOptOuts).toEqual(['raw_tokens']);
   });
 });

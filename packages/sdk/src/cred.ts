@@ -5,7 +5,7 @@
  * Local mode: Uses @credninja/oauth + @credninja/vault (optional peer deps).
  */
 
-import { withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
+import { hasDerivedReadScope, widestDerivedReadSources, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes } from '@credninja/protocol';
 import {
   CredConfig,
   CredLocalConfig,
@@ -42,7 +42,7 @@ import {
   UpdatePermissionParams,
 } from './types.js';
 import { CredError, ConsentRequiredError } from './errors.js';
-import { parseConstraints, unknownConstraints } from '@credninja/attenuation';
+import { parseConstraints, unknownConstraints, scopeCoveredBy } from '@credninja/attenuation';
 import {
   CRED_PROTOCOL_SUPPORTED_VERSIONS,
   CRED_PROTOCOL_VERSION,
@@ -154,6 +154,18 @@ interface VaultInstance {
     expiresAt?: Date;
     scopes?: string[];
   }>>;
+  /**
+   * The stored entry as it is at rest: no refresh, no provider call. The
+   * narrowest accessor that reports a connection's stored scopes.
+   */
+  getStored?(input: { provider: string; userId: string }): Promise<{
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: Date;
+    scopes?: string[];
+    provider: string;
+    userId: string;
+  } | null>;
   delete(input: { provider: string; userId: string }): Promise<void>;
   getPermission?(agentId: string, connectionId: string): Promise<{
     id: string;
@@ -195,8 +207,17 @@ interface VaultInstance {
   }): void;
 }
 
+/** The vault's positional refresh contract (structural, like @credninja/vault's RefreshAdapter). */
+type LocalRefreshAdapter = { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> };
+
+/**
+ * The parts of @credninja/oauth local mode uses. createAdapter returns a native
+ * adapter, which takes one params object and answers in the provider's
+ * snake_case shape; toVaultRefreshAdapter wraps it into the vault's contract.
+ */
 interface OAuthModule {
-  createAdapter(name: string): { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> };
+  createAdapter(name: string): unknown;
+  toVaultRefreshAdapter?: (adapter: unknown) => LocalRefreshAdapter;
 }
 
 /** Minimal audit event — matches @credninja/vault AuditEvent shape */
@@ -241,6 +262,12 @@ interface RotatedWebBotAuthIdentityWire extends WebBotAuthIdentityWire {
 function isLocalConfig(config: CredConfig): config is CredLocalConfig {
   return (config as CredLocalConfig).mode === 'local';
 }
+
+/**
+ * The stored entry a local vault reports at rest: what `getStored` returns, and
+ * what a hop pins as the credential it issues against.
+ */
+type LocalVaultEntry = NonNullable<Awaited<ReturnType<NonNullable<VaultInstance['getStored']>>>>;
 
 export class Cred {
   // ── Cloud mode fields ───────────────────────────────────────────────────────
@@ -362,7 +389,7 @@ export class Cred {
     return crypto.scryptSync(this.localConfig!.vault.passphrase, `cred:${context}:v1`, 32);
   }
 
-  private async getAdapter(service: string): Promise<{ refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> }> {
+  private async getAdapter(service: string): Promise<LocalRefreshAdapter> {
     let oauthModule: OAuthModule;
     try {
       oauthModule = await import('@credninja/oauth') as unknown as OAuthModule;
@@ -373,7 +400,21 @@ export class Cred {
         0,
       );
     }
-    return oauthModule.createAdapter(service);
+    if (typeof oauthModule.toVaultRefreshAdapter !== 'function') {
+      // An older @credninja/oauth: unexpired credentials are still served, and
+      // only an actual refresh is refused, since its native adapter cannot be
+      // called through the vault's contract.
+      return {
+        refreshAccessToken: async () => {
+          throw new CredError(
+            'Local mode needs a newer @credninja/oauth to refresh tokens. Upgrade it: npm install @credninja/oauth@latest',
+            'missing_dependency',
+            0,
+          );
+        },
+      };
+    }
+    return oauthModule.toVaultRefreshAdapter(oauthModule.createAdapter(service));
   }
 
   // ── Core methods ────────────────────────────────────────────────────────────
@@ -690,7 +731,63 @@ export class Cred {
     }
   }
 
-  private async delegateLocal(params: DelegateParams): Promise<DelegationResult> {
+  /**
+   * The credential a delegation issues against, from the row its decision was
+   * made on.
+   *
+   * `pinned` is the stored connection a caller in this same call has already
+   * read — a sub-delegation's grantor decision — and while its entry is usable
+   * that entry IS the credential: there is no second read left to disagree with
+   * the decision, so a connection replaced in between cannot be handed out
+   * wider than it was checked. An expired entry is the one case the read cannot
+   * serve, because refresh belongs to `get()`; that re-read is then compared
+   * against what the pin covered, and a wider result refuses with a scope error
+   * rather than being issued. A derived read's meaning turns on the token behind
+   * it, so `github.read` over a `repo` token is access a `public_repo` decision
+   * never covered.
+   *
+   * `pinned` undefined means no read has been taken yet (a fresh delegation):
+   * get() is then the only read and therefore the deciding one. `pinned.entry`
+   * null means the decision saw no row at all, and no row appeared since.
+   */
+  private async selectLocalCredential(
+    vault: VaultInstance,
+    params: DelegateParams,
+    refresh: {
+      adapter?: { refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scopes?: string[] }> };
+      clientId?: string;
+      clientSecret?: string;
+    },
+    pinned: { entry: LocalVaultEntry | null; held: string[] } | null | undefined,
+  ): Promise<LocalVaultEntry | null> {
+    if (pinned && pinned.entry) {
+      const expired = pinned.entry.expiresAt !== undefined && pinned.entry.expiresAt.getTime() <= Date.now();
+      if (!expired) return pinned.entry;
+    }
+    if (pinned && pinned.entry === null) return null;
+    const entry = await vault.get({
+      provider: params.service,
+      userId: params.userId,
+      ...refresh,
+    });
+    if (pinned && entry) {
+      const unreviewed = withStoredDerivedScopes(params.service, entry.scopes ?? [])
+        .filter((scope) => !scopeCoveredBy(pinned.held, scope));
+      if (unreviewed.length > 0) {
+        throw new CredError(
+          `The stored ${params.service} connection changed while this delegation was being decided and now covers ${unreviewed.join(', ')}, which this delegation was not authorized over. Ask for a new delegation.`,
+          'invalid_scope',
+          403,
+        );
+      }
+    }
+    return entry;
+  }
+
+  private async delegateLocal(
+    params: DelegateParams,
+    pinned?: { entry: LocalVaultEntry | null; held: string[] } | null,
+  ): Promise<DelegationResult> {
     await this.assertLocalConstraintsEnforceable(params.constraints);
     const vault = await this.ensureVault();
     const correlationId = crypto.randomUUID();
@@ -856,13 +953,7 @@ export class Cred {
       correlationId,
     });
 
-    const entry = await vault.get({
-      provider: params.service,
-      userId: params.userId,
-      adapter,
-      clientId,
-      clientSecret,
-    });
+    const entry = await this.selectLocalCredential(vault, params, { adapter, clientId, clientSecret }, pinned);
 
     if (!entry) {
       const err = new CredError(
@@ -928,11 +1019,20 @@ export class Cred {
     let delegatedScopes = grantedScopes;
 
     if (!unnarrowed) {
-      // Read scopes derived from what is stored are available to a narrowed
-      // delegation, and an empty result is a refusal, never the whole connection.
-      delegatedScopes = withStoredDerivedScopes(params.service, grantedScopes);
+      // What the stored connection covers: the scopes stored on it, the reads
+      // those scopes derive, and — for an existing Notion entry with no stored
+      // scopes — the whole connection, since Notion's capabilities live on the
+      // integration and not on the token. That list is what a narrowed
+      // delegation may ask for, and an empty result is a refusal, never the
+      // whole connection.
+      const storedCovers = withStoredDerivedScopes(params.service, grantedScopes);
+      delegatedScopes = storedCovers;
       if (permission) {
-        const allowed = withDerivedScopesUnder(params.service, permission.allowedScopes, grantedScopes);
+        // The Permission is read over the same list, so a row naming only the
+        // narrower source of a derived read does not reach the read itself once
+        // the connection is wider: `read_content` over a Notion connection with
+        // no stored scopes grants no `notion.read`.
+        const allowed = withDerivedScopesUnder(params.service, permission.allowedScopes, storedCovers);
         delegatedScopes = delegatedScopes.filter((scope) => allowed.includes(scope));
       }
       if (requested) delegatedScopes = delegatedScopes.filter((scope) => requested.includes(scope));
@@ -985,6 +1085,96 @@ export class Cred {
       ...(unnarrowed ? { unnarrowed: true } : {}),
       delegationId,
       receipt,
+    };
+  }
+
+  /**
+   * The stored connection a hop decides on, read once and kept: what it covers,
+   * and the entry itself, because that entry is also the credential the hop
+   * issues against (see delegateLocal's `pinned` option).
+   *
+   * `getStored` is the narrowest accessor that reports the stored scopes: it
+   * decrypts the row at rest, never refreshes it and never calls the provider.
+   * Only the scope list is used for a decision — the token stays inside the
+   * returned entry and reaches the caller only through the delegation itself.
+   *
+   * An entry that exists covers its stored scopes plus what those derive, and
+   * for Notion an empty stored list is the whole connection: the token carries
+   * no scopes because the capabilities are set on the integration. Reporting
+   * that as "nothing" would let a row naming only `read_content` reach
+   * `notion.read` over a connection that can do everything.
+   *
+   * Null means the vault cannot report what it holds at all: such a connection
+   * is treated as holding every scope a derived read can come from, so no
+   * derivation is assumed on its behalf, and no entry can be pinned.
+   */
+  private async storedConnectionFor(
+    vault: VaultInstance,
+    service: string,
+    userId: string,
+  ): Promise<{ entry: LocalVaultEntry | null; held: string[] } | null> {
+    const stored = await vault.getStored?.({ provider: service, userId });
+    if (stored === undefined) return null;
+    // No entry at all: no token backs any read, and delegateLocal() refuses the
+    // hop for the same reason.
+    if (stored === null) return { entry: null, held: [] };
+    return { entry: stored, held: withStoredDerivedScopes(service, stored.scopes ?? []) };
+  }
+
+  /**
+   * The Permission a grantor DID holds for one service, at its agent record id
+   * and at its DID, reduced to the tighter of the two: neither row may widen the
+   * other, exactly as the server treats a record-vs-DID pair. Null when the
+   * vault holds no row under either key, which keeps the pre-existing
+   * recipient-only behaviour for legacy chains.
+   */
+  private async grantorPermissionFor(
+    vault: VaultInstance,
+    agentDid: string,
+    service: string,
+  ): Promise<{
+    id: string;
+    delegatable: boolean;
+    maxDelegationDepth: number;
+    allowedScopes: string[];
+    expiresAt?: Date;
+  } | null> {
+    if (!vault.getPermission) return null;
+    const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
+    const keys = [...new Set([record?.id, agentDid].filter((key): key is string => typeof key === 'string' && key.length > 0))];
+    const rows: Array<{ id: string; delegatable: boolean; maxDelegationDepth: number; allowedScopes: string[]; expiresAt?: Date }> = [];
+    for (const key of keys) {
+      const row = await vault.getPermission(key, service);
+      if (!row) continue;
+      // The DID row and the record-id row can be the same row: count it once.
+      if (rows.some((seen) => seen.id === row.id)) continue;
+      rows.push({
+        id: row.id,
+        delegatable: row.delegatable,
+        maxDelegationDepth: row.maxDelegationDepth,
+        allowedScopes: row.allowedScopes,
+        expiresAt: row.expiresAt,
+      });
+    }
+    if (rows.length === 0) return null;
+    // Coverage is wildcard-aware, and a derived read scope counts as covered
+    // when a row names the wider scope it comes from. The token is unknown
+    // here, so assume the widest: no row derives through a narrower source.
+    const covered = (list: string[], scope: string) =>
+      scopeCoveredBy(withDerivedScopesUnder(service, list, widestDerivedReadSources()), scope);
+    const earliest = rows
+      .map((row) => row.expiresAt)
+      .filter((date): date is Date => date instanceof Date)
+      .sort((a, b) => a.getTime() - b.getTime())[0];
+    return {
+      id: rows[0]!.id,
+      delegatable: rows.every((row) => row.delegatable),
+      maxDelegationDepth: Math.min(...rows.map((row) => row.maxDelegationDepth)),
+      allowedScopes: [...new Set([
+        ...rows[0]!.allowedScopes.filter((scope) => rows.slice(1).every((row) => covered(row.allowedScopes, scope))),
+        ...rows.slice(1).flatMap((row) => row.allowedScopes.filter((scope) => covered(rows[0]!.allowedScopes, scope))),
+      ])],
+      expiresAt: earliest,
     };
   }
 
@@ -1061,6 +1251,102 @@ export class Cred {
       throw new CredError(`Agent ${params.agentDid} has no permission for ${params.service}`, 'no_permission', 403);
     }
 
+    // ── The grantor's own Permission ──────────────────────────────────────
+    // Local mode is trusted in-process access to this same vault, but the row
+    // that authorizes a handoff is still the one held by the agent handing
+    // off, not only by the agent receiving it: an agent whose row is not
+    // delegatable, or that already sits at its own maxDelegationDepth, may not
+    // pass access on. A grantor the vault holds no row for keeps the
+    // pre-existing recipient-only behaviour.
+    const grantorPermission = await this.grantorPermissionFor(vault, parent.sub, params.service);
+    if (grantorPermission && !grantorPermission.delegatable) {
+      throw new CredError(
+        `Agent ${parent.sub} may not sub-delegate ${params.service}: its Permission is not delegatable`,
+        'delegation_not_allowed',
+        403,
+      );
+    }
+    if (grantorPermission && (parent.chainDepth ?? 0) + 1 > grantorPermission.maxDelegationDepth) {
+      throw new CredError(
+        `Sub-delegation exceeds the max delegation depth of agent ${parent.sub}`,
+        'depth_exceeded',
+        403,
+      );
+    }
+    // The stored connection, read once for the whole hop: its scopes answer the
+    // grantor's derived-read check below, and its entry is the credential the
+    // hop issues against when it goes on to delegate.
+    let connection: { entry: LocalVaultEntry | null; held: string[] } | null = null;
+    // The grantor's row is a clock and a scope list, not only a boolean. A
+    // receipt names what was granted when it was minted; what its holder may
+    // pass on now is bounded by the row it holds now, exactly as delegate()
+    // bounds what the holder may take now. An expired row hands nothing on,
+    // and a row narrowed since issuance hands on only what it still covers, so
+    // the child gets the intersection and never a scope the grantor has lost.
+    if (grantorPermission) {
+      if (grantorPermission.expiresAt && grantorPermission.expiresAt.getTime() <= Date.now()) {
+        this.writeAuditEvent({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: parent.sub },
+          action: 'deny',
+          resource: { type: 'permission', id: grantorPermission.id },
+          outcome: 'denied',
+          scopesRequested: params.scopes ?? parent.scopes,
+          correlationId,
+          errorMessage: 'permission_expired',
+        });
+        throw new CredError(
+          `Permission of agent ${parent.sub} for ${params.service} has expired and cannot sub-delegate`,
+          'permission_expired',
+          403,
+        );
+      }
+      const handoffScopes = params.scopes && params.scopes.length > 0 ? params.scopes : parent.scopes;
+      // Only scopes the receipt itself covers are the grantor's to lose: a
+      // scope outside the receipt is the parent's business, and stays
+      // 'scope_escalation_denied' below exactly as it was.
+      const receiptScopes = withDerivedScopes(params.service, parent.scopes);
+      // A derived read scope is Cred's name for access the raw token already
+      // carries, so it means what the stored connection can reach, never what
+      // the receipt happens to name: `github.read` over a `repo` token reaches
+      // private repositories, so a grantor narrowed to `public_repo` cannot
+      // hand it on however old its receipt is. The comparison is taken over the
+      // stored scopes, as delegateLocal() already takes its own.
+      // One stored read answers every stored-scope question on this hop, and its
+      // entry is the credential the hop goes on to issue against: a decision
+      // taken over one row and a credential chosen from another is how a
+      // connection replaced in between is issued wider than it was checked.
+      connection = hasDerivedReadScope(params.service)
+        ? await this.storedConnectionFor(vault, params.service, params.userId)
+        : null;
+      const tokenScopes = connection
+        ? connection.held
+        : hasDerivedReadScope(params.service) ? widestDerivedReadSources() : [];
+      const grantorCovers = withDerivedScopesUnder(params.service, grantorPermission.allowedScopes, tokenScopes);
+      const uncoveredScopes = [...new Set(handoffScopes.filter((scope) =>
+        scopeCoveredBy(receiptScopes, scope) && !scopeCoveredBy(grantorCovers, scope),
+      ))];
+      if (uncoveredScopes.length > 0) {
+        this.writeAuditEvent({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: parent.sub },
+          action: 'deny',
+          resource: { type: 'permission', id: grantorPermission.id },
+          outcome: 'denied',
+          scopesRequested: handoffScopes,
+          correlationId,
+          errorMessage: 'invalid_scope',
+        });
+        throw new CredError(
+          `Agent ${parent.sub} may not sub-delegate ${uncoveredScopes.join(', ')}: its Permission no longer covers them`,
+          'invalid_scope',
+          403,
+        );
+      }
+    }
+
     const validation = vaultModule.validateSubDelegation({
       parent: {
         delegationId: parent.delegationId,
@@ -1083,19 +1369,44 @@ export class Cred {
       },
     });
 
-    const parentScopeSet = new Set(parent.scopes);
-    const requestedScopes = params.scopes ?? parent.scopes;
-    const childRequestedScopes = agentRecord?.scopeCeiling?.length
-      ? requestedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
-      : requestedScopes;
+    // What the receipt will name, and only that, is what the raw token may be
+    // selected for. A membership test against the parent's scopes would drop a
+    // concrete request a wildcard parent covers ("crm.*" covers "crm.read"),
+    // and delegateLocal() reads an empty list as "unspecified" and picks stored
+    // scopes of its own choosing — a wider grant than the receipt describes.
+    //
+    // `validateSubDelegation().grantedScopes` is that validated selection: what
+    // both the parent receipt and the receiving Permission cover, wildcard-aware.
+    // It is not yet bounded by the receiving agent's own ceiling, which this code
+    // applies as a separate hard cap in place, exactly as the server does after
+    // validation, so the receipt, the response and this hop's audit record all
+    // describe the selection that was actually made. A receipt can therefore
+    // never anchor a later hop to a scope this hop did not select.
+    //
+    // The ceiling is exact membership over Cred's scope names, as the local
+    // direct-delegation path has always treated it; it is a cap, not a grant, so
+    // nothing is derived through it. An empty intersection is a refusal.
+    const withinCeiling = agentRecord?.scopeCeiling?.length
+      ? validation.grantedScopes.filter((scope) => agentRecord!.scopeCeiling.includes(scope))
+      : validation.grantedScopes;
+    if (withinCeiling.length === 0) {
+      throw new CredError(
+        `The scope ceiling of agent ${params.agentDid} leaves no scope of this delegation to ${params.service}`,
+        'scope_ceiling_exceeded',
+        403,
+      );
+    }
+    validation.grantedScopes = withinCeiling;
 
+    // The same row the decision was made on, so the credential cannot differ
+    // from what was checked: see selectLocalCredential().
     const childDelegation = await this.delegateLocal({
       service: params.service,
       userId: params.userId,
       agentDid: params.agentDid,
       appClientId: params.appClientId,
-      scopes: childRequestedScopes.filter((scope) => parentScopeSet.has(scope)),
-    });
+      scopes: validation.grantedScopes,
+    }, connection);
 
     const receipt = this.createLocalDelegationReceipt({
       agentDid: params.agentDid,

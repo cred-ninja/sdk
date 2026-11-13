@@ -9,6 +9,6 @@
     "grant": "node grant-agent.mjs"
   },
   "dependencies": {
-    "@credninja/server": "^2.0.0"
+    "@credninja/server": "^2.1.0"
   }
 }

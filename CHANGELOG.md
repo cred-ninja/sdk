@@ -2,57 +2,76 @@
 
 ## [Unreleased]
 
-### BREAKING: generated apps are multi-user, with an agent to grant
+## [2.1.0] - 2026-11-13
 
-- `@credninja/create-app`: a generated app sets `SINGLE_USER_MODE=false`, so every
-  request names `user_id`. It also generates an agent identity in `agent.env` (mode
-  0600, not read by the server) and a `grant-agent.mjs` script, run as
-  `npm run grant -- github github.read`, which creates the Permission an agent now
-  needs. It reads the admin token and server address only from the `.env` beside
-  it, and sends the token only over loopback or https, following no redirect. Apps
-  generated earlier keep their settings, but their agents need a Permission once
-  they upgrade.
-- A generated `.env` and README state that `user_id` is not an authorization
-  boundary for the static agent token, and that a Permission is per agent and
-  service, not per user.
+npm 2.1.0 for every `@credninja` package, PyPI 2.0.1 for the Python packages. Read the
+[release and upgrade notes](docs/releases/npm-2.1.0.md) before upgrading a running
+deployment.
 
-### Changed: docs match the code
+No export, type or route is removed, and code written against 2.0.0 compiles. The
+server does refuse calls that 2.0.0 allowed, which is what the sections marked
+"refuses calls 2.0.0 allowed" describe: an agent with no Permission, a brokered call
+the delegation's scopes do not cover, and a Salesforce call to a host other than the
+connection's own. The first two have a deprecated opt-out for a transition. The third
+has none, and Salesforce connections must be reconnected.
 
-- README, SDK and MCP samples use Delegation Tokens and `use()`, with the agent's
-  key, in place of provider tokens. The MCP sample's `CRED_AGENT_DID` is a did:key,
-  which the server requires. Linear and HubSpot are listed beside the other five
-  brokered services, and the Notion row no longer lists scopes Notion does not have.
-- `SECURITY-AUDITS.md` is now titled Security Review Notes and dated: these are
-  maintainer reviews, not independent audits.
-- `docs/releases/npm-2.0.0.md` records that 2.0.0 is published.
-- `SECURITY-AUDITS.md` scopes each review result to its date and scope, and its
-  dependency, test-count and transport statements match the code.
+### Changed, refuses calls 2.0.0 allowed: agents need a Permission, and a revocation holds
 
-### Fixed: the TypeScript SDK accepts `http://[::1]` for local development
+- `@credninja/server`: `POST /api/v1/delegate` and `POST /bc-authorize` refuse
+  an agent named by `agent_did` that holds no Permission for the service
+  (`403 permission_required`, naming the fix). Before this, an agent with no
+  Permission was issued the whole connection, so any new did:key presented with
+  the agent token got every stored scope. Grant one at `POST /admin/permissions`.
+  A file vault cannot store Permissions, so every agent is refused there, and the
+  server warns at startup: use `VAULT_STORAGE=sqlite`. There is no migration command;
+  connect providers again on the new vault.
+- Revoking a Permission no longer widens the agent to the whole connection. It
+  used to delete the row, and the agent then counted as having no limit. The
+  revocation is now recorded, the agent's live delegations on that service are
+  revoked, and it is refused (`403 agent_access_revoked`) until it is granted
+  again.
+- Revoking a delegation holds out each agent the cascade reached, for that user
+  and service, instead of letting it ask again at once. This also applies at
+  `/api/v1/subdelegate`, `/bc-authorize` and `/api/v1/token`, and to a Cred Link
+  agent as well as its key. Holds and consent revocations commit with the
+  revocation, so a retry stays correct. Disconnecting a connection holds no agent out.
+- A revocation also ends the agent's consents on that service (for that user, when
+  it was one delegation), so a re-grant asks for approval again.
+- New `POST /admin/permissions/:id/restore` ends a hold and leaves the Permission as
+  it is, for one user with `user_id` or all. New `GET /admin/agent-holds` lists holds.
+- `POST /admin/permissions` ends every hold at the limits it names, and now refuses
+  with `409 permission_limits_would_drop` rather than silently drop an approval gate,
+  rate limit, expiry, TTL override or `admin` or `both` approver on the row it replaces.
+  A re-grant is a new row, so live delegations under the old one must ask again.
+- Replaying a revocation changes nothing, so it cannot undo a restore or re-grant.
+- Narrowing a Permission with `PATCH` reaches live delegations: each `/api/v1/use` is
+  held to the Permission as it stands. Delegations record which Permission authorized
+  them, and one whose Permission has gone or expired can do nothing.
+- An agent with a Permission under both its DID and record id gets the limits of both.
+- Raw tokens: a request naming no agent now also needs
+  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, including at `GET /api/token/:provider`.
+  One whose Permission covers nothing on the connection is refused
+  (`403 no_scopes_granted`). Issued ones are marked `raw_tokens` in
+  `enforcementOptOuts`. A raw token does not honor read-only labels.
+- `POST /api/v1/delegate` now honours a Permission stored under the agent's
+  record id, as `/api/v1/subdelegate` already did. It used to look only under
+  the DID and otherwise issue the whole connection.
+- `@credninja/vault`: `revokePermission` returns the Permission removed and
+  records an agent revocation (a custom `StorageBackend` written for 2.0.0, whose
+  `revokePermission` returns nothing, still compiles and works, and `CredVault` then
+  returns null); `createPermission` ends one. New
+  `recordAgentRevocations`, `getAgentRevocation`, `listAgentRevocations`,
+  `clearAgentRevocations` and `getPermissionById`, a `hold` option on revocations,
+  and a `vault_agent_revocations` table created on start. Existing rows are not
+  changed, and a Permission revoked before this version left no record.
+- Deprecated opt-outs, each logging a warning at startup and marking affected
+  audit events in `metadata.enforcementOptOuts`:
+  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` and
+  `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION`. Setting both restores the old
+  behavior, widening included. With only the first set, a did:key with no agent record
+  is still refused on a service and user with any hold. They will be removed.
 
-- `@credninja/sdk`: `new Cred({ baseUrl: 'http://[::1]:3456' })` no longer throws.
-  The loopback check compared the hostname with `::1`, but a parsed URL keeps the
-  brackets. The Python SDK already accepted it.
-
-### BREAKING: a Salesforce token goes only to its connection's instance
-
-- `@credninja/server`: outside Cred Link, `/api/v1/use` forwarded a Salesforce
-  connection's bearer token to any `*.salesforce.com` or `*.force.com` host the
-  caller named, and such a host can belong to anyone. The token now goes only to
-  the instance stored for the connection, which each delegation also records at
-  issuance: `400 salesforce_instance_mismatch` for any other host or when the two
-  differ, `400 salesforce_instance_unknown` when none is stored. There is no opt-out.
-  Salesforce connections made before this version store no instance and must be
-  reconnected: `/api/v1/delegate` answers `consent_required` with a `consent_url`, and
-  a refusal at `/api/v1/use` carries one. Reconnecting to another org revokes the
-  delegations and approvals given for the old one.
-- `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
-  across a refresh. New `instance_url` column, added on start; existing rows are
-  not changed. The OAuth callback stores Salesforce's `instance_url` and stores
-  nothing when it is outside the host grammar.
-- `@credninja/sdk` and `@credninja/mcp` local mode apply the same rule through
-  `authorizeLocalUse`'s new `targetUrl`. Store local Salesforce connections with
-  `instanceUrl`, or their calls are refused.
+### Changed, refuses calls 2.0.0 allowed: a brokered call must be covered by the delegation's scopes
 
 - `@credninja/guard`: new operation classifier (`evaluateOperation`,
   `canonicalBrokerUrl`, `methodOverrideChannel`, `contentTypeMismatch`), with
@@ -122,13 +141,174 @@
 - Deprecated opt-out: `CRED_ALLOW_UNCLASSIFIED_BROKER_CALLS`, which warns at
   startup and marks every affected audit event. The URL allowlist still applies.
 
-### Changed: the audit feed's shape
+### Changed, refuses calls 2.0.0 allowed: a Salesforce token goes only to its connection's instance
+
+- `@credninja/server`: outside Cred Link, `/api/v1/use` forwarded a Salesforce
+  connection's bearer token to any `*.salesforce.com` or `*.force.com` host the
+  caller named, and such a host can belong to anyone. The token now goes only to
+  the instance stored for the connection, which each delegation also records at
+  issuance: `400 salesforce_instance_mismatch` for any other host or when the two
+  differ, `400 salesforce_instance_unknown` when none is stored. There is no opt-out.
+  Salesforce connections made before this version store no instance and must be
+  reconnected: `/api/v1/delegate` answers `consent_required` with a `consent_url`, and
+  a refusal at `/api/v1/use` carries one. Reconnecting to another org revokes the
+  delegations and approvals given for the old one.
+- `@credninja/vault`: `store` takes `instanceUrl`, and entries return it, kept
+  across a refresh. New `instance_url` column, added on start; existing rows are
+  not changed. The OAuth callback stores Salesforce's `instance_url` and stores
+  nothing when it is outside the host grammar.
+- `@credninja/sdk` and `@credninja/mcp` local mode apply the same rule through
+  `authorizeLocalUse`'s new `targetUrl`. Store local Salesforce connections with
+  `instanceUrl`, or their calls are refused.
+
+### Fixed: permission rate limits, user binding and provider tables
+
+- `@credninja/vault`: a Permission's rate limit counts a true trailing window. A
+  clock-aligned window refilled at each boundary, so one per minute could admit two
+  requests milliseconds apart. Rows that leave the window are pruned.
+- `@credninja/server`: a caller an `agentRequestVerifier` binds to one user can only
+  poll for that user's CIBA approvals (`403 user_id_mismatch`), like every other route.
+- `@credninja/guard`: GitHub `/user`, `/orgs` and gist routes follow the scopes GitHub
+  documents. Calls that worked and are now refused: `/user/**` and `/orgs/**` outside
+  the routes the README lists, SSH, GPG and signing keys under `user`, org writes other
+  than membership under `write:org`, and gists under `repo` or `public_repo`. Creating,
+  changing or deleting a team, and changing a team's repositories, need `admin:org`.
+  New `listOperationRows()` lists every row the classifier maps.
+- `@credninja/guard`: under a repository, writes go only to named sub-trees, so `repo` no longer
+  reaches deploy keys, collaborators, webhooks, transfers or Actions secrets. Org reads need an
+  org scope. `gmail.metadata` and `drive.metadata` no longer read content, and calendar partition
+  scopes are unmapped, since the broker can't tell which events they cover.
+- `@credninja/server`: `public_repo` is never exercised over a token that holds `repo`, including
+  after a reconnect widens it. A suspended agent's live tokens stop. A rate limit that isn't made of
+  positive whole numbers gets `400 invalid_rate_limit`. A sub-delegation also needs the parent's
+  Permission to be delegatable. Link's delegate honors a verifier's user binding. The audit route
+  matches a user id exactly, and two Permission rows for one agent both count toward rate limits.
+- `@credninja/server`, deprecated raw-token opt-in: a raw token is refused unless the Permission
+  covers every scope on the connection (`403 raw_token_wider_than_grant`), and an agent revoked
+  under its record id stays revoked when named by that id.
+- `@credninja/guard`: Google metadata grants cannot download Drive content through
+  `$alt` (including `%24alt`) or search Gmail messages/threads/drafts with `q`. Repeated or
+  ambiguous `alt`, `format` and `q` spellings fail closed for every scope; ordinary
+  broad-scope downloads, full message reads and searches remain supported.
+  `gmail.metadata` no longer lists or reads drafts, which Gmail gives it no method for,
+  and `userinfo.email` and `userinfo.profile` read `people/me` only, not another contact
+  by id.
+- `@credninja/server`, deprecated raw-token opt-in: requests naming a did:key now
+  prove possession with the existing DPoP verifier before credential retrieval,
+  refresh or issuance. Missing, invalid, wrong-key and replayed proofs are refused
+  with `401 invalid_dpop_proof`. The same proof is required when the request names the
+  agent by a record id whose record holds a did:key. An agent with no key on record has
+  nothing to prove and is known only by the name the caller gives. The returned provider
+  token remains a bearer token.
+- `@credninja/server` and `@credninja/sdk` (local mode): a sub-delegation now holds to the
+  delegating agent's own Permission as well as the receiving agent's. A grantor whose row is
+  not `delegatable`, that already sits at its `maxDelegationDepth`, whose `expiresAt` has
+  passed, or whose `allowedScopes` no longer cover every scope the hop would grant, is refused
+  with `403 delegation_not_allowed` / `403 depth_exceeded` / `403 permission_expired` /
+  `403 scope_insufficient` (SDK local mode: `invalid_scope`) before a credential is released
+  or a child recorded. A child holds only the intersection of the parent
+  receipt's scopes and the grantor's current scopes, so a scope an admin removed after the
+  receipt was minted is refused rather than quietly handed on; the record-id row and the DID
+  row are merged tightest-first, so neither widens the other. A grantor the vault holds no row
+  for keeps the previous recipient-only behaviour, and the receiving agent's gates are unchanged.
+- A derived read scope is judged over what the stored connection covers, not over what a
+  receipt happens to name: `public_repo` cannot hand on `github.read` over a token holding
+  `repo`, `api` cannot hand on `salesforce.read` over a token holding `full`, and
+  `read_content` cannot hand on `notion.read` over a token holding `content`, since the read
+  would reach past what the row names. A Notion connection with no stored scopes is the whole
+  connection — its token carries none, because the capabilities are set on the integration —
+  so it counts as `content` here too, and `read_content` reaches no `notion.read` through it.
+  The rule is applied everywhere a stored connection is judged: the direct delegation, the
+  delegating agent's own Permission, and the receiving Permission and scope ceiling.
+  Naming the read itself, or the wider scope, still allows it, and a token holding only
+  `public_repo` under a `public_repo` grantor row still derives `github.read`.
+  Deciding this reads the stored row through `getStored` on the built-in file and SQLite
+  backends: it decrypts the row's stored credential fields, never refreshes them and makes no
+  provider call, and only the scope list is used — no token value is logged or returned. That
+  no-provider-call, no-token-logged statement holds for those backends and for any accessor
+  whose read and error behaviour is known, not for an arbitrary custom `StorageBackend`: one
+  without `getForRefresh()` is served through its own `get()`, which may refresh a token or
+  hide an expired row, and an error it throws reaches the route's outer catch, which logs the
+  error object. A vault that cannot report what a connection holds at all is treated as
+  holding every scope a derived read could come from, so no read is assumed on its behalf —
+  a refusal to assume, which is not the same as an existing entry with an empty list. A hop
+  refused on this basis still releases no credential and records no child delegation.
+- `@credninja/sdk` (local mode): a scope a wildcard parent receipt covers (`crm.*` covering
+  `crm.read`) is carried into the child's delegation by name. An exact-membership filter used
+  to drop it, which left the credential selection unspecified and could record stored scopes
+  the receipt does not describe; a selection left empty by the receiving agent's
+  `scopeCeiling` is now `403 scope_ceiling_exceeded` rather than an unspecified request. A
+  partial intersection — a ceiling narrower than the validated grant — now governs the child's
+  receipt, its returned scopes and the hop's audit record, so a receipt names exactly the
+  selection that was made and cannot anchor a later hop to a scope it never selected. The
+  server already applied its ceiling before minting; this makes the local path agree.
+- `cred-crewai` declares `requires-python = ">=3.10,<3.14"`, since every current CrewAI
+  release does. On 3.14 pip used to backtrack into very old CrewAI releases and fail.
+- `npm run test:python` installs every Python package together from
+  `scripts/python-test-constraints.txt`, and runs in CI on 3.10, 3.12, 3.13 and 3.14.
+  On 3.14 it says it skipped `cred-crewai`. It refuses Python 3.9, which the framework
+  integrations do not support.
+
+### Fixed: a token refresh no longer restores a deleted connection
+
+- `@credninja/vault`: `CredVault.get()` refreshes an expired token through the provider
+  and then stores the result. The write-back is now a compare-and-set on the row the
+  refresh read. If the connection was deleted while the refresh was in flight, nothing
+  is written and `get()` returns `null`, where it used to store the row again. If
+  another write replaced the row, the stored row wins. In `@credninja/server` this
+  covers every delete route, and a request that started the refresh no longer returns
+  a token after the delete answered `204`.
+- `StorageBackend` gains an optional `replaceIfUnchanged()`, atomic in the SQLite and
+  file backends. A custom backend without it gets a re-read before the write, which
+  narrows the window but does not close it.
+
+### Fixed: Guard policies judge verified identity, not what the request body names
+
+- `@credninja/server`: `webBotAuthPolicy` and `receiptClaimsPolicy` were shown
+  `web_bot_auth_key_id`, `key_id`, `signature_agent`, `receipt_claims` and
+  `metadata.receiptClaims` from the request body, so a caller could name them and pass,
+  with no signature or over a signature under another key. Guard now sees only the Web
+  Bot Auth signature the server checked, the parent receipt it verified, or claims an
+  `agentRequestVerifier` attached to the caller. A request that passed such a policy
+  only by naming them is now refused with `403`.
+- `@credninja/server` also verifies a root delegation's TOFU proof before exposing
+  `identitySource: 'tofu'` or `tofuFingerprint` to Guard. `/bc-authorize`,
+  `/api/v1/subdelegate` and the compatibility token route do not verify TOFU proofs
+  and cannot claim that source by naming body fields.
+- `@credninja/guard`: with `resolveVerifiedIdentity`, `agentDid`, `tofuFingerprint`
+  and identity-source inference now also come only from the resolver, never the
+  request body. The resolver accepts optional verified DID and TOFU fields.
+- `@credninja/server` shows Guard an `agentDid` (source `did`) when the request carries
+  a DPoP proof for the route by the key of the `agent_did` it names
+  (`/api/v1/delegate`, `/bc-authorize`), and on `/api/v1/subdelegate` the receiving
+  agent's did:key, which the issued token is bound to. A policy that allows or denies by
+  DID or by the `did` source keeps working for those requests. A DID that is only
+  named is not shown.
+  Without it the adapter reads the body as before, which is safe only behind middleware
+  that verified those fields. The MCP adapter has no verified channel and reads them
+  from the tool call's `metadata`. The README says where identity comes from in each.
+
+### Changed: newly generated apps are multi-user, with an agent to grant
+
+- `@credninja/create-app`: a generated app sets `SINGLE_USER_MODE=false`, so every
+  request names `user_id`. It also generates an agent identity in `agent.env` (mode
+  0600, not read by the server) and a `grant-agent.mjs` script, run as
+  `npm run grant -- github github.read`, which creates the Permission an agent now
+  needs. It reads the admin token and server address only from the `.env` beside
+  it, and sends the token only over loopback or https, following no redirect. Apps
+  generated earlier keep their settings, but their agents need a Permission once
+  they upgrade.
+- A generated `.env` and README state that `user_id` is not an authorization
+  boundary for the static agent token, and that a Permission is per agent and
+  service, not per user.
+
+### Added: `actor` and `details` in the audit feed
 
 - `GET /api/v1/audit` and `getAuditLog()` return `actor`, except on a failed DPoP proof.
-  An event's own fields moved from `metadata.webBotAuth` to `metadata.details`, and
-  `metadata.webBotAuth` now appears only for what a Web Bot Auth signature said. A
-  reader of `metadata.webBotAuth.delegationId` must change. Stored rows and the hash
-  chain are not affected.
+  An event's own fields are under the new `metadata.details`. `metadata.webBotAuth` is
+  deprecated: as in 2.0.0 it still holds every stored field, signed or not, so existing
+  readers keep working, and a Web Bot Auth signature was checked only when it carries
+  `webBotAuthKeyId`. Stored rows and the hash chain are not affected.
 
 ### Fixed: the audit log names the agent behind a brokered call
 
@@ -160,59 +340,112 @@
 - Existing audit rows are not changed, so rows written earlier still say
   `server-agent`. The hash chain verifies across old and new rows.
 
-### BREAKING: agents need a Permission, and a revocation holds
+### Fixed: the TypeScript SDK accepts `http://[::1]` for local development
 
-- `@credninja/server`: `POST /api/v1/delegate` and `POST /bc-authorize` refuse
-  an agent named by `agent_did` that holds no Permission for the service
-  (`403 permission_required`, naming the fix). Before this, an agent with no
-  Permission was issued the whole connection, so any new did:key presented with
-  the agent token got every stored scope. Grant one at `POST /admin/permissions`.
-  A file vault cannot store Permissions, so every agent is refused there, and the
-  server warns at startup: use `VAULT_STORAGE=sqlite`. There is no migration command;
-  connect providers again on the new vault.
-- Revoking a Permission no longer widens the agent to the whole connection. It
-  used to delete the row, and the agent then counted as having no limit. The
-  revocation is now recorded, the agent's live delegations on that service are
-  revoked, and it is refused (`403 agent_access_revoked`) until it is granted
-  again.
-- Revoking a delegation holds out each agent the cascade reached, for that user
-  and service, instead of letting it ask again at once. This also applies at
-  `/api/v1/subdelegate`, `/bc-authorize` and `/api/v1/token`, and to a Cred Link
-  agent as well as its key. Holds and consent revocations commit with the
-  revocation, so a retry stays correct. Disconnecting a connection holds no agent out.
-- A revocation also ends the agent's consents on that service (for that user, when
-  it was one delegation), so a re-grant asks for approval again.
-- New `POST /admin/permissions/:id/restore` ends a hold and leaves the Permission as
-  it is, for one user with `user_id` or all. New `GET /admin/agent-holds` lists holds.
-- `POST /admin/permissions` ends every hold at the limits it names, and now refuses
-  with `409 permission_limits_would_drop` rather than silently drop an approval gate,
-  rate limit, expiry, TTL override or `admin` or `both` approver on the row it replaces.
-  A re-grant is a new row, so live delegations under the old one must ask again.
-- Replaying a revocation changes nothing, so it cannot undo a restore or re-grant.
-- Narrowing a Permission with `PATCH` reaches live delegations: each `/api/v1/use` is
-  held to the Permission as it stands. Delegations record which Permission authorized
-  them, and one whose Permission has gone or expired can do nothing.
-- An agent with a Permission under both its DID and record id gets the limits of both.
-- Raw tokens: a request naming no agent now also needs
-  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, including at `GET /api/token/:provider`.
-  One whose Permission covers nothing on the connection is refused
-  (`403 no_scopes_granted`). Issued ones are marked `raw_tokens` in
-  `enforcementOptOuts`. A raw token does not honor read-only labels.
-- `POST /api/v1/delegate` now honours a Permission stored under the agent's
-  record id, as `/api/v1/subdelegate` already did. It used to look only under
-  the DID and otherwise issue the whole connection.
-- `@credninja/vault`: `revokePermission` returns the Permission removed and
-  records an agent revocation; `createPermission` ends one. New
-  `recordAgentRevocations`, `getAgentRevocation`, `listAgentRevocations`,
-  `clearAgentRevocations` and `getPermissionById`, a `hold` option on revocations,
-  and a `vault_agent_revocations` table created on start. Existing rows are not
-  changed, and a Permission revoked before this version left no record.
-- Deprecated opt-outs, each logging a warning at startup and marking affected
-  audit events in `metadata.enforcementOptOuts`:
-  `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION` and
-  `CRED_ALLOW_REDELEGATION_AFTER_REVOCATION`. Setting both restores the old
-  behavior, widening included. With only the first set, a did:key with no agent record
-  is still refused on a service and user with any hold. They will be removed.
+- `@credninja/sdk`: `new Cred({ baseUrl: 'http://[::1]:3456' })` no longer throws.
+  The loopback check compared the hostname with `::1`, but a parsed URL keeps the
+  brackets. The Python SDK already accepted it.
+
+### Fixed: a raw token for a TOFU agent needs that agent's proof
+
+- `@credninja/server`, deprecated raw-token opt-in: a request naming a TOFU principal
+  (`agent_did: "tofu:<agentId>"`) used to skip the proof check, because the name is not
+  a did:key and no agent record holds one. Anyone holding the agent token could then take
+  a raw provider token under that principal's Permission, even after the TOFU agent was
+  revoked. Naming a TOFU principal in `agent_did` on a raw request is now refused with
+  `401 agent_key_required`. A TOFU agent is identified by its signed TOFU request.
+
+### Known limitation: one static agent token serves every user
+
+- `@credninja/server`: the static `AGENT_TOKEN` carries no user, so on the legacy routes
+  the user comes from the request's `user_id`, and whoever holds the token can name any
+  connected user. The server now warns at startup when one static token serves more than
+  one user (`SINGLE_USER_MODE` off and no `agentRequestVerifier`). A single-user
+  deployment is not affected. To bind each caller to one user, configure an
+  `agentRequestVerifier` that returns `userId`.
+- `@credninja/server`: whoever holds the agent token can also revoke any delegation of a
+  user it names, and that revocation now holds the agent out until an admin restores it.
+  Treat the agent token as an operator credential.
+- `@credninja/sdk`: `tofuDelegate()` names no `agent_did`, so a 2.1.0 server refuses it
+  with `403 permission_required` unless `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true` is set.
+  Move TOFU clients to did:key agents with a Permission.
+
+### Fixed: a restored handle proves its key before its token is refreshed
+
+- `@credninja/server`: on `/api/v1/use`, a delegation this process has not
+  cached (another replica, or after a restart) used to be rebuilt before the
+  request's DPoP proof was checked, and rebuilding reads the stored provider
+  token, refreshing an expired one at the provider. A Delegation Token sent
+  without the key it is bound to, or with no proof at all, could therefore make
+  the server decrypt the row and rotate its tokens before being refused. The
+  proof is now checked first, against the delegation's recorded agent and key,
+  and nothing is read from the vault until it passes. An unproven request for
+  a revoked delegation now answers `401 invalid_dpop_proof` rather than
+  `401 delegation_revoked`, a token whose agent or key does not match the
+  delegation's record answers `401 invalid_token`, and the other refusals of an
+  uncached delegation (`403 cumulative_constraint_unenforceable` among them)
+  now follow the proof.
+- `@credninja/server`: a proven agent that is suspended, or whose Permission is
+  gone or has expired, used to be refused only after the handle was rebuilt, so
+  it could still make the server refresh an expired row once per delegation. It
+  is now refused before the token is read (`403 agent_suspended`,
+  `403 scope_insufficient`).
+
+### Fixed: local mode refreshes expired tokens, and refreshes keep the stated scope
+
+- `@credninja/sdk` (local mode): an expired credential could never be
+  refreshed. The native OAuth adapter takes one params object and answers in
+  the provider's snake_case shape, but it was handed to the vault, which calls
+  `refreshAccessToken(refreshToken, clientId, clientSecret)` and reads
+  camelCase, so the provider received `refresh_token=undefined` and the
+  delegation failed with "No credentials found". Local mode now wraps the
+  adapter with `toVaultRefreshAdapter`. With an `@credninja/oauth` that does not
+  export it, unexpired credentials are still served and a refresh is refused.
+- `@credninja/oauth`: new `toVaultRefreshAdapter(adapter)`, which wraps a
+  native adapter into the vault's refresh contract. It carries a scope the
+  provider states for the refreshed token (space- or comma-separated), leaves
+  the scope unstated when the provider omits it or sends it empty, and refuses
+  a refresh that returns no access token. The Zoom and Asana adapters now
+  finish a refresh the way the other adapters do, so their stated scope is
+  carried and a `200` body carrying an OAuth error is refused.
+- `@credninja/server`: a refresh now stores the scope the provider states,
+  through the same adapter. It used to keep the stored list whatever the
+  provider said, so a narrowed grant stayed recorded under the wider list. A
+  refresh that states no scope keeps the stored list, as RFC 6749 section 5.1
+  allows.
+
+### Fixed: a live brokered handle decides over the credential it forwards
+
+- `@credninja/server`: a handle now records the stored scopes of the connection
+  row its provider token came from, and `/api/v1/use` decides over those rather
+  than over a row that replaced them. A row replaced narrower after issuance
+  (`repo` to `public_repo`, or a Notion connection narrowed to `read_content`)
+  used to make the decision read the narrow row while the handle still forwarded
+  the wider token it was issued, so a call the row no longer covered was served
+  with a credential that reached past it, and the widened-token check read the
+  narrow row and reported no wider token. That call is now refused with
+  `403 scope_insufficient` and nothing is forwarded. A row reconnected wider
+  behaves as before, and a cached handle carrying no recorded provenance is
+  refused rather than assumed to match the current row.
+
+### Changed: docs match the code
+
+- README, SDK and MCP samples use Delegation Tokens and `use()`, with the agent's
+  key, in place of provider tokens. The MCP sample's `CRED_AGENT_DID` is a did:key,
+  which the server requires. Linear and HubSpot are listed beside the other five
+  brokered services, and the Notion row no longer lists scopes Notion does not have.
+- `SECURITY-AUDITS.md` is now titled Security Review Notes and dated: these are
+  maintainer reviews, not independent audits.
+- `docs/releases/npm-2.0.0.md` records that 2.0.0 is published.
+- `SECURITY-AUDITS.md` scopes each review result to its date and scope, and its
+  dependency, test-count and transport statements match the code.
+
+## [2.0.0] - 2026-10-31
+
+npm only; Python package versions are unchanged. Nothing between 1.0.0 and
+2.0.0 was ever published, so everything below ships in this one major. Read
+the [release and migration notes](docs/releases/npm-2.0.0.md) before
+upgrading.
 
 ### Changed: Cred Link on Delegation Tokens
 
@@ -625,13 +858,6 @@ change: Cred Link, which is moving to `cred-ninja/link`.
   `validateSubDelegation()` takes optional `parent.expiresAt` and
   `requestedExpiresAt` and throws `expiry_escalation_denied` for a child that
   would outlive its parent.
-
-## [2.0.0] - 2026-10-31
-
-npm only; Python package versions are unchanged. Nothing between 1.0.0 and
-2.0.0 was ever published, so everything below ships in this one major. Read
-the [release and migration notes](docs/releases/npm-2.0.0.md) before
-upgrading.
 
 ### BREAKING: explicit user ids on the legacy routes (`@credninja/server`)
 

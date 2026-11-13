@@ -215,6 +215,14 @@ cannot create an event and can run a `freeBusy` POST, a Slack read scope can use
 read method over POST and cannot call `chat.postMessage`, and Linear's `read` runs
 queries and no mutation, however the document is arranged.
 
+Google metadata grants do not cover content: Drive `$alt` (including `%24alt`)
+receives the same conservative content check as `alt`, and `gmail.metadata` cannot
+use `q` on messages or threads lists and reaches no draft at all. `userinfo.email` and
+`userinfo.profile` read `people/me`, not another contact. Duplicate `alt`, `format` or `q` parameters,
+including mixed `alt`/`$alt`, and unrecognized case or dollar-prefixed aliases are
+refused with `operation_not_mapped` for every grant. Ordinary broad-scope `alt=media`,
+`format=full` and `q` requests still work.
+
 | Provider | Mapped | Not mapped, so refused |
 |---|---|---|
 | Google | Gmail (messages, threads, labels, drafts, profile); Calendar events, calendars and `freeBusy`; Drive files; Sheets values; Docs; People; Directory users and groups; userinfo | HTTP batch, uploads (`/upload/`, `uploadType`), Gmail `batchDelete` and `batchModify`, anything else |
@@ -225,9 +233,14 @@ queries and no mutation, however the document is arranged.
 | Notion | Pages, blocks, databases, data sources, comments, users, search | File uploads |
 | Salesforce | `query`, `queryAll`, `search`, `limits` and `sobjects`, at the connection's own instance | Composite, tooling, jobs, Apex REST, and any other host |
 
-GitHub does not publish scopes per endpoint, and HubSpot's per-endpoint scopes
-could not be read from its docs, so those two tables follow the provider's scope
-descriptions. Where a provider accepts more scopes than a rule lists, the rule is
+GitHub documents scopes for many REST endpoints but not all, and none per GraphQL
+field. HubSpot documents them per API guide. Where those stop, the tables follow the
+provider's scope descriptions, and neither table has been exercised against the live
+provider. `GET /user` is open to any GitHub grant, so an agent can learn whose account
+it acts for; on a token holding `user` the answer includes private profile fields.
+`GET /repos/*/*/pulls/*` under `github.read` can make GitHub create a test merge
+commit, as its docs describe, and a contents download URL can be used once without the
+broker. Where a provider accepts more scopes than a rule lists, the rule is
 narrower on purpose: a Drive scope does not reach the Sheets API here, and Linear's
 own `issues:create` also updates issues.
 
@@ -302,9 +315,11 @@ this version are unchanged and still say `server-agent`.
 `GET /api/v1/audit` and `getAuditLog()` return `actor`, except on a failed DPoP proof,
 which would tell a Bearer caller who a token it does not hold is bound to.
 `GET /admin/audit` shows it. An event's own fields are under `metadata.details`
-(`delegationId`, `origin`, `route`, ...), and `metadata.webBotAuth` holds only what a
-Web Bot Auth signature said. This is the response's shape; stored rows and the hash
-chain are unchanged.
+(`delegationId`, `origin`, `route`, ...). `metadata.webBotAuth` is deprecated: as in
+2.0.0 it holds every stored field, whether or not a signature was involved, and a Web
+Bot Auth signature was checked only when it carries `webBotAuthKeyId`. Read event
+fields from `details`. This is the response's shape; stored rows and the hash chain
+are unchanged.
 
 ## Agent access
 
@@ -364,11 +379,17 @@ any user and act on that user's connections, within the named agent's Permission
 To bind callers to one user each, configure a custom `agentRequestVerifier` (see
 [User ids](#user-ids)).
 
-Raw tokens (the deprecated `CRED_ALLOW_RAW_TOKENS=true`) do not honor read-only
-labels: a provider token holds the connection's whole scope whatever the Permission
-says. One is refused when the Permission covers nothing on the connection, and when
-the request names no agent unless `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true` is set
-too. Each is marked in the audit log (`enforcementOptOuts`).
+Raw tokens (the deprecated `CRED_ALLOW_RAW_TOKENS=true`) hold the connection's whole
+scope and remain bearer credentials at the provider, so their use is not bound by the
+broker. A `/api/v1/delegate` request naming a did:key in `agent_did` must prove that
+key with a fresh DPoP proof for this endpoint before credential retrieval or refresh.
+Missing, invalid, wrong-agent and replayed proofs receive `401 invalid_dpop_proof`.
+A request naming the agent by a record id whose record holds a did:key needs the same
+proof. An agent with no key on record cannot be proved, so any holder of the agent token
+can name it: give raw-token Permissions to did:key agents only.
+A raw token is refused unless the Permission covers every scope on the connection,
+and when the request names no agent unless `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`
+is set too. Each is marked in the audit log (`enforcementOptOuts`).
 
 With only `CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true`, a did:key with no agent record
 is refused on a service and user with any hold, so a new key cannot walk around a

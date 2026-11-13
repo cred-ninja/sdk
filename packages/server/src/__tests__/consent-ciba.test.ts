@@ -415,6 +415,25 @@ describe('review regressions', () => {
     expect(limited.body.error).toBe('rate_limited');
   });
 
+  it('holds that limit when the requests straddle a clock minute', async () => {
+    const agent = await newAgent();
+    const { app, vault } = await setup(agent, 'subject');
+    mockNetwork();
+    const permission = await vault.getPermission!(agent.did, 'google');
+    await vault.updatePermission!(permission!.id, { rateLimit: { maxRequests: 1, windowMs: 60_000 } });
+    const boundary = Date.now() + 60_000 - (Date.now() % 60_000);
+    vi.useFakeTimers({ toFake: ['Date'], now: boundary - 1 });
+    try {
+      expect((await delegate(app, agent)).body.error).toBe('approval_required');
+      vi.setSystemTime(boundary + 1);
+      const limited = await delegate(app, agent);
+      expect(limited.status).toBe(429);
+      expect(limited.body.error).toBe('rate_limited');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reuses a consent only under ceilings at least as tight and the same app client', async () => {
     const agent = await newAgent();
     const { app } = await setup(agent, 'subject');

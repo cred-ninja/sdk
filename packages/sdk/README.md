@@ -120,6 +120,31 @@ For agent-to-agent handoff, the delegating agent calls `cred.subDelegateGrant({ 
 for a single-use grant, and the receiving agent calls
 `cred.redeemDelegationGrant({ delegationGrant, agentIdentity })` for its own Delegation Token.
 
+Every hop is judged against both agents' Permissions: the receiving agent's row must allow the
+requested scopes and depth, and the *delegating* agent's own row (when the deployment or, in local
+mode, the vault holds one) must be `delegatable`, must allow the child's depth, must not have
+`expiresAt` in the past, and must still cover every scope the hop would grant. Otherwise the
+handoff is refused with `delegation_not_allowed`, `depth_exceeded`, `permission_expired` or
+`invalid_scope` before any credential is released. The child holds only what both rows still
+cover: a scope an admin removed from the grantor's row after the receipt was minted is never
+passed on. Where an agent has both a record-id row and a DID row, the tighter of the two applies.
+
+Derived read scopes (`github.read`, `salesforce.read`, `notion.read`) are judged against what the
+stored connection covers, not against what a receipt names: `public_repo` cannot hand on
+`github.read` over a token holding `repo` (likewise `api` over `full`, and `read_content` over a
+Notion connection with `content` stored or with none at all, which is the whole connection),
+because the read would reach past the row, while a token holding only `public_repo` under a
+`public_repo` row still derives `github.read`. The same rule bounds a receiving agent's
+Permission and scope ceiling, so a recipient row naming only the narrower source is not issued
+the read. Deciding it reads the stored row's scope list through `getStored` on the built-in file
+and SQLite backends: it decrypts the row's stored credential fields, without refreshing them or
+calling the provider, and no token value is logged or returned. That holds for those backends
+and for accessors whose read and error behaviour is known, not for an arbitrary custom
+`StorageBackend`, whose `get()` fallback may refresh or hide an expired row. A refusal on that
+basis releases no credential. A scope a wildcard parent receipt covers (`crm.*` covering
+`crm.read`) is carried into the child's delegation by name, and the receiving agent's ceiling
+bounds the child's returned scopes, its receipt and the hop's audit record.
+
 ### `cred.getConsentUrl(params)`
 
 Get the URL to send a user to for connecting a service.

@@ -1,6 +1,6 @@
 {
   "name": "@credninja/attenuation",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Delegation attenuation for AI agents: scope grammar, constraint ceilings, chain verification, and the draft-asor-wimse-agent-delegation-chain-02 token format. No runtime dependencies.",
   "license": "Apache-2.0",
   "author": "Cred",

@@ -1,9 +1,9 @@
 {
   "name": "@credninja/create-app",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Scaffold a self-hosted Cred server in seconds",
   "bin": {
-    "create-cred-app": "./bin/create.mjs"
+    "create-cred-app": "bin/create.mjs"
   },
   "files": [
     "bin",

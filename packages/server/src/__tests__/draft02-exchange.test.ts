@@ -77,6 +77,20 @@ function decode(jws: string, part: 0 | 1): Record<string, any> {
   return JSON.parse(Buffer.from(jws.split('.')[part]!, 'base64url').toString('utf8'));
 }
 
+/**
+ * A receipt carrying this server's own signature in the legacy claim layout
+ * (the acting agent in `sub`, no `act`). Lets a test present a trusted but
+ * ancient-shaped receipt the modern minting path would no longer produce.
+ */
+function legacyReceipt(payload: Record<string, unknown>): string {
+  const now = Math.floor(Date.now() / 1000);
+  return signCompactJws({ iss: BASE, iat: now, exp: now + 120, ...payload }, {
+    alg: 'EdDSA',
+    kid: createVerificationKey(derivedReceiptKey()).kid!,
+    sign: (input) => crypto.sign(null, input, derivedReceiptKey()),
+  });
+}
+
 const ROOT = await newAgent();
 const CHILD = await newAgent();
 const SIBLING = await newAgent();
@@ -236,6 +250,34 @@ describe('caller identity on /api/v1/subdelegate', () => {
     const { app } = await setup();
     const root = await delegateRoot(app);
     expect((await subdelegate(app, root.body.receipt, CHILD)).status).toBe(200);
+  });
+
+  it('refuses a trusted receipt naming a non-did:key agent, even with a fresh actor token', async () => {
+    // The receipt carries this server's own signature, so it is trusted, but
+    // it names `agent:no-key` in the legacy layout: no key exists for that
+    // identity, so the caller cannot prove it is that agent. A valid, freshly
+    // signed actor token does not repair that, and nothing is released.
+    const { app } = await setup();
+    const receipt = legacyReceipt({
+      sub: 'agent:no-key',
+      service: 'google',
+      scopes: ['openid'],
+      userId: 'alice',
+      appClientId: 'local',
+      delegationId: `del_legacy_${crypto.randomUUID()}`,
+      chainDepth: 0,
+    });
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    try {
+      const res = await subdelegate(app, receipt, CHILD);
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toBe('agent_identity_unverifiable');
+      expect(res.body.access_token).toBeUndefined();
+      expect(res.body.receipt).toBeUndefined();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('ignores CRED_REQUIRE_AGENT_IDENTITY=false: a leaked receipt alone never mints a token, and warns', async () => {

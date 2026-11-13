@@ -41,6 +41,7 @@ vi.mock('@credninja/vault', () => {
 
 vi.mock('@credninja/oauth', () => ({
   createAdapter: (...args: unknown[]) => mockCreateAdapter(...args),
+  toVaultRefreshAdapter: (adapter: unknown) => adapter,
 }));
 
 function makeLocalCred(

@@ -205,6 +205,10 @@ export class CredVault {
 
   private async writeEntry(input: StoreInput): Promise<void> {
     const key = await this.ensureReady();
+    await this.backend.store(this.encryptRow(input, key));
+  }
+
+  private encryptRow(input: StoreInput, key: Buffer): StoredRow {
     const now = new Date().toISOString();
 
     const accessEnc = encryptWithKey(input.accessToken, key);
@@ -229,7 +233,30 @@ export class CredVault {
       row.refreshTokenTag = refreshEnc.tag;
     }
 
+    return row;
+  }
+
+  /**
+   * Write refreshed tokens back only over the row they were refreshed from.
+   * The provider call is slow, so a delete or a new store can land while it
+   * is in flight; either one wins, and the refreshed tokens are dropped.
+   */
+  private async writeRefreshedEntry(input: StoreInput, refreshedFrom: StoredRow): Promise<'replaced' | 'missing' | 'changed'> {
+    const key = this.ensureKey();
+    const row = this.encryptRow(input, key);
+    const expected = { accessTokenEnc: refreshedFrom.accessTokenEnc, accessTokenIv: refreshedFrom.accessTokenIv };
+    if (this.backend.replaceIfUnchanged) {
+      return this.backend.replaceIfUnchanged(row, expected);
+    }
+    // A custom backend without replaceIfUnchanged gets a re-check here. It is
+    // not atomic with the write, so such a backend keeps a narrower window.
+    const current = this.backend.getForRefresh
+      ? await this.backend.getForRefresh(input.provider, input.userId)
+      : await this.backend.get(input.provider, input.userId);
+    if (!current) return 'missing';
+    if (current.accessTokenEnc !== expected.accessTokenEnc || current.accessTokenIv !== expected.accessTokenIv) return 'changed';
     await this.backend.store(row);
+    return 'replaced';
   }
 
   /**
@@ -286,8 +313,9 @@ export class CredVault {
         const newRefreshToken = refreshed.refreshToken ?? refreshToken;
         const newScopes = refreshed.scopes ?? scopes;
 
-        // Persist refreshed tokens (encrypted)
-        await this.writeEntry({
+        // Persist refreshed tokens (encrypted), but only over the row they
+        // were refreshed from.
+        const written = await this.writeRefreshedEntry({
           provider: input.provider,
           userId: input.userId,
           accessToken: refreshed.accessToken,
@@ -296,7 +324,17 @@ export class CredVault {
           scopes: newScopes,
           // A refresh never moves a connection to another instance.
           ...(row.instanceUrl ? { instanceUrl: row.instanceUrl } : {}),
-        });
+        }, row);
+        // Deleted while the refresh was in flight: it stays deleted, and the
+        // caller gets nothing for it.
+        if (written === 'missing') return null;
+        // Replaced meanwhile (a reconnect, or another refresh that finished
+        // first): hand out what is stored now, never the dropped tokens.
+        if (written === 'changed') {
+          const current = await this.getStored({ provider: input.provider, userId: input.userId }, access);
+          if (!current || (current.expiresAt !== undefined && current.expiresAt <= new Date())) return null;
+          return current;
+        }
 
         return {
           provider: input.provider,

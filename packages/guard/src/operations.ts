@@ -9,10 +9,11 @@
  * someone maps it.
  *
  * Each table comes from the provider's documentation. Where a provider accepts
- * more scopes than are listed here the table is narrower on purpose, and where
- * its docs do not give scopes per endpoint (GitHub, HubSpot) the table follows
- * its scope descriptions. Google, not this table, has the last word on whether a
- * token really holds a scope. This decides only whether the broker forwards.
+ * more scopes than are listed here the table is narrower on purpose. GitHub gives
+ * scopes for many endpoints but not all, and not per GraphQL field; HubSpot gives
+ * them per API guide. Where the docs stop, a table follows the scope descriptions,
+ * and the provider has the last word on whether a token really holds a scope. This
+ * decides only whether the broker forwards.
  */
 import { Kind, parse, type DocumentNode, type SelectionSetNode } from 'graphql';
 
@@ -80,14 +81,18 @@ const GMAIL_RULES = (prefix: string): Rule[] => [
   read(`${prefix}/threads/*`, GMAIL_READ),
   read(`${prefix}/labels`, GMAIL_READ),
   read(`${prefix}/profile`, GMAIL_READ),
-  read(`${prefix}/drafts`, [...GMAIL_READ, 'gmail.compose']),
-  read(`${prefix}/drafts/*`, [...GMAIL_READ, 'gmail.compose']),
+  // drafts.list/get do not accept gmail.metadata, even for metadata/minimal format.
+  read(`${prefix}/drafts`, [...GMAIL_DRAFT, 'gmail.readonly']),
+  read(`${prefix}/drafts/*`, [...GMAIL_DRAFT, 'gmail.readonly']),
   write('POST', `${prefix}/drafts`, GMAIL_DRAFT),
   write('POST', `${prefix}/drafts/send`, GMAIL_SEND),
 ];
 
-const CALENDAR_EVENTS_READ = ['calendar.readonly', 'calendar', 'calendar.events.readonly', 'calendar.events', 'calendar.app.created', 'calendar.events.freebusy', 'calendar.events.owned', 'calendar.events.owned.readonly', 'calendar.events.public.readonly'];
-const CALENDAR_EVENTS_WRITE = ['calendar', 'calendar.events', 'calendar.app.created', 'calendar.events.owned'];
+// Partition scopes (calendar.app.created, calendar.events.owned, calendar.events.public.readonly) and
+// free/busy scopes name a subset this table can't see in a URL. Over a wider token the broker would
+// reach everything, so they are not mapped here.
+const CALENDAR_EVENTS_READ = ['calendar.readonly', 'calendar', 'calendar.events.readonly', 'calendar.events'];
+const CALENDAR_EVENTS_WRITE = ['calendar', 'calendar.events'];
 const CALENDAR_RULES: Rule[] = [
   read('/calendar/v3/calendars/*/events', CALENDAR_EVENTS_READ),
   read('/calendar/v3/calendars/*/events/*', CALENDAR_EVENTS_READ),
@@ -100,13 +105,15 @@ const CALENDAR_RULES: Rule[] = [
   read('/calendar/v3/calendars/*', ['calendar.readonly', 'calendar', 'calendar.calendars', 'calendar.calendars.readonly']),
 ];
 
+const METADATA_ONLY_SCOPES: ReadonlySet<string> = new Set(['gmail.metadata', 'drive.metadata', 'drive.metadata.readonly']);
 const DRIVE_READ = ['drive', 'drive.file', 'drive.metadata', 'drive.metadata.readonly', 'drive.readonly'];
+const DRIVE_CONTENT = ['drive', 'drive.file', 'drive.readonly'];
 const DRIVE_WRITE = ['drive', 'drive.file'];
 const DRIVE_RULES: Rule[] = [
   read('/drive/v3/about', DRIVE_READ),
   read('/drive/v3/files', DRIVE_READ),
   read('/drive/v3/files/*', DRIVE_READ),
-  read('/drive/v3/files/*/export', DRIVE_READ),
+  read('/drive/v3/files/*/export', DRIVE_CONTENT),
   write('POST', '/drive/v3/files', DRIVE_WRITE),
   write(['PATCH', 'DELETE'], '/drive/v3/files/*', DRIVE_WRITE),
   write('POST', '/drive/v3/files/*/copy', DRIVE_WRITE),
@@ -128,7 +135,9 @@ const DOCS_RULES: Rule[] = [
   write('POST', '/v1/documents/*:batchUpdate', ['documents']),
 ];
 const PEOPLE_RULES: Rule[] = [
-  read('/v1/people/*', ['contacts', 'contacts.readonly', 'userinfo.email', 'userinfo.profile']),
+  // The identity scopes read the user's own profile, not a contact whose id the caller knows.
+  read('/v1/people/me', ['contacts', 'contacts.readonly', 'userinfo.email', 'userinfo.profile']),
+  read('/v1/people/*', ['contacts', 'contacts.readonly']),
   read('/v1/people/me/connections', ['contacts', 'contacts.readonly']),
 ];
 const ADMIN_RULES: Rule[] = [
@@ -279,8 +288,16 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
     origins: new Set(['https://api.github.com']),
     otherScopes: ['workflow', 'user:email', 'read:packages', 'write:packages'],
     rules: [
+      // Who the token belongs to. Every grant may ask, though a `user` token's
+      // answer also includes private profile fields.
       read('/user', ANY_GRANT),
-      read('/user/**', ['user', 'read:user', 'user:email', ...GH_WRITE]),
+      read('/user/emails', ['user', 'user:email']),
+      read('/user/public_emails', ['user', 'user:email']),
+      read('/user/repos', GH_WRITE),
+      read('/user/orgs', ['user', 'read:org', 'write:org', 'admin:org']),
+      read('/user/followers', ['user', 'read:user']),
+      read('/user/following', ['user', 'read:user']),
+      read('/user/following/*', ['user', 'read:user']),
       // A public profile is public. Below it, what comes back depends on the whole
       // token (a user's own events include private ones), so it needs a scope that
       // says so.
@@ -290,16 +307,39 @@ const TABLES: Readonly<Record<string, ProviderTable>> = {
       ...GH_REPOSITORY_READS,
       read('/repos/**', GH_WRITE),
       read('/search/**', GH_READ),
-      read('/orgs/**', [...GH_WRITE, 'read:org', 'write:org', 'admin:org']),
-      read('/gists', [...GH_WRITE, 'gist']),
-      read('/gists/**', [...GH_WRITE, 'gist']),
+      // Named sub-trees only: /orgs also holds secrets, webhooks, runner tokens and
+      // secret-scanning alerts, which GitHub puts under other scopes.
+      ...['/orgs/*', '/orgs/*/members', '/orgs/*/members/*', '/orgs/*/memberships/*', '/orgs/*/teams', '/orgs/*/teams/*', '/orgs/*/teams/*/members', '/orgs/*/teams/*/memberships/*']
+        .map((pattern) => read(pattern, ['read:org', 'write:org', 'admin:org'])),
+      read('/orgs/*/repos', GH_WRITE),
+      read('/orgs/*/teams/*/repos', GH_WRITE),
+      read('/orgs/*/teams/*/repos/**', GH_WRITE),
+      read('/gists', ['gist']),
+      read('/gists/**', ['gist']),
       read('/notifications', ['notifications', 'repo']),
       write('DELETE', '/repos/*/*', ['delete_repo']),
-      write(WRITE_METHODS, '/repos/*/*/**', GH_WRITE),
+      // Named sub-trees: deploy keys, collaborators, webhooks, transfers and Actions secrets also
+      // live under a repository, and they outlast a revocation here. Same policy as GraphQL's.
+      ...['contents/**', 'issues', 'issues/**', 'pulls', 'pulls/**', 'git/**', 'labels', 'labels/**', 'milestones', 'milestones/**', 'releases', 'releases/**', 'commits/**', 'statuses/*', 'check-runs', 'check-runs/**', 'merges', 'forks']
+        .map((tail) => write(WRITE_METHODS, `/repos/*/*/${tail}`, GH_WRITE)),
       write('POST', '/user/repos', GH_WRITE),
       write(['PATCH'], '/user', ['user']),
-      write(WRITE_METHODS, '/user/**', ['user']),
-      write(WRITE_METHODS, '/orgs/**', ['admin:org', 'write:org']),
+      write(WRITE_METHODS, '/user/emails', ['user']),
+      write(WRITE_METHODS, '/user/following/*', ['user']),
+      // Each kind of key has its own scope pair, and only admin deletes.
+      ...[['keys', 'public_key'], ['gpg_keys', 'gpg_key'], ['ssh_signing_keys', 'ssh_signing_key']].flatMap(([path, scope]) => [
+        write('POST', `/user/${path}`, [`write:${scope}`, `admin:${scope}`]),
+        write('DELETE', `/user/${path}/*`, [`admin:${scope}`]),
+      ]),
+      write('POST', '/orgs/*/repos', GH_WRITE),
+      // write:org manages membership. Teams themselves, and what they can reach, need admin:org.
+      write(['PUT', 'DELETE'], '/orgs/*/memberships/*', ['admin:org', 'write:org']),
+      write('POST', '/orgs/*/invitations', ['admin:org', 'write:org']),
+      write('DELETE', '/orgs/*/invitations/*', ['admin:org', 'write:org']),
+      write(['PUT', 'DELETE'], '/orgs/*/teams/*/memberships/*', ['admin:org', 'write:org']),
+      write('POST', '/orgs/*/teams', ['admin:org']),
+      write(['PATCH', 'DELETE'], '/orgs/*/teams/*', ['admin:org']),
+      write(['PUT', 'DELETE'], '/orgs/*/teams/*/repos/**', ['admin:org']),
       write('POST', '/gists', ['gist']),
       write(WRITE_METHODS, '/gists/**', ['gist']),
     ],
@@ -370,8 +410,8 @@ const GITHUB_GRAPHQL_READ = ['repo', 'public_repo'];
 /**
  * The GitHub GraphQL mutations the broker forwards, each with the scopes that
  * cover it. Any other is refused: `repo` also covers mutations that administer a
- * repository, which one write scope should not reach by accident. GitHub does
- * not publish scopes per mutation, so these follow its scope descriptions.
+ * repository, which one write scope should not reach by accident. GitHub's GraphQL
+ * guide gives no scopes per mutation, so these follow its scope descriptions.
  */
 const GITHUB_GRAPHQL_MUTATIONS: ReadonlyMap<string, readonly string[]> = new Map([
   ['createIssue', GH_WRITE],
@@ -644,6 +684,15 @@ function classify(request: OperationRequest): Mapped | { reason: string } {
 
   let rules: readonly Rule[] | undefined;
   if (service === 'google') {
+    // Google accepts $alt as alt. Refuse duplicate/unknown spellings rather
+    // than guessing which representation an upstream parser will choose.
+    const seen = new Set<string>();
+    for (const key of parsed.searchParams.keys()) {
+      const canonical = key.replace(/^\$/, '').toLowerCase();
+      if (canonical !== 'alt' && canonical !== 'format' && canonical !== 'q') continue;
+      if ((key !== canonical && key !== '$alt') || seen.has(canonical)) return { reason: 'ambiguous_query' };
+      seen.add(canonical);
+    }
     rules = Object.prototype.hasOwnProperty.call(GOOGLE_BY_ORIGIN, origin) ? GOOGLE_BY_ORIGIN[origin] : undefined;
   } else if (Object.prototype.hasOwnProperty.call(TABLES, service)) {
     const table = TABLES[service]!;
@@ -659,6 +708,16 @@ function classify(request: OperationRequest): Mapped | { reason: string } {
     && request.body && typeof request.body === 'object'
     && NOTION_TRASH_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(request.body, field))) {
     return { operation: `${method} ${found.pattern}`, access: found.access, needs: NOTION_WHOLE };
+  }
+  // A metadata scope reaches a message or a file's content through a query parameter.
+  if (service === 'google' && method === 'GET' && found.needs !== ANY_GRANT) {
+    const format = parsed.searchParams.get('format');
+    const gmailContent = /\/(messages|threads|drafts)\/\*$/.test(found.pattern) && format !== 'metadata' && format !== 'minimal';
+    const gmailSearch = /\/(messages|threads|drafts)$/.test(found.pattern) && parsed.searchParams.has('q');
+    const driveContent = found.pattern === '/drive/v3/files/*' && (parsed.searchParams.has('alt') || parsed.searchParams.has('$alt'));
+    if (gmailContent || gmailSearch || driveContent) {
+      return { operation: `${method} ${found.pattern}`, access: found.access, needs: found.needs.filter((scope) => !METADATA_ONLY_SCOPES.has(scope)) };
+    }
   }
   return { operation: `${method} ${found.pattern}`, access: found.access, needs: found.needs };
 }
@@ -697,6 +756,49 @@ function knownScopes(service: string): ReadonlySet<string> {
   if (service === 'github') ['read:user', 'user', 'read:org'].forEach((scope) => known.add(scope));
   KNOWN_SCOPES.set(service, known);
   return known;
+}
+
+/** One row of the operation tables, for test harnesses that must cover every row. */
+export interface OperationRow {
+  service: string;
+  /** Null where the host varies per customer. */
+  origin: string | null;
+  methods: readonly string[];
+  /** A pattern as in the tables, or a Slack method path. `/graphql` rows name their `graphql` shape. */
+  pattern: string;
+  access: OperationAccess;
+  /** The scopes that cover it, or 'any' for a row every grant reaches. */
+  needs: readonly string[] | 'any';
+  graphql?: 'query' | { mutation: string };
+}
+
+/** Every row the classifier maps. A row added to a table appears here, so a harness can fail until it is tested. */
+export function listOperationRows(): OperationRow[] {
+  const needsOf = (needs: Needs): readonly string[] | 'any' => (needs === ANY_GRANT ? 'any' : needs);
+  const ofRules = (service: string, origin: string | null, rules: readonly Rule[]): OperationRow[] =>
+    rules.map((each) => ({ service, origin, methods: each.methods, pattern: each.pattern, access: each.access, needs: needsOf(each.needs) }));
+  const rows: OperationRow[] = [];
+  for (const [origin, rules] of Object.entries(GOOGLE_BY_ORIGIN)) rows.push(...ofRules('google', origin, rules));
+  for (const [service, table] of Object.entries(TABLES)) {
+    const origins = typeof table.origins === 'function' ? [null] : [...table.origins];
+    for (const origin of origins) rows.push(...ofRules(service, origin, table.rules));
+  }
+  for (const [method, needs] of Object.entries(SLACK_READ_METHODS)) {
+    rows.push({ service: 'slack', origin: 'https://slack.com', methods: ['GET', 'POST'], pattern: `/api/${method}`, access: 'read', needs: needsOf(needs) });
+  }
+  for (const [method, needs] of Object.entries(SLACK_WRITE_METHODS)) {
+    rows.push({ service: 'slack', origin: 'https://slack.com', methods: ['POST'], pattern: `/api/${method}`, access: 'write', needs: needsOf(needs) });
+  }
+  rows.push({ service: 'github', origin: GITHUB_ORIGIN, methods: ['POST'], pattern: '/graphql', access: 'read', needs: GITHUB_GRAPHQL_READ, graphql: 'query' });
+  for (const [mutation, needs] of GITHUB_GRAPHQL_MUTATIONS) {
+    rows.push({ service: 'github', origin: GITHUB_ORIGIN, methods: ['POST'], pattern: '/graphql', access: 'write', needs, graphql: { mutation } });
+  }
+  rows.push({ service: 'linear', origin: LINEAR_ORIGIN, methods: ['POST'], pattern: '/graphql', access: 'read', needs: ['read', 'write', 'admin'], graphql: 'query' });
+  rows.push({ service: 'linear', origin: LINEAR_ORIGIN, methods: ['POST'], pattern: '/graphql', access: 'write', needs: ['write'], graphql: { mutation: 'issueUpdate' } });
+  for (const [scope, mutations] of Object.entries(LINEAR_NARROW_MUTATIONS)) {
+    for (const mutation of mutations) rows.push({ service: 'linear', origin: LINEAR_ORIGIN, methods: ['POST'], pattern: '/graphql', access: 'write', needs: ['write', scope], graphql: { mutation } });
+  }
+  return rows;
 }
 
 /** Whether classification has a table for this service at all. */

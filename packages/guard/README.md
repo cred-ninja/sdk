@@ -8,6 +8,9 @@ Policy engine for credential delegation guardrails. Add rate limiting, scope fil
 npm install @credninja/guard
 ```
 
+The package is ESM only: load it with `import`. `require('@credninja/guard')` fails with
+`ERR_PACKAGE_PATH_NOT_EXPORTED`.
+
 ## Quick Start
 
 ### Server Middleware
@@ -86,6 +89,56 @@ const guard = new CredGuard({
 | `urlAllowlistPolicy` | Restrict which URLs agents can call (cred_use) | `{ allowedUrls }` (origin-scoped string prefix or RegExp) |
 | `maxTtlPolicy` | Cap delegation TTL | `{ maxTtlSeconds, perProvider? }` |
 | `webBotAuthPolicy` | Require or constrain Web Bot Auth identity metadata | `{ requireKeyId?, allowedIdentitySources?, allowedSignatureAgentPrefixes? }` |
+
+## Where identity comes from
+
+`webBotAuthPolicy` and `receiptClaimsPolicy` judge what the adapter puts in the
+context (`identitySource`, `webBotAuthKeyId`, `signatureAgent`, `receiptClaims`), so
+they are only as good as where those values come from.
+
+- **`@credninja/server`** passes verified state: the key id and Signature-Agent of a
+  Web Bot Auth signature it checked, the claims of a parent receipt it verified, or
+  claims an `agentRequestVerifier` attached to the caller. Values of the same name in
+  the request body are ignored.
+- **The Express adapter on your own app** reads `web_bot_auth_key_id`, `key_id`,
+  `signature_agent`, `receipt_claims` and `metadata.receiptClaims` from the request
+  body unless you pass `resolveVerifiedIdentity`. Pass it, and return only what your
+  own middleware verified:
+
+  ```typescript
+  app.use('/api/token', guard.expressMiddleware({
+    resolveVerifiedIdentity: (req) => ({
+      webBotAuthKeyId: req.verifiedSignature?.keyId,
+      signatureAgent: req.verifiedSignature?.signatureAgent,
+    }),
+  }));
+  ```
+
+- **The MCP adapter** has no verified channel: it reads these fields from the tool
+  call's `metadata`, which the caller writes. Do not rely on `webBotAuthPolicy` or
+  `receiptClaimsPolicy` there.
+
+`agentDid` and `tofuFingerprint` follow the same rule: with
+`resolveVerifiedIdentity`, only the resolver may supply them or cause the source to
+be `did` or `tofu`. Return `agentDid` only after verifying proof of possession, or
+when what the request issues is bound to that DID's key, and
+`tofuFingerprint` only after checking the TOFU delegation proof. Returning undefined
+means `agent-token` unless another verified identity was supplied. Without a resolver,
+the Express adapter retains legacy body inference; `metadata` is still caller input.
+
+The server verifies TOFU proofs for root `/api/v1/delegate` requests before Guard.
+It exposes no TOFU identity on `/bc-authorize`, `/api/v1/subdelegate` or the compatibility
+token route, which do not verify TOFU.
+
+The server shows Guard an `agentDid`, and the `did` source, in three cases. On
+`/api/v1/delegate` and `/bc-authorize`: when the request carries a DPoP proof for that
+route signed by the key of the `agent_did` it names. With the raw-token opt-in: the
+did:key the request proved, also when it names the agent by record id. On
+`/api/v1/subdelegate`: the receiving agent's did:key, which the request names and the
+issued token or grant is bound to. A DID a request only names is not shown, so a
+policy that denies a DID is not passed by leaving the proof out: Guard then sees
+`agent-token`, and the route refuses the request for its missing proof. The route
+checks the proof again after Guard and is what refuses a replayed one.
 
 ## Policy Chain Behavior
 

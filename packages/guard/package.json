@@ -1,6 +1,6 @@
 {
   "name": "@credninja/guard",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Policy engine for credential delegation guardrails. Rate limiting, scope filtering, time windows, and more.",
   "license": "Apache-2.0",
   "author": "CredNinja",
@@ -29,12 +29,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@credninja/protocol": "^2.0.0",
+    "@credninja/protocol": "^2.1.0",
     "@types/express": "^5.0.5",
     "graphql": "^16.14.2"
   },
   "devDependencies": {
-    "@credninja/vault": "^2.0.0",
+    "@credninja/vault": "^2.1.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
     "vitest": "^4.1.12"

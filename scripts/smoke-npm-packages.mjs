@@ -151,7 +151,7 @@ for (const peer of ['@credninja/vault', '@credninja/oauth']) {
   assert.throws(() => require.resolve(peer), { code: 'MODULE_NOT_FOUND' });
 }
 const sdkPackage = require('./node_modules/@credninja/sdk/package.json');
-assert.equal(sdkPackage.dependencies['@credninja/attenuation'], '^2.0.0');
+assert.equal(sdkPackage.dependencies['@credninja/attenuation'], '^2.1.0');
 for (const { Cred, generateAgentIdentity } of [await import('@credninja/sdk'), require('@credninja/sdk')]) {
   const agent = await generateAgentIdentity();
   const cred = new Cred({ agentToken: 'cred_at_cloud_fixture', baseUrl: 'https://cred.example.com' });

@@ -7,6 +7,8 @@ on:
       - 'packages/sdk-python/**'
       - 'packages/integrations/**'
       - 'scripts/smoke-python-wheels.sh'
+      - 'scripts/test-python-packages.sh'
+      - 'scripts/python-test-constraints.txt'
       - '.github/workflows/python-ci.yml'
   pull_request:
     branches: [main]
@@ -14,6 +16,8 @@ on:
       - 'packages/sdk-python/**'
       - 'packages/integrations/**'
       - 'scripts/smoke-python-wheels.sh'
+      - 'scripts/test-python-packages.sh'
+      - 'scripts/python-test-constraints.txt'
       - '.github/workflows/python-ci.yml'
 
 concurrency:
@@ -86,6 +90,28 @@ jobs:
 
       - name: Test integration package
         run: python -m pytest '${{ matrix.package }}/tests'
+
+  # Every package in one environment: proves they install together, which the
+  # per-package jobs above cannot. Pinned by scripts/python-test-constraints.txt.
+  combined:
+    name: Python Combined (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: scripts/python-test-constraints.txt
+
+      - name: Test every Python package together
+        run: bash scripts/test-python-packages.sh
 
   wheel-smoke:
     name: Python Wheel Smoke (${{ matrix.python-version }})

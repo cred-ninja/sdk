@@ -1,6 +1,6 @@
 {
   "name": "@credninja/vault",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Encrypted local token vault for AI agents. AES-256-GCM, SQLite and file storage, auto-refresh",
   "license": "Apache-2.0",
   "author": "Cred",
@@ -30,12 +30,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@credninja/attenuation": "^2.0.0",
-    "@credninja/protocol": "^2.0.0",
+    "@credninja/attenuation": "^2.1.0",
+    "@credninja/protocol": "^2.1.0",
     "better-sqlite3": "^12.6.2"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^2.0.0"
+    "@credninja/oauth": "^2.1.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

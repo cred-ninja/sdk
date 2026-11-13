@@ -245,7 +245,7 @@ describe('github.read does not cover administrative reads', () => {
 
   it('refuses account and org settings under github.read', () => {
     for (const url of ['/user/keys', '/user/emails', '/user/gpg_keys', '/orgs/acme/hooks', '/orgs/acme/actions/secrets', '/gists', '/notifications']) {
-      expect(read(url, 'github.read'), url).toBe('insufficient');
+      expect(['insufficient', 'not_mapped'], url).toContain(read(url, 'github.read'));
     }
   });
 

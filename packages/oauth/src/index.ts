@@ -47,6 +47,10 @@ export { HubSpotAdapter } from './adapters/hubspot.js';
 // Factory
 export { createAdapter } from './adapters/index.js';
 
+// Vault refresh bridge
+export { toVaultRefreshAdapter } from './vault-refresh.js';
+export type { VaultRefreshAdapter, VaultRefreshResult } from './vault-refresh.js';
+
 // Types
 export type {
   ServiceAdapter,

@@ -1,6 +1,6 @@
 {
   "name": "@credninja/sdk",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OAuth2 credential delegation SDK for AI agents. Works standalone or with a self-hosted Cred server",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
@@ -41,12 +41,12 @@
     "node": ">=22"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^2.0.0",
-    "@credninja/vault": "^2.0.0"
+    "@credninja/oauth": "^2.1.0",
+    "@credninja/vault": "^2.1.0"
   },
   "dependencies": {
-    "@credninja/attenuation": "^2.0.0",
-    "@credninja/protocol": "^2.0.0"
+    "@credninja/attenuation": "^2.1.0",
+    "@credninja/protocol": "^2.1.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

@@ -98,21 +98,27 @@ describe('the audit feed names who did what, under fields that say what they are
     expect(entry?.actor).toMatchObject({ type: 'agent', id: server.agent.did, fingerprint: expect.any(String) });
   });
 
-  it('delegation and route fields are not filed under webBotAuth', async () => {
+  it('delegation and route fields are under details', async () => {
     const server = await setup();
     const entry = (await feed(server)).find((e) => e.action === 'access');
-    expect(entry?.metadata.webBotAuth).toBeUndefined();
     expect(entry?.metadata.details).toMatchObject({ delegationId: server.minted.body.delegation_id, origin: 'https://api.github.com', route: '/repos/{id}/{id}', method: 'GET' });
   });
 
-  it('Web Bot Auth fields still are, and only they', async () => {
+  it('webBotAuth still holds every stored field, as 2.0.0 returned it, and names no key without a signature', async () => {
+    const server = await setup();
+    const entry = (await feed(server)).find((e) => e.action === 'access');
+    expect(entry?.metadata.webBotAuth).toMatchObject({ delegationId: server.minted.body.delegation_id });
+    expect(entry?.metadata.webBotAuth.webBotAuthKeyId).toBeUndefined();
+  });
+
+  it('Web Bot Auth fields stay out of details', async () => {
     const server = await setup();
     server.vault.writeAuditEvent({
       id: 'evt_wba', timestamp: new Date(), actor: { type: 'agent', id: 'agt' }, action: 'delegate', resource: { type: 'token', id: 'github/alice' }, outcome: 'success', correlationId: 'c',
       metadata: { identitySource: 'web-bot-auth', webBotAuthKeyId: 'k', signatureAgent: 's', delegationId: 'del_x' },
     });
     const entry = (await feed(server)).find((e) => e.id === 'evt_wba');
-    expect(entry?.metadata.webBotAuth).toEqual({ identitySource: 'web-bot-auth', webBotAuthKeyId: 'k', signatureAgent: 's' });
+    expect(entry?.metadata.webBotAuth).toEqual({ identitySource: 'web-bot-auth', webBotAuthKeyId: 'k', signatureAgent: 's', delegationId: 'del_x' });
     expect(entry?.metadata.details).toEqual({ delegationId: 'del_x' });
   });
 

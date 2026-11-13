@@ -320,6 +320,50 @@ export class SQLiteBackend implements StorageBackend {
     });
   }
 
+  replaceIfUnchanged(
+    row: StoredRow,
+    expected: { accessTokenEnc: string; accessTokenIv: string },
+  ): 'replaced' | 'missing' | 'changed' {
+    const db = this.ensureDb();
+    const update = db.prepare(`
+      UPDATE vault_credentials SET
+        access_token_enc  = @accessTokenEnc,
+        access_token_iv   = @accessTokenIv,
+        access_token_tag  = @accessTokenTag,
+        refresh_token_enc = @refreshTokenEnc,
+        refresh_token_iv  = @refreshTokenIv,
+        refresh_token_tag = @refreshTokenTag,
+        expires_at        = @expiresAt,
+        scopes            = @scopes,
+        instance_url      = @instanceUrl,
+        updated_at        = @updatedAt
+      WHERE provider = @provider AND user_id = @userId
+        AND access_token_enc = @expectedAccessTokenEnc
+        AND access_token_iv = @expectedAccessTokenIv
+    `);
+    const exists = db.prepare('SELECT 1 FROM vault_credentials WHERE provider = ? AND user_id = ?');
+    return db.transaction((): 'replaced' | 'missing' | 'changed' => {
+      const result = update.run({
+        provider: row.provider,
+        userId: row.userId,
+        accessTokenEnc: row.accessTokenEnc,
+        accessTokenIv: row.accessTokenIv,
+        accessTokenTag: row.accessTokenTag,
+        refreshTokenEnc: row.refreshTokenEnc ?? null,
+        refreshTokenIv: row.refreshTokenIv ?? null,
+        refreshTokenTag: row.refreshTokenTag ?? null,
+        expiresAt: row.expiresAt ?? null,
+        scopes: row.scopes ?? null,
+        instanceUrl: row.instanceUrl ?? null,
+        updatedAt: row.updatedAt,
+        expectedAccessTokenEnc: expected.accessTokenEnc,
+        expectedAccessTokenIv: expected.accessTokenIv,
+      });
+      if (result.changes === 1) return 'replaced';
+      return exists.get(row.provider, row.userId) ? 'changed' : 'missing';
+    }).immediate();
+  }
+
   get(provider: string, userId: string): StoredRow | null {
     const db = this.ensureDb();
 
@@ -1023,46 +1067,50 @@ export class SQLiteBackend implements StorageBackend {
     return run.immediate(connectionId);
   }
 
+  /**
+   * At most maxRequests admitted in any trailing windowMs. A clock-aligned
+   * window would refill at each boundary and admit twice the limit across one.
+   * Each row is one admission time; refused requests leave no row, so they do
+   * not extend the wait. Rows that have left the window are pruned here.
+   */
   checkPermissionRateLimit(
     permissionId: string,
     maxRequests: number,
     windowMs: number,
     now = new Date(),
   ): boolean {
+    // A nonsense limit must refuse, not admit everything or throw on every call.
+    if (!Number.isSafeInteger(maxRequests) || maxRequests < 1 || !Number.isSafeInteger(windowMs) || windowMs < 1) return false;
     const db = this.ensureDb();
-    const windowStart = new Date(
-      Math.floor(now.getTime() / windowMs) * windowMs,
-    ).toISOString();
+    const nowIso = now.toISOString();
+    const cutoff = new Date(now.getTime() - windowMs).toISOString();
 
-    const check = db.transaction((id: string, start: string) => {
-      const current = db.prepare(`
-        SELECT request_count AS requestCount
+    const check = db.transaction((id: string) => {
+      db.prepare(`
+        DELETE FROM vault_rate_limit_counters
+        WHERE permission_id = ? AND window_start <= ?
+      `).run(id, cutoff);
+
+      const { admitted } = db.prepare(`
+        SELECT COALESCE(SUM(request_count), 0) AS admitted
         FROM vault_rate_limit_counters
-        WHERE permission_id = ? AND window_start = ?
-      `).get(id, start) as { requestCount: number } | undefined;
+        WHERE permission_id = ?
+      `).get(id) as { admitted: number };
 
-      if (!current) {
-        db.prepare(`
-          INSERT INTO vault_rate_limit_counters (permission_id, window_start, request_count)
-          VALUES (?, ?, 1)
-        `).run(id, start);
-        return true;
-      }
-
-      if (current.requestCount >= maxRequests) {
+      if (admitted >= maxRequests) {
         return false;
       }
 
       db.prepare(`
-        UPDATE vault_rate_limit_counters
-        SET request_count = request_count + 1
-        WHERE permission_id = ? AND window_start = ?
-      `).run(id, start);
+        INSERT INTO vault_rate_limit_counters (permission_id, window_start, request_count)
+        VALUES (?, ?, 1)
+        ON CONFLICT (permission_id, window_start) DO UPDATE SET request_count = request_count + 1
+      `).run(id, nowIso);
 
       return true;
     });
 
-    return check(permissionId, windowStart);
+    return check(permissionId);
   }
 
   // ── Audit event methods ─────────────────────────────────────────────────────

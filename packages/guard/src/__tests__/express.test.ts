@@ -442,5 +442,60 @@ describe('Express Middleware', () => {
 
       expect(next).toHaveBeenCalled();
     });
+
+    describe('resolveVerifiedIdentity', () => {
+      const capture = () => {
+        const seen: Array<Record<string, unknown>> = [];
+        const policy: CredPolicy = {
+          name: 'capture',
+          evaluate: (ctx) => {
+            seen.push({ source: ctx.identitySource, keyId: ctx.webBotAuthKeyId, signatureAgent: ctx.signatureAgent, claims: ctx.receiptClaims, did: ctx.agentDid, tofu: ctx.tofuFingerprint });
+            return { decision: 'ALLOW', policy: 'capture' };
+          },
+        };
+        return { seen, guard: new CredGuard({ policies: [policy] }) };
+      };
+      const claimed = { web_bot_auth_key_id: 'claimed', key_id: 'claimed', signature_agent: 'https://claimed.example/', receipt_claims: ['claimed'], metadata: { receiptClaims: ['claimed'] } };
+
+      it('takes nothing from the body when the request proved nothing', async () => {
+        const { seen, guard } = capture();
+        const middleware = createExpressMiddleware(guard, { resolveVerifiedIdentity: () => undefined });
+        for (const body of [{ ...claimed, agent_did: 'did:key:z6Mk' }, { ...claimed, tofu_fingerprint: 'forged', agent_did: 'did:key:z6Mk' }]) {
+          await middleware(mockRequest({ body }), mockResponse(), vi.fn());
+        }
+        expect(seen).toEqual(Array(2).fill({ source: 'agent-token', keyId: undefined, signatureAgent: undefined, claims: undefined, did: undefined, tofu: undefined }));
+      });
+
+      it('shows policies the verified values over any the body names', async () => {
+        const { seen, guard } = capture();
+        const middleware = createExpressMiddleware(guard, {
+          resolveVerifiedIdentity: async () => ({ webBotAuthKeyId: 'verified', signatureAgent: 'https://verified.example/', receiptClaims: ['verified'] }),
+        });
+        await middleware(mockRequest({ body: claimed }), mockResponse(), vi.fn());
+        expect(seen).toEqual([{ source: 'web-bot-auth', keyId: 'verified', signatureAgent: 'https://verified.example/', claims: ['verified'] }]);
+      });
+
+      it('uses only resolver-verified TOFU and DID values', async () => {
+        const { seen, guard } = capture();
+        await createExpressMiddleware(guard, { resolveVerifiedIdentity: () => ({ tofuFingerprint: 'verified-fp', agentDid: 'verified-did' }) })(
+          mockRequest({ body: { tofu_fingerprint: 'forged', agent_did: 'forged-did' } }), mockResponse(), vi.fn(),
+        );
+        expect(seen).toEqual([{ source: 'tofu', tofu: 'verified-fp', did: 'verified-did' }]);
+      });
+      it('without a resolver, retains legacy TOFU and DID body inference', async () => {
+        const { seen, guard } = capture();
+        await createExpressMiddleware(guard)(mockRequest({ body: { tofu_fingerprint: 'legacy', agent_did: 'legacy-did' } }), mockResponse(), vi.fn());
+        await createExpressMiddleware(guard)(mockRequest({ body: { agent_did: 'legacy-did' } }), mockResponse(), vi.fn());
+        expect(seen).toEqual([
+          { source: 'tofu', tofu: 'legacy', did: 'legacy-did' },
+          { source: 'did', tofu: undefined, did: 'legacy-did' },
+        ]);
+      });
+      it('without a resolver, reads the body as before', async () => {
+        const { seen, guard } = capture();
+        await createExpressMiddleware(guard)(mockRequest({ body: claimed }), mockResponse(), vi.fn());
+        expect(seen).toEqual([{ source: 'web-bot-auth', keyId: 'claimed', signatureAgent: 'https://claimed.example/', claims: ['claimed'] }]);
+      });
+    });
   });
 });

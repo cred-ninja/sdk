@@ -41,8 +41,9 @@ export {
   narrowedScopeStaysExposed,
   hasOperationTable,
   SLACK_MAPPED_METHODS,
+  listOperationRows,
 } from './operations.js';
-export type { OperationAccess, OperationRequest, OperationVerdict } from './operations.js';
+export type { OperationAccess, OperationRequest, OperationRow, OperationVerdict } from './operations.js';
 export { withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, isBrokerOnlyScope, providerScopesFor } from '@credninja/protocol';
 
 // Types
@@ -96,7 +97,7 @@ export { buildAuditEvent, formatAuditLog } from './audit.js';
 import './middleware/express.js';
 import './middleware/mcp.js';
 
-export type { ExpressMiddlewareOptions } from './middleware/express.js';
+export type { ExpressMiddlewareOptions, VerifiedGuardIdentity } from './middleware/express.js';
 export { createExpressMiddleware } from './middleware/express.js';
 export type { CallToolResult, McpToolContext, CredToolInput, McpWrapperOptions } from './middleware/mcp.js';
 export { wrapMcpToolHandler } from './middleware/mcp.js';

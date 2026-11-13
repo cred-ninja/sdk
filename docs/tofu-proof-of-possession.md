@@ -89,6 +89,11 @@ const result = await cred.tofuDelegate({
 console.log(result.accessToken);
 ```
 
+`tofuDelegate()` asks for a raw provider token and names no `agent_did`. A 2.1.0 server
+refuses it unless the deprecated `CRED_ALLOW_RAW_TOKENS=true` and
+`CRED_ALLOW_AGENTS_WITHOUT_PERMISSION=true` are both set. For new integrations, use a
+did:key agent with a Permission and brokered Delegation Tokens instead.
+
 ## Raw HTTP
 
 Registration request:

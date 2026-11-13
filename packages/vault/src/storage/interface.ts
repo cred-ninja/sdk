@@ -30,6 +30,19 @@ export interface StorageBackend {
   store(row: StoredRow): void | Promise<void>;
 
   /**
+   * Replace the credential row for row.provider + row.userId only if it is
+   * still the one `expected` names (its access token ciphertext and IV, which
+   * are unique per write), atomically. Never inserts: 'missing' when no row
+   * exists, 'changed' when another write replaced it. Used for the refresh
+   * write-back, so a delete or a new store during a refresh wins. Optional;
+   * without it CredVault re-reads the row before writing, which is not atomic.
+   */
+  replaceIfUnchanged?(
+    row: StoredRow,
+    expected: { accessTokenEnc: string; accessTokenIv: string },
+  ): 'replaced' | 'missing' | 'changed' | Promise<'replaced' | 'missing' | 'changed'>;
+
+  /**
    * Retrieve a credential row by provider + userId.
    * Returns null if not found — never throws for missing entries.
    */
@@ -70,8 +83,13 @@ export interface StorageBackend {
    * Delete a permission row and, in the same transaction, record that the
    * agent's access was revoked (an AgentRevocation for every user of the
    * connection). Returns the row removed, or null when there was none.
+   *
+   * A backend written for 2.0.0 returns nothing and records no revocation. That
+   * still type-checks and still removes the row, and CredVault then reports
+   * null. No hold is recorded for it, so nothing but the missing Permission
+   * keeps the agent out.
    */
-  revokePermission?(permissionId: string): PermissionRow | null | Promise<PermissionRow | null>;
+  revokePermission?(permissionId: string): PermissionRow | null | void | Promise<PermissionRow | null | void>;
   /**
    * Atomically apply a partial update to a single permission row, keyed
    * strictly by `id` (never by agent_id/connection_id). Must be a single

@@ -19,15 +19,18 @@ export interface GoogleScopeFamily {
 
 export const GOOGLE_SCOPE_ENDPOINTS: readonly GoogleScopeFamily[] = [
   {
-    scopes: ['calendar', 'calendar.readonly', 'calendar.events'],
+    scopes: [
+      'calendar', 'calendar.readonly', 'calendar.events', 'calendar.events.readonly', 'calendar.events.freebusy', 'calendar.freebusy',
+      'calendar.calendarlist', 'calendar.calendarlist.readonly', 'calendar.calendars', 'calendar.calendars.readonly',
+    ],
     bases: ['https://www.googleapis.com/calendar/', 'https://calendar.googleapis.com/'],
   },
   {
-    scopes: ['gmail.readonly', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
+    scopes: ['gmail.readonly', 'gmail.metadata', 'gmail.send', 'gmail.compose', 'gmail.modify', 'mail.google.com'],
     bases: ['https://gmail.googleapis.com/', 'https://www.googleapis.com/gmail/'],
   },
   {
-    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata.readonly'],
+    scopes: ['drive', 'drive.readonly', 'drive.file', 'drive.metadata', 'drive.metadata.readonly'],
     bases: ['https://www.googleapis.com/drive/', 'https://www.googleapis.com/upload/drive/', 'https://drive.googleapis.com/'],
   },
   {
@@ -39,7 +42,7 @@ export const GOOGLE_SCOPE_ENDPOINTS: readonly GoogleScopeFamily[] = [
     bases: ['https://docs.googleapis.com/'],
   },
   {
-    scopes: ['admin', 'admin.directory.user.readonly', 'admin.directory.group.readonly'],
+    scopes: ['admin', 'admin.directory.user', 'admin.directory.user.readonly', 'admin.directory.group', 'admin.directory.group.readonly'],
     bases: ['https://admin.googleapis.com/'],
   },
   {
@@ -47,7 +50,7 @@ export const GOOGLE_SCOPE_ENDPOINTS: readonly GoogleScopeFamily[] = [
     bases: ['https://www.googleapis.com/oauth2/', 'https://openidconnect.googleapis.com/'],
   },
   {
-    scopes: ['contacts', 'contacts.readonly'],
+    scopes: ['contacts', 'contacts.readonly', 'userinfo.email', 'userinfo.profile'],
     bases: ['https://people.googleapis.com/'],
   },
 ];
@@ -68,6 +71,12 @@ export function brokerScopeEquivalent(left: string, right: string): boolean {
   return brokerCanonicalScope(left) === brokerCanonicalScope(right);
 }
 
+const NEEDS_CLASSIFIER: ReadonlySet<string> = new Set([
+  'gmail.metadata', 'drive.metadata', 'userinfo.email', 'userinfo.profile',
+  'calendar.events.readonly', 'calendar.freebusy', 'calendar.events.freebusy', 'calendar.calendarlist', 'calendar.calendarlist.readonly', 'calendar.calendars', 'calendar.calendars.readonly',
+  'admin.directory.user', 'admin.directory.group',
+]);
+
 /** Whether a granted scope satisfies a family's required scope (the broker's rule). */
 export function googleScopeMatches(grantedScope: string, requiredScope: string): boolean {
   const normalized = grantedScope.toLowerCase().replace(/\/$/, '');
@@ -79,8 +88,10 @@ export function googleScopeMatches(grantedScope: string, requiredScope: string):
 }
 
 /** Whether the broker lets these scopes call this (normalized) Google URL. */
-export function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[]): boolean {
+export function isAllowedGoogleScopeEndpoint(normalizedUrl: string, scopes?: string[], classified = true): boolean {
   if (!scopes || scopes.length === 0) return false;
+  // These name less than their family, so only the operation tables can hold them to it.
+  if (!classified) scopes = scopes.filter((scope) => !NEEDS_CLASSIFIER.has(brokerCanonicalScope(scope)));
   return GOOGLE_SCOPE_ENDPOINTS.some(({ scopes: requiredScopes, bases }) => (
     bases.some((base) => normalizedUrl.startsWith(base)) &&
     requiredScopes.some((requiredScope) => scopes.some((scope) => googleScopeMatches(scope, requiredScope)))

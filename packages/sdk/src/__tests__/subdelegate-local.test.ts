@@ -72,6 +72,7 @@ vi.mock('@credninja/vault', () => {
 
 vi.mock('@credninja/oauth', () => ({
   createAdapter: () => ({ refreshAccessToken: vi.fn() }),
+  toVaultRefreshAdapter: (adapter: unknown) => adapter,
 }));
 
 const TEST_VAULT_PASSPHRASE = 'test-pass';

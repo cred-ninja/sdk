@@ -43,6 +43,6 @@ export class AsanaAdapter extends BaseServiceAdapter {
     }
 
     const data = await response.json() as Record<string, unknown>;
-    return this.normalizeRefreshResponse(data);
+    return this.finishRefreshResponse(data, response.status);
   }
 }

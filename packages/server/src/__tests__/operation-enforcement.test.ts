@@ -97,6 +97,49 @@ const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const CAL = 'https://www.googleapis.com/calendar/v3';
 
 describe('Google', () => {
+  it('Drive metadata cannot download via alternate alt names at /api/v1/use', async () => {
+    const ctx = await connected('google', ['drive.metadata.readonly'], ['drive.metadata.readonly']);
+    for (const key of ['$alt', '%24alt']) {
+      await expectRefused(ctx, `https://www.googleapis.com/drive/v3/files/abc?${key}=media`, 'GET', undefined, 'scope_insufficient');
+    }
+  });
+  it('ambiguous Google representation parameters are refused at /api/v1/use, including broad grants', async () => {
+    const ctx = await connected('google', ['gmail.metadata', 'gmail.readonly'], ['gmail.metadata', 'gmail.readonly']);
+    for (const query of ['format=metadata&format=full', 'format=metadata&$format=full', 'alt=json&%24alt=media']) {
+      await expectRefused(ctx, `${GMAIL}/messages/1?${query}`, 'GET', undefined, 'operation_not_mapped');
+    }
+    await expectAllowed(ctx, `${GMAIL}/messages/1?format=full`);
+  });
+  it('Gmail metadata cannot search messages or threads at /api/v1/use', async () => {
+    const metadata = await connected('google', ['gmail.metadata'], ['gmail.metadata']);
+    const broad = await connected('google', ['gmail.readonly'], ['gmail.readonly']);
+    for (const collection of ['messages', 'threads']) {
+      await expectAllowed(metadata, `${GMAIL}/${collection}`);
+      await expectRefused(metadata, `${GMAIL}/${collection}?q=secret`, 'GET', undefined, 'scope_insufficient');
+      await expectAllowed(broad, `${GMAIL}/${collection}?q=secret`);
+    }
+  });
+  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('Gmail drafts-list search on %s at /api/v1/use', (origin) => {
+    const drafts = `${origin}/gmail/v1/users/me/drafts`;
+    it.each(['q=secret', '%71=secret', 'q='])('gmail.metadata refuses %s before upstream fetch', async (query) => {
+      const ctx = await connected('google', ['gmail.metadata', 'gmail.readonly'], ['gmail.metadata']);
+      await expectRefused(ctx, `${drafts}?${query}`, 'GET', undefined, 'scope_insufficient');
+    });
+    it.each(['', '/synthetic-draft?format=metadata', '/synthetic-draft?format=minimal'])('gmail.metadata refuses draft read %s before upstream fetch', async (suffix) => {
+      const ctx = await connected('google', ['gmail.metadata', 'gmail.readonly', 'gmail.compose'], ['gmail.metadata']);
+      await expectRefused(ctx, `${drafts}${suffix}`, 'GET', undefined, 'scope_insufficient');
+    });
+    it.each(['gmail.readonly', 'gmail.compose'])('%s retains draft read access', async (scope) => {
+      const ctx = await connected('google', [scope], [scope]);
+      for (const suffix of ['', '/synthetic-draft?format=metadata', '/synthetic-draft?format=minimal']) {
+        await expectAllowed(ctx, `${drafts}${suffix}`);
+      }
+    });
+    it.each(['q=secret', '%71=secret', 'q='])('gmail.readonly still allows %s', async (query) => {
+      const ctx = await connected('google', ['gmail.readonly'], ['gmail.readonly']);
+      await expectAllowed(ctx, `${drafts}?${query}`);
+    });
+  });
   it('gmail.readonly allows reading messages and refuses sending, end to end', async () => {
     const ctx = await connected('google', ['gmail.readonly'], ['gmail.readonly']);
     await expectAllowed(ctx, `${GMAIL}/messages`);
@@ -496,11 +539,13 @@ describe('fail closed', () => {
 
   it('a grant that does not cover the call is audited as scope_insufficient', async () => {
     const ctx = await connected('google', ['gmail.readonly'], ['gmail.readonly']);
-    await expectRefused(ctx, `${GMAIL}/messages/send`, 'POST', { raw: 'eA' }, 'scope_insufficient');
+    // A body marker long enough that a random DID or id in the event cannot contain it by chance.
+    const bodyMarker = 'c3ludGhldGljLWJvZHktbWFya2VyLW5vdC1hdWRpdGVk';
+    await expectRefused(ctx, `${GMAIL}/messages/send`, 'POST', { raw: bodyMarker }, 'scope_insufficient');
     const event = ctx.vault.queryAuditEvents({ limit: 50 }).find((e) => e.errorMessage === 'scope_insufficient');
     expect(event?.actor.id).toBe(ctx.agent.did);
     expect(event?.metadata).toMatchObject({ method: 'POST', access: 'write', route: '/gmail/v1/users/me/messages/send' });
-    expect(JSON.stringify(event)).not.toContain('eA');
+    expect(JSON.stringify(event)).not.toContain(bodyMarker);
   });
 
   it('encoded or dot-segment paths, doubled slashes and trailing-dot hosts cannot reach a write endpoint', async () => {
@@ -647,8 +692,7 @@ describe('raw tokens', () => {
     await server.vault.store({ provider: 'github', userId: 'alice', accessToken: 'gho_full', expiresAt: new Date(Date.now() + 3600_000), scopes: ['repo'] });
     const agent = await newAgent();
     await grantTo(server, agent, 'github', ['github.read']);
-    const res = await request(server.app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`)
-      .send({ service: 'github', user_id: 'alice', token_format: 'raw', agent_did: agent.did });
+    const res = await delegateAs(server.app, agent, { service: 'github', user_id: 'alice', token_format: 'raw' }, { bearer: BEARER });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_scope');
     expect(JSON.stringify(res.body)).not.toContain('gho_full');

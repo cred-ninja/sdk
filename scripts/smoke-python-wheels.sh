@@ -62,6 +62,8 @@ exports = {
 expected = set(exports)
 if sys.version_info < (3, 10):
     expected = {"cred-auth", "cred-langchain"}
+elif sys.version_info >= (3, 14):
+    expected.discard("cred-crewai")  # CrewAI declares <3.14
 
 wheels = {}
 for wheel in sorted(Path(dist_dir).glob("*.whl")):

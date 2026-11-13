@@ -31,7 +31,7 @@ import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, constraintsSubsume, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
-import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant } from '@credninja/vault';
+import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant, VaultEntry } from '@credninja/vault';
 import { SqliteCumulativeLedger } from '@credninja/vault';
 import {
   receiptActorClaims,
@@ -55,7 +55,7 @@ import type { CredDelegationDetail } from '@credninja/attenuation';
 import { createReceiptKeys, checkReceiptSignature, type ReceiptKeys } from './receipt-signing.js';
 import { createDelegationGrantStore, createJtiReplayCache, verifyActorToken, DELEGATION_GRANT_TOKEN_TYPE, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE } from './delegation-grants.js';
 import { AgentVault, agentIdentityToDirectoryJwks, publicKeyToJwkWithKid } from '@credninja/tofu';
-import { OAuthClient, createAdapter } from '@credninja/oauth';
+import { OAuthClient, createAdapter, toVaultRefreshAdapter } from '@credninja/oauth';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
 import { assertLinkConfig, resolveLinkStorePath } from './config.js';
@@ -71,10 +71,12 @@ import {
   CRED_PROTOCOL_VERSION_HEADER,
   CRED_PROTOCOL_VERSION_MINIMUM,
   CRED_PROTOCOL_VERSION_UNSUPPORTED_ERROR,
+  hasDerivedReadScope,
   isCredProtocolVersionSupported,
   isConnectionId,
   isScopeSubset,
   linkAudienceFor,
+  widestDerivedReadSources,
 } from '@credninja/protocol';
 import { verifyReceiptChain } from './receipt-chain.js';
 import { auditOriginAndRoute, createRefusalAggregator } from './audit-route.js';
@@ -113,6 +115,20 @@ interface BrokeredDelegation {
   service: string;
   userId: string;
   scopes: string[];
+  /**
+   * The stored scopes of the connection row whose token this handle holds, as
+   * that row read when the token was cached: the authority of the credential
+   * the handle forwards, which a later replacement of the row cannot change.
+   *
+   * A live handle forwards the token it was issued, never a fresh read, so its
+   * authorization decision is taken over these scopes and over the row only as
+   * far as the row still covers them. A Link handle holds no provider token
+   * (its token is loaded and checked at each exercise) and records none.
+   *
+   * Absent on a handle cached before this was recorded: what it forwards cannot
+   * be established, so /api/v1/use refuses rather than assuming the current row.
+   */
+  credentialScopes?: string[];
   expiresAt: number;
   createdAt: number;
   /**
@@ -841,7 +857,7 @@ export function createServer(config: ServerConfig) {
       decodedUrl.startsWith(candidate) && parsed.pathname.startsWith(new URL(candidate).pathname)
     ));
     if (!base) return null;
-    if (service === 'google' && !isAllowedGoogleScopeEndpoint(decodedUrl, scopes)) return null;
+    if (service === 'google' && !isAllowedGoogleScopeEndpoint(decodedUrl, scopes, classifyBrokerCalls)) return null;
 
     // The base is a constant that ends in '/'; everything after it is the
     // caller's path below that base plus the query string.
@@ -1560,6 +1576,12 @@ export function createServer(config: ServerConfig) {
     return identity;
   }
 
+  function invalidRateLimit(limit: unknown): boolean {
+    if (limit === undefined || limit === null) return false;
+    const { maxRequests, windowMs } = limit as { maxRequests?: unknown; windowMs?: unknown };
+    return !Number.isSafeInteger(maxRequests) || (maxRequests as number) < 1 || !Number.isSafeInteger(windowMs) || (windowMs as number) < 1;
+  }
+
   function rateLimitKey(req: Request): string {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     return ipKeyGenerator(ip);
@@ -1704,6 +1726,13 @@ export function createServer(config: ServerConfig) {
   // first delegation.
   if (config.receiptSigner || config.receiptSigningKeyPem || config.receiptAcceptedAlgs || config.receiptVerificationKeys) {
     getReceiptKeys();
+  }
+  // Known limitation: a static agent token carries no user, so on the legacy
+  // routes the user comes from the request's user_id. With more than one user,
+  // anyone holding the token can name any of them. A single-user deployment, or
+  // an agentRequestVerifier that binds each principal to its user, is not affected.
+  if (config.agentToken && !config.agentRequestVerifier && !singleUserMode) {
+    console.warn('[cred] One static AGENT_TOKEN serves every user on this server: the legacy routes take the user from the request\'s user_id, so anyone holding the token can act for any user. Run one server per user with SINGLE_USER_MODE=true, or bind each agent to its user with an agentRequestVerifier.');
   }
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
@@ -2328,6 +2357,10 @@ export function createServer(config: ServerConfig) {
         return;
       }
 
+      if (invalidRateLimit(body.rateLimit)) {
+        res.status(400).json({ error: 'invalid_rate_limit', message: 'rateLimit needs maxRequests and windowMs as positive whole numbers' });
+        return;
+      }
       const permission = await vault.createPermission({
         agentId: body.agentId,
         connectionId: body.connectionId,
@@ -2437,6 +2470,10 @@ export function createServer(config: ServerConfig) {
 
       const input: UpdatePermissionInput = {};
       if ('allowedScopes' in body) input.allowedScopes = body.allowedScopes;
+      if (invalidRateLimit(body.rateLimit)) {
+        res.status(400).json({ error: 'invalid_rate_limit', message: 'rateLimit needs maxRequests and windowMs as positive whole numbers' });
+        return;
+      }
       if ('rateLimit' in body) input.rateLimit = body.rateLimit ?? undefined;
       if ('ttlOverride' in body) input.ttlOverride = body.ttlOverride ?? undefined;
       if ('requiresApproval' in body) input.requiresApproval = body.requiresApproval;
@@ -3305,6 +3342,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   // The stored scopes a request naming none would be granted, shown to
   // Guard in its place (exposeStoredScopesToGuard).
   const storedScopesForGuard = new WeakMap<Request, string[]>();
+  /** The DID a raw-token request proved with a DPoP proof, checked in front of Guard. */
+  const provedRawAgentDid = new WeakMap<Request, string>();
   /** The scopes a request names, as the Guard middleware reads them. */
   function scopesNamedBy(req: Request): string[] {
     const scopes = req.body?.scopes || req.query.scopes;
@@ -3355,11 +3394,73 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     });
   }
 
+  /**
+   * The agent DID Guard may judge. On /api/v1/delegate and /bc-authorize: the
+   * `agent_did` whose key signed a DPoP proof for this route, or the DID the
+   * raw-token check in front of Guard already proved. The proof's jti is not
+   * recorded here: the route checks the proof again and refuses a replay. On
+   * /api/v1/subdelegate: the receiving agent's did:key, which the request
+   * names and the issued token or grant is bound to, so only the holder of
+   * that key can use what a policy allowed. Undefined otherwise.
+   */
+  function agentDidForGuard(req: Request): string | undefined {
+    const proved = provedRawAgentDid.get(req);
+    if (proved !== undefined) return proved;
+    const path = req.route?.path;
+    const agentDid = req.body?.agent_did;
+    if (typeof agentDid !== 'string' || !dpopBindingFor(agentDid)) return undefined;
+    if (path === '/api/v1/subdelegate') return agentDid;
+    if (path !== '/api/v1/delegate' && path !== '/bc-authorize') return undefined;
+    if (path === '/api/v1/delegate' && tokenFormatFromBody(req) === 'raw') return undefined;
+    const header = readDpopHeader(req.headers.dpop);
+    if (header === 'multiple') return undefined;
+    const result = verifyDpopProof(header, {
+      agentDid,
+      htm: 'POST',
+      htu: `${publicBaseUri()}${path}`,
+      seenJti: () => false,
+    });
+    return result.ok ? agentDid : undefined;
+  }
+
   const guardMiddleware = config.guard
     ? createExpressMiddleware(config.guard, {
         extractScopes: (req) => storedScopesForGuard.get(req) ?? scopesNamedBy(req),
         // Link context from verified state only (set by the Link precheck).
         resolveLinkContext: (req) => linkService?.resolveGuardLinkContext(req),
+        // Identity a policy may rely on, from verified state only: a checked Web Bot
+        // Auth signature, a verified parent receipt, or claims a request verifier
+        // attached to the caller. Never the request body, which is the caller's word.
+        resolveVerifiedIdentity: async (req) => {
+          const signature = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
+          const parent = (req as any).verifiedParentReceipt as { receiptClaims?: string[] } | undefined;
+          let tofuFingerprint: string | undefined;
+          // Only root delegation supports TOFU proofs. Other routes cannot
+          // acquire a TOFU identity by naming a fingerprint in their body.
+          if (req.route?.path === '/api/v1/delegate' && req.body?.connection_id === undefined) {
+            const { tofu_fingerprint, tofu_payload, tofu_signature, service, appClientId = 'local' } = req.body ?? {};
+            const user = resolveUserId(req, { explicit: explicitRequestUserId(req), agent: true });
+            if (user.ok && typeof service === 'string' && typeof appClientId === 'string'
+              && typeof tofu_fingerprint === 'string' && typeof tofu_payload === 'string' && typeof tofu_signature === 'string') {
+              try {
+                const verified = await resolveTofuPrincipal(tofu,
+                  { fingerprint: tofu_fingerprint, payloadBase64: tofu_payload, signatureBase64: tofu_signature },
+                  { service, userId: user.userId, appClientId, requestedScopes: normalizeRequestedScopes(req.body.scopes) });
+                tofuFingerprint = verified.principal.fingerprint;
+              } catch {
+                // No verified fact for Guard. The route still refuses an
+                // invalid proof if a policy allows requests without TOFU.
+              }
+            }
+          }
+          return {
+            agentDid: agentDidForGuard(req),
+            tofuFingerprint,
+            webBotAuthKeyId: signature?.keyId,
+            signatureAgent: signature?.signatureAgent,
+            receiptClaims: extractTrustedReceiptClaims(req) ?? parent?.receiptClaims,
+          };
+        },
         onDeny: (req, res, decision) => {
           // Log guard denials for audit
           console.warn('[guard] DENIED', {
@@ -3439,22 +3540,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const entry = await vault.get({
       provider: service,
       userId,
-      adapter: {
-        refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
-          const client = new OAuthClient({
-            adapter,
-            clientId,
-            clientSecret,
-            redirectUri: `${config.redirectBaseUri}/connect/${service}/callback`,
-          });
-          const result = await client.refreshToken(refreshToken);
-          return {
-            accessToken: result.access_token,
-            refreshToken: result.refresh_token,
-            expiresIn: result.expires_in,
-          };
-        },
-      },
+      // The bridge carries a scope the provider states for the refreshed token,
+      // so the stored list follows it; an unstated scope keeps the stored list.
+      adapter: toVaultRefreshAdapter(adapter),
       clientId: providerConfig.clientId,
       clientSecret: providerConfig.clientSecret,
     });
@@ -3574,6 +3662,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     service: string;
     userId: string;
     scopes: string[];
+    /**
+     * The stored scopes of the row `accessToken` was read from, for the handle
+     * to decide over at each exercise (see BrokeredDelegation.credentialScopes).
+     * Omitted only for a handle that holds no provider token (a Link one).
+     */
+    credentialScopes?: string[];
     expiresIn: number;
     link?: LinkHandleBinding;
     constraints?: DelegationConstraint[];
@@ -3587,6 +3681,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       service: input.service,
       userId: input.userId,
       scopes: input.scopes,
+      ...(input.credentialScopes ? { credentialScopes: input.credentialScopes } : {}),
       expiresAt,
       createdAt: Date.now(),
       ...(input.link ? { link: input.link } : {}),
@@ -3844,6 +3939,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     lineage?: string[];
     /** The Cred Link binding, for a delegation of a Link connection. */
     link?: LinkHandleBinding;
+    /**
+     * The stored scopes of the row `accessToken` was read from, recorded on the
+     * handle so each exercise decides over the authority of the credential it
+     * forwards (BrokeredDelegation.credentialScopes). A Link handle reads its
+     * token at each exercise and records none.
+     */
+    credentialScopes?: string[];
   }): Record<string, unknown> {
     // Every handle and every receipt-bearing delegation is registered with
     // the cumulative ledger, with its parent, so a descendant's max_subtree
@@ -3877,6 +3979,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         userId: input.userId,
         scopes: input.scopes,
         expiresIn: input.expiresIn,
+        ...(input.credentialScopes ? { credentialScopes: input.credentialScopes } : {}),
         ...(input.constraints ? { constraints: input.constraints } : {}),
         ...(input.link ? { link: input.link } : {}),
       });
@@ -4223,13 +4326,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    */
   async function permissionRefusal(permission: Permission): Promise<string | null> {
     if (permission.expiresAt && permission.expiresAt.getTime() <= Date.now()) return 'permission_expired';
-    if (permission.rateLimit && vault.checkPermissionRateLimit) {
-      const allowed = await vault.checkPermissionRateLimit(
-        permission.id,
-        permission.rateLimit.maxRequests,
-        permission.rateLimit.windowMs,
-      );
-      if (!allowed) return 'rate_limited';
+    for (const row of [permission, (permission as Permission & { alsoLimitedBy?: Permission }).alsoLimitedBy]) {
+      if (row?.rateLimit && vault.checkPermissionRateLimit) {
+        const allowed = await vault.checkPermissionRateLimit(row.id, row.rateLimit.maxRequests, row.rateLimit.windowMs);
+        if (!allowed) return 'rate_limited';
+      }
     }
     if (permission.requiresApproval) return 'approval_required';
     return null;
@@ -4257,12 +4358,20 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * The connection scopes a did:key agent may be given: within its scope
    * ceiling and within its Permission's allowedScopes. No Permission means
    * none, unless the deprecated opt-out is set.
+   *
+   * Both comparisons are made over what the stored connection covers, not over
+   * its bare scope list. For Notion that matters: an existing entry with no
+   * stored scopes is the whole connection, so a row naming only `read_content`
+   * must not be issued `notion.read` through the wider scope the empty list
+   * stands for.
    */
   function scopesForDidAgent(service: string, stored: string[], record: AgentRecord | null, permission: Permission | null): string[] {
     if (!permission && !allowAgentsWithoutPermission) return [];
-    return withStoredDerivedScopes(service, stored)
-      .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope, stored))
-      .filter((scope) => !permission || permissionCovers(service, permission.allowedScopes, scope, stored));
+    const held = withStoredDerivedScopes(service, stored);
+    return held
+      .filter((scope) => !publicRepoOverWiderToken(service, scope, stored))
+      .filter((scope) => !record?.scopeCeiling.length || ceilingCovers(service, record.scopeCeiling, scope, held))
+      .filter((scope) => !permission || permissionCovers(service, permission.allowedScopes, scope, held));
   }
 
   /** A ceiling covers a scope, or the wider scope a derived read scope comes from. Never the reverse. */
@@ -4295,6 +4404,64 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return expanded.some((name) => scopeEquivalent(name, scope)) || scopeCoveredBy(expanded, scope);
   }
 
+  /** One stored row, and what it covers, as a single read returned it. */
+  type ConnectionSnapshot = { entry: VaultEntry | null; held: string[] };
+
+  /**
+   * What a stored connection covers, from one metadata read of its row: its
+   * stored scopes plus the reads those derive, with an existing Notion entry's
+   * empty list meaning the whole connection (its token carries no scopes,
+   * because the capabilities are set on the integration). A row that cannot be
+   * read — no entry at all — covers nothing here; the route refuses the hop
+   * later when the credential itself cannot be read.
+   *
+   * The row is kept with its scopes, because the same entry is the credential a
+   * hop issues against: see hopCredential(). A hop takes this read once and
+   * answers every stored-scope question from it.
+   *
+   * `getStored` decrypts the row at rest, never refreshes it and never calls the
+   * provider. Only its scope list is used for a decision, and it is neither
+   * logged nor returned.
+   */
+  async function connectionSnapshot(service: string, userId: string): Promise<ConnectionSnapshot> {
+    const entry = await vault.getStored({ provider: service, userId });
+    return { entry, held: entry ? withStoredDerivedScopes(service, entry.scopes ?? []) : [] };
+  }
+
+  /**
+   * The credential a hop issues against, taken from the row its decision was
+   * made on.
+   *
+   * `snapshot` is that row. While the entry it holds is still usable it IS the
+   * credential: there is no second read left to disagree with the decision, so
+   * a connection replaced between the checks and the issuance cannot widen what
+   * the hop hands out. An expired entry is the one case the stored read cannot
+   * serve — refresh belongs to `get()`, which may also write the token back — so
+   * that case re-reads, and the result must still be covered by the snapshot.
+   * A re-read that reaches any scope the decision was not taken over is refused
+   * rather than issued against, because a derived read's meaning turns on the
+   * token behind it: `github.read` over a `repo` token reaches private
+   * repositories, and a decision taken over `public_repo` never covered that.
+   *
+   * A hop on a service with no derived read scope takes no snapshot — it has no
+   * stored-scope question to answer — and reads its credential once here.
+   */
+  async function hopCredential(
+    service: string,
+    snapshot: ConnectionSnapshot | undefined,
+    getOpts: Parameters<typeof vault.get>[0],
+  ): Promise<{ entry: VaultEntry | null } | { unreviewed: string[] }> {
+    const pinned = snapshot?.entry ?? null;
+    const usable = pinned !== null && !(pinned.expiresAt !== undefined && pinned.expiresAt.getTime() <= Date.now());
+    const entry = usable ? pinned : await vault.get(getOpts);
+    if (snapshot && entry) {
+      const unreviewed = withStoredDerivedScopes(service, entry.scopes ?? [])
+        .filter((scope) => !scopeCoveredBy(snapshot.held, scope));
+      if (unreviewed.length > 0) return { unreviewed };
+    }
+    return { entry };
+  }
+
   /**
    * What a live delegation may do now: its scopes, within the Permission that
    * authorized it and the agent's Permission as they stand. A Permission narrowed
@@ -4302,28 +4469,120 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * expired covers nothing, and a re-grant is a new row: a delegation under the
    * replaced one stops.
    */
-  async function scopesAllowedNow(delegationId: string, delegation: BrokeredDelegation): Promise<string[]> {
-    const { service } = delegation;
-    const permissionId = (await vault.getDelegation(delegationId))?.grant?.permissionId;
+  /**
+   * The Permission rows that bound a delegation now: the row that authorized it
+   * and the agent's current row for the service. Null when the authorizing row
+   * is gone or either row has expired, which covers nothing; an empty list when
+   * neither exists. One definition for exercise and for cold restore.
+   */
+  async function permissionLimitsNow(
+    permissionId: string | undefined,
+    agentDid: string | undefined,
+    service: string,
+  ): Promise<Permission[] | null> {
     const authorizing = permissionId ? await vault.getPermissionById(permissionId) : null;
-    if (permissionId && !authorizing) return [];
-    const agentDid = delegation.agentDid;
+    if (permissionId && !authorizing) return null;
     const current = agentDid
       ? await permissionForDidAgent(agentDid, await vault.getAgentByDid?.(agentDid) ?? null, service)
       : null;
     const limits = [authorizing, current].filter((limit): limit is Permission => limit !== null);
+    if (limits.some((limit) => limit.expiresAt && limit.expiresAt.getTime() <= Date.now())) return null;
+    return limits;
+  }
+
+  async function scopesAllowedNow(
+    delegationId: string,
+    delegation: BrokeredDelegation,
+    connection?: ConnectionSnapshot,
+  ): Promise<string[]> {
+    const { service } = delegation;
+    const permissionId = (await vault.getDelegation(delegationId))?.grant?.permissionId;
+    const limits = await permissionLimitsNow(permissionId, delegation.agentDid, service);
+    if (limits === null) return [];
     if (limits.length === 0) return allowAgentsWithoutPermission ? delegation.scopes : [];
-    if (limits.some((limit) => limit.expiresAt && limit.expiresAt.getTime() <= Date.now())) return [];
-    const stored = await vault.getStored({ provider: service, userId: delegation.userId });
-    const held = [...(stored?.scopes ?? []), ...delegation.scopes];
+    // One read of the row, through the same helper the issuance paths use, so
+    // "what this connection covers" has a single definition. A handle restored
+    // in this same request hands in the row its token came from, and this call
+    // decides over that one rather than reading again.
+    const row = connection ?? await connectionSnapshot(service, delegation.userId);
+    // The authority of the credential this call forwards, which is NOT the row
+    // as it stands now: a live handle forwards the provider token it was issued
+    // (upstreamToken below is delegation.accessToken), and a row that replaced
+    // the connection since describes a different token. A handle restored by
+    // this request forwards the row it hands in, so there the row IS the
+    // credential and the two reads are one.
+    //
+    // A handle cached before its issuance recorded this has no way to say what
+    // it forwards: it fails closed rather than being judged over a row that may
+    // no longer cover it.
+    const credentialScopes = connection ? (connection.entry?.scopes ?? []) : delegation.credentialScopes;
+    if (!credentialScopes) return [];
+    // Over what the credential covers, not its bare list: an existing Notion
+    // entry with no stored scopes is the whole connection, so a credential
+    // issued over `read_content` never reaches `notion.read`.
+    const credentialHeld = withStoredDerivedScopes(service, credentialScopes);
+    // What the credential was issued over, named as the row named it: an empty
+    // Notion list stands for the whole connection, and a derived read is not
+    // credited to the credential unless the row it was issued over reached it.
+    const credentialAuthority = credentialScopes.length > 0 ? credentialScopes : credentialHeld;
+    // A row that no longer covers the forwarded credential cannot decide for it.
+    // Narrowed from `repo` to `public_repo` under a handle that still holds the
+    // `repo` token, the row's scopes would let that token's private reach
+    // through as if it were public only, and the widened-token check below would
+    // read the narrow row and report no wider token at all. A row reconnected to
+    // a wider scope still covers the narrower credential, so that direction is
+    // untouched. A removed row is not decided here: the route's own existence
+    // check answers it (connection_revoked).
+    if (row.entry && credentialAuthority.some((scope) => !connectionCovers(service, row.held, scope))) return [];
+    // The widest of the two is what the Permission's derived reads are measured
+    // over, so neither the credential behind the handle nor the connection as it
+    // now stands can be read as narrower than it is.
+    const held = [...new Set([...credentialHeld, ...row.held, ...delegation.scopes])];
+    const storedScopes = row.entry?.scopes ?? [];
     return withoutRedundantDerivedScopes(service, withDerivedScopes(service, delegation.scopes)
+      // A public-only grant is only honest over a token that reaches no further:
+      // the credential this call forwards, and the connection as it now stands.
+      .filter((scope) => !publicRepoOverWiderToken(service, scope, credentialScopes))
+      .filter((scope) => !publicRepoOverWiderToken(service, scope, storedScopes))
       .filter((scope) => limits.every((limit) => permissionCovers(service, limit.allowedScopes, scope, held))));
   }
 
+  /**
+   * A token holding `repo` also reaches private repositories, so it can't honor a public_repo grant. A reconnect can widen the stored row after issuance too.
+   */
+  function publicRepoOverWiderToken(service: string, scope: string, stored: string[]): boolean {
+    return service === 'github' && scope === 'public_repo' && stored.includes('repo');
+  }
+
+  /**
+   * Provider scopes where the wider one already reaches the narrower: `repo`
+   * includes public repositories, `content` includes `read_content`, `full`
+   * includes `api`. A connection reconnected to the wider scope therefore still
+   * covers a credential issued over the narrower one, while the reverse is what
+   * /api/v1/use must refuse.
+   *
+   * This mirrors the `outgrown` pairs of the derived read table in
+   * @credninja/protocol, which that package keeps internal. A service not listed
+   * has no such pair, so there only an exact match covers.
+   */
+  const WIDER_SCOPE_COVERS: Readonly<Record<string, readonly [narrow: string, wide: string]>> = {
+    github: ['public_repo', 'repo'],
+    notion: ['read_content', 'content'],
+    salesforce: ['api', 'full'],
+  };
+
+  /** Whether a connection holding `held` covers `scope`, the narrower half of a wider scope included. */
+  function connectionCovers(service: string, held: readonly string[], scope: string): boolean {
+    if (scopeCoveredBy(held, scope)) return true;
+    const pair = Object.prototype.hasOwnProperty.call(WIDER_SCOPE_COVERS, service) ? WIDER_SCOPE_COVERS[service] : undefined;
+    return pair !== undefined && scope === pair[0] && held.includes(pair[1]);
+  }
+
   /** Two Permissions for one agent: neither can widen the other, so it gets the limits of both. */
-  function tightestOf(service: string, a: Permission, b: Permission): Permission {
-    // The token is unknown here, so assume the widest: neither row derives through public_repo.
-    const covered = (list: string[], scope: string) => permissionCovers(service, list, scope, ['repo']);
+  function tightestOf(service: string, a: Permission, b: Permission): Permission & { alsoLimitedBy?: Permission } {
+    // The token is unknown here, so assume the widest: no row derives a read
+    // through a narrower scope it names alone.
+    const covered = (list: string[], scope: string) => permissionCovers(service, list, scope, widestDerivedReadSources());
     const rate = (limit: Permission['rateLimit']) => (limit ? limit.maxRequests / limit.windowMs : Infinity);
     // The rate limit counts against the row whose limit is tighter.
     const tighterRate = rate(a.rateLimit) <= rate(b.rateLimit) ? a : b;
@@ -4332,6 +4591,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     const approvers = [a, b].filter((p) => p.requiresApproval).map((p) => p.approver ?? 'subject');
     return {
       ...tighterRate,
+      alsoLimitedBy: tighterRate === a ? b : a,
       allowedScopes: [...new Set([
         ...a.allowedScopes.filter((scope) => covered(b.allowedScopes, scope)),
         ...b.allowedScopes.filter((scope) => covered(a.allowedScopes, scope)),
@@ -4477,7 +4737,47 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     next();
   };
 
-  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false)];
+  // The agent a raw request names is the one whose Permission authorizes
+  // issuance, though the output is a provider bearer token. When that agent
+  // has a key (a did:key, or a record id whose record holds one), prove the
+  // key before Guard's stored-scope lookup, token retrieval or refresh can
+  // run. An agent with no key on record has nothing to prove: it is known
+  // only by the name the caller gives.
+  const requireRawAgentProof: express.RequestHandler = async (req, res, next) => {
+    try {
+      const named = req.body?.agent_did;
+      const service = req.body?.service;
+      if (!allowRawTokens || tokenFormatFromBody(req) !== 'raw' || req.body?.connection_id !== undefined
+        || typeof named !== 'string' || typeof service !== 'string') {
+        next();
+        return;
+      }
+      // A TOFU principal has a key on record, but it is proved by its signed TOFU
+      // payload, never by being named. Naming it here would issue a raw token
+      // under its Permission to anyone holding the agent token.
+      if (named.startsWith('tofu:')) {
+        refuseDpop(res, 401, 'agent_key_required', 'A raw token for a TOFU agent is issued only to its signed TOFU request; name a did:key agent in agent_did instead');
+        return;
+      }
+      let agentDid: string | undefined = named.startsWith('did:key:') ? named : undefined;
+      if (agentDid === undefined && !named.startsWith('did:')) {
+        const recordDid = (await vault.getAgent?.(named) ?? null)?.did;
+        if (typeof recordDid === 'string' && recordDid.startsWith('did:key:')) agentDid = recordDid;
+      }
+      if (agentDid === undefined) {
+        next();
+        return;
+      }
+      const userId = requestUserId(req, res, { agent: true, source: 'body' });
+      if (userId === null) return;
+      if (!checkDpop(req, res, { agentDid, path: '/api/v1/delegate', resource: { type: 'connection', id: `${service}/${userId}` } })) return;
+      provedRawAgentDid.set(req, agentDid);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+  const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false), requireRawAgentProof];
   if (linkService) {
     // Runs checkLinkAccess for calls naming connection_id, before Guard and
     // before any vault access, whether or not a Guard is configured.
@@ -4649,6 +4949,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     return { connectionId, clientId, grantId, grantVersion, agentId };
   }
 
+  /** Why a cold restore refused before loading the provider token. */
+  type RestoreRefusal = {
+    refused: 'agent_suspended' | 'permission_lapsed';
+    agentDid: string;
+    jkt: string | undefined;
+    service: string;
+    userId: string;
+  };
+
   /**
    * The exercise state of a delegation whose token this process did not
    * issue (another replica, or before a restart): rebuilt from the recorded
@@ -4658,7 +4967,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   async function restoreTokenDelegation(
     delegationId: string,
     expiresAtSeconds: number,
-  ): Promise<BrokeredDelegation | null | 'cumulative_unenforceable' | { revokedBy: string }> {
+    out?: { connection: ConnectionSnapshot | null },
+  ): Promise<BrokeredDelegation | null | 'cumulative_unenforceable' | { revokedBy: string } | RestoreRefusal> {
     const record = await vault.getDelegation(delegationId);
     if (!record?.grant || !record.agentDid) return null;
     if (record.status === 'revoked') return { revokedBy: record.revokedAncestorId ?? record.id };
@@ -4679,11 +4989,38 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (grant.link && (!link || !linkService)) return null;
     let accessToken = '';
     let providerLifetime = Number.POSITIVE_INFINITY;
+    // The stored scopes of the row the token above was read from. Recorded on
+    // the handle with the token, so every later exercise decides over the
+    // authority the handle forwards rather than over a row that replaced it.
+    let credentialScopes: string[] | undefined;
     if (!link) {
+      // Loading the token below reads the stored row and refreshes an expired
+      // one at the provider. An agent that /api/v1/use would refuse anyway (a
+      // suspended agent, or one whose Permission is gone or expired) is refused
+      // here first, so it cannot make the server rotate the row.
+      const refusedFor = { agentDid: record.agentDid, jkt: grant.jkt, service: record.service, userId: record.userId };
+      if ((await vault.getAgentByDid?.(record.agentDid))?.status === 'suspended') {
+        return { refused: 'agent_suspended', ...refusedFor };
+      }
+      const limits = await permissionLimitsNow(grant.permissionId, record.agentDid, record.service);
+      if (limits === null || (limits.length === 0 && !allowAgentsWithoutPermission)) {
+        return { refused: 'permission_lapsed', ...refusedFor };
+      }
       const vaultEntry = await getVaultEntry(record.service, record.userId);
       if ('status' in vaultEntry) return null;
       accessToken = vaultEntry.entry.accessToken;
       providerLifetime = handleLifetimeSeconds(vaultEntry.entry.expiresAt);
+      credentialScopes = vaultEntry.entry.scopes ?? [];
+      // This row is the token this call will forward, so it is also the row the
+      // call's checks are taken over: /api/v1/use decides from it rather than
+      // reading the connection again, and a replacement that lands after this
+      // read cannot make the decision and the credential disagree.
+      if (out) {
+        out.connection = {
+          entry: vaultEntry.entry,
+          held: withStoredDerivedScopes(record.service, vaultEntry.entry.scopes ?? []),
+        };
+      }
     }
     cumulativeLedger.register({
       id: delegationId,
@@ -4697,6 +5034,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       userId: record.userId,
       scopes: grant.scopes,
       ...(link ? { link } : {}),
+      ...(credentialScopes ? { credentialScopes } : {}),
       // Never cache the provider token past its own expiry, the token's, or
       // the recorded delegation's.
       expiresIn: Math.max(1, Math.min(
@@ -4788,12 +5126,63 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
-      const found = getBrokeredDelegation(delegationId) ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!);
+      // A delegation this process has not cached is rebuilt from its record,
+      // and rebuilding reads the provider token from the vault, which refreshes
+      // an expired row at the provider. Prove the key the token is bound to
+      // first, from the record's metadata alone, so a Delegation Token presented
+      // without its key cannot make this server decrypt the row or rotate it.
+      // The proof's jti is spent on verification, so it is checked once: here
+      // for a restore, below for a cached handle.
+      const cached = getBrokeredDelegation(delegationId);
+      let proofChecked = false;
+      if (!cached) {
+        const record = await vault.getDelegation(delegationId);
+        if (record?.grant && record.agentDid) {
+          if (!tokenBinding || tokenBinding.agentDid !== record.agentDid || tokenBinding.jkt !== record.grant.jkt) {
+            refuseDelegationToken(res, 'The Delegation Token does not match its delegation');
+            return;
+          }
+          const requestHash = useRequestHashes.get(req) ?? null;
+          if (requestHash === null) {
+            res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
+            return;
+          }
+          if (!checkDpop(req, res, {
+            agentDid: record.agentDid,
+            path: '/api/v1/use',
+            ath: delegationTokenAth(presentedToken),
+            req: requestHash,
+            resource: { type: 'token', id: `${record.service}/${record.userId}` },
+          })) return;
+          proofChecked = true;
+        }
+      }
+      const restored: { connection: ConnectionSnapshot | null } = { connection: null };
+      const found = cached ?? await restoreTokenDelegation(delegationId, tokenExpiresAt!, restored);
       if (found === 'cumulative_unenforceable') {
         res.status(403).json({
           error: CUMULATIVE_CONSTRAINT_UNENFORCEABLE,
           message: 'This delegation carries a cumulative constraint whose running total this server does not hold; set a shared cumulative ledger (cumulativeLedgerPath)',
         });
+        return;
+      }
+      if (found !== null && typeof found === 'object' && 'refused' in found) {
+        if (found.refused === 'agent_suspended') {
+          res.status(403).json({ error: 'agent_suspended', message: 'Agent is suspended' });
+          return;
+        }
+        refusals.record({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: found.agentDid, ...(found.jkt ? { fingerprint: found.jkt } : {}) },
+          action: 'deny',
+          resource: { type: 'token', id: `${found.service}/${found.userId}` },
+          outcome: 'denied',
+          correlationId: crypto.randomUUID(),
+          errorMessage: 'scope_insufficient',
+          metadata: { delegationId, method: normalizedMethod, reason: 'permission_narrowed' },
+        });
+        res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers it: it was narrowed, replaced by a new grant, revoked or expired. Ask for a new delegation.' });
         return;
       }
       if (found !== null && typeof found === 'object' && 'revokedBy' in found) {
@@ -4818,7 +5207,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // naming this token (ath) and this exact request: the proof's cred_req
       // covers the whole body (URL, method, upstream body and extra
       // headers), so it authorizes one upstream call.
-      {
+      if (!proofChecked) {
         const requestHash = useRequestHashes.get(req) ?? null;
         if (requestHash === null) {
           res.status(400).json({ error: 'invalid_request', message: 'The request body has no canonical JSON form (RFC 8785)' });
@@ -4835,6 +5224,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       const revokedBy = await delegationRevokedBy(delegationId, delegation);
       if (revokedBy !== null) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
+        return;
+      }
+      if (delegation.agentDid && (await vault.getAgentByDid?.(delegation.agentDid))?.status === 'suspended') {
+        res.status(403).json({ error: 'agent_suspended', message: 'Agent is suspended' });
         return;
       }
       // Opaque restrictions survive delegation, but cannot authorize use.
@@ -4894,7 +5287,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           : undefined;
       }
       // A Link delegation was just re-checked against its grant and Permission above.
-      const scopesNow = linkAccess ? linkAccess.effective_scopes : await scopesAllowedNow(delegationId, delegation);
+      // A handle restored by this request hands in the row it loaded its token
+      // from, so this check and the credential it guards are one read.
+      const scopesNow = linkAccess
+        ? linkAccess.effective_scopes
+        : await scopesAllowedNow(delegationId, delegation, restored.connection ?? undefined);
       if (scopesNow.length === 0) {
         refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_narrowed' });
         res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers it: it was narrowed, replaced by a new grant, revoked or expired. Ask for a new delegation.' });
@@ -5431,7 +5828,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       let authorizingPermission: Permission | null = null;
       let didAgentRecord: AgentRecord | null = null;
       if (agentDid && vault.getAgentByDid) {
-        didAgentRecord = await vault.getAgentByDid(agentDid);
+        // Named by DID or by record id, a revoked agent is a revoked agent.
+        didAgentRecord = await vault.getAgentByDid(agentDid) ?? (agentDid.startsWith('did:') ? null : await vault.getAgent?.(agentDid) ?? null);
         if (didAgentRecord?.status === 'revoked') {
           writeAuditEventIfSupported({
             id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -5604,6 +6002,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
 
+      // Nor to one whose Permission covers only part of it: the token would do the rest.
+      if (tokenFormat === 'raw' && didPermission) {
+        const uncovered = (entry.scopes ?? []).filter((scope) => !grantedScopes.some((granted) => scopeEquivalent(granted, scope)));
+        if (uncovered.length > 0) {
+          res.status(403).json({ error: 'raw_token_wider_than_grant', message: 'A raw token carries every scope on the connection, and this agent\'s Permission does not cover them all. Use token_format "handle"' });
+          return;
+        }
+      }
+
       const delegationId = `del_${crypto.randomUUID().replace(/-/g, '')}`;
       const expiresIn = handleLifetimeSeconds(entry.expiresAt);
 
@@ -5747,6 +6154,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         constraints: rootConstraints.constraints,
         ...(agentDelegationToken ? { agentDelegationToken } : {}),
         ...(agentDid ? { agentDid } : {}),
+        // The row this token was read from: the handle decides over its scopes
+        // at each exercise, never over a row that replaced it later.
+        credentialScopes: entry.scopes ?? [],
       }));
     } catch (err) {
       if (sendReservedUserIdError(res, err)) return;
@@ -6061,8 +6471,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     if (event.resource.type === 'agent') {
       return userId === 'default' && !service;
     }
-    const [eventService, eventUserId] = event.resource.id.split('/');
-    if (eventUserId !== userId) return false;
+    // The user id may itself hold a slash, so only the first one separates.
+    const separator = event.resource.id.indexOf('/');
+    const eventService = event.resource.id.slice(0, separator);
+    if (separator === -1 || event.resource.id.slice(separator + 1) !== userId) return false;
     if (service && eventService !== service) return false;
     return true;
   }
@@ -6077,8 +6489,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   function buildAuditEntryMetadata(event: AuditEvent) {
     const stored = event.metadata ?? {};
     const isWebBotAuth = WEB_BOT_AUTH_SIGNS.some((key) => stored[key] !== undefined);
-    const webBotAuth = isWebBotAuth ? Object.fromEntries(Object.entries(stored).filter(([key]) => WEB_BOT_AUTH_FIELDS.includes(key))) : {};
-    const details = Object.fromEntries(Object.entries(stored).filter(([key]) => !(key in webBotAuth)));
+    const signed = isWebBotAuth ? Object.fromEntries(Object.entries(stored).filter(([key]) => WEB_BOT_AUTH_FIELDS.includes(key))) : {};
+    const details = Object.fromEntries(Object.entries(stored).filter(([key]) => !(key in signed)));
     return {
       outcome: event.outcome,
       scopesRequested: event.scopesRequested,
@@ -6086,7 +6498,10 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       correlationId: event.correlationId,
       errorMessage: event.errorMessage,
       ...(Object.keys(details).length > 0 ? { details } : {}),
-      ...(isWebBotAuth ? { webBotAuth } : {}),
+      // Deprecated, kept for 2.x readers: 2.0.0 filed every stored field here, signed
+      // or not, so it still holds them all. Read an event's own fields from `details`;
+      // a Web Bot Auth signature was checked only when `webBotAuthKeyId` is present.
+      ...(event.metadata ? { webBotAuth: stored } : {}),
     };
   }
 
@@ -6112,7 +6527,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         metadata: buildAuditEntryMetadata(event),
       };
     }
-    const [eventService, eventUserId] = event.resource.id.split('/');
+    const separator = event.resource.id.indexOf('/');
+    const eventService = separator === -1 ? event.resource.id : event.resource.id.slice(0, separator);
+    const eventUserId = separator === -1 ? undefined : event.resource.id.slice(separator + 1);
     return {
       id: event.id,
       action: event.action,
@@ -6668,6 +7085,110 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
 
       const permission = await permissionForDidAgent(agentDid, agentRecord as AgentRecord | null, service);
+      // The agent handing off needs leave to hand off, as well as the agent receiving.
+      const parentPermission = parent.sub.startsWith('did:')
+        ? await permissionForDidAgent(parent.sub, await vault.getAgentByDid?.(parent.sub) ?? null, service)
+        : null;
+      if (parentPermission && !parentPermission.delegatable) {
+        res.status(403).json({ error: 'Permission is not delegatable', code: 'delegation_not_allowed' });
+        return;
+      }
+      // The grantor's own row also caps how deep it may pass access on: what a
+      // Permission holder may hand off depends on the depth it already sits at,
+      // not only on the receiving agent's row. A grantor with no row keeps the
+      // pre-existing recipient-only behaviour.
+      if (parentPermission && (parent.chainDepth ?? 0) + 1 > parentPermission.maxDelegationDepth) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'permission', id: parentPermission.id },
+          outcome: 'denied',
+          errorMessage: 'grantor_depth_exceeded',
+          correlationId,
+        });
+        res.status(403).json({
+          error: "Sub-delegation exceeds the delegating agent's max delegation depth",
+          code: 'depth_exceeded',
+        });
+        return;
+      }
+      // A Permission is a clock and a scope list, not only a boolean. A receipt
+      // names what was granted when it was minted; what its holder may pass on
+      // now is bounded by the row it holds now, exactly as /api/v1/use bounds
+      // what the holder may reach now. A row that has expired hands nothing on,
+      // and a row narrowed since issuance hands on only what it still covers:
+      // the child gets the intersection, never a scope the grantor has lost.
+      //
+      // One metadata read of the stored row decides every stored-scope question
+      // on this hop: what the grantor may still pass on, and what the receiving
+      // Permission's derived read would reach. It is taken once, so a refusal
+      // costs a single read and no two checks can see different rows — and the
+      // entry that read returned is the credential this hop issues against
+      // (hopCredential), so no later read exists to disagree with the decision.
+      let hopSnapshot: Promise<ConnectionSnapshot> | undefined;
+      const tokenScopesForHop = async (): Promise<string[]> => {
+        if (!hasDerivedReadScope(service)) return [];
+        hopSnapshot ??= connectionSnapshot(service, userId);
+        return (await hopSnapshot).held;
+      };
+      if (parentPermission) {
+        if (parentPermission.expiresAt && parentPermission.expiresAt.getTime() <= Date.now()) {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'permission', id: parentPermission.id },
+            outcome: 'denied',
+            scopesRequested: requestedScopes,
+            errorMessage: 'grantor_permission_expired',
+            correlationId,
+          });
+          refusePermission(res, 'permission_expired');
+          return;
+        }
+        const handoffScopes = Array.isArray(requestedScopes) && requestedScopes.length > 0 ? requestedScopes : parent.scopes;
+        // Only scopes the receipt itself covers are the grantor's to lose: a
+        // scope outside the receipt is the parent's business, and stays
+        // 'scope_escalation_denied' below exactly as it was.
+        const receiptScopes = withDerivedScopes(service, parent.scopes);
+        // A derived read scope is Cred's name for access the raw token already
+        // carries, so it means what the stored connection can reach, never what
+        // the receipt happens to name. getStored is the narrowest accessor that
+        // reports those scopes: it decrypts the row at rest, never refreshes it
+        // and never calls the provider. Only the scope list is used, and it is
+        // neither logged nor returned; the read leaves no other trace. An
+        // existing Notion entry with no stored scopes covers the whole
+        // connection, so a grantor narrowed to `read_content` cannot hand on
+        // `notion.read` from a receipt minted while its row was wider.
+        const tokenScopes = await tokenScopesForHop();
+        const uncoveredScopes = [...new Set(handoffScopes.filter((scope) =>
+          scopeCoveredBy(receiptScopes, scope)
+          && !permissionCovers(service, parentPermission.allowedScopes, scope, tokenScopes),
+        ))];
+        if (uncoveredScopes.length > 0) {
+          writeAuditEventIfSupported({
+            id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+            timestamp: new Date(),
+            actor: { type: 'agent', id: agentDid },
+            action: 'deny',
+            resource: { type: 'permission', id: parentPermission.id },
+            outcome: 'denied',
+            scopesRequested: requestedScopes,
+            errorMessage: 'grantor_scope_insufficient',
+            correlationId,
+          });
+          res.status(403).json({
+            error: 'scope_insufficient',
+            code: 'scope_insufficient',
+            message: "The delegating agent's Permission no longer covers every scope this handoff would grant. Ask for a new delegation.",
+            scopes: uncoveredScopes,
+          });
+          return;
+        }
+      }
       if (!permission) {
         writeAuditEventIfSupported({
           id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -6700,6 +7221,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
 
       // ── Validate delegation chain ────────────────────────────────────────
 
+      // The receiving Permission is read over what the stored connection
+      // actually covers, not over the parent receipt's list. A derived read
+      // means access the raw token carries, so a recipient row naming only the
+      // narrower source of one — `public_repo` over a `repo` token, or
+      // `read_content` over a Notion connection with no stored scopes — must not
+      // be issued that read. The live use check already reads the stored row;
+      // this is the issuance-time equivalent, so a receipt never names more than
+      // the recipient's Permission states.
+      const hopTokenScopes = await tokenScopesForHop();
       let validation;
       try {
         validation = validateSubDelegation({
@@ -6726,7 +7256,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             ? { requestedConstraints: childConstraints.constraints }
             : {}),
           permission: {
-            allowedScopes: withDerivedScopesUnder(service, permission.allowedScopes, parent.scopes),
+            allowedScopes: withDerivedScopesUnder(service, permission.allowedScopes, hopTokenScopes),
             delegatable: permission.delegatable,
             maxDelegationDepth: permission.maxDelegationDepth,
           },
@@ -6754,10 +7284,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // Mirror the direct-delegation path (a non-empty scopeCeiling is a hard
       // per-agent cap; empty means unbounded). Without this, sub-delegation
       // could grant an agent scopes above the ceiling that the same agent is
-      // capped to on direct delegation.
+      // capped to on direct delegation. The ceiling is read over what the stored
+      // connection covers for the same reason as the recipient Permission above:
+      // a `public_repo` ceiling does not reach `github.read` over a `repo` token.
       if (agentRecord?.scopeCeiling.length) {
         const withinCeiling = validation.grantedScopes.filter((scope) =>
-          ceilingCovers(service, agentRecord!.scopeCeiling, scope, parent.scopes),
+          ceilingCovers(service, agentRecord!.scopeCeiling, scope, hopTokenScopes),
         );
         if (withinCeiling.length === 0) {
           writeAuditEventIfSupported({
@@ -6799,27 +7331,36 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       };
       if (providerConfig) {
         const adapter = createAdapter(providerConfig.slug as BuiltinAdapterSlug);
-        getOpts.adapter = {
-          refreshAccessToken: async (refreshToken, clientId, clientSecret) => {
-            const client = new OAuthClient({
-              adapter,
-              clientId,
-              clientSecret,
-              redirectUri: `${config.redirectBaseUri}/connect/${service}/callback`,
-            });
-            const result = await client.refreshToken(refreshToken);
-            return {
-              accessToken: result.access_token,
-              refreshToken: result.refresh_token,
-              expiresIn: result.expires_in,
-            };
-          },
-        };
+        getOpts.adapter = toVaultRefreshAdapter(adapter);
         getOpts.clientId = providerConfig.clientId;
         getOpts.clientSecret = providerConfig.clientSecret;
       }
 
-      const entry = await vault.get(getOpts);
+      // The decision's own entry, not a second read of the same connection: see
+      // hopCredential(). A hop that re-read here could authorize against one row
+      // and issue against another replaced in between.
+      const selected = await hopCredential(service, hopSnapshot ? await hopSnapshot : undefined, getOpts);
+      if ('unreviewed' in selected) {
+        writeAuditEventIfSupported({
+          id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+          timestamp: new Date(),
+          actor: { type: 'agent', id: agentDid },
+          action: 'deny',
+          resource: { type: 'token', id: `${service}/${userId}` },
+          outcome: 'denied',
+          scopesRequested: requestedScopes,
+          errorMessage: 'connection_changed_during_hop',
+          correlationId,
+        });
+        res.status(403).json({
+          error: 'scope_insufficient',
+          code: 'scope_insufficient',
+          message: 'The stored connection changed while this hop was being decided and now covers scopes this hop was not authorized over. Ask for a new delegation.',
+          scopes: selected.unreviewed,
+        });
+        return;
+      }
+      const { entry } = selected;
       if (!entry) {
         res.status(404).json({
           error: `No credentials stored for '${service}/${userId}'. Connect it first: an operator opens /connect?user_id=${encodeURIComponent(userId)} and clicks Connect for ${service}.`,
@@ -7111,6 +7652,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           agentDid,
           grant: grantState,
           lineage: ancestorDids,
+          // The row this hop issued against: the child handle decides over its
+          // scopes at each exercise, exactly as the hop's own decision did.
+          credentialScopes: entry?.scopes ?? [],
         }),
         // Always present: sub-delegation is broker-only at every depth, so
         // this both confirms the format and flags any downgrade from a
@@ -7517,6 +8061,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       receipt,
       constraints,
       agentDid: request.agentDid,
+      // The row this token was read from: the handle decides over its scopes at
+      // each exercise, never over a row that replaced it later.
+      credentialScopes: vaultEntry.entry.scopes ?? [],
     }));
   }
 
@@ -7637,6 +8184,13 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
         const pending = typeof body.auth_req_id === 'string' ? approvals.get(body.auth_req_id) : null;
         if (!pending) {
           res.status(400).json({ error: 'invalid_grant', error_description: 'Unknown auth_req_id' });
+          return;
+        }
+        // As on the grant redemption below: a caller bound to a user may only
+        // redeem that user's approvals, even when it shares the agent's key.
+        const boundCibaUser = principalBoundUserId(req);
+        if (boundCibaUser !== undefined && boundCibaUser !== pending.subject) {
+          res.status(403).json({ error: 'user_id_mismatch' });
           return;
         }
         if (!checkDpop(req, res, { agentDid: pending.agentDid, path: '/api/v1/token', resource: { type: 'token', id: `${pending.service}/${pending.subject}` } })) return;
@@ -7773,6 +8327,9 @@ ${request.bindingMessage ? `<p>Code shown by the agent: <strong>${escapeHtml(req
           parentDelegationId: grant.parentDelegationId,
           constraints: grant.constraints,
           agentDid: grant.agentDid,
+          // The row the exchanged token was read from: the handle decides over
+          // its scopes at each exercise, never over a row that replaced it.
+          credentialScopes: entry.scopes ?? [],
           ...(grant.agentDelegationToken ? { agentDelegationToken: grant.agentDelegationToken } : {}),
         }),
         // RFC 8693 Section 2.2.1: the issued token is the DPoP-bound

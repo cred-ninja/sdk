@@ -71,6 +71,23 @@ export class FileBackend implements StorageBackend {
     this.writeAll(data);
   }
 
+  replaceIfUnchanged(
+    row: StoredRow,
+    expected: { accessTokenEnc: string; accessTokenIv: string },
+  ): 'replaced' | 'missing' | 'changed' {
+    if (!fs.existsSync(this.filePath)) return 'missing';
+    // Read, compare and write with no await between them, so nothing else in
+    // this process can write in between.
+    const data = this.readAll();
+    const key = this.rowKey(row.provider, row.userId);
+    const current = data[key];
+    if (!current) return 'missing';
+    if (current.accessTokenEnc !== expected.accessTokenEnc || current.accessTokenIv !== expected.accessTokenIv) return 'changed';
+    data[key] = { ...row, createdAt: current.createdAt };
+    this.writeAll(data);
+    return 'replaced';
+  }
+
   get(provider: string, userId: string): StoredRow | null {
     if (!fs.existsSync(this.filePath)) {
       return null;

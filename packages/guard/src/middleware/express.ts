@@ -10,6 +10,20 @@ import { CredGuard } from '../guard.js';
 import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
 
+/** Identity facts verified in front of the adapter. See `resolveVerifiedIdentity`. */
+export interface VerifiedGuardIdentity {
+  /**
+   * DID whose proof of possession was checked upstream, or the did:key that
+   * whatever the request issues is cryptographically bound to.
+   */
+  agentDid?: string;
+  /** Fingerprint whose TOFU delegation proof was checked upstream. */
+  tofuFingerprint?: string;
+  webBotAuthKeyId?: string;
+  signatureAgent?: string;
+  receiptClaims?: string[];
+}
+
 /** Options for express middleware */
 export interface ExpressMiddlewareOptions {
   /**
@@ -41,6 +55,23 @@ export interface ExpressMiddlewareOptions {
   resolveLinkContext?: (req: Request) => GuardLinkContext | undefined | Promise<GuardLinkContext | undefined>;
 
   /**
+   * Supply the identity facts a policy may rely on, from verified request
+   * state only: a DID with checked proof of possession, a verified TOFU
+   * fingerprint, the Web Bot Auth key id and Signature-Agent of a checked
+   * signature, and the claims of a verified receipt. With this set, all
+   * identity fields and identitySource come from the resolver alone.
+   * Return undefined, or leave a field out, for a request that proved none.
+   *
+   * Without it the adapter reads `web_bot_auth_key_id`, `key_id`,
+   * `signature_agent`, `receipt_claims` and `metadata.receiptClaims` from the
+   * body, as it always has. That is safe only when something in front of the
+   * adapter verified those values and wrote them there; otherwise they are
+   * the caller's claims, and `webBotAuthPolicy` and `receiptClaimsPolicy`
+   * judge claims.
+   */
+  resolveVerifiedIdentity?: (req: Request) => VerifiedGuardIdentity | undefined | Promise<VerifiedGuardIdentity | undefined>;
+
+  /**
    * Called when guard allows the request.
    * Default: calls next().
    */
@@ -68,6 +99,7 @@ export function createExpressMiddleware(
     onAllow = defaultOnAllow,
     onDeny = defaultOnDeny,
     resolveLinkContext,
+    resolveVerifiedIdentity,
   } = options;
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -93,6 +125,22 @@ export function createExpressMiddleware(
 
       const principal = (req as any).agentPrincipal;
       const link = resolveLinkContext ? await resolveLinkContext(req) : undefined;
+      // With a resolver, what a policy reads as proved comes from it alone.
+      const identity = resolveVerifiedIdentity
+        ? { ...(await resolveVerifiedIdentity(req)) }
+        : {
+            agentDid: typeof req.body?.agent_did === 'string' ? req.body.agent_did : undefined,
+            tofuFingerprint: typeof req.body?.tofu_fingerprint === 'string' ? req.body.tofu_fingerprint : undefined,
+            webBotAuthKeyId: typeof req.body?.web_bot_auth_key_id === 'string'
+              ? req.body.web_bot_auth_key_id
+              : (typeof req.body?.key_id === 'string' ? req.body.key_id : undefined),
+            signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
+            receiptClaims: resolveReceiptClaims(req.body, principal),
+          };
+      const identitySource = resolveVerifiedIdentity
+        ? (identity.webBotAuthKeyId !== undefined || identity.signatureAgent !== undefined ? 'web-bot-auth'
+          : identity.tofuFingerprint !== undefined ? 'tofu' : identity.agentDid !== undefined ? 'did' : 'agent-token')
+        : inferIdentitySource(req.body, true);
       const ctx: GuardContext = {
         provider,
         agentTokenHash,
@@ -103,14 +151,12 @@ export function createExpressMiddleware(
         targetMethod: req.body?.targetMethod || req.method,
         delegationId: req.body?.delegationId,
         metadata: mergeMetadata(req.body?.metadata, principal),
-        identitySource: inferIdentitySource(req.body),
-        agentDid: typeof req.body?.agent_did === 'string' ? req.body.agent_did : undefined,
-        tofuFingerprint: typeof req.body?.tofu_fingerprint === 'string' ? req.body.tofu_fingerprint : undefined,
-        webBotAuthKeyId: typeof req.body?.web_bot_auth_key_id === 'string'
-          ? req.body.web_bot_auth_key_id
-          : (typeof req.body?.key_id === 'string' ? req.body.key_id : undefined),
-        signatureAgent: typeof req.body?.signature_agent === 'string' ? req.body.signature_agent : undefined,
-        receiptClaims: resolveReceiptClaims(req.body, principal),
+        identitySource,
+        agentDid: identity.agentDid,
+        tofuFingerprint: identity.tofuFingerprint,
+        webBotAuthKeyId: identity.webBotAuthKeyId,
+        signatureAgent: identity.signatureAgent,
+        receiptClaims: identity.receiptClaims && identity.receiptClaims.length > 0 ? identity.receiptClaims : undefined,
         ...(link ? { link } : {}),
       };
 
@@ -222,9 +268,10 @@ function mergeMetadata(
   };
 }
 
-function inferIdentitySource(body: Record<string, unknown> | undefined): GuardContext['identitySource'] {
+/** `webBotAuthFromBody` is false when verified state, not the body, says whether a signature was checked. */
+function inferIdentitySource(body: Record<string, unknown> | undefined, webBotAuthFromBody: boolean): GuardContext['identitySource'] {
   if (!body) return 'agent-token';
-  if (typeof body.web_bot_auth_key_id === 'string' || typeof body.signature_agent === 'string') {
+  if (webBotAuthFromBody && (typeof body.web_bot_auth_key_id === 'string' || typeof body.signature_agent === 'string')) {
     return 'web-bot-auth';
   }
   if (typeof body.tofu_fingerprint === 'string') {

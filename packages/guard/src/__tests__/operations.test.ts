@@ -4,6 +4,7 @@ import {
   canonicalBrokerUrl,
   contentTypeMismatch,
   evaluateOperation,
+  listOperationRows,
   hasOperationTable,
   methodOverrideChannel,
 } from '../operations.js';
@@ -12,7 +13,182 @@ import { isBrokerOnlyScope, withDerivedScopes, withStoredDerivedScopes, withoutR
 const outcome = (service: string, method: string, url: string, scopes: string[], body?: unknown) =>
   evaluateOperation({ service, method, url, body }, scopes).outcome;
 
+describe('Google scopes that name less than a URL shows', () => {
+  const gmail = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/1';
+  it('gmail.metadata reads only metadata', () => {
+    expect(outcome('google', 'GET', `${gmail}?format=metadata`, ['gmail.metadata'])).toBe('allowed');
+    expect(outcome('google', 'GET', `${gmail}?format=full`, ['gmail.metadata'])).toBe('insufficient');
+    expect(outcome('google', 'GET', gmail, ['gmail.metadata'])).toBe('insufficient');
+    expect(outcome('google', 'GET', gmail, ['gmail.readonly'])).toBe('allowed');
+  });
+  it('drive.metadata never downloads or exports', () => {
+    const file = 'https://www.googleapis.com/drive/v3/files/1';
+    expect(outcome('google', 'GET', file, ['drive.metadata.readonly'])).toBe('allowed');
+    expect(outcome('google', 'GET', `${file}?alt=media`, ['drive.metadata.readonly'])).toBe('insufficient');
+    expect(outcome('google', 'GET', `${file}/export`, ['drive.metadata'])).toBe('insufficient');
+    expect(outcome('google', 'GET', `${file}?alt=media`, ['drive.readonly'])).toBe('allowed');
+  });
+  it.each(['$alt', '%24alt'])('Drive metadata refuses content through %s', (key) => {
+    const url = `https://www.googleapis.com/drive/v3/files/1?${key}=media`;
+    for (const scope of ['drive.metadata', 'drive.metadata.readonly']) {
+      expect(outcome('google', 'GET', url, [scope])).toBe('insufficient');
+    }
+    expect(outcome('google', 'GET', url, ['drive.readonly'])).toBe('allowed');
+  });
+  it.each([
+    'alt=json&alt=media', '$alt=json&alt=media', 'alt=media&%24alt=json',
+    'ALT=media', 'Alt=media', 'format=metadata&format=full',
+    'format=metadata&%24format=full', '$format=metadata', 'Format=metadata',
+  ])('Google refuses ambiguous representation parameters for every scope: %s', (query) => {
+    for (const scope of ['drive.metadata.readonly', 'drive', 'gmail.metadata', 'gmail.readonly']) {
+      expect(outcome('google', 'GET', `${gmail}?${query}`, [scope])).toBe('not_mapped');
+      expect(outcome('google', 'GET', `https://www.googleapis.com/drive/v3/files/1?${query}`, [scope])).toBe('not_mapped');
+    }
+  });
+  it('ordinary broad-scope representations remain valid', () => {
+    expect(outcome('google', 'GET', `${gmail}?format=full`, ['gmail.readonly'])).toBe('allowed');
+    expect(outcome('google', 'GET', `${gmail}?format=raw`, ['gmail.modify'])).toBe('allowed');
+    expect(outcome('google', 'GET', 'https://www.googleapis.com/drive/v3/files/1?alt=media', ['drive'])).toBe('allowed');
+  });
+  it.each(['messages', 'threads'])('gmail.metadata cannot search %s by content', (collection) => {
+    const list = `https://gmail.googleapis.com/gmail/v1/users/me/${collection}`;
+    for (const query of ['q=secret', '%71=secret', 'q=']) {
+      expect(outcome('google', 'GET', `${list}?${query}`, ['gmail.metadata'])).toBe('insufficient');
+      expect(outcome('google', 'GET', `${list}?${query}`, ['gmail.readonly'])).toBe('allowed');
+    }
+    expect(outcome('google', 'GET', list, ['gmail.metadata'])).toBe('allowed');
+  });
+  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('Gmail drafts-list search on %s', (origin) => {
+    const drafts = `${origin}/gmail/v1/users/me/drafts`;
+    it.each(['q=secret', '%71=secret', 'q='])('gmail.metadata refuses %s', (query) => {
+      expect(outcome('google', 'GET', `${drafts}?${query}`, ['gmail.metadata'])).toBe('insufficient');
+    });
+    it.each(['', '/synthetic-draft?format=metadata', '/synthetic-draft?format=minimal'])('gmail.metadata cannot read drafts even with a reduced representation: %s', (suffix) => {
+      expect(outcome('google', 'GET', `${drafts}${suffix}`, ['gmail.metadata'])).toBe('insufficient');
+    });
+    it.each(['gmail.readonly', 'gmail.compose', 'gmail.modify', 'https://mail.google.com/'])('%s retains draft read access', (scope) => {
+      for (const suffix of ['', '/synthetic-draft?format=metadata', '/synthetic-draft?format=minimal']) {
+        expect(outcome('google', 'GET', `${drafts}${suffix}`, [scope])).toBe('allowed');
+      }
+    });
+    it.each(['q=secret', '%71=secret', 'q='])('gmail.readonly still allows %s', (query) => {
+      expect(outcome('google', 'GET', `${drafts}?${query}`, ['gmail.readonly'])).toBe('allowed');
+    });
+  });
+  it('identity scopes read the user\'s own People profile and no other contact', () => {
+    const people = 'https://people.googleapis.com/v1/people';
+    for (const scope of ['userinfo.email', 'userinfo.profile']) {
+      expect(outcome('google', 'GET', `${people}/me?personFields=names`, [scope])).toBe('allowed');
+      expect(outcome('google', 'GET', `${people}/c123?personFields=names`, [scope])).toBe('insufficient');
+      expect(outcome('google', 'GET', `${people}/me/connections`, [scope])).toBe('insufficient');
+    }
+    expect(outcome('google', 'GET', `${people}/c123?personFields=names`, ['contacts.readonly'])).toBe('allowed');
+    expect(outcome('google', 'GET', `${people}/me/connections`, ['contacts.readonly'])).toBe('allowed');
+  });
+  it.each(['q=x&q=y', '$q=x', 'Q=x'])('Google refuses ambiguous search parameters: %s', (query) => {
+    expect(outcome('google', 'GET', `${gmail}?${query}`, ['gmail.readonly'])).toBe('not_mapped');
+  });
+  it('calendar partition and free/busy scopes do not read or change events', () => {
+    const events = 'https://www.googleapis.com/calendar/v3/calendars/c/events';
+    for (const scope of ['calendar.events.freebusy', 'calendar.app.created', 'calendar.events.owned']) {
+      expect(outcome('google', 'GET', events, [scope]), scope).not.toBe('allowed');
+      expect(outcome('google', 'DELETE', `${events}/1`, [scope]), scope).not.toBe('allowed');
+    }
+  });
+});
+
+describe('listOperationRows', () => {
+  it('lists every provider, and every row classifies as listed under a scope it names', () => {
+    const rows = listOperationRows();
+    expect(new Set(rows.map((row) => row.service))).toEqual(new Set(['google', 'github', 'slack', 'notion', 'salesforce', 'linear', 'hubspot']));
+    for (const row of rows) {
+      if (row.origin === null || row.needs === 'any' || row.pattern.includes('*:')) continue;
+      const path = row.pattern.replace(/\/\*\*$/, '/a/b').replace(/\*/g, 'x');
+      const body = row.graphql === 'query' ? { query: '{ viewer { id } }' }
+        : row.graphql ? { query: `mutation { ${row.graphql.mutation}(input: {}) { clientMutationId } }` } : {};
+      const verdict = evaluateOperation({ service: row.service, method: row.methods[0]!, url: `${row.origin}${path}`, body }, [row.needs[0]!]);
+      expect(verdict.outcome, `${row.service} ${row.methods[0]} ${row.pattern}`).toBe('allowed');
+    }
+  });
+});
+
 describe('evaluateOperation', () => {
+  describe('GitHub user and org routes follow the scopes GitHub documents', () => {
+    const api = 'https://api.github.com';
+    it('a profile scope adds no SSH, GPG or signing key, and starts no migration', () => {
+      for (const path of ['/user/keys', '/user/gpg_keys', '/user/ssh_signing_keys', '/user/migrations']) {
+        expect(outcome('github', 'POST', `${api}${path}`, ['user', 'repo']), path).not.toBe('allowed');
+      }
+      expect(outcome('github', 'POST', `${api}/user/keys`, ['write:public_key'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/user/keys`, ['admin:public_key'])).toBe('allowed');
+      expect(outcome('github', 'DELETE', `${api}/user/keys/1`, ['write:public_key'])).not.toBe('allowed');
+      expect(outcome('github', 'DELETE', `${api}/user/keys/1`, ['admin:public_key'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/user/gpg_keys`, ['write:gpg_key'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/user/ssh_signing_keys`, ['write:ssh_signing_key'])).toBe('allowed');
+      expect(outcome('github', 'PATCH', `${api}/user`, ['user'])).toBe('allowed');
+    });
+
+    it('read:user does not list private repositories or read mail addresses', () => {
+      expect(outcome('github', 'GET', `${api}/user/repos`, ['read:user'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/user/emails`, ['read:user'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/user/repos`, ['repo'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/user/emails`, ['user:email'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/user/followers`, ['read:user'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/user/codespaces/secrets`, ['user', 'repo'])).toBe('not_mapped');
+    });
+
+    it('an org read scope does not reach secrets, webhooks or secret scanning', () => {
+      for (const path of ['/secret-scanning/alerts', '/actions/secrets', '/hooks', '/actions/runners/registration-token']) {
+        expect(outcome('github', 'GET', `${api}/orgs/o${path}`, ['read:org', 'repo', 'admin:org']), path).toBe('not_mapped');
+      }
+      expect(outcome('github', 'GET', `${api}/orgs/o`, ['read:org'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/members`, ['read:org'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/repos`, ['read:org'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/repos`, ['repo'])).toBe('allowed');
+    });
+
+    it('write:org manages membership only: not runners, secrets or the org itself', () => {
+      expect(outcome('github', 'PUT', `${api}/orgs/o/memberships/u`, ['write:org'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/orgs/o/invitations`, ['write:org'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/orgs/o/actions/runners/registration-token`, ['write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'PUT', `${api}/orgs/o/actions/secrets/S`, ['write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'DELETE', `${api}/orgs/o`, ['admin:org', 'write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/orgs/o/repos`, ['repo'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/orgs/o/repos`, ['write:org'])).not.toBe('allowed');
+    });
+
+    it('a team is managed by admin:org, and write:org only moves people', () => {
+      expect(outcome('github', 'PUT', `${api}/orgs/o/teams/t/memberships/u`, ['write:org'])).toBe('allowed');
+      expect(outcome('github', 'POST', `${api}/orgs/o/teams`, ['write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'DELETE', `${api}/orgs/o/teams/t`, ['write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'PUT', `${api}/orgs/o/teams/t/repos/o/r`, ['write:org'])).not.toBe('allowed');
+      expect(outcome('github', 'DELETE', `${api}/orgs/o/teams/t`, ['admin:org'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/teams/t/members`, ['read:org'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/teams/t/repos`, ['read:org'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/teams/t/repos`, ['repo'])).toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/orgs/o/teams/t/discussions`, ['read:org'])).toBe('not_mapped');
+    });
+
+    it('a repository write scope does not add keys, collaborators, webhooks, transfers or secrets', () => {
+      for (const tail of ['keys', 'collaborators/u', 'hooks', 'transfer', 'actions/secrets/S']) {
+        const method = tail.includes('/') ? 'PUT' : 'POST';
+        expect(outcome('github', method, `${api}/repos/o/r/${tail}`, ['repo']), tail).toBe('not_mapped');
+      }
+      expect(outcome('github', 'POST', `${api}/repos/o/r/issues`, ['repo'])).toBe('allowed');
+      expect(outcome('github', 'PUT', `${api}/repos/o/r/contents/a.txt`, ['public_repo'])).toBe('allowed');
+    });
+
+    it('a repository scope does not read org membership', () => {
+      expect(outcome('github', 'GET', `${api}/orgs/o/members`, ['repo'])).not.toBe('allowed');
+    });
+
+    it('reads gists only under the gist scope', () => {
+      expect(outcome('github', 'GET', `${api}/gists`, ['repo'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/gists/1`, ['public_repo'])).not.toBe('allowed');
+      expect(outcome('github', 'GET', `${api}/gists/1`, ['gist'])).toBe('allowed');
+    });
+  });
+
   it('has a table for every brokered service', () => {
     for (const service of ['google', 'github', 'slack', 'notion', 'salesforce', 'linear', 'hubspot']) {
       expect(hasOperationTable(service)).toBe(true);
