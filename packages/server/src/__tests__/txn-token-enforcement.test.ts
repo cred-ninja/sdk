@@ -1,0 +1,248 @@
+/**
+ * Transaction Tokens on the final hop, through the real WIMSE source and
+ * server: bound to the workload's proof, verified against the trust domain's
+ * configuration, narrowing the authority of brokered calls, recorded in the
+ * audit trail, and never sent to the provider.
+ */
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import request from 'supertest';
+import { createDpopProof } from '@credninja/sdk';
+import { CredGuard, type CredPolicy } from '@credninja/guard';
+import {
+  ADMIN, BASE, BEARER, CALENDAR, cleanupDirs, delegateWithHttpSig, send, sha256b64url, trustDomain, txnIssuer, useWithHttpSig, wimseServer, wptHeaders,
+} from './wimse-fixture.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  cleanupDirs();
+});
+
+const TD = 'domain-b.example';
+
+async function setup(opts: { scopes?: string[]; required?: boolean; config?: Record<string, unknown>; userSubject?: null } = {}) {
+  const b = trustDomain(TD);
+  const w = b.workload();
+  const tts = txnIssuer(TD);
+  const trust = tts.trust({
+    ...(opts.required === false ? { required: false } : {}),
+    ...(opts.userSubject === null ? { userSubject: undefined } : {}),
+  });
+  const s = await wimseServer({ domains: [b], mapSubject: () => w.subject, txnTokens: { [TD]: trust }, scopes: opts.scopes, config: opts.config });
+  return { b, w, tts, ...s };
+}
+
+function provider() {
+  const seen: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init: any) => {
+    seen.push({ method: init?.method ?? 'GET', url: String(url), headers: Object.fromEntries(Object.entries(init?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)])) });
+    return new Response('{"items":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  return seen;
+}
+
+/** Audit events as GET /admin/audit returns them: outcome and details under metadata. */
+async function auditFor(app: any) {
+  const res = await request(app).get('/admin/audit?limit=200').set('Authorization', `Bearer ${ADMIN}`);
+  return (res.body.entries as Array<{ action: string; metadata?: { outcome?: string; details?: Record<string, unknown> } }>)
+    .map((e) => ({ action: e.action, outcome: e.metadata?.outcome, metadata: e.metadata?.details }));
+}
+
+/** Delegate with WIT + HTTP-sig and a bound Txn-Token, then return the Delegation Token. */
+async function delegated(s: Awaited<ReturnType<typeof setup>>, txnClaims: Record<string, unknown> = {}, scopes = ['calendar.readonly']) {
+  const txn = s.tts.mint(txnClaims);
+  const minted = await delegateWithHttpSig(s.app, s.agent, s.w, { scopes }, { 'txn-token': txn });
+  expect(minted.status, JSON.stringify(minted.body)).toBe(200);
+  return minted.body.access_token as string;
+}
+
+describe('binding: a Txn-Token rides only on the proof that covers it', () => {
+  it('WPT with a matching tth is accepted on an agent route', async () => {
+    const s = await setup();
+    const txn = s.tts.mint();
+    const json = JSON.stringify({ token_format: 'handle', agent_did: s.agent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    const res = await send(s.app, 'post', '/api/v1/delegate', {
+      ...wptHeaders(s.w, '/api/v1/delegate', { tth: sha256b64url(txn) }), 'txn-token': txn,
+      dpop: createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`),
+    }, json);
+    expect(res.status).toBe(200);
+  });
+
+  it('WPT: a Txn-Token swapped after the WPT was made is refused', async () => {
+    const s = await setup();
+    const res = await send(s.app, 'get', '/api/v1/connections?user_id=default', {
+      ...wptHeaders(s.w, '/api/v1/connections', { tth: sha256b64url(s.tts.mint()) }), 'txn-token': s.tts.mint(),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('HTTP signature: a Txn-Token swapped after signing is refused, and the provider is never called', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, {
+      extraHeaders: { 'txn-token': s.tts.mint() },
+      tamper: (h) => { h['txn-token'] = s.tts.mint(); },
+    });
+    expect(res.status).toBe(400);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('a Txn-Token with the agent token (no workload proof) is refused as unbound', async () => {
+    const s = await setup();
+    const res = await request(s.app).get('/api/v1/connections?user_id=default').set('Authorization', `Bearer ${BEARER}`).set('Txn-Token', s.tts.mint());
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('txn_token_unbound');
+  });
+
+  it('with no Txn-Token configuration the header is ignored, so existing deployments are unchanged', async () => {
+    const b = trustDomain(TD);
+    const w = b.workload();
+    const s = await wimseServer({ domains: [b], mapSubject: () => w.subject });
+    const res = await request(s.app).get('/api/v1/connections?user_id=default').set('Authorization', `Bearer ${BEARER}`).set('Txn-Token', 'x.y.z');
+    expect(res.status).toBe(200);
+  });
+
+  it('a workload from a domain that requires Txn-Tokens is refused without one, and accepted with required: false', async () => {
+    const strict = await setup();
+    const conn = '/api/v1/connections?user_id=default';
+    expect((await send(strict.app, 'get', conn, wptHeaders(strict.w, '/api/v1/connections'))).status).toBe(401);
+    const lax = await setup({ required: false });
+    expect((await send(lax.app, 'get', conn, wptHeaders(lax.w, '/api/v1/connections'))).status).toBe(200);
+  });
+
+  it('a Txn-Token issued for another trust domain is refused', async () => {
+    const s = await setup();
+    const txn = s.tts.mint({ aud: 'domain-a.example' });
+    const res = await delegateWithHttpSig(s.app, s.agent, s.w, {}, { 'txn-token': txn });
+    expect(res.status).toBe(400);
+  });
+
+  it('an agent whose domain requires Txn-Tokens cannot drop its workload proof on /use', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, null, { url: CALENDAR, method: 'GET' });
+    expect(res.status).toBe(400);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe('authority only narrows', () => {
+  it('a bound Txn-Token for the delegation user allows a read, and the audit line carries its txn', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    provider();
+    const txn = s.tts.mint({ txn: 'txn-read-1' });
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': txn } });
+    expect(res.status).toBe(200);
+    const access = (await auditFor(s.app)).filter((e) => e.action === 'access' && e.outcome === 'success');
+    expect(access.map((e) => e.metadata?.txn)).toContain('txn-read-1');
+  });
+
+  it('a write is refused when the transaction maps only to read, though the Permission and grant allow write', async () => {
+    const s = await setup({ scopes: ['calendar.readonly', 'calendar.events'] });
+    const token = await delegated(s, { scope: 'calendar.read calendar.write' }, ['calendar.readonly', 'calendar.events']);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'POST', body: { summary: 'x' } }, {
+      extraHeaders: { 'txn-token': s.tts.mint({ txn: 'txn-write-1', scope: 'calendar.read' }) },
+    });
+    expect(res.status).toBe(403);
+    expect(seen).toHaveLength(0);
+    // The refusal is recorded under the same transaction id.
+    const denied = (await auditFor(s.app)).filter((e) => e.outcome === 'denied');
+    expect(denied.map((e) => e.metadata?.txn)).toContain('txn-write-1');
+  });
+
+  it('a Txn-Token scope with no mapping is refused', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint({ scope: 'payments.send' }) } });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_scope_unmapped');
+  });
+
+  it('an autonomous transaction (no user subject) cannot use a user-delegated credential', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint({ sub: 'workload:nightly-batch' }) } });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_autonomous');
+    expect(seen).toHaveLength(0);
+    // Nor obtain one.
+    const del = await delegateWithHttpSig(s.app, s.agent, s.w, {}, { 'txn-token': s.tts.mint({ sub: 'workload:nightly-batch' }) });
+    expect(del.status).toBe(403);
+  });
+
+  it("a transaction for another user than the delegation's is refused", async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint({ sub: 'user:mallory' }) } });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_user_mismatch');
+  });
+
+  it('delegation in a transaction may not ask for scopes beyond what the transaction maps to', async () => {
+    const s = await setup({ scopes: ['calendar.readonly', 'calendar.events'] });
+    const res = await delegateWithHttpSig(s.app, s.agent, s.w, { scopes: ['calendar.events'] }, { 'txn-token': s.tts.mint({ scope: 'calendar.read' }) });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_scope_exceeded');
+  });
+});
+
+describe('never forwarded, and checked fresh before the provider call', () => {
+  it('Txn-Token, WIT, signature, DPoP and Content-Digest headers never reach the provider, even as extra_headers', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    const seen = provider();
+    const txn = s.tts.mint();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, {
+      url: CALENDAR, method: 'GET',
+      extra_headers: { 'Txn-Token': txn, 'Workload-Identity-Token': s.w.wit, Signature: 'x', 'Signature-Input': 'x', DPoP: 'x', 'Content-Digest': 'x', 'X-Request-Id': 'kept' },
+    }, { extraHeaders: { 'txn-token': txn } });
+    expect(res.status).toBe(200);
+    const names = Object.keys(seen[0].headers);
+    for (const h of ['txn-token', 'workload-identity-token', 'signature', 'signature-input', 'dpop', 'content-digest']) expect(names).not.toContain(h);
+    expect(names).toContain('x-request-id');
+    expect(seen[0].headers.authorization).toBe('Bearer ya29.wimse');
+  });
+
+  it('an agent revoked between authorization and the provider call is refused at the fresh check', async () => {
+    let revoke: (() => Promise<void>) | undefined;
+    const probe: CredPolicy = {
+      name: 'revoke-mid-call',
+      async evaluate(ctx) {
+        if (ctx.metadata?.brokered && revoke) await revoke();
+        return { decision: 'ALLOW', policy: 'revoke-mid-call' };
+      },
+    };
+    const s = await setup({ config: { guard: new CredGuard({ policies: [probe] }) } });
+    const token = await delegated(s);
+    const record = await s.vault.getAgentByDid!(s.agent.did);
+    revoke = () => s.vault.revokeAgent(record!.id);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint() } });
+    expect(res.status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('a Permission narrowed between authorization and the provider call is refused at the fresh check', async () => {
+    let narrow: (() => Promise<unknown>) | undefined;
+    const probe: CredPolicy = {
+      name: 'narrow-mid-call',
+      async evaluate(ctx) {
+        if (ctx.metadata?.brokered && narrow) await narrow();
+        return { decision: 'ALLOW', policy: 'narrow-mid-call' };
+      },
+    };
+    const s = await setup({ scopes: ['calendar.readonly', 'calendar.events'], config: { guard: new CredGuard({ policies: [probe] }) } });
+    const token = await delegated(s, { scope: 'calendar.read calendar.write' }, ['calendar.readonly', 'calendar.events']);
+    narrow = () => request(s.app).patch(`/admin/permissions/${s.permissionId}`).set('Authorization', `Bearer ${ADMIN}`).send({ allowedScopes: ['calendar.events'] });
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint({ scope: 'calendar.read' }) } });
+    expect(res.status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+});

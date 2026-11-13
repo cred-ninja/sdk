@@ -29,6 +29,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, constraintsSubsume, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
 import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant, VaultEntry } from '@credninja/vault';
@@ -87,6 +88,8 @@ import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, ve
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
 import { WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
 import { parseDictionary } from './identity/structured-fields.js';
+import { checkTxnTokenTrust, mappedProviderScopes, TxnTokenRefusal, verifyTxnToken, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
+import { validateWorkloadIdentifier } from './identity/wimse.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -301,6 +304,13 @@ const WEB_BOT_AUTH_SIGNS: readonly string[] = ['webBotAuthKeyId', 'signatureAgen
 const WEB_BOT_AUTH_FIELDS: readonly string[] = [...WEB_BOT_AUTH_SIGNS, 'identitySource'];
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
+  // Workload and transaction credentials stay inside their trust domain:
+  // a provider is outside it (draft-ietf-oauth-transaction-tokens-11 §14).
+  'accept-signature',
+  'content-digest',
+  'dpop',
+  'txn-token',
+  'workload-identity-token',
   'authorization',
   'connection',
   'content-length',
@@ -378,6 +388,8 @@ export function createServer(config: ServerConfig) {
   // sent, before any middleware adds members to req.body (Web Bot Auth adds
   // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
   const useRequestHashes = new WeakMap<object, string | null>();
+  /** The transaction id of the request in progress, once its Txn-Token verified. */
+  const txnContext = new AsyncLocalStorage<{ txn: string; hash: string }>();
   // The exact bytes of a request that carries a Workload Identity Token, for
   // Content-Digest (draft-ietf-wimse-http-signature-08 §3). Only kept when
   // external identity is configured.
@@ -1001,6 +1013,85 @@ export function createServer(config: ServerConfig) {
   const externalDpopJtiSeen = createJtiReplayCache();
   /** The agent a verified external identity mapped to, per request. */
   const provenExternalAgent = new WeakMap<Request, { agentDid: string; identity: VerifiedExternalIdentity }>();
+  const txnTokenTrust = externalIdentity?.txnTokens;
+  for (const [td, trust] of Object.entries(txnTokenTrust ?? {})) {
+    try {
+      checkTxnTokenTrust(trust);
+    } catch (err) {
+      throw new Error(`externalIdentity.txnTokens["${td}"]: ${(err as Error).message}`);
+    }
+  }
+  /** The verified Txn-Token of a request, with the trust it verified under. */
+  const verifiedTxnTokens = new WeakMap<Request, { token: VerifiedTxnToken; trust: TxnTokenTrust }>();
+
+  /** The trust domain configuration whose Txn-Tokens an agent must present on brokered calls, if any. */
+  function txnTrustRequiredFor(agentDid: string): TxnTokenTrust | undefined {
+    if (!txnTokenTrust || !externalIdentity) return undefined;
+    for (const m of externalIdentity.mappings) {
+      if (m.kind !== 'wimse' || m.agentDid !== agentDid) continue;
+      try {
+        const trust = txnTokenTrust[validateWorkloadIdentifier(m.subject).trustDomain];
+        if (trust && trust.required !== false) return trust;
+      } catch {
+        // A mapping whose subject is not a Workload Identifier maps nothing.
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Txn-Token checks once a request is authenticated (`identity` null: not by
+   * a WIMSE workload). With no txnTokens configuration the header is ignored.
+   * Otherwise it must come from a WIMSE workload whose proof bound it (WPT
+   * tth, or the HTTP signature covering it), verify under that workload's
+   * trust domain, and is required when that domain says so.
+   */
+  function checkTxnToken(req: Request, res: Response, identity: VerifiedExternalIdentity | null): 'ok' | 'refused' {
+    if (!txnTokenTrust) return 'ok';
+    const header = req.headers['txn-token'];
+    const present = header !== undefined;
+    const refuseUnbound = (code: string, detail: string): 'refused' => {
+      if (identity) return refuseExternalIdentity(req, res, identity.kind, code, detail, identity.subject, identity.proof);
+      writeAuditEventIfSupported({
+        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+        timestamp: new Date(),
+        actor: { type: 'agent', id: 'unknown' },
+        action: 'deny',
+        resource: { type: 'agent', id: 'unknown' },
+        outcome: 'denied',
+        correlationId: crypto.randomUUID(),
+        metadata: { reason: code, route: req.originalUrl.split('?')[0] },
+      });
+      res.status(401).json({ error: 'txn_token_unbound', message: 'A Txn-Token is accepted only with the workload identity proof that binds it' });
+      return 'refused';
+    };
+    if (!identity || identity.kind !== 'wimse') {
+      return present ? refuseUnbound('txn_token_unbound', 'Txn-Token without a WIMSE proof that binds it') : 'ok';
+    }
+    const trust = txnTokenTrust[identity.trustDomain];
+    if (!trust) return present ? refuseUnbound('txn_token_untrusted', 'no Txn-Token trust for this trust domain') : 'ok';
+    if (!present) return trust.required === false ? 'ok' : refuseUnbound('txn_token_required', 'this trust domain requires a Txn-Token');
+    // The binding (SPEC-NOTES #10): the WPT source has already required a
+    // matching tth; an HTTP signature must cover the header.
+    if (identity.proof === 'http-sig') {
+      const covered = identity.attributes.covered;
+      if (!Array.isArray(covered) || !covered.includes('txn-token')) return refuseUnbound('txn_token_unbound', 'signature does not cover Txn-Token');
+    } else if (identity.proof !== 'wpt') {
+      return refuseUnbound('txn_token_unbound', 'proof cannot bind a Txn-Token');
+    }
+    if (Array.isArray(header) || String(header).includes(',')) return refuseUnbound('txn_token_invalid', 'more than one Txn-Token');
+    let token: VerifiedTxnToken;
+    try {
+      token = verifyTxnToken(String(header), trust);
+    } catch (err) {
+      if (err instanceof TxnTokenRefusal) return refuseUnbound(`txn_token_${err.code}`, err.detail);
+      throw err;
+    }
+    verifiedTxnTokens.set(req, { token, trust });
+    // From here on, every audit event this request writes carries txn.
+    txnContext.enterWith({ txn: token.txn, hash: token.hash });
+    return 'ok';
+  }
 
   function refuseExternalIdentity(
     req: Request,
@@ -1176,9 +1267,11 @@ export function createServer(config: ServerConfig) {
       const external = await authenticateExternalIdentity(req, res);
       if (external === 'refused') return;
       if (external) {
+        if (checkTxnToken(req, res, provenExternalAgent.get(req)!.identity) === 'refused') return;
         next();
         return;
       }
+      if (checkTxnToken(req, res, null) === 'refused') return;
     } catch (err) {
       next(err);
       return;
@@ -1860,6 +1953,10 @@ export function createServer(config: ServerConfig) {
   const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
+    // Every event a request writes after its Txn-Token verified carries the
+    // transaction id (draft-ietf-oauth-transaction-tokens-11 §9.2 txn).
+    const txn = txnContext.getStore();
+    if (txn && !(event.metadata && 'txn' in event.metadata)) event = { ...event, metadata: { ...event.metadata, txn: txn.txn } };
     try {
       vault.writeAuditEvent(event);
     } catch (err) {
@@ -5385,7 +5482,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         // checked in addition to the Delegation Token and its DPoP proof.
         if (externalIdentity && req.headers['workload-identity-token'] !== undefined) {
           if (await authenticateUseWorkload(req, res, verified.claims.client_id) === 'refused') return;
+        } else if (txnTrustRequiredFor(verified.claims.client_id)) {
+          // An agent whose trust domain requires Txn-Tokens cannot drop its
+          // workload proof to escape the narrowing they impose.
+          refuseExternalIdentity(req, res, 'wimse', 'workload_proof_required', 'this agent must present its WIT and HTTP signature on /use', undefined, 'http-sig');
+          return;
         }
+        if (checkTxnToken(req, res, provenExternalAgent.get(req)?.identity ?? null) === 'refused') return;
       } else {
         // Every delegation, Cred Link's included, is exercised with its
         // Delegation Token: an id alone authorizes nothing.
@@ -5569,13 +5672,41 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // A Link delegation was just re-checked against its grant and Permission above.
       // A handle restored by this request hands in the row it loaded its token
       // from, so this check and the credential it guards are one read.
-      const scopesNow = linkAccess
+      let scopesNow = linkAccess
         ? linkAccess.effective_scopes
         : await scopesAllowedNow(delegationId, delegation, restored.connection ?? undefined);
       if (scopesNow.length === 0) {
         refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_narrowed' });
         res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers it: it was narrowed, replaced by a new grant, revoked or expired. Ask for a new delegation.' });
         return;
+      }
+      // A Txn-Token only narrows (draft-ietf-oauth-transaction-tokens-11 §9.2.1):
+      // the user it names must be the delegation's user, and its scope maps
+      // to provider-native scopes intersected with what the grant allows now.
+      const txn = verifiedTxnTokens.get(req);
+      if (txn) {
+        if (txn.token.userId === undefined) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_autonomous', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' });
+          return;
+        }
+        if (txn.token.userId !== delegation.userId) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_user_mismatch', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_user_mismatch', message: 'The transaction is for another user than this delegation' });
+          return;
+        }
+        const mapped = mappedProviderScopes(txn.trust, delegation.service, txn.token.scopes);
+        if (mapped === null) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_scope_unmapped', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_scope_unmapped', message: `The transaction's scope does not map to ${delegation.service} scopes here` });
+          return;
+        }
+        scopesNow = scopesNow.filter((scope) => mapped.includes(scope));
+        if (scopesNow.length === 0) {
+          refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'txn_scope' });
+          res.status(403).json({ error: 'scope_insufficient', message: "The transaction's scope does not cover this delegation" });
+          return;
+        }
       }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
         delegationId,
@@ -5739,6 +5870,33 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (revokedInFlight !== null) {
         refuseRevokedDelegation(res, delegationId, revokedInFlight, delegation);
         return;
+      }
+      // Fresh authorization immediately before the provider call: the agent
+      // is still active, a workload still maps to it, and the Permission still
+      // covers what this call was classified under. It refuses on a change,
+      // never because approval is on (turning approval on revokes live
+      // delegations, caught just above).
+      if (delegation.agentDid) {
+        const agentNow = await vault.getAgentByDid?.(delegation.agentDid);
+        if (agentNow && agentNow.status !== 'active') {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'agent_inactive', { method: normalizedMethod });
+          res.status(403).json({ error: `agent_${agentNow.status}`, message: 'The agent is no longer active' });
+          return;
+        }
+      }
+      const workload = provenExternalAgent.get(req);
+      if (workload && externalIdentity && mappedAgentDid(externalIdentity.mappings, workload.identity) !== delegation.agentDid) {
+        refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'workload_unmapped', { method: normalizedMethod });
+        res.status(403).json({ error: 'agent_mismatch', message: 'The workload no longer maps to this agent' });
+        return;
+      }
+      if (!linkAccess) {
+        const allowedNow = await scopesAllowedNow(delegationId, delegation, restored.connection ?? undefined);
+        if (!guardResult.effectiveScopes.every((scope) => allowedNow.includes(scope))) {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_changed' });
+          res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation changed during the call. Ask for a new delegation.' });
+          return;
+        }
       }
       // A non-Link handle holds a copy of its connection's token. The
       // connection must still exist: this catches a revocation in another
@@ -6069,6 +6227,26 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const requestedScopes = normalizeRequestedScopes(scopes);
+      // A Txn-Token bounds what may be delegated in its transaction: its user
+      // must be the user named here, and every requested scope must be one
+      // its scope maps to. Refused, never silently narrowed.
+      const txnForDelegate = verifiedTxnTokens.get(req);
+      if (txnForDelegate) {
+        const { token, trust } = txnForDelegate;
+        if (token.userId === undefined) {
+          res.status(403).json({ error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' });
+          return;
+        }
+        if (token.userId !== userId) {
+          res.status(403).json({ error: 'txn_user_mismatch', message: 'The transaction is for another user than user_id' });
+          return;
+        }
+        const mapped = mappedProviderScopes(trust, service, token.scopes);
+        if (mapped === null || !requestedScopes || requestedScopes.length === 0 || !requestedScopes.every((scope) => mapped.includes(scope))) {
+          res.status(403).json({ error: 'txn_scope_exceeded', message: "The requested scopes are not within the transaction's scope" });
+          return;
+        }
+      }
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
         if (vaultEntry.status === 404 && getProviderConfig(service)) {

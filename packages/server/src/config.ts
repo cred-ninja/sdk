@@ -11,6 +11,7 @@ import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 import type { ExternalIdentitySource, ExternalIdentityMapping } from './identity/types.js';
+import type { TxnTokenTrust } from './identity/txn-token.js';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -43,6 +44,15 @@ export type AgentRequestVerifier =
 export interface ExternalIdentityConfig {
   sources: readonly ExternalIdentitySource[];
   mappings: readonly ExternalIdentityMapping[];
+  /**
+   * Transaction Tokens (draft-ietf-oauth-transaction-tokens-11), keyed by the
+   * WIMSE trust domain of the workload presenting them. Absent: a Txn-Token
+   * header is ignored (and never forwarded). Present: a Txn-Token must be
+   * bound to the request's WPT (`tth`) or HTTP signature (covered), verify
+   * against that domain's configuration, and it narrows the authority of
+   * brokered calls. A trust domain with `required` (the default) must send one.
+   */
+  txnTokens?: Readonly<Record<string, TxnTokenTrust>>;
 }
 
 export interface ServerConfig {

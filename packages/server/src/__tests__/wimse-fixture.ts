@@ -16,6 +16,7 @@ import { loadTrustBundle, type TrustAnchorKeys } from '../identity/trust-bundle.
 import { signWimseRequest } from '../identity/http-signature.js';
 import { createReplayCache, type ExternalIdentityMapping } from '../identity/types.js';
 import { newAgent, type AgentIdentity } from './token-helpers.js';
+import type { TxnTokenTrust } from '../identity/txn-token.js';
 
 export const ADMIN = `cred_admin_${crypto.randomBytes(32).toString('hex')}`;
 export const BEARER = `cred_at_${crypto.randomBytes(32).toString('hex')}`;
@@ -63,6 +64,34 @@ export function trustDomain(name: string): TrustDomain {
         cnf: { jwk: { ...key.publicKey.export({ format: 'jwk' }), alg: 'ES256' } }, ...claims,
       }, issuer.privateKey);
       return { subject, wit, key };
+    },
+  };
+}
+
+/** A Txn-Token Service for one trust domain (draft-ietf-oauth-transaction-tokens-11 §9). */
+export function txnIssuer(aud: string) {
+  const key = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const kid = `${aud}-tts`;
+  const keys = loadTrustBundle(
+    { jwks: { keys: [{ ...key.publicKey.export({ format: 'jwk' }), kid, use: 'sig' } as any] } },
+    { keyUse: 'sig' },
+  );
+  return {
+    keys,
+    mint(claims: Record<string, unknown> = {}, header: Record<string, unknown> = {}): string {
+      const now = Math.floor(Date.now() / 1000);
+      return es256Jws({ alg: 'ES256', typ: 'txntoken+jwt', kid, ...header }, {
+        iat: now - 5, exp: now + 300, aud, txn: crypto.randomUUID(), sub: 'user:default',
+        scope: 'calendar.read', req_wl: `gateway.${aud}`, ...claims,
+      }, key.privateKey);
+    },
+    trust(over: Partial<TxnTokenTrust> = {}): TxnTokenTrust {
+      return {
+        aud, keys,
+        userSubject: { claim: 'sub', pattern: '^user:([A-Za-z0-9._@-]{1,128})$' },
+        scopeMap: { google: { 'calendar.read': ['calendar.readonly'], 'calendar.write': ['calendar.events'] } },
+        ...over,
+      };
     },
   };
 }
@@ -123,6 +152,7 @@ export async function wimseServer(opts: {
   config?: Partial<ServerConfig>;
   source?: Partial<WimseSourceConfig>;
   scopes?: string[];
+  txnTokens?: Record<string, TxnTokenTrust>;
 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-wimse-'));
   dirs.push(dir);
@@ -140,7 +170,7 @@ export async function wimseServer(opts: {
     vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'sqlite', tofuPath: path.join(dir, 'tofu.sqlite'),
     adminToken: ADMIN, agentToken: BEARER, redirectBaseUri: BASE,
     providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: [] }],
-    externalIdentity: { sources: [source], mappings },
+    externalIdentity: { sources: [source], mappings, ...(opts.txnTokens ? { txnTokens: opts.txnTokens } : {}) },
     ...opts.config,
   });
   await server.vault.init();
