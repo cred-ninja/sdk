@@ -187,7 +187,7 @@ has none, and Salesforce connections must be reconnected.
   covers every scope on the connection (`403 raw_token_wider_than_grant`), and an agent revoked
   under its record id stays revoked when named by that id.
 - `@credninja/guard`: Google metadata grants cannot download Drive content through
-  `$alt` (including `%24alt`) or search Gmail messages/threads/drafts with `q`. Repeated or
+  `$alt` (including `%24alt`) or search Gmail's messages, threads or drafts with `q`. Repeated or
   ambiguous `alt`, `format` and `q` spellings fail closed for every scope; ordinary
   broad-scope downloads, full message reads and searches remain supported.
   `gmail.metadata` no longer lists or reads drafts, which Gmail gives it no method for,
