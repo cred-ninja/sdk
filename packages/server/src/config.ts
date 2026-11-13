@@ -9,6 +9,7 @@ import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
+import type { KeyObject } from 'node:crypto';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 import type { ExternalIdentitySource, ExternalIdentityMapping } from './identity/types.js';
 import type { TxnTokenTrust } from './identity/txn-token.js';
@@ -53,6 +54,20 @@ export interface ExternalIdentityConfig {
    * brokered calls. A trust domain with `required` (the default) must send one.
    */
   txnTokens?: Readonly<Record<string, TxnTokenTrust>>;
+  /**
+   * Cred's own workload identity, for signed responses
+   * (draft-ietf-wimse-http-signature-08 §3.5). When set, a verified request
+   * whose signature carries `wimse-sign-response` gets a response signed with
+   * this WIT's key. When absent, such a request gets 501
+   * `wimse-signed-response-unsupported`.
+   */
+  responseSigning?: {
+    /** Cred's WIT, or a function returning the current one (rotation). */
+    wit: string | (() => string);
+    /** The private key the WIT's cnf.jwk names. */
+    privateKey: KeyObject;
+    alg: 'ES256' | 'EdDSA';
+  };
 }
 
 export interface ServerConfig {

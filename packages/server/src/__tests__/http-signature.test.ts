@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import crypto from 'node:crypto';
 import {
   signWimseRequest,
+  signWimseResponse,
   verifyWimseRequestSignature,
   generateWorkloadKey,
   type HttpSigMessage,
@@ -160,5 +161,31 @@ describe('http-signature-08 request verifier', () => {
     // The WIT is valid, but its cnf key did not make the signature (§3.1). The
     // WIT header is covered too, so either way the signature cannot verify.
     expect(code(() => verifyWimseRequestSignature(swapped, s.cfg()))).toBe('bad_signature');
+  });
+});
+
+describe('http-signature-08 response signer', () => {
+  it('produces a §3.4 response signature that an independent RFC 9421 base check verifies', () => {
+    const key = generateWorkloadKey('ES256');
+    const body = Buffer.from('{"ok":true}');
+    const h = signWimseResponse({
+      status: 200, headers: { 'content-type': 'application/json' }, body,
+      request: { method: 'POST', path: '/api/v1/use', query: 'a=1' },
+      requestNonce: 'req-nonce-0123456789abcdef', wit: 'wit.of.cred', privateKey: key.privateKey, alg: 'ES256',
+    });
+    const params = h['signature-input'].slice(h['signature-input'].indexOf('=') + 1);
+    expect(params).toContain('wimse-req-nonce="req-nonce-0123456789abcdef"');
+    // Independent signature base: string operations only.
+    const values: Record<string, string> = {
+      '"@status"': '200', '"workload-identity-token"': 'wit.of.cred', '"content-type"': 'application/json',
+      '"content-digest"': `sha-256=:${crypto.createHash('sha256').update(body).digest('base64')}:`,
+      '"@method";req': 'POST', '"@path";req': '/api/v1/use', '"@query";req': '?a=1',
+    };
+    const items = params.slice(1, params.indexOf(')')).match(/"[^"]+"(?:;req)?/g)!;
+    expect(items).toEqual(Object.keys(values));
+    const base = `${items.map((i) => `${i}: ${values[i]}`).join('\n')}\n"@signature-params": ${params}`;
+    const sig = Buffer.from(/=:([^:]+):/.exec(h.signature)![1], 'base64');
+    expect(crypto.verify('sha256', Buffer.from(base), { key: key.publicKey, dsaEncoding: 'ieee-p1363' }, sig)).toBe(true);
+    expect(h['content-digest']).toBe(values['"content-digest"']);
   });
 });

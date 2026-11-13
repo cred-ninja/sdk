@@ -584,6 +584,7 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       attributes: {
         cnfJkt: v.wit.cnfJkt,
         covered: [...v.covered],
+        nonce: v.nonce,
         ...(v.signResponse ? { signResponse: 'true' } : {}),
       },
       proof: 'http-sig',

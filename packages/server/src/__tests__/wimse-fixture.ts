@@ -153,6 +153,7 @@ export async function wimseServer(opts: {
   source?: Partial<WimseSourceConfig>;
   scopes?: string[];
   txnTokens?: Record<string, TxnTokenTrust>;
+  responseSigning?: { wit: string; privateKey: crypto.KeyObject; alg: 'ES256' | 'EdDSA' };
 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-wimse-'));
   dirs.push(dir);
@@ -170,7 +171,11 @@ export async function wimseServer(opts: {
     vaultPath: path.join(dir, 'vault.sqlite'), tofuStorage: 'sqlite', tofuPath: path.join(dir, 'tofu.sqlite'),
     adminToken: ADMIN, agentToken: BEARER, redirectBaseUri: BASE,
     providers: [{ slug: 'google', clientId: 'id', clientSecret: 'secret', defaultScopes: [] }],
-    externalIdentity: { sources: [source], mappings, ...(opts.txnTokens ? { txnTokens: opts.txnTokens } : {}) },
+    externalIdentity: {
+      sources: [source], mappings,
+      ...(opts.txnTokens ? { txnTokens: opts.txnTokens } : {}),
+      ...(opts.responseSigning ? { responseSigning: opts.responseSigning } : {}),
+    },
     ...opts.config,
   });
   await server.vault.init();

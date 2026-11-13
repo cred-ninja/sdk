@@ -34,12 +34,13 @@ export {
   verifyWimseRequestSignature,
   verifyWimseResponseSignature,
   signWimseRequest,
+  signWimseResponse,
   selectWimseSignature,
   signatureBase,
   WIMSE_SIGNATURE_TAG,
   WIMSE_PROBLEM_TYPES,
 } from './identity/http-signature.js';
-export type { HttpSigMessage, HttpSigVerifyConfig, VerifiedHttpSignature, SignRequestInput } from './identity/http-signature.js';
+export type { HttpSigMessage, HttpSigVerifyConfig, VerifiedHttpSignature, SignRequestInput, SignResponseInput } from './identity/http-signature.js';
 export { parseDictionary, parseItem, StructuredFieldError } from './identity/structured-fields.js';
 // draft-ietf-oauth-transaction-tokens-11 at the final hop.
 export { verifyTxnToken, checkTxnTokenTrust, mappedProviderScopes, TxnTokenRefusal } from './identity/txn-token.js';

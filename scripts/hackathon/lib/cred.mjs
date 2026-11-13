@@ -40,7 +40,7 @@ async function freePort(host) {
  *   agents: [ { name, workload: "spiffe://<td>/<path>", allowedScopes: [...] } ]
  * }
  */
-export async function startCred(cfg, { stateDir, quiet = true } = {}) {
+export async function startCred(cfg, { stateDir, quiet = true, responseSigning } = {}) {
   const { server: cred, sdk } = await loadPackages();
   const host = cfg.host ?? '127.0.0.1';
   const port = cfg.port && cfg.port !== 0 ? cfg.port : await freePort(host);
@@ -104,7 +104,12 @@ export async function startCred(cfg, { stateDir, quiet = true } = {}) {
     tofuStorage: 'sqlite', tofuPath: path.join(stateDir, 'tofu.sqlite'),
     adminToken, agentToken, redirectBaseUri: baseUrl,
     providers: [{ slug: 'google', clientId: 'hackathon-demo', clientSecret: 'hackathon-demo', defaultScopes: [] }],
-    externalIdentity: { sources: [source], mappings, ...(Object.keys(txnTokens).length ? { txnTokens } : {}) },
+    externalIdentity: {
+      sources: [source], mappings,
+      ...(Object.keys(txnTokens).length ? { txnTokens } : {}),
+      // Cred's own WIT and key, to sign responses a request asks for (http-signature-08 §3.5).
+      ...(responseSigning ? { responseSigning } : {}),
+    },
   });
   await s.vault.init();
   await s.tofu.init();

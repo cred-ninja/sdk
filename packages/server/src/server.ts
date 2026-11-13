@@ -86,7 +86,7 @@ import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWith
 import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
-import { WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
+import { signWimseResponse, WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
 import { parseDictionary } from './identity/structured-fields.js';
 import { checkTxnTokenTrust, mappedProviderScopes, TxnTokenRefusal, verifyTxnToken, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
 import { validateWorkloadIdentifier } from './identity/wimse.js';
@@ -1172,6 +1172,47 @@ export function createServer(config: ServerConfig) {
     return 'refused';
   }
 
+  /**
+   * Sign this request's response with Cred's own WIT (§3.5), whatever route
+   * answers it: every Express response ends in res.end, where the full body
+   * is known. Covers @status, the WIT, Content-Type and Content-Digest, and
+   * the request's @method/@path/@query (;req), with wimse-req-nonce.
+   */
+  function armResponseSigning(req: Request, res: Response, requestNonce: string): void {
+    const signing = externalIdentity!.responseSigning!;
+    const queryAt = req.originalUrl.indexOf('?');
+    const request = {
+      method: req.method.toUpperCase(),
+      path: req.originalUrl.split('?')[0],
+      ...(queryAt === -1 ? {} : { query: req.originalUrl.slice(queryAt + 1) }),
+    };
+    const originalEnd = res.end.bind(res) as (...args: unknown[]) => Response;
+    let done = false;
+    (res as any).end = (...args: unknown[]) => {
+      if (done || res.headersSent) return originalEnd(...args);
+      done = true;
+      let [chunk, encoding] = args;
+      if (typeof chunk === 'function') chunk = undefined;
+      if (typeof encoding === 'function') encoding = undefined;
+      const body = chunk === undefined || chunk === null
+        ? undefined
+        : Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), (encoding as BufferEncoding | undefined) ?? 'utf8');
+      const contentType = res.getHeader('content-type');
+      const added = signWimseResponse({
+        status: res.statusCode,
+        headers: contentType === undefined ? {} : { 'content-type': String(contentType) },
+        ...(body ? { body } : {}),
+        request,
+        requestNonce,
+        wit: typeof signing.wit === 'function' ? signing.wit() : signing.wit,
+        privateKey: signing.privateKey,
+        alg: signing.alg,
+      });
+      for (const [name, value] of Object.entries(added)) res.setHeader(name, value);
+      return originalEnd(...args);
+    };
+  }
+
   function sendWimseSignatureInvalid(res: Response): void {
     res.status(400).type('application/problem+json').send(JSON.stringify({
       type: WIMSE_PROBLEM_TYPES.signatureInvalid,
@@ -1255,14 +1296,26 @@ export function createServer(config: ServerConfig) {
       },
     };
     if (identity.attributes.signResponse === 'true') {
-      // §3.3/§3.6: Cred does not sign responses, so a request that requires a
-      // signed response gets 501 rather than a successful unsigned answer.
-      res.status(501).type('application/problem+json').send(JSON.stringify({
-        type: WIMSE_PROBLEM_TYPES.signedResponseUnsupported,
-        title: 'Signed responses are not supported',
-        status: 501,
-      }));
-      return 'refused';
+      // §3.3/§3.5/§3.6: a request that requires a signed response gets one,
+      // or an error, never a successful unsigned answer.
+      if (!externalIdentity.responseSigning) {
+        res.status(501).type('application/problem+json').send(JSON.stringify({
+          type: WIMSE_PROBLEM_TYPES.signedResponseUnsupported,
+          title: 'Signed responses are not supported',
+          status: 501,
+        }));
+        return 'refused';
+      }
+      if (req.originalUrl.split('?')[0].replace(/\/+$/, '') === '/api/v1/audit/stream') {
+        // A stream has no end to sign over.
+        res.status(400).type('application/problem+json').send(JSON.stringify({
+          type: WIMSE_PROBLEM_TYPES.signedResponseUnavailable,
+          title: 'This response cannot be signed',
+          status: 400,
+        }));
+        return 'refused';
+      }
+      armResponseSigning(req, res, String(identity.attributes.nonce ?? ''));
     }
     (req as any).agentPrincipal = principal;
     (req as any).agentTokenHash = hashAgentPrincipal(principal);
@@ -5693,7 +5746,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
         return;
       }
-      if (delegation.agentDid && (await vault.getAgentByDid?.(delegation.agentDid))?.status === 'suspended') {
+      // Read once here; the fresh check before the provider call compares against it.
+      const agentAtAuthorization = delegation.agentDid ? await vault.getAgentByDid?.(delegation.agentDid) : null;
+      if (agentAtAuthorization?.status === 'suspended') {
         res.status(403).json({ error: 'agent_suspended', message: 'Agent is suspended' });
         return;
       }
@@ -5965,6 +6020,14 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         if (agentNow && agentNow.status !== 'active') {
           refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'agent_inactive', { method: normalizedMethod });
           res.status(403).json({ error: `agent_${agentNow.status}`, message: 'The agent is no longer active' });
+          return;
+        }
+        // An agent record that existed when this call was authorized and is
+        // gone now was deleted mid-call: refused like a revoked agent. An agent
+        // that never had a record (allowed by older configurations) is not.
+        if (!agentNow && agentAtAuthorization) {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'agent_removed', { method: normalizedMethod });
+          res.status(403).json({ error: 'agent_revoked', message: 'The agent is no longer registered' });
           return;
         }
       }

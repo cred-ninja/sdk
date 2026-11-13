@@ -49,6 +49,8 @@ const issuerC = witIssuer(TD_C, trustDir); // never configured in Cred
 
 const provider = await startMockProvider();
 const planner = issuerB.workload('/ns/agents/sa/planner');
+// Cred's own workload identity in domain B, for signed responses (http-signature-08 §3.5).
+const credSelf = issuerB.workload('/cred/final-hop');
 const stranger = issuerB.workload('/ns/agents/sa/no-delegation');
 
 const config = {
@@ -70,7 +72,10 @@ const config = {
   ],
 };
 
-const cred = await startCred(config, { stateDir: path.join(state, 'cred') });
+const cred = await startCred(config, {
+  stateDir: path.join(state, 'cred'),
+  responseSigning: { wit: credSelf.wit, privateKey: credSelf.privateKey, alg: 'ES256' },
+});
 const plannerClient = agentClient({ baseUrl: cred.baseUrl, workload: planner, agent: cred.agents.planner, sdk: cred.sdk, cred: cred.cred });
 const strangerClient = agentClient({ baseUrl: cred.baseUrl, workload: stranger, agent: cred.agents['no-delegation'], sdk: cred.sdk, cred: cred.cred });
 const txn = (claims = {}) => ttsB.mint({ txn: TXN, ...claims });
@@ -159,6 +164,24 @@ await refusal('Refused: revocation between authorization and use', async () => {
   const revoke = await fetch(`${cred.baseUrl}/api/v1/delegations/${jti}?user_id=alice`, { method: 'DELETE', headers: { authorization: `Bearer ${cred.agentToken}` } });
   const r = await plannerClient.sendUse(plannerClient.buildUse(fresh.body.access_token, { url: CALENDAR, method: 'GET' }, txn()));
   return { ok: fresh.status === 200 && revoke.status === 200 && r.status === 401, detail: `delegated ${fresh.status}, revoked ${revoke.status}, then use: HTTP ${r.status} ${r.body?.error ?? ''}` };
+});
+
+// ── Signed response: the client asks for one and verifies it ─────────────────
+await check('A request asking for a signed response gets one, signed with Cred\'s own WIT and bound to the request nonce', async () => {
+  const p = '/api/v1/connections';
+  const headers = cred.cred.signWimseRequest({
+    method: 'GET', path: p, query: 'user_id=alice', headers: { 'txn-token': txn() }, wit: planner.wit, privateKey: planner.privateKey,
+    alg: 'ES256', audience: `${cred.baseUrl}${p}`, signResponse: true,
+  });
+  const res = await fetch(`${cred.baseUrl}${p}?user_id=alice`, { headers });
+  const body = Buffer.from(await res.arrayBuffer());
+  const nonce = /nonce="([^"]+)"/.exec(headers['signature-input'])[1];
+  const verified = cred.cred.verifyWimseResponseSignature(
+    { method: 'GET', status: res.status, headers: Object.fromEntries(res.headers), body },
+    { method: 'GET', path: p, query: 'user_id=alice', headers: {} },
+    nonce, true, { trustDomains: { [TD_B]: cred.cred.loadTrustBundle({ path: issuerB.bundlePath }, { keyUse: 'wit-svid' }) } },
+  );
+  return { ok: res.status === 200 && verified?.wit.subject === credSelf.subject, detail: `HTTP ${res.status}, response signed by ${verified?.wit.subject ?? '-'}, wimse-req-nonce matches` };
 });
 
 // ── 3. What the provider saw ────────────────────────────────────────────────

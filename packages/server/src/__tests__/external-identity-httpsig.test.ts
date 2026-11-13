@@ -155,6 +155,72 @@ describe('WIT + HTTP signature on agent routes', () => {
   });
 });
 
+describe('signed responses (§3.5) when Cred has its own WIT', () => {
+  async function signingServer() {
+    const b = trustDomain('domain-b.example');
+    const w = b.workload();
+    const credWorkload = b.workload('/cred/final-hop');
+    const s = await wimseServer({
+      domains: [b], mapSubject: () => w.subject,
+      responseSigning: { wit: credWorkload.wit, privateKey: credWorkload.key.privateKey, alg: 'ES256' },
+    });
+    const { verifyWimseResponseSignature } = await import('../identity/http-signature.js');
+    const verify = (res: request.Response, reqHeaders: Record<string, string>, pathAndQuery: string, opts: { body?: string } = {}) => {
+      const [p, q] = pathAndQuery.split('?');
+      const nonce = /nonce="([^"]+)"/.exec(reqHeaders['signature-input'])![1];
+      return verifyWimseResponseSignature(
+        { method: 'GET', status: res.status, headers: res.headers as Record<string, string>, body: Buffer.from(opts.body ?? res.text) },
+        { method: 'GET', path: p, query: q, headers: {} },
+        nonce, true, { trustDomains: { [b.name]: b.anchors } },
+      );
+    };
+    return { ...s, b, w, credWorkload, verify };
+  }
+
+  it('signs the response with its own WIT, echoing the request nonce, and the client verifies it', async () => {
+    const s = await signingServer();
+    const h = httpSigHeaders(s.w, 'GET', CONN, { signResponse: true });
+    const res = await send(s.app, 'get', CONN, h);
+    expect(res.status).toBe(200);
+    expect(res.headers['workload-identity-token']).toBe(s.credWorkload.wit);
+    const v = s.verify(res, h, CONN);
+    expect(v?.wit.subject).toBe(s.credWorkload.subject);
+    expect([...v!.covered]).toEqual(expect.arrayContaining(['@status', 'workload-identity-token', 'content-type', 'content-digest', '@method;req', '@path;req', '@query;req']));
+  });
+
+  it('a response body altered in transit fails the client check', async () => {
+    const s = await signingServer();
+    const h = httpSigHeaders(s.w, 'GET', CONN, { signResponse: true });
+    const res = await send(s.app, 'get', CONN, h);
+    const { IdentityRefusal } = await import('../identity/types.js');
+    expect(() => s.verify(res, h, CONN, { body: res.text.replace('google', 'g00gle') })).toThrow(IdentityRefusal);
+  });
+
+  it('signs refusals too, so a required signed response is never an unsigned error from a route', async () => {
+    const s = await signingServer();
+    const p = '/api/v1/connections';
+    const h = httpSigHeaders(s.w, 'GET', p, { signResponse: true });
+    const res = await send(s.app, 'get', p, h);
+    expect(res.status).toBe(400);
+    expect(s.verify(res, h, p)).not.toBeNull();
+  });
+
+  it('adds no signature when the request did not ask for one', async () => {
+    const s = await signingServer();
+    const res = await send(s.app, 'get', CONN, httpSigHeaders(s.w, 'GET', CONN));
+    expect(res.status).toBe(200);
+    expect(res.headers.signature).toBeUndefined();
+  });
+
+  it('the event stream cannot be signed: 400 wimse-signed-response-unavailable', async () => {
+    const s = await signingServer();
+    const p = '/api/v1/audit/stream?user_id=default';
+    const res = await send(s.app, 'get', p, httpSigHeaders(s.w, 'GET', p, { signResponse: true }));
+    expect(res.status).toBe(400);
+    expect(res.body.type).toBe(WIMSE_PROBLEM_TYPES.signedResponseUnavailable);
+  });
+});
+
 describe('WIT + HTTP signature on /api/v1/use', () => {
   async function delegated() {
     const s = await domainB();

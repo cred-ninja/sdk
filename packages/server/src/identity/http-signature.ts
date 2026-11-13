@@ -531,6 +531,75 @@ export function signWimseRequest(input: SignRequestInput): Record<string, string
   return headers;
 }
 
+export interface SignResponseInput {
+  status: number;
+  /** Response headers already set (lower-case names). */
+  headers: Record<string, string>;
+  body?: Buffer;
+  /** The request the response answers: its method, path and query (`;req`). */
+  request: { method: string; path: string; query?: string };
+  /** The request signature's nonce, echoed as `wimse-req-nonce` (§3.4). */
+  requestNonce: string;
+  /** The responder's own WIT and the private key its cnf.jwk names. */
+  wit: string;
+  privateKey: KeyObject;
+  alg: string;
+  created?: number;
+  lifetimeSec?: number;
+  label?: string;
+}
+
+/**
+ * Sign a response per §3.4–3.5. Returns the headers to add:
+ * Workload-Identity-Token, Content-Digest when there is content,
+ * Signature-Input and Signature. Covers `@status`, the responder's WIT,
+ * Content-Type and Content-Digest when present, and `@method;req`,
+ * `@path;req` and `@query;req` (CONNECT is never signed here).
+ */
+export function signWimseResponse(input: SignResponseInput): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input.headers)) headers[k.toLowerCase()] = v;
+  headers['workload-identity-token'] = input.wit;
+  if (input.body !== undefined && input.body.length > 0) {
+    headers['content-digest'] = `sha-256=:${createHash('sha256').update(input.body).digest('base64')}:`;
+  }
+  const items: Array<{ name: string; req: boolean }> = [{ name: '@status', req: false }, { name: 'workload-identity-token', req: false }];
+  for (const h of ['content-type', 'content-digest']) if (headers[h] !== undefined) items.push({ name: h, req: false });
+  for (const n of ['@method', '@path', '@query']) items.push({ name: n, req: true });
+  const created = input.created ?? Math.floor(Date.now() / 1000);
+  const params: Parameters = new Map<string, BareItem>([
+    ['created', { type: 'integer', value: created }],
+    ['expires', { type: 'integer', value: created + (input.lifetimeSec ?? 60) }],
+    ['nonce', { type: 'string', value: randomBytes(16).toString('base64url') }],
+    ['tag', { type: 'string', value: WIMSE_SIGNATURE_TAG }],
+    ['wimse-req-nonce', { type: 'string', value: input.requestNonce }],
+  ]);
+  const inner: InnerList = {
+    kind: 'inner-list',
+    items: items.map((c) => ({
+      kind: 'item',
+      value: { type: 'string', value: c.name },
+      params: c.req ? new Map<string, BareItem>([['req', { type: 'boolean', value: true }]]) : new Map(),
+    })),
+    params,
+  };
+  const response: HttpSigMessage = { method: input.request.method, status: input.status, headers, body: input.body };
+  const request: HttpSigMessage = { method: input.request.method, path: input.request.path, query: input.request.query, headers: {} };
+  const base = signatureBase(inner, response, request);
+  const alg = sigAlg(input.alg);
+  let sig: Buffer;
+  if (alg === 'ES256') sig = cryptoSign('sha256', Buffer.from(base, 'utf8'), { key: input.privateKey, dsaEncoding: 'ieee-p1363' });
+  else if (alg === 'EdDSA') sig = cryptoSign(null, Buffer.from(base, 'utf8'), input.privateKey);
+  else throw new Error(`signWimseResponse: unsupported alg ${input.alg}`);
+  const label = input.label ?? 'wimse';
+  return {
+    'workload-identity-token': headers['workload-identity-token'],
+    ...(headers['content-digest'] ? { 'content-digest': headers['content-digest'] } : {}),
+    'signature-input': `${label}=${serializeInnerList(inner)}`,
+    signature: `${label}=:${sig.toString('base64')}:`,
+  };
+}
+
 /** A fresh workload key pair, for tests and the demo. */
 export function generateWorkloadKey(alg: 'ES256' | 'EdDSA' = 'ES256'): { privateKey: KeyObject; publicKey: KeyObject } {
   return alg === 'ES256' ? generateKeyPairSync('ec', { namedCurve: 'P-256' }) : generateKeyPairSync('ed25519');

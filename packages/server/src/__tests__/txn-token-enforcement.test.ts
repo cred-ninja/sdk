@@ -453,6 +453,25 @@ describe('never forwarded, and checked fresh before the provider call', () => {
     expect(seen).toHaveLength(0);
   });
 
+  it('an agent record that disappears between authorization and the provider call is refused at the fresh check', async () => {
+    let drop: (() => void) | undefined;
+    const probe: CredPolicy = {
+      name: 'drop-record-mid-call',
+      evaluate(ctx) {
+        if (ctx.metadata?.brokered && drop) drop();
+        return { decision: 'ALLOW', policy: 'drop-record-mid-call' };
+      },
+    };
+    const s = await setup({ config: { guard: new CredGuard({ policies: [probe] }) } });
+    const token = await delegated(s);
+    // Storage can lose a record outside Cred's API; simulate that mid-call.
+    drop = () => { (s.vault as any).getAgentByDid = async () => null; };
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint() } });
+    expect(res.status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+
   it('a Permission narrowed between authorization and the provider call is refused at the fresh check', async () => {
     let narrow: (() => Promise<unknown>) | undefined;
     const probe: CredPolicy = {

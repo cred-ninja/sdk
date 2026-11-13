@@ -61,6 +61,12 @@ JSON
   node "$root/scripts/hackathon/interop/final-hop.mjs" "bundle-$alg.json" "$td" "svid-$alg.json" | grep -v '^\[cred\]'
 done
 
+echo; echo "=== Cred signs a response; wimsey's response profile verifies it ==="
+node "$here/signed-response.mjs" "$out/signed-response" | grep -v '^\[cred\]'
+CARGO_TARGET_DIR="$out/cargo-target" cargo build --release -q --manifest-path "$here/verify-response/Cargo.toml"
+"$out/cargo-target/release/cred-wimsey-verify-response" "$out/signed-response/exchange.json"
+"$W" wit verify --issuer-jwk "$out/signed-response/cred-issuer.pub.jwk" --token "$(cat "$out/signed-response/cred-wit.txt")" > /dev/null && echo "wimsey wit verify of Cred's own WIT: OK"
+
 echo; echo "=== Cred -> wimsey (Cred's demo issuer and signer, wimsey verifies) ==="
 eval "$(node "$here/cred-signed.mjs" "$out" "127.0.0.1:$port" /api/v1/connections user_id=alice "$base/api/v1/connections")"
 "$W" httpsig verify --issuer-jwk "$out/cred-issuer.pub.jwk" --wit "$CRED_WIT" --method GET --authority "127.0.0.1:$port" --path /api/v1/connections --query user_id=alice --signature-input "$CRED_SI" --signature "$CRED_SIG" --aud "$base/api/v1/connections" && echo "wimsey httpsig verify of Cred's signature: OK"
