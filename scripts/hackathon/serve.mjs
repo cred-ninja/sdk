@@ -47,6 +47,7 @@ console.log(`Trusted WIMSE trust domains: ${Object.keys(cfg.trustDomains ?? {}).
 console.log(`Txn-Tokens: ${Object.keys(cfg.txnTokens ?? {}).length ? Object.keys(cfg.txnTokens).join(', ') : 'not configured (header ignored)'}`);
 console.log('Workload -> agent mappings:');
 for (const a of Object.values(cred.agents)) console.log(`  ${a.workload}  ->  ${a.name} (${a.did})`);
+if (Object.values(cred.agents).some((a) => a.identity)) console.log(`Generated agent keys (for DPoP on /delegate and /use): ${path.join(stateDir, 'agents')}/<name>.json (mode 0600)`);
 console.log(`\nAudience (wimse-aud / WPT aud) for an agent route: ${cred.baseUrl}/api/v1/connections`);
 console.log(`Try:  GET ${cred.baseUrl}/api/v1/connections?user_id=${cred.user}  with Workload-Identity-Token + Signature-Input/Signature (or Authorization: WPT)`);
 console.log(`Admin and agent tokens for this local server: ${tokens} (mode 0600)`);

@@ -71,6 +71,15 @@ Send to an agent route, e.g. `GET /api/v1/connections?user_id=alice`:
 
 Brokered provider calls go to `POST /api/v1/use` with `Authorization: DPoP <Delegation Token>` and a DPoP proof (Cred's delegation protocol). Your HTTP signature there must also cover `authorization`. `scripts/hackathon/lib/client.mjs` shows the whole sequence.
 
+### The agent key (needed for `/delegate` and `/use`)
+
+Every Delegation Token is bound to the agent's Ed25519 `did:key`, so `POST /api/v1/delegate` and `POST /api/v1/use` need a DPoP proof (RFC 9449, `typ dpop+jwt`, `alg EdDSA`) signed by that key, in addition to your WIT and WPT or HTTP signature. Two ways to hold it:
+
+- Bring your own: set `"did": "did:key:z6Mk..."` on the agent in your config and keep the private key yourself.
+- Let Cred generate one: it is written to `<state>/agents/<name>.json` (`did`, `privateKeyHex`, mode 0600).
+
+On `/delegate`, send `agent_did` in the body and a proof with `htm`, `htu`, `iat`, `jti`. On `/use`, the proof also carries `ath` (SHA-256 of the Delegation Token) and `cred_req`: base64url SHA-256 of the RFC 8785 canonical JSON of the request body (`{"method":"GET","url":"..."}`). The Delegation Token is `access_token` in the `/delegate` response; `delegation_id` names it for revocation.
+
 ## What each refusal looks like
 
 For WIT, WPT and HTTP-signature failures the response never says which check failed; the detail goes only to Cred's log and audit trail. Txn-Token and delegation refusals name their reason.
@@ -94,3 +103,4 @@ For WIT, WPT and HTTP-signature failures the response never says which check fai
 - The replay cache (WPT `jti`, signature `nonce`) is per process; replicas do not share it.
 - Cred does not sign responses, and its routes do not accept CONNECT.
 - The mock provider stands in for `https://www.googleapis.com` inside the demo process only.
+- Revoking a delegation (`DELETE /api/v1/delegations/:id`) also revokes that agent's access to the service: a later `/delegate` returns `403 agent_access_revoked` until an operator calls `POST /admin/permissions/:id/restore`. Restart `serve` with a fresh `--state` to reset.

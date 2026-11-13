@@ -66,12 +66,25 @@ export async function startCred(cfg, { stateDir, quiet = true } = {}) {
   }
 
   // One did:key identity per agent; a workload maps to exactly one agent.
+  // A participant who brings their own did:key sets agents[].did and keeps the
+  // private key. Otherwise Cred generates one and writes it to
+  // <state>/agents/<name>.json, since every Delegation Token is DPoP-bound to it.
   const agents = {};
   const mappings = [];
   for (const a of cfg.agents ?? []) {
-    const identity = await sdk.generateAgentIdentity();
-    agents[a.name] = { ...a, identity, did: identity.did };
-    if (a.workload) mappings.push({ kind: 'wimse', subject: a.workload, agentDid: identity.did });
+    let identity = null;
+    let did = a.did;
+    if (!did) {
+      identity = await sdk.generateAgentIdentity();
+      did = identity.did;
+      const dir = path.join(stateDir, 'agents');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(dir, `${a.name}.json`), JSON.stringify(identity.export(), null, 2), { mode: 0o600 });
+    } else if (!/^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]+$/.test(did)) {
+      throw new Error(`agents[${a.name}].did must be an Ed25519 did:key (did:key:z6Mk...)`);
+    }
+    agents[a.name] = { ...a, identity, did };
+    if (a.workload) mappings.push({ kind: 'wimse', subject: a.workload, agentDid: did });
   }
 
   const source = cred.createWimseIdentitySource({
