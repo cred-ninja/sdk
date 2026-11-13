@@ -33,7 +33,10 @@
     "release:hygiene": "node scripts/check-release-hygiene.mjs",
     "smoke:npm": "node scripts/smoke-npm-packages.mjs",
     "smoke:python": "bash scripts/smoke-python-wheels.sh",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "hackathon:demo": "node scripts/hackathon/demo.mjs",
+    "hackathon:serve": "node scripts/hackathon/serve.mjs",
+    "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs"
   },
   "devDependencies": {
     "eslint": "9.39.4",

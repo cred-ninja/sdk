@@ -1,0 +1,68 @@
+// An agent client in trust domain B: authenticates to Cred with its WIT plus
+// a WPT (draft-ietf-wimse-wpt-02) or an HTTP signature
+// (draft-ietf-wimse-http-signature-08), carrying a Txn-Token bound to that
+// proof, and uses a Delegation Token with a DPoP proof on brokered calls.
+import crypto from 'node:crypto';
+import { es256Jws, sha256b64url } from './issuers.mjs';
+
+export function agentClient({ baseUrl, workload, agent, sdk, cred }) {
+  const wpt = (pathOnly, txnToken) => {
+    const now = Math.floor(Date.now() / 1000);
+    return es256Jws({ alg: 'ES256', typ: 'wpt+jwt' }, {
+      aud: `${baseUrl}${pathOnly}`, exp: now + 60, jti: crypto.randomBytes(16).toString('base64url'),
+      wth: sha256b64url(workload.wit), ...(txnToken ? { tth: sha256b64url(txnToken) } : {}),
+    }, workload.privateKey);
+  };
+
+  async function send(method, pathAndQuery, headers, body) {
+    const res = await fetch(`${baseUrl}${pathAndQuery}`, { method, headers, body });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* not JSON */ }
+    return { status: res.status, body: json ?? text, headers: Object.fromEntries(res.headers) };
+  }
+
+  return {
+    /** WIT + WPT (+ bound Txn-Token) on POST /api/v1/delegate: returns the Delegation Token response. */
+    async delegateWithWpt(body, txnToken) {
+      const p = '/api/v1/delegate';
+      const json = JSON.stringify({ token_format: 'handle', agent_did: agent.did, service: 'google', ...body });
+      return send('POST', p, {
+        'content-type': 'application/json',
+        'workload-identity-token': workload.wit,
+        authorization: `WPT ${wpt(p, txnToken)}`,
+        ...(txnToken ? { 'txn-token': txnToken } : {}),
+        dpop: sdk.createDpopProof(agent.identity, 'POST', `${baseUrl}${p}`),
+      }, json);
+    },
+
+    /**
+     * Build a brokered call: Delegation Token + DPoP, WIT, bound Txn-Token,
+     * HTTP signature over all of it (Authorization and Txn-Token covered).
+     * Returns { headers, body } so a case can tamper before sending.
+     */
+    buildUse(token, call, txnToken, opts = {}) {
+      const p = '/api/v1/use';
+      const json = JSON.stringify(call);
+      const headers = {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `DPoP ${token}`, dpop: sdk.createDpopProof(agent.identity, 'POST', `${baseUrl}${p}`, token, call) } : {}),
+        ...(txnToken ? { 'txn-token': txnToken } : {}),
+      };
+      const signed = cred.signWimseRequest({
+        method: 'POST', path: p, headers, body: Buffer.from(json), wit: workload.wit,
+        privateKey: workload.privateKey, alg: 'ES256', audience: opts.audience ?? `${baseUrl}${p}`,
+      });
+      return { headers: signed, body: json };
+    },
+
+    sendUse(built) {
+      return send('POST', '/api/v1/use', built.headers, built.body);
+    },
+
+    /** A WIT alone, with no proof of possession, on an agent route. */
+    witOnly(pathAndQuery) {
+      return send('GET', pathAndQuery, { 'workload-identity-token': workload.wit });
+    },
+  };
+}
