@@ -29,6 +29,18 @@ export type { TrustAnchorKeys, TrustAnchorKey } from './identity/trust-bundle.js
 export { startTailscaleListener, checkListenerSocket, checkLocalApiSocket, DEFAULT_LOCALAPI_SOCKET } from './identity/tailscale.js';
 export type { TailscaleSourceConfig, TailscaleListener, SocketCheck } from './identity/tailscale.js';
 export { IdentityRefusal, createReplayCache, mappedAgentDid } from './identity/types.js';
+// draft-ietf-wimse-http-signature-08 (RFC 9421 profile) and RFC 8941 parsing.
+export {
+  verifyWimseRequestSignature,
+  verifyWimseResponseSignature,
+  signWimseRequest,
+  selectWimseSignature,
+  signatureBase,
+  WIMSE_SIGNATURE_TAG,
+  WIMSE_PROBLEM_TYPES,
+} from './identity/http-signature.js';
+export type { HttpSigMessage, HttpSigVerifyConfig, VerifiedHttpSignature, SignRequestInput } from './identity/http-signature.js';
+export { parseDictionary, parseItem, StructuredFieldError } from './identity/structured-fields.js';
 export type {
   ExternalIdentityKind,
   ExternalIdentitySource,

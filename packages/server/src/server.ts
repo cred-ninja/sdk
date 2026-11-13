@@ -85,6 +85,8 @@ import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWith
 import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
+import { WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
+import { parseDictionary } from './identity/structured-fields.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -376,8 +378,15 @@ export function createServer(config: ServerConfig) {
   // sent, before any middleware adds members to req.body (Web Bot Auth adds
   // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
   const useRequestHashes = new WeakMap<object, string | null>();
+  // The exact bytes of a request that carries a Workload Identity Token, for
+  // Content-Digest (draft-ietf-wimse-http-signature-08 §3). Only kept when
+  // external identity is configured.
+  const workloadRequestBodies = new WeakMap<object, Buffer>();
+  const capturesWorkloadBody = (req: { headers: Record<string, unknown> }) =>
+    Boolean(config.externalIdentity) && req.headers['workload-identity-token'] !== undefined;
   app.use(express.json({
     verify(req, _res, buffer) {
+      if (capturesWorkloadBody(req)) workloadRequestBodies.set(req, Buffer.from(buffer));
       if (req.method === 'POST' && /^\/api\/v1\/use\/?(?:\?|$)/i.test(req.url ?? '')) {
         let hash: string | null = null;
         try {
@@ -401,6 +410,15 @@ export function createServer(config: ServerConfig) {
       } catch {
         invalidConstraintJson.add(req);
       }
+    },
+  }));
+  // Any other content type on a WIT-bearing request: keep its bytes too, so
+  // its Content-Digest can be checked. Routes read JSON only, so nothing else
+  // consumes these bodies.
+  app.use(express.raw({
+    type: (req) => capturesWorkloadBody(req as any) && !workloadRequestBodies.has(req),
+    verify(req, _res, buffer) {
+      workloadRequestBodies.set(req, Buffer.from(buffer));
     },
   }));
   app.use(express.urlencoded({ extended: false }));
@@ -991,6 +1009,7 @@ export function createServer(config: ServerConfig) {
     code: string,
     detail: string,
     subject?: string,
+    proof?: VerifiedExternalIdentity['proof'],
   ): 'refused' {
     // The response never says which check failed; the detail is for the
     // operator's log and audit trail only.
@@ -1003,8 +1022,14 @@ export function createServer(config: ServerConfig) {
       resource: { type: 'agent', id: subject ?? 'unknown' },
       outcome: 'denied',
       correlationId: crypto.randomUUID(),
-      metadata: { identitySource: kind, reason: code, route: req.originalUrl.split('?')[0] },
+      metadata: { identitySource: kind, reason: code, route: req.originalUrl.split('?')[0], ...(proof ? { proof } : {}) },
     });
+    if (proof === 'http-sig') {
+      // draft-ietf-wimse-http-signature-08 §3.6: 400 with one problem type,
+      // whatever failed (the WIT, the signature, or the identity after them).
+      sendWimseSignatureInvalid(res);
+      return 'refused';
+    }
     if (code === 'agent_mismatch') {
       res.status(403).json({ error: 'agent_mismatch', message: 'agent_did does not name the agent this identity maps to' });
       return 'refused';
@@ -1012,6 +1037,14 @@ export function createServer(config: ServerConfig) {
     if (kind === 'wimse') res.setHeader('WWW-Authenticate', 'WPT');
     res.status(401).json({ error: kind === 'wimse' ? 'invalid_workload_identity' : 'invalid_tailnet_identity' });
     return 'refused';
+  }
+
+  function sendWimseSignatureInvalid(res: Response): void {
+    res.status(400).type('application/problem+json').send(JSON.stringify({
+      type: WIMSE_PROBLEM_TYPES.signatureInvalid,
+      title: 'Workload authentication failed',
+      status: 400,
+    }));
   }
 
   /**
@@ -1022,12 +1055,18 @@ export function createServer(config: ServerConfig) {
   async function authenticateExternalIdentity(req: Request, res: Response): Promise<boolean | 'refused'> {
     if (!externalIdentity || externalIdentity.sources.length === 0) return false;
     const targetUri = `${publicBaseUri()}${req.originalUrl.split('?')[0]}`;
+    const queryAt = req.originalUrl.indexOf('?');
+    const contentLength = Number(req.headers['content-length'] ?? 0);
     const request: IdentityRequest = {
       method: req.method.toUpperCase(),
       targetUri,
       headers: req.headers,
       rawHeaders: req.rawHeaders,
       socket: req.socket,
+      path: req.originalUrl.split('?')[0],
+      ...(queryAt === -1 ? {} : { query: req.originalUrl.slice(queryAt + 1) }),
+      hasBody: contentLength > 0 || req.headers['transfer-encoding'] !== undefined,
+      body: workloadRequestBodies.get(req),
     };
     const found: VerifiedExternalIdentity[] = [];
     for (const source of externalIdentity.sources) {
@@ -1035,27 +1074,27 @@ export function createServer(config: ServerConfig) {
         const identity = await source.authenticate(request);
         if (identity) found.push(identity);
       } catch (err) {
-        if (err instanceof IdentityRefusal) return refuseExternalIdentity(req, res, err.kind, err.code, err.detail);
+        if (err instanceof IdentityRefusal) return refuseExternalIdentity(req, res, err.kind, err.code, err.detail, undefined, err.proof);
         return refuseExternalIdentity(req, res, source.kind, 'source_error', err instanceof Error ? err.message : String(err));
       }
     }
     if (found.length === 0) return false;
     if (found.length > 1) {
-      return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','));
+      return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','), undefined, found.some((i) => i.proof === 'http-sig') ? 'http-sig' : undefined);
     }
     const identity = found[0];
     // Sources apply their own clock skew to exp; this backstop allows the same 60s.
     if (identity.expiresAt + 60 <= Math.floor(Date.now() / 1000)) {
-      return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject, identity.proof);
     }
     const agentDid = mappedAgentDid(externalIdentity.mappings, identity);
-    if (!agentDid) return refuseExternalIdentity(req, res, identity.kind, 'unmapped', 'no mapping for subject', identity.subject);
+    if (!agentDid) return refuseExternalIdentity(req, res, identity.kind, 'unmapped', 'no mapping for subject', identity.subject, identity.proof);
     // The mapped agent must already exist and be active. Nothing is created
     // from an identity Cred has not been told about.
     const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
-    if (!record) return refuseExternalIdentity(req, res, identity.kind, 'agent_not_found', agentDid, identity.subject);
+    if (!record) return refuseExternalIdentity(req, res, identity.kind, 'agent_not_found', agentDid, identity.subject, identity.proof);
     if (record.status !== 'active') {
-      return refuseExternalIdentity(req, res, identity.kind, `agent_${record.status}`, agentDid, identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, `agent_${record.status}`, agentDid, identity.subject, identity.proof);
     }
     if (identity.proof === 'channel') {
       // A channel identity (Tailscale) proves the node, not the agent on it:
@@ -1064,11 +1103,11 @@ export function createServer(config: ServerConfig) {
       const checked = proof === 'multiple'
         ? { ok: false as const, message: 'multiple DPoP headers' }
         : verifyDpopProof(proof, { agentDid, htm: request.method, htu: targetUri, seenJti: externalDpopJtiSeen });
-      if (!checked.ok) return refuseExternalIdentity(req, res, identity.kind, 'dpop_required', checked.message, identity.subject);
+      if (!checked.ok) return refuseExternalIdentity(req, res, identity.kind, 'dpop_required', checked.message, identity.subject, identity.proof);
     }
     const named = req.body?.agent_did;
     if (typeof named === 'string' && named !== agentDid && named !== record.id) {
-      return refuseExternalIdentity(req, res, identity.kind, 'agent_mismatch', `${named} != ${agentDid}`, identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, 'agent_mismatch', `${named} != ${agentDid}`, identity.subject, identity.proof);
     }
     const principal: RequestAgentPrincipal = {
       type: identity.kind,
@@ -1082,10 +1121,51 @@ export function createServer(config: ServerConfig) {
         },
       },
     };
+    if (identity.attributes.signResponse === 'true') {
+      // §3.3/§3.6: Cred does not sign responses, so a request that requires a
+      // signed response gets 501 rather than a successful unsigned answer.
+      res.status(501).type('application/problem+json').send(JSON.stringify({
+        type: WIMSE_PROBLEM_TYPES.signedResponseUnsupported,
+        title: 'Signed responses are not supported',
+        status: 501,
+      }));
+      return 'refused';
+    }
     (req as any).agentPrincipal = principal;
     (req as any).agentTokenHash = hashAgentPrincipal(principal);
     provenExternalAgent.set(req, { agentDid, identity });
     return true;
+  }
+
+  /**
+   * A WIT with an HTTP signature on /api/v1/use. The signature must cover
+   * Authorization (so the Delegation Token cannot be swapped), and the
+   * workload must map to the agent the Delegation Token was issued to.
+   */
+  async function authenticateUseWorkload(req: Request, res: Response, tokenAgentDid: string): Promise<'ok' | 'refused'> {
+    // Guard and audit keep keying on the Delegation Token's binding.
+    const keepHash = (req as any).agentTokenHash;
+    const keepPrincipal = (req as any).agentPrincipal;
+    const result = await authenticateExternalIdentity(req, res);
+    if (result === 'refused') return 'refused';
+    const proven = provenExternalAgent.get(req);
+    (req as any).agentTokenHash = keepHash;
+    (req as any).agentPrincipal = keepPrincipal;
+    if (!result || !proven || proven.identity.kind !== 'wimse') {
+      return refuseExternalIdentity(req, res, 'wimse', 'proof_required', 'no workload identity verified on /use', undefined, 'http-sig');
+    }
+    const { identity, agentDid } = proven;
+    if (identity.proof !== 'http-sig') {
+      return refuseExternalIdentity(req, res, 'wimse', 'proof_required', '/use needs an HTTP signature', identity.subject, 'http-sig');
+    }
+    const covered = identity.attributes.covered;
+    if (!Array.isArray(covered) || !covered.includes('authorization')) {
+      return refuseExternalIdentity(req, res, 'wimse', 'authorization_not_covered', 'signature does not cover Authorization', identity.subject, 'http-sig');
+    }
+    if (agentDid !== tokenAgentDid) {
+      return refuseExternalIdentity(req, res, 'wimse', 'agent_mismatch', 'workload maps to another agent than the Delegation Token', identity.subject, 'http-sig');
+    }
+    return 'ok';
   }
 
   /**
@@ -1142,9 +1222,39 @@ export function createServer(config: ServerConfig) {
    * mode-specific behavior (e.g. `require` mode's 401-when-absent) don't need to
    * re-derive header presence themselves.
    */
+  /**
+   * Whether Signature-Input carries a WIMSE-tagged member. Throws when it
+   * carries one alongside any other member: such a request is ambiguous
+   * between Web Bot Auth and WIMSE, and is refused rather than guessed at.
+   */
+  function carriesWimseSignature(req: Request): boolean {
+    const input = req.get('Signature-Input');
+    if (!input) return false;
+    let dict;
+    try {
+      dict = parseDictionary(input);
+    } catch {
+      return false; // Not parseable: Web Bot Auth verification refuses it.
+    }
+    let wimse = 0;
+    for (const member of dict.values()) {
+      const tag = member.params.get('tag');
+      if (tag?.type === 'string' && tag.value === WIMSE_SIGNATURE_TAG) wimse++;
+    }
+    if (wimse === 0) return false;
+    if (dict.size > wimse) throw new Error('a WIMSE signature cannot be combined with another message signature here');
+    return true;
+  }
+
   async function attemptWebBotAuthIdentity(req: Request): Promise<boolean> {
     const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
     if (!hasHeaders) {
+      return false;
+    }
+    if (externalIdentity && carriesWimseSignature(req)) {
+      // A WIMSE workload signature is verified by the external identity
+      // source, never as Web Bot Auth, and never satisfies Web Bot Auth
+      // identity. A request mixing it with another signature is refused here.
       return false;
     }
 
@@ -5270,6 +5380,11 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         if (bodyDelegationId !== undefined && bodyDelegationId !== delegationId) {
           res.status(400).json({ error: 'invalid_request', message: 'delegation_id does not match the Delegation Token' });
           return;
+        }
+        // Workload identity on a brokered call (draft-ietf-wimse-http-signature-08):
+        // checked in addition to the Delegation Token and its DPoP proof.
+        if (externalIdentity && req.headers['workload-identity-token'] !== undefined) {
+          if (await authenticateUseWorkload(req, res, verified.claims.client_id) === 'refused') return;
         }
       } else {
         // Every delegation, Cred Link's included, is exercised with its

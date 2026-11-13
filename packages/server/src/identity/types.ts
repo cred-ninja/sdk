@@ -26,6 +26,16 @@ export interface IdentityRequest {
   rawHeaders?: readonly string[];
   /** The connection's socket, so a source can tell which listener accepted it. */
   socket: unknown;
+  /** The request's path as received (`@path`), e.g. `/api/v1/use`. */
+  path?: string;
+  /** The query without its leading `?`, or undefined when the target has none. */
+  query?: string;
+  /**
+   * The exact bytes received, for Content-Digest. Undefined when the server
+   * did not capture them; `hasBody` says whether the request carried a body.
+   */
+  body?: Buffer;
+  hasBody?: boolean;
 }
 
 /** An identity a source has verified for this one request. */
@@ -56,13 +66,19 @@ export class IdentityRefusal extends Error {
   readonly code: string;
   readonly detail: string;
   readonly kind: ExternalIdentityKind;
+  /**
+   * The proof profile the refused request used, when known. HTTP-signature
+   * refusals answer differently (draft-ietf-wimse-http-signature-08 §3.6).
+   */
+  readonly proof?: VerifiedExternalIdentity['proof'];
 
-  constructor(kind: ExternalIdentityKind, code: string, detail: string) {
+  constructor(kind: ExternalIdentityKind, code: string, detail: string, proof?: VerifiedExternalIdentity['proof']) {
     super(`${kind}: ${code}`);
     this.name = 'IdentityRefusal';
     this.kind = kind;
     this.code = code;
     this.detail = detail;
+    if (proof) this.proof = proof;
   }
 }
 

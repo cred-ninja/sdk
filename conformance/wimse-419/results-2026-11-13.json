@@ -1,0 +1,202 @@
+{
+  "source": "https://github.com/ietf-wg-wimse/draft-ietf-wimse-s2s-protocol/issues/419",
+  "draft": "draft-ietf-wimse-http-signature-08",
+  "corrections": [
+    "P-01, P-02, P-06 (sig2), N-15: @query value with leading \"?\", signatures from the 2026-11-07T04:36:50Z comment",
+    "P-04: @authority without :443, signature from the 2026-11-13T04:09:52Z comment"
+  ],
+  "verifier": "packages/server/src/identity/http-signature.ts",
+  "summary": "28/28 passed",
+  "vectors": [
+    {
+      "id": "N-01",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "coverage"
+    },
+    {
+      "id": "N-02",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "coverage"
+    },
+    {
+      "id": "N-03",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "content_digest_missing"
+    },
+    {
+      "id": "N-04",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "content_digest_mismatch"
+    },
+    {
+      "id": "N-05",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "missing_parameter"
+    },
+    {
+      "id": "N-06",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "forbidden_parameter"
+    },
+    {
+      "id": "N-07",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "forbidden_parameter"
+    },
+    {
+      "id": "N-08",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "duplicate_wimse_tag"
+    },
+    {
+      "id": "N-09",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "expired_signature"
+    },
+    {
+      "id": "N-10",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "audience"
+    },
+    {
+      "id": "N-11",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "missing_parameter"
+    },
+    {
+      "id": "N-12",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "missing_parameter"
+    },
+    {
+      "id": "N-13",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "req_nonce_mismatch"
+    },
+    {
+      "id": "N-14",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "unsigned_response"
+    },
+    {
+      "id": "N-15",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "bad_signature"
+    },
+    {
+      "id": "N-16",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "sender conformant: 2000 unique nonces, 128 bits each"
+    },
+    {
+      "id": "N-17",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "WIT failure 400, signature failure 400, bodies identical"
+    },
+    {
+      "id": "N-18",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "wimse-sign-response gave 501 https://iana.org/assignments/http-problem-types#wimse-signed-response-unsupported"
+    },
+    {
+      "id": "N-19",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "with mandate 501; preference only 200, unsigned (no weaker signature produced)"
+    },
+    {
+      "id": "N-20",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "expired WIT with valid signature: 400, provider calls 0"
+    },
+    {
+      "id": "N-21",
+      "expected": "reject",
+      "outcome": "reject",
+      "pass": true,
+      "detail": "coverage"
+    },
+    {
+      "id": "N-22",
+      "expected": "conformant",
+      "outcome": "conformant",
+      "pass": true,
+      "detail": "label-based selection is not used"
+    },
+    {
+      "id": "P-01",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    },
+    {
+      "id": "P-02",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    },
+    {
+      "id": "P-03",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    },
+    {
+      "id": "P-04",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    },
+    {
+      "id": "P-05",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    },
+    {
+      "id": "P-06",
+      "expected": "accept",
+      "outcome": "accept",
+      "pass": true
+    }
+  ]
+}

@@ -26,6 +26,7 @@ import {
   type VerifiedExternalIdentity,
 } from './types.js';
 import type { TrustAnchorKeys } from './trust-bundle.js';
+import { selectWimseSignature, verifyWimseRequestSignature } from './http-signature.js';
 
 export interface WimseSourceConfig {
   /** Allowlist: exactly these trust domains, each with its own anchors (workload-creds-03 §3). */
@@ -39,6 +40,16 @@ export interface WimseSourceConfig {
   clockSkewSec?: number;
   /** Current time in seconds since the epoch; for tests. */
   now?: () => number;
+  /**
+   * HTTP-signature proof (draft-ietf-wimse-http-signature-08). `wimse-aud` is
+   * accepted when it string-equals the request's target URI (the configured
+   * public base plus path, as for the WPT `aud`) or one of `audiences`.
+   */
+  httpSignature?: {
+    audiences?: readonly string[];
+    maxSignatureLifetimeSec?: number;
+    minNonceLength?: number;
+  };
 }
 
 /** The configuration the pure verifiers need (no replay cache). */
@@ -92,7 +103,7 @@ const TOKEN68 = /^[A-Za-z0-9\-._~+/]+=*$/;
 const EMBEDDED_KEY_HEADERS = ['jwk', 'jku', 'x5u', 'x5c'] as const;
 const PRIVATE_JWK_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k'] as const;
 
-type SigAlg = 'ES256' | 'ES384' | 'RS256' | 'PS256' | 'EdDSA';
+export type SigAlg = 'ES256' | 'ES384' | 'RS256' | 'PS256' | 'EdDSA';
 
 interface ResolvedConfig {
   trustDomains: Map<string, TrustAnchorKeys>;
@@ -165,7 +176,7 @@ function typIs(typ: unknown, expected: string): boolean {
 }
 
 /** Maps a JWS alg to the one this module verifies; "Ed25519" (RFC 9864) and "EdDSA" are one algorithm here. */
-function sigAlg(alg: unknown): SigAlg | undefined {
+export function sigAlg(alg: unknown): SigAlg | undefined {
   switch (alg) {
     case 'ES256':
     case 'ES384':
@@ -181,7 +192,7 @@ function sigAlg(alg: unknown): SigAlg | undefined {
 }
 
 /** Whether `key` is of the type and curve `alg` requires. */
-function keyFitsAlg(key: KeyObject, alg: SigAlg): boolean {
+export function keyFitsAlg(key: KeyObject, alg: SigAlg): boolean {
   const type = key.asymmetricKeyType;
   const curve = key.asymmetricKeyDetails?.namedCurve;
   switch (alg) {
@@ -198,7 +209,7 @@ function keyFitsAlg(key: KeyObject, alg: SigAlg): boolean {
   }
 }
 
-function verifySignature(alg: SigAlg, key: KeyObject, input: Buffer, sig: Buffer): boolean {
+export function verifySignature(alg: SigAlg, key: KeyObject, input: Buffer, sig: Buffer): boolean {
   try {
     switch (alg) {
       case 'ES256':
@@ -489,17 +500,27 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
         refuse('multiple_wit', 'workload-identity-token occurs more than once');
       }
 
+      const auth = req.headers['authorization'];
+      // Node keeps only the first Authorization field; count the raw ones
+      // (wpt-02 §2.2: a sender MUST NOT generate more than one). On the
+      // HTTP-signature path a second field would escape signature coverage.
+      let authFields = 0;
+      if (req.rawHeaders) {
+        for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'authorization') authFields++;
+      }
+      const wptScheme = typeof auth === 'string' && /^wpt +/i.test(auth.trim());
+      // Throws (proof 'http-sig') on a malformed or duplicated WIMSE signature.
+      const tagged = selectWimseSignature(req.headers) !== null;
+      if (wptScheme && tagged) refuse('proof_ambiguous', 'both a WPT and a WIMSE HTTP signature');
+      if (tagged) {
+        if (authFields > 1) throw new IdentityRefusal('wimse', 'multiple_authorization', 'more than one authorization header', 'http-sig');
+        return authenticateHttpSig(req, rawWit as string);
+      }
+
       // wpt-02 §2.2: exactly one Authorization field using the WPT scheme;
       // a WIT alone, or with a Bearer token, is not accepted.
-      const auth = req.headers['authorization'];
       if (Array.isArray(auth)) refuse('proof_required', 'more than one authorization header');
-      // Node keeps only the first Authorization field; count the raw ones
-      // (wpt-02 §2.2: a sender MUST NOT generate more than one).
-      if (req.rawHeaders) {
-        let fields = 0;
-        for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'authorization') fields++;
-        if (fields > 1) refuse('proof_required', 'more than one authorization header');
-      }
+      if (authFields > 1) refuse('proof_required', 'more than one authorization header');
       if (typeof auth !== 'string') refuse('proof_required', 'no authorization header with the WPT scheme');
       const m = /^([A-Za-z0-9!#$%&'*+.^_`|~-]+) +(\S+)$/.exec((auth as string).trim());
       if (!m || m[1].toLowerCase() !== 'wpt') refuse('proof_required', 'authorization scheme is not WPT');
@@ -527,4 +548,46 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       };
     },
   };
+
+  function authenticateHttpSig(req: IdentityRequest, rawWit: string): VerifiedExternalIdentity {
+    const fail = (code: string, detail: string): never => {
+      throw new IdentityRefusal('wimse', code, detail, 'http-sig');
+    };
+    // The digest is computed over the bytes as sent; a decoded body is not them.
+    const encoding = req.headers['content-encoding'];
+    if (encoding !== undefined && String(encoding).trim().toLowerCase() !== 'identity') fail('content_encoding', 'content-encoding is not supported with HTTP signatures');
+    if (req.hasBody && req.body === undefined) fail('body_not_captured', 'request body was not available for Content-Digest');
+    if (rawWit.includes(',')) fail('multiple_wit', 'workload-identity-token occurs more than once');
+    const hs = config.httpSignature ?? {};
+    const verified = verifyWimseRequestSignature(
+      {
+        method: req.method,
+        path: req.path ?? new URL(req.targetUri).pathname,
+        query: req.query,
+        headers: req.headers,
+        body: req.hasBody ? req.body : undefined,
+      },
+      {
+        ...verifyCfg,
+        audiences: [req.targetUri, ...(hs.audiences ?? [])],
+        replay: config.replay,
+        maxSignatureLifetimeSec: hs.maxSignatureLifetimeSec,
+        minNonceLength: hs.minNonceLength,
+      },
+    );
+    if (!verified) fail('proof_required', 'no WIMSE signature');
+    const v = verified!;
+    return {
+      kind: 'wimse',
+      subject: v.wit.subject,
+      trustDomain: v.wit.trustDomain,
+      attributes: {
+        cnfJkt: v.wit.cnfJkt,
+        covered: [...v.covered],
+        ...(v.signResponse ? { signResponse: 'true' } : {}),
+      },
+      proof: 'http-sig',
+      expiresAt: Math.min(v.wit.exp, v.expires),
+    };
+  }
 }
