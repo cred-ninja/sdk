@@ -138,6 +138,8 @@ describe('Tailscale node identity through the server', () => {
     const t = await tailnet(0o700);
     expect(t.listener.enabled).toBe(true);
     expect(await viaSocket(t.listenerSocketPath, { 'X-Forwarded-For': '100.64.0.7', DPoP: t.dpop() })).toBe(200);
+    // The same peer without the agent's DPoP proof is the node, not the agent.
+    expect(await viaSocket(t.listenerSocketPath, { 'X-Forwarded-For': '100.64.0.7' })).toBe(401);
   });
 
   it('forged X-Forwarded-For through a socket that fails the ownership and mode check is refused', async () => {

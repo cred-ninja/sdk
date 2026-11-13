@@ -157,9 +157,11 @@ describe('external identity replaces the agent token', () => {
     expect(res.body).toEqual({ error: 'invalid_workload_identity' });
   });
 
-  it('refuses an identity that has expired', async () => {
-    const { app } = await setup({ sources: () => [fakeSource('wimse', () => identity({ expiresAt: Math.floor(Date.now() / 1000) - 1 }))] });
-    expect((await connections(app, { 'X-Fake-Id': '1' })).status).toBe(401);
+  it('refuses an identity expired beyond the 60s skew the sources allow; accepts one inside it', async () => {
+    const stale = await setup({ sources: () => [fakeSource('wimse', () => identity({ expiresAt: Math.floor(Date.now() / 1000) - 61 }))] });
+    expect((await connections(stale.app, { 'X-Fake-Id': '1' })).status).toBe(401);
+    const skewed = await setup({ sources: () => [fakeSource('wimse', () => identity({ expiresAt: Math.floor(Date.now() / 1000) - 30 }))] });
+    expect((await connections(skewed.app, { 'X-Fake-Id': '1' })).status).toBe(200);
   });
 
   it('refuses a request two sources both claim', async () => {
@@ -197,6 +199,20 @@ describe('a channel identity (Tailscale) also needs the agent key', () => {
     expect(bare.status).toBe(401);
     expect(bare.body).toEqual({ error: 'invalid_tailnet_identity' });
   });
+
+  it('refuses a verified node that no mapping names', async () => {
+    const { app, agent } = await setup({ sources: tailscale, subject: 'tailscale:node:nOTHER' });
+    const res = await connections(app, { 'X-Fake-Id': '1', DPoP: createDpopProof(agent, 'GET', `${BASE}/api/v1/connections`) });
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'invalid_tailnet_identity' });
+  });
+
+  for (const status of ['suspended', 'revoked'] as const) {
+    it(`refuses a mapped node whose agent is ${status}`, async () => {
+      const { app, agent } = await setup({ sources: tailscale, subject: 'tailscale:node:nXYZ', status });
+      expect((await connections(app, { 'X-Fake-Id': '1', DPoP: createDpopProof(agent, 'GET', `${BASE}/api/v1/connections`) })).status).toBe(401);
+    });
+  }
 
   it('refuses a proof by a second agent on the same node', async () => {
     const { app } = await setup({ sources: tailscale, subject: 'tailscale:node:nXYZ' });

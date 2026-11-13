@@ -1044,7 +1044,8 @@ export function createServer(config: ServerConfig) {
       return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','));
     }
     const identity = found[0];
-    if (identity.expiresAt <= Math.floor(Date.now() / 1000)) {
+    // Sources apply their own clock skew to exp; this backstop allows the same 60s.
+    if (identity.expiresAt + 60 <= Math.floor(Date.now() / 1000)) {
       return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject);
     }
     const agentDid = mappedAgentDid(externalIdentity.mappings, identity);

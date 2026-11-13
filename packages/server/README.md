@@ -1083,7 +1083,7 @@ const { app, vault } = createServer({
 - Trust anchors are configured per trust domain only (a JWKS or a SPIFFE trust bundle, filtered by the key `use` you name, for example `wit-svid`). Keys are never taken from a token. A trust domain not configured is refused.
 - The WPT `aud` must equal the broker's configured base URI plus the request path, without the query; it is never derived from `Host`.
 - `wth` binds the WPT to the WIT. If a `Txn-Token` header is present, `tth` must match it. Unknown `oth` entries are refused.
-- Replay: each WPT `jti` is accepted once until it expires (at most 300 seconds). The cache is per process, like the DPoP and actor-token caches: replicas behind a load balancer do not share it.
+- Replay: each WPT `jti` is accepted once; it is held until the WPT expires plus 60 seconds of clock skew (a WPT may expire at most 300 seconds ahead, plus skew). The cache is per process, like the DPoP and actor-token caches: replicas behind a load balancer do not share it.
 - Supported workload keys: ES256 and Ed25519. HTTP message signatures (draft-ietf-wimse-http-signature) and Transaction Tokens are not implemented in this release.
 
 **Tailscale.** `startTailscaleListener(app, config)` listens on a unix socket that `tailscale serve` forwards to, and Cred asks the local tailscaled (LocalAPI WhoIs) who the peer is. The identity is the node's `StableID` (`tailscale:node:<StableID>`); `requireTags` limits which tagged nodes are accepted.
@@ -1091,9 +1091,10 @@ const { app, vault } = createServer({
 - At startup the listener socket and its directory must be owned by Cred's user or the tailscaled user, not be symlinks, and not be writable by other users (group-writable only for a configured `allowedGid`); tailscaled's socket and directory must be owned by `localApiOwnerUid` (root by default). If any check fails the source is disabled and every request on that listener is refused.
 - Expired, shared-in and WireGuard-only nodes, nodes outside the configured tailnet and Funnel requests are refused.
 - A node is not an agent: every Tailscale-authenticated request must also carry a DPoP proof by the mapped agent's did:key, so two agents on one node are told apart by their keys.
+- `POST /api/v1/use` with a Delegation Token is authenticated by the token and its DPoP proof on any listener, as today; the Tailscale source is not consulted there.
 - Limits: Linux only (the macOS LocalAPI is not supported). The checks run at startup only. The root of trust is the tailnet's control plane and the admins who assign tags. The tests use a fake LocalAPI; no run on a live tailnet is recorded.
 
-Refusals return one response per source (`401 invalid_workload_identity` with `WWW-Authenticate: WPT`, or `401 invalid_tailnet_identity`) and never say which check failed; the reason goes to the server log and a `deny` audit event. A request carrying a source's credential that fails is refused; it never falls back to the agent token.
+Credential refusals return one response per source (`401 invalid_workload_identity` with `WWW-Authenticate: WPT`, or `401 invalid_tailnet_identity`) and never say which credential check failed (the separate `403 agent_mismatch` is about the request body, not the credential); the reason goes to the server log and a `deny` audit event. A request carrying a source's credential that fails is refused; it never falls back to the agent token.
 
 In the SDK, set `authenticateRequest` instead of `agentToken` to send these headers on every request.
 
