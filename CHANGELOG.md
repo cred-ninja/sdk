@@ -43,8 +43,9 @@
 - `@credninja/server`: audit events of a WIMSE-authenticated request carry
   `metadata.workload`, and, once a Txn-Token verifies, `metadata.txn`.
 - `@credninja/server`: a fresh check just before each brokered provider call,
-  for every caller: the agent is still active and the Permission still covers the
-  scopes the call was classified under.
+  for every caller: an agent with a vault record must still be active, and for
+  delegations other than Cred Link ones the Permission must still cover the
+  scopes the call was classified under (Link calls are re-checked by Link).
 - Hackathon tooling: `npm run hackathon:demo` (one-command final-hop demo, no
   Docker), `npm run hackathon:serve`, `npm run conformance:wimse-419`, and recorded
   interop runs in `conformance/interop` (SPIRE main WIT-SVIDs, go-spiffe v2.7.0,

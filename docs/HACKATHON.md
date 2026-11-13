@@ -2,7 +2,7 @@
 
 Cred is the last hop in trust domain B. An agent in domain B authenticates to Cred with its WIT plus a WPT or an HTTP signature, carrying a domain-B Txn-Token bound to that proof. Cred then calls a third-party resource server that does not speak WIMSE, using a credential a user delegated to that agent, with the provider's own scopes (draft-sweeney-wimse-credential-delegation). The WIT, the proof and the Txn-Token never reach the provider. Every audit line for the call carries the transaction id.
 
-Branch `hackathon/ietf127` of `github.com/cred-ninja/sdk`. Everything here is opt-in; without this configuration Cred behaves as it does on `main`.
+Branch `hackathon/ietf127` of `github.com/cred-ninja/sdk`. The WIMSE and Txn-Token paths run only when `externalIdentity` is configured. Two tightenings on this branch apply to every deployment: a fresh check just before each brokered provider call, and a longer list of headers that `extra_headers` cannot forward (see `CHANGELOG.md`).
 
 ## Try it (one command, no Docker)
 
@@ -73,7 +73,7 @@ Brokered provider calls go to `POST /api/v1/use` with `Authorization: DPoP <Dele
 
 ## What each refusal looks like
 
-The detail goes only to Cred's log and audit trail; the response never says which check failed.
+For WIT, WPT and HTTP-signature failures the response never says which check failed; the detail goes only to Cred's log and audit trail. Txn-Token and delegation refusals name their reason.
 
 | Case | Response |
 |---|---|
