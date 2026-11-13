@@ -208,6 +208,61 @@ describe('authority only narrows', () => {
   });
 });
 
+describe('audit context stays with its request', () => {
+  it('a later request on the same keep-alive connection does not inherit the previous txn or workload', async () => {
+    const http = await import('node:http');
+    const s = await setup();
+    const server = http.createServer(s.app);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as { port: number }).port;
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const call = (method: string, p: string, headers: Record<string, string>, body?: string) => new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method, path: p, headers, agent }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
+      req.on('error', reject);
+      if (body) req.write(body);
+      req.end();
+    });
+    try {
+      // Request 1: a delegation inside transaction txn-keepalive-1 (writes audit with txn and workload).
+      const json = JSON.stringify({ token_format: 'handle', agent_did: s.agent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+      const { httpSigHeaders } = await import('./wimse-fixture.js');
+      const txn = s.tts.mint({ txn: 'txn-keepalive-1' });
+      const h1 = httpSigHeaders(s.w, 'POST', '/api/v1/delegate', { body: json, headers: { 'content-type': 'application/json', 'txn-token': txn } });
+      // The fixture signs for BASE; this server listens elsewhere, so sign for its real audience.
+      const real = (await import('../identity/http-signature.js')).signWimseRequest({
+        method: 'POST', path: '/api/v1/delegate', headers: { 'content-type': 'application/json', 'txn-token': txn }, body: Buffer.from(json),
+        wit: s.w.wit, privateKey: s.w.key.privateKey, alg: 'ES256', audience: `${BASE}/api/v1/delegate`,
+      });
+      void h1;
+      const status1 = await call('POST', '/api/v1/delegate', { ...real, dpop: createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`), 'content-length': String(Buffer.byteLength(json)) }, json);
+      expect(status1).toBe(200);
+      // Request 2, same socket: a refused, unauthenticated request (writes a deny event).
+      const status2 = await call('GET', '/api/v1/connections?user_id=default', { 'workload-identity-token': 'not.a.wit' });
+      expect(status2).toBeGreaterThanOrEqual(400);
+      const events = await auditFor(s.app);
+      const deny = events.filter((e) => e.action === 'deny');
+      expect(events.some((e) => e.metadata?.txn === 'txn-keepalive-1')).toBe(true);
+      expect(deny.length).toBeGreaterThan(0);
+      for (const e of deny) {
+        expect(e.metadata?.txn).toBeUndefined();
+        expect(e.metadata?.workload).toBeUndefined();
+      }
+    } finally {
+      agent.destroy();
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('audit lines of a WIMSE-authenticated request name the workload subject', async () => {
+    const s = await setup();
+    await delegated(s);
+    const events = await auditFor(s.app);
+    const del = events.find((e) => e.action === 'delegate' && e.outcome === 'success');
+    expect(del?.metadata?.workload).toMatchObject({ subject: s.w.subject, trustDomain: TD, proof: 'http-sig' });
+  });
+});
+
 describe('never forwarded, and checked fresh before the provider call', () => {
   it('Txn-Token, WIT, signature, DPoP and Content-Digest headers never reach the provider, even as extra_headers', async () => {
     const s = await setup();

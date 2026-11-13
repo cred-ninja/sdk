@@ -388,8 +388,15 @@ export function createServer(config: ServerConfig) {
   // sent, before any middleware adds members to req.body (Web Bot Auth adds
   // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
   const useRequestHashes = new WeakMap<object, string | null>();
-  /** The transaction id of the request in progress, once its Txn-Token verified. */
-  const txnContext = new AsyncLocalStorage<{ txn: string; hash: string }>();
+  /**
+   * Request-scoped audit context: the verified workload (WIMSE subject) and,
+   * once its Txn-Token verified, the transaction id. Every audit event the
+   * request writes afterwards carries them.
+   */
+  const auditContext = new AsyncLocalStorage<{
+    txn?: string;
+    workload?: { subject: string; trustDomain: string; proof: string };
+  }>();
   // The exact bytes of a request that carries a Workload Identity Token, for
   // Content-Digest (draft-ietf-wimse-http-signature-08 §3). Only kept when
   // external identity is configured.
@@ -1046,6 +1053,17 @@ export function createServer(config: ServerConfig) {
    * tth, or the HTTP signature covering it), verify under that workload's
    * trust domain, and is required when that domain says so.
    */
+  /**
+   * Record the verified workload for this request's audit events. Synchronous
+   * on purpose: AsyncLocalStorage.enterWith inside an awaited callee would not
+   * reach the caller, so callers invoke this right after their await.
+   */
+  function enterAuditWorkload(req: Request): void {
+    const identity = provenExternalAgent.get(req)?.identity;
+    if (identity?.kind !== 'wimse') return;
+    auditContext.enterWith({ ...auditContext.getStore(), workload: { subject: identity.subject, trustDomain: identity.trustDomain, proof: identity.proof } });
+  }
+
   function checkTxnToken(req: Request, res: Response, identity: VerifiedExternalIdentity | null): 'ok' | 'refused' {
     if (!txnTokenTrust) return 'ok';
     const header = req.headers['txn-token'];
@@ -1089,7 +1107,7 @@ export function createServer(config: ServerConfig) {
     }
     verifiedTxnTokens.set(req, { token, trust });
     // From here on, every audit event this request writes carries txn.
-    txnContext.enterWith({ txn: token.txn, hash: token.hash });
+    auditContext.enterWith({ ...auditContext.getStore(), txn: token.txn });
     return 'ok';
   }
 
@@ -1267,6 +1285,7 @@ export function createServer(config: ServerConfig) {
       const external = await authenticateExternalIdentity(req, res);
       if (external === 'refused') return;
       if (external) {
+        enterAuditWorkload(req);
         if (checkTxnToken(req, res, provenExternalAgent.get(req)!.identity) === 'refused') return;
         next();
         return;
@@ -1955,8 +1974,9 @@ export function createServer(config: ServerConfig) {
   function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
     // Every event a request writes after its Txn-Token verified carries the
     // transaction id (draft-ietf-oauth-transaction-tokens-11 §9.2 txn).
-    const txn = txnContext.getStore();
-    if (txn && !(event.metadata && 'txn' in event.metadata)) event = { ...event, metadata: { ...event.metadata, txn: txn.txn } };
+    const ctx = auditContext.getStore();
+    if (ctx?.txn && !(event.metadata && 'txn' in event.metadata)) event = { ...event, metadata: { ...event.metadata, txn: ctx.txn } };
+    if (ctx?.workload && !(event.metadata && 'workload' in event.metadata)) event = { ...event, metadata: { ...event.metadata, workload: ctx.workload } };
     try {
       vault.writeAuditEvent(event);
     } catch (err) {
@@ -5488,6 +5508,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         // checked in addition to the Delegation Token and its DPoP proof.
         if (externalIdentity && req.headers['workload-identity-token'] !== undefined) {
           if (await authenticateUseWorkload(req, res, verified.claims.client_id) === 'refused') return;
+          enterAuditWorkload(req);
         } else if (txnTrustRequiredFor(verified.claims.client_id)) {
           // An agent whose trust domain requires Txn-Tokens cannot drop its
           // workload proof to escape the narrowing they impose.
