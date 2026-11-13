@@ -1,0 +1,56 @@
+wrote $RUN/minispire.wit-bundle.json
+Cred http://127.0.0.1:59365; trusted example.com from $RUN/minispire.wit-bundle.json; wimse://example.com/gid/20/pid/28057/uid/501 -> did:key:z6MkwYCnPHeWxd7ezJUuXMy577kwafRuXAfAaHKazECyUk3T
+POST /api/v1/delegate (WIT + WPT): 200 DPoP
+POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
+provider calls 1; WIMSE headers at provider: none
+audit:
+  2026-11-13T20:14:14.566Z create success actor=admin {"agentId":"did:key:z6MkwYCnPHeWxd7ezJUuXMy577kwafRuXAfAaHKazECyUk3T","connectionId":"google"}
+  2026-11-13T20:14:14.596Z delegate success actor=did:key:z6MkwYCnPHeWxd7ezJUuXMy577kwafRuXAfAaHKazECyUk3T {"identitySource":"did","agentDid":"did:key:z6MkwYCnPHeWxd7ezJUuXMy577kwafRuXAfAaHKazECyUk3T","workload":{"subject":"wimse://example.com/gid/20/pid/28057/uid/501","trustDomain":"example.com","proof":"wpt"}}
+  2026-11-13T20:14:14.604Z access success actor=did:key:z6MkwYCnPHeWxd7ezJUuXMy577kwafRuXAfAaHKazECyUk3T {"delegationId":"del_20bb69a00ce34903ac44a9082c1206cf","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"wimse://example.com/gid/20/pid/28057/uid/501","trustDomain":"example.com","proof":"http-sig"}}
+RESULT: PASS
+WIT header and payload:
+{
+  "alg": "ES256",
+  "kid": "kid",
+  "typ": "wit+jwt"
+}{
+  "aud": "",
+  "cnf": {
+    "jwk": {
+      "alg": "ES256",
+      "crv": "P-256",
+      "kty": "EC",
+      "use": "sig",
+      "x": "LzcdelrH5DAGtOpR0v-NtjQnV-Ix9XlEnU3nUESRHYA",
+      "y": "Xrl8pvwpTwOrv3Yz5ITZcsAfaQ8V1CVKkqLE5gN3M4I"
+    }
+  },
+  "exp": 1794601157,
+  "iat": 1794600857,
+  "iss": "wimse://example.com",
+  "jti": "2668cfc9b446c10bab434d2ef386132b8961d29f012a85009b295826f83995e6",
+  "sub": "wimse://example.com/gid/20/pid/28068/uid/501"
+}
+
+Request:
+GET /api/v1/connections HTTP/1.1
+Workload-Identity-Token: eyJhbGciOiJFUzI1NiIsImtpZCI6ImtpZCIsInR5cCI6IndpdCtqd3QifQ.eyJhdWQiOiIiLCJjbmYiOnsiandrIjp7InVzZSI6InNpZyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJhbGciOiJFUzI1NiIsIngiOiJMemNkZWxySDVEQUd0T3BSMHYtTnRqUW5WLUl4OVhsRW5VM25VRVNSSFlBIiwieSI6IlhybDhwdndwVHdPcnYzWXo1SVRaY3NBZmFROFYxQ1ZLa3FMRTVnTjNNNEkifX0sImV4cCI6MTc5NDYwMTE1NywiaWF0IjoxNzk0NjAwODU3LCJpc3MiOiJ3aW1zZTovL2V4YW1wbGUuY29tIiwianRpIjoiMjY2OGNmYzliNDQ2YzEwYmFiNDM0ZDJlZjM4NjEzMmI4OTYxZDI5ZjAxMmE4NTAwOWIyOTU4MjZmODM5OTVlNiIsInN1YiI6IndpbXNlOi8vZXhhbXBsZS5jb20vZ2lkLzIwL3BpZC8yODA2OC91aWQvNTAxIn0.dvgF6W-r17eoC7zqcD2EQ7u_RM3pWMVXN7BIsBv8SL25n74J_145eipD9KDIu6xt9SE0jD1Ov2dtpn2Y4pvOeQ
+Signature: wimse=:tHk0jjQEsnyZB1d4ep6CjKIcbgYJnAJ3Pv35LbC3xrdzLiEdlkKaA7loP6cZPKKckc0BLScXWs7mqYyFqv997A==:
+Signature-Input: wimse=("@method" "@request-target" "workload-identity-token");created=1794600857;expires=1794601157;nonce="8a4dec940bf8f60892e73cd89caa18579b3d04b280948d9c74a56ca7d7288d38";alg="ecdsa-p256-sha256";tag="wimse-workload-to-workload"
+
+Response:
+HTTP/1.1 400 Bad Request
+Date: Fri, 13 Nov 2026 20:14:17 GMT
+Connection: keep-alive
+X-Powered-By: Express
+Ratelimit-Policy: 120;w=60
+Ratelimit-Reset: 60
+Content-Length: 136
+Etag: W/"88-rJ7Vxu/tKSOJYGFq1SwNU1lvYF8"
+Keep-Alive: timeout=5
+Cred-Protocol-Version: 0.1.0
+Ratelimit-Limit: 120
+Ratelimit-Remaining: 119
+Content-Type: application/problem+json; charset=utf-8
+client error: unable to parse token: go-jose/go-jose: compact JWS format must have three parts
+[cred] wimse identity refused: forbidden_parameter: alg present
