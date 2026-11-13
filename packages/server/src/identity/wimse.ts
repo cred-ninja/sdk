@@ -258,9 +258,15 @@ export function validateWorkloadIdentifier(uri: unknown): WorkloadIdentifier {
   if (s.includes('#')) bad('has a fragment component');
 
   // §4.1: absolute URI with a non-empty authority.
-  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/]*)(.*)$/.exec(s);
-  if (!m) bad('is not an absolute URI with an authority');
-  const [, scheme, authority, path] = m as RegExpExecArray;
+  // Split with string operations, not a backtracking regex (input is untrusted).
+  const sep = s.indexOf('://');
+  if (sep <= 0) bad('is not an absolute URI with an authority');
+  const scheme = s.slice(0, sep);
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*$/.test(scheme)) bad('is not an absolute URI with an authority');
+  const rest = s.slice(sep + 3);
+  const slash = rest.indexOf('/');
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  const path = slash === -1 ? '' : rest.slice(slash);
   if (authority.length === 0) bad('has an empty authority (trust domain)');
   // §4.1: "MUST NOT contain ... user information, or a port component".
   if (authority.includes('@')) bad('has user information');

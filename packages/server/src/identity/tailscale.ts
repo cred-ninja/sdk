@@ -262,7 +262,14 @@ function whois(socketPath: string, addr: string, timeoutMs: number): Promise<Who
 }
 
 function normalizeDomain(s: string): string {
-  return s.trim().replace(/^\.+/, '').replace(/\.+$/, '').toLowerCase();
+  // Trim leading and trailing dots without a regex: `/\.+$/` backtracks
+  // polynomially on long runs of dots.
+  const t = s.trim();
+  let start = 0;
+  let end = t.length;
+  while (start < end && t[start] === '.') start++;
+  while (end > start && t[end - 1] === '.') end--;
+  return t.slice(start, end).toLowerCase();
 }
 
 /** Node checks; field meanings from tailcfg/tailcfg.go:372-549. */
