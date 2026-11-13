@@ -1,12 +1,12 @@
 # Interop: Cofide WIMSE HTTP-signature PoC and minispire
 
-Recorded 2026-11-13. Raw output: [`cofide-run-2026-11-13.txt`](cofide-run-2026-11-13.txt). Reproduce with `scripts/hackathon/interop/cofide/run.sh`.
+Recorded 2026-11-13 (runs repeated at `c75e4c1`). Raw output: [`cofide-run-2026-11-13.txt`](cofide-run-2026-11-13.txt). Reproduce with `scripts/hackathon/interop/cofide/run.sh`.
 
 | | |
 |---|---|
 | Implementation | [cofide/wimse-s2s-httpsig-poc](https://github.com/cofide/wimse-s2s-httpsig-poc) @ `7984a60105002dc65b31e9cd08572cd5d10ed9d6` (2025-11-14), Go module pseudo-version `v0.0.0-20251114125238-7984a6010500` |
 | WIT issuer | [cofide/minispire](https://github.com/cofide/minispire) v0.2.2 (the version the PoC README names) |
-| Cred | branch `hackathon/ietf127` (verifier as at `df03b24`) |
+| Cred | branch `hackathon/ietf127` @ `c75e4c1` (re-run after the review fixes) |
 | Toolchain | go1.27.1 darwin/arm64, Node 26.8.1 |
 
 ## Platform note

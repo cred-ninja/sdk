@@ -1,12 +1,12 @@
 # Interop: SPIRE main with WIT-SVIDs
 
-Recorded 2026-11-13. Raw output: [`spire-run-2026-11-13.txt`](spire-run-2026-11-13.txt). Reproduce with `SPIRE_BIN=<dir> scripts/hackathon/interop/spire/run.sh`.
+Recorded 2026-11-13 (runs repeated at `c75e4c1`). Raw output: [`spire-run-2026-11-13.txt`](spire-run-2026-11-13.txt). Reproduce with `SPIRE_BIN=<dir> scripts/hackathon/interop/spire/run.sh`.
 
 | | |
 |---|---|
 | Implementation | [spiffe/spire](https://github.com/spiffe/spire) main @ `f722f5f0994ecc47ddd2ce9c805d262627529061` (2026-11-12), `spire-server` and `spire-agent` built from source (`1.16.1-dev`), with the experimental `enable_wit_svids` on server and agent |
 | Workload API client | go-spiffe `v2.7.0` `workloadapi.FetchWITSVID` / `FetchWITBundles` |
-| Cred | branch `hackathon/ietf127` |
+| Cred | branch `hackathon/ietf127` @ `c75e4c1` (re-run after the review fixes) |
 | Toolchain | go1.27.3 (fetched by `GOTOOLCHAIN=auto`), darwin/arm64, no Docker |
 
 ## Setup

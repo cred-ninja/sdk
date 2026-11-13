@@ -1,11 +1,11 @@
 # Interop: wimsey
 
-Recorded 2026-11-13. Raw output: [`wimsey-run-2026-11-13.txt`](wimsey-run-2026-11-13.txt). Reproduce with `WIMSEY=<binary> scripts/hackathon/interop/wimsey/run.sh`.
+Recorded 2026-11-13 (runs repeated at `c75e4c1`). Raw output: [`wimsey-run-2026-11-13.txt`](wimsey-run-2026-11-13.txt). Reproduce with `WIMSEY=<binary> scripts/hackathon/interop/wimsey/run.sh`.
 
 | | |
 |---|---|
 | Implementation | [kanywst/wimsey](https://github.com/kanywst/wimsey) @ `56b070582f3e380c5006630698fb4ca808c08b04` (release 0.10.1). An independent Rust implementation of WIT, WPT and RFC 9421 HTTP signatures, listed in http-signature-08 §4.2. Built with `cargo build --release -p wimsey-cli` |
-| Cred | branch `hackathon/ietf127` |
+| Cred | branch `hackathon/ietf127` @ `c75e4c1` (re-run after the review fixes) |
 | Toolchain | rustc 1.99.0, Node 26.8.1, darwin/arm64 |
 
 Each run uses fresh keys. Cred trusts the wimsey issuer through a bundle file holding the issuer's public JWK, given a `kid` and `"use": "wit-svid"`; wimsey's `key public` output has neither.

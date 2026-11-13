@@ -3,7 +3,7 @@ wimsey: wimsey 0.10.1
 === wimsey -> Cred (ES256 issuer and workload keys) ===
 WIT header: {"typ":"wit+jwt","alg":"ES256","kid":"wimsey-issuer-1"}
 WIT + WPT (wimsey): 200
-Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794601071;expires=1794601371;nonce="9e4559b14a42b44665d8e4f97240302f";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
+Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794603050;expires=1794603350;nonce="5ed859fa49fab88319a8036ad74f76ad";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
 WIT + HTTP signature (wimsey), GET: 200
   same request replayed: 400
 WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","message":"A Delegation Token is bound to the agent's key: send agent_did as a did:key and a DPoP proof by that key"} 400
@@ -11,20 +11,20 @@ WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","me
   wimsey signature for /api/v1/connections sent to /api/v1/providers: 400
   cred log: [cred] wimse identity refused: replay: nonce already used
   cred log: [cred] wimse identity refused: bad_signature: signature invalid
-Cred http://127.0.0.1:59709; trusted domain-b.example from bundle-ES256.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkiayQBKJkM1Hs1LLuWCZX25nfhnJ4gss5vwBuqVLehTVU
+Cred http://127.0.0.1:54099; trusted domain-b.example from bundle-ES256.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkfpPAu96jZYTxofjimU41ts4YnVa8jvhbXusCqhEcbZFw
 POST /api/v1/delegate (WIT + WPT): 200 DPoP
 POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
 provider calls 1; WIMSE headers at provider: none
 audit:
-  2026-11-13T20:17:51.316Z create success actor=admin {"agentId":"did:key:z6MkiayQBKJkM1Hs1LLuWCZX25nfhnJ4gss5vwBuqVLehTVU","connectionId":"google"}
-  2026-11-13T20:17:51.346Z delegate success actor=did:key:z6MkiayQBKJkM1Hs1LLuWCZX25nfhnJ4gss5vwBuqVLehTVU {"identitySource":"did","agentDid":"did:key:z6MkiayQBKJkM1Hs1LLuWCZX25nfhnJ4gss5vwBuqVLehTVU","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
-  2026-11-13T20:17:51.354Z access success actor=did:key:z6MkiayQBKJkM1Hs1LLuWCZX25nfhnJ4gss5vwBuqVLehTVU {"delegationId":"del_8d930f5f12a54124a364e35f3e2ec10d","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+  2026-11-13T20:50:50.936Z create success actor=admin {"agentId":"did:key:z6MkfpPAu96jZYTxofjimU41ts4YnVa8jvhbXusCqhEcbZFw","connectionId":"google"}
+  2026-11-13T20:50:50.968Z delegate success actor=did:key:z6MkfpPAu96jZYTxofjimU41ts4YnVa8jvhbXusCqhEcbZFw {"identitySource":"did","agentDid":"did:key:z6MkfpPAu96jZYTxofjimU41ts4YnVa8jvhbXusCqhEcbZFw","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T20:50:50.977Z access success actor=did:key:z6MkfpPAu96jZYTxofjimU41ts4YnVa8jvhbXusCqhEcbZFw {"delegationId":"del_02800f2f2e6c4e35aedf0751bc2410a8","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
 RESULT: PASS
 
 === wimsey -> Cred (Ed25519 issuer and workload keys) ===
 WIT header: {"typ":"wit+jwt","alg":"Ed25519","kid":"wimsey-issuer-1"}
 WIT + WPT (wimsey): 200
-Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794601071;expires=1794601371;nonce="c79cb69af0ef29dd82f808e81e892981";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
+Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794603051;expires=1794603351;nonce="b1af9220a533b4645216cbbc46490ace";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
 WIT + HTTP signature (wimsey), GET: 200
   same request replayed: 400
 WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","message":"A Delegation Token is bound to the agent's key: send agent_did as a did:key and a DPoP proof by that key"} 400
@@ -32,14 +32,14 @@ WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","me
   wimsey signature for /api/v1/connections sent to /api/v1/providers: 400
   cred log: [cred] wimse identity refused: replay: nonce already used
   cred log: [cred] wimse identity refused: bad_signature: signature invalid
-Cred http://127.0.0.1:59724; trusted domain-b.example from bundle-Ed25519.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkkZYGutDH7XQDnXmwQhrZCtKqoLUEx7XqQzY2y3taTGyY
+Cred http://127.0.0.1:54113; trusted domain-b.example from bundle-Ed25519.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkhwDmGPdYPBJu3NnsKCrTFTpn8miJSG7Au5VzVVzujGHg
 POST /api/v1/delegate (WIT + WPT): 200 DPoP
 POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
 provider calls 1; WIMSE headers at provider: none
 audit:
-  2026-11-13T20:17:51.939Z create success actor=admin {"agentId":"did:key:z6MkkZYGutDH7XQDnXmwQhrZCtKqoLUEx7XqQzY2y3taTGyY","connectionId":"google"}
-  2026-11-13T20:17:51.969Z delegate success actor=did:key:z6MkkZYGutDH7XQDnXmwQhrZCtKqoLUEx7XqQzY2y3taTGyY {"identitySource":"did","agentDid":"did:key:z6MkkZYGutDH7XQDnXmwQhrZCtKqoLUEx7XqQzY2y3taTGyY","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
-  2026-11-13T20:17:51.977Z access success actor=did:key:z6MkkZYGutDH7XQDnXmwQhrZCtKqoLUEx7XqQzY2y3taTGyY {"delegationId":"del_e794b3672edd4764954ab3d30f3ba69a","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+  2026-11-13T20:50:51.564Z create success actor=admin {"agentId":"did:key:z6MkhwDmGPdYPBJu3NnsKCrTFTpn8miJSG7Au5VzVVzujGHg","connectionId":"google"}
+  2026-11-13T20:50:51.594Z delegate success actor=did:key:z6MkhwDmGPdYPBJu3NnsKCrTFTpn8miJSG7Au5VzVVzujGHg {"identitySource":"did","agentDid":"did:key:z6MkhwDmGPdYPBJu3NnsKCrTFTpn8miJSG7Au5VzVVzujGHg","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T20:50:51.602Z access success actor=did:key:z6MkhwDmGPdYPBJu3NnsKCrTFTpn8miJSG7Au5VzVVzujGHg {"delegationId":"del_a85c6bf4ce714dbd9d6203081bb0d990","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
 RESULT: PASS
 
 === Cred -> wimsey (Cred's demo issuer and signer, wimsey verifies) ===
@@ -52,9 +52,9 @@ wimsey httpsig verify of Cred's signature: OK
   "sub": "spiffe://domain-b.example/ns/agents/sa/planner",
   "wpt": {
     "aud": "http://127.0.0.1:3491/api/v1/connections",
-    "exp": 1794601132,
-    "jti": "u3UiU_cjyCLz1uwkBO4dNw",
-    "wth": "sdqCKQLEDA02TMlbmzMiWBt7-0maq6cWDxWEQZsKFsY"
+    "exp": 1794603111,
+    "jti": "5GlCalYltR1O0jHihkXEVw",
+    "wth": "SlS4XZQwLc7yR1c41qui7Qt3yJD5AOP5XWLWixJRehc"
   }
 }
 wimsey wpt verify of Cred's WPT: OK

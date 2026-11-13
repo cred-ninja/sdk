@@ -1,11 +1,11 @@
 # Interop: Txn-Tokens from authgent's Transaction Token Service
 
-Recorded 2026-11-13. Raw output: [`authgent-txn-run-2026-11-13.txt`](authgent-txn-run-2026-11-13.txt). Reproduce with `AUTHGENT=<authgent-server> scripts/hackathon/interop/authgent/run.sh`.
+Recorded 2026-11-13 (runs repeated at `c75e4c1`). Raw output: [`authgent-txn-run-2026-11-13.txt`](authgent-txn-run-2026-11-13.txt). Reproduce with `AUTHGENT=<authgent-server> scripts/hackathon/interop/authgent/run.sh`.
 
 | | |
 |---|---|
 | Implementation | [authgent/authgent](https://github.com/authgent/authgent) @ `8341cf932c9816dc666f2a6577b6776bd6f3b978`, Python (Apache-2.0). Its Transaction Token Service follows draft-ietf-oauth-transaction-tokens-08/-09 |
-| Cred | branch `hackathon/ietf127` (Txn-Token verifier per -11) |
+| Cred | branch `hackathon/ietf127` @ `c75e4c1` (re-run after the review fixes) |
 | Toolchain | Python 3.12 (uv venv), Node 26.8.1, darwin/arm64 |
 
 This is a Txn-Token run only. The WIT, WPT and HTTP signature come from Cred's demo issuer and client; authgent has no WIMSE workload credentials.
