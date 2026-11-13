@@ -58,7 +58,7 @@ describe('Google scopes that name less than a URL shows', () => {
     }
     expect(outcome('google', 'GET', list, ['gmail.metadata'])).toBe('allowed');
   });
-  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('Gmail drafts-list search on %s', (origin) => {
+  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('drafts-list search in the Gmail API on %s', (origin) => {
     const drafts = `${origin}/gmail/v1/users/me/drafts`;
     it.each(['q=secret', '%71=secret', 'q='])('gmail.metadata refuses %s', (query) => {
       expect(outcome('google', 'GET', `${drafts}?${query}`, ['gmail.metadata'])).toBe('insufficient');

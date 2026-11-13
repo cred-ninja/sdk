@@ -119,7 +119,7 @@ describe('Google', () => {
       await expectAllowed(broad, `${GMAIL}/${collection}?q=secret`);
     }
   });
-  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('Gmail drafts-list search on %s at /api/v1/use', (origin) => {
+  describe.each(['https://gmail.googleapis.com', 'https://www.googleapis.com'])('drafts-list search in the Gmail API on %s at /api/v1/use', (origin) => {
     const drafts = `${origin}/gmail/v1/users/me/drafts`;
     it.each(['q=secret', '%71=secret', 'q='])('gmail.metadata refuses %s before upstream fetch', async (query) => {
       const ctx = await connected('google', ['gmail.metadata', 'gmail.readonly'], ['gmail.metadata']);
