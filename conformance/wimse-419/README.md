@@ -29,7 +29,7 @@ Verification time is the vectors' T0+60 (`1795000060`), and the trusted audience
 - **Behaviour cases** test the role Cred plays:
   - N-16 (sender nonce entropy): Cred's signer draws 128-bit nonces from `crypto.randomBytes`, and 2000 of them are distinct.
   - N-17 (error surface): Cred as a server answers a WIT failure and a signature failure with the same `400` `wimse-signature-invalid` problem, with no `WWW-Authenticate`.
-  - N-18 (signed response required): Cred does not sign responses, so a request with `wimse-sign-response` gets `501` `wimse-signed-response-unsupported` and never a successful unsigned response.
+  - N-18 (signed response required): without `externalIdentity.responseSigning`, a request with `wimse-sign-response` gets `501` `wimse-signed-response-unsupported`, never a successful unsigned response. With it configured, the response is signed. That path is tested in `external-identity-httpsig.test.ts`, and wimsey's response profile verifies it (see `conformance/interop/wimsey.md`).
   - N-19 (weaker `Accept-Signature`): such a header never lowers what Cred does.
   - N-20 (no processing before validation): an expired WIT with a valid signature on a brokered call is refused, and no provider call is made.
   - N-22 (selection by tag): the WIMSE signature is found by its tag whether it is labelled `sig1` or `sig2`.

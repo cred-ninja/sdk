@@ -32,8 +32,18 @@
   #419 test vectors (`conformance/wimse-419`, 28 of 28 pass). WIT + HTTP signature is
   accepted wherever WIT + WPT is, and on `POST /api/v1/use` the signature must
   cover the Delegation Token in `Authorization`. Every failure is the same `400`
-  `wimse-signature-invalid` problem. `wimse-sign-response` gets `501` (Cred does
-  not sign responses). Includes an RFC 8941 structured-field parser.
+  `wimse-signature-invalid` problem. With `externalIdentity.responseSigning`
+  (Cred's own WIT and key) a request carrying `wimse-sign-response` gets a signed
+  response (§3.4-3.5: `@status`, the WIT, Content-Type, Content-Digest and the
+  request components, with `wimse-req-nonce`); without it, `501`. The event
+  stream answers `400 wimse-signed-response-unavailable`. Includes an RFC 8941
+  structured-field parser.
+- `@credninja/server`: delegation receipts minted inside a verified transaction
+  carry `txn`. The SDK's and the Python SDK's receipt verifiers accept them.
+- `@credninja/sdk`: `signRequest` on `CredExternalIdentityCloudConfig`, called
+  last with the final headers and exact body, and `createWimseHttpSigner`
+  (http-signature-08 request signing, optional bound Txn-Token). With it,
+  `authenticateRequest` is optional. No new dependencies.
 - `@credninja/server`: implements Txn-Token validation from
   draft-ietf-oauth-transaction-tokens-11 (§9, §12.2) on the final hop, as covered by
   the tests. `externalIdentity.txnTokens` configures trust per WIMSE trust domain.

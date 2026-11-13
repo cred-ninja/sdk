@@ -36,6 +36,6 @@ Cred answered `HTTP/1.1 400 Bad Request` (`wimse-signature-invalid`) and logged 
 2. It covers `@request-target` instead of `@path` and `@query` (§3: "The following derived components MUST be signed: @method, @path, @query").
 3. There is no `wimse-aud` (§3: "For requests only … MUST also be included: wimse-aud").
 
-The PoC client then failed on its own side, because it requires a signed response and Cred does not sign responses.
+The PoC client then failed on its own side, because it requires a signed response. Cred signs responses only to requests it has authenticated (and only with `responseSigning` configured), so the refusal of this request is unsigned.
 
 Result: Cred interoperates with minispire's WITs and keys, for both WPT and HTTP-signature proofs. It does not interoperate with the PoC client's -07 signatures, which -08 forbids.
