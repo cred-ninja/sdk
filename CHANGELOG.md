@@ -25,6 +25,36 @@
 - `@credninja/sdk`: `CredExternalIdentityCloudConfig` with `authenticateRequest`, an
   alternative to `agentToken` that supplies per-request authentication headers.
 
+### Added: WIMSE HTTP signatures and Transaction Tokens (opt-in)
+
+- `@credninja/server`: implements draft-ietf-wimse-http-signature-08 (an RFC 9421
+  profile) as a proof of possession for a WIT, as covered by the tests and by the
+  #419 test vectors (`conformance/wimse-419`, 28 of 28 pass). WIT + HTTP signature is
+  accepted wherever WIT + WPT is, and on `POST /api/v1/use` the signature must
+  cover the Delegation Token in `Authorization`. Every failure is the same `400`
+  `wimse-signature-invalid` problem. `wimse-sign-response` gets `501` (Cred does
+  not sign responses). Includes an RFC 8941 structured-field parser.
+- `@credninja/server`: implements Txn-Token validation from
+  draft-ietf-oauth-transaction-tokens-11 (§9, §12.2) on the final hop, as covered by
+  the tests. `externalIdentity.txnTokens` configures trust per WIMSE trust domain.
+  A Txn-Token must be bound to the WPT (`tth`) or covered by the HTTP signature; it
+  narrows a brokered call's scopes through a configured scope map, and must name
+  the delegation's user.
+- `@credninja/server`: audit events of a WIMSE-authenticated request carry
+  `metadata.workload`, and, once a Txn-Token verifies, `metadata.txn`.
+- `@credninja/server`: a fresh check just before each brokered provider call
+  (agent active, workload still mapped, Permission still covering the call).
+- Hackathon tooling: `npm run hackathon:demo` (one-command final-hop demo, no
+  Docker), `npm run hackathon:serve`, `npm run conformance:wimse-419`, and recorded
+  interop runs in `conformance/interop` (SPIRE main WIT-SVIDs, go-spiffe v2.7.0,
+  wimsey, Cofide's PoC and minispire, authgent Txn-Tokens).
+
+### Changed
+
+- `@credninja/server`: `extra_headers` on `POST /api/v1/use` can no longer forward
+  `Txn-Token`, `Workload-Identity-Token`, `DPoP`, `Content-Digest` or
+  `Accept-Signature` to a provider.
+
 ### Fixed
 
 Two of these refuse requests 2.1.0 accepted: a Web Bot Auth signature living longer
