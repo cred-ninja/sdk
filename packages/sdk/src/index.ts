@@ -30,6 +30,7 @@ export type { WebBotAuthSigner, WebBotAuthSignerConfig } from './web-bot-auth.js
 export type {
   CredConfig,
   CredCloudConfig,
+  CredExternalIdentityCloudConfig,
   CredLocalConfig,
   CredLocalVaultConfig,
   CredProviderConfig,

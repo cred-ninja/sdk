@@ -84,6 +84,7 @@ import { capabilitiesAllow, capabilitiesSubsumed, matchedPageParam, validateCapa
 import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWithinPrefix, meterSide } from './metering.js';
 import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
+import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -452,7 +453,10 @@ export function createServer(config: ServerConfig) {
   const actorTokenJtiSeen = createJtiReplayCache();
   // DPoP proof replay cache, keyed by key thumbprint and jti.
   const dpopJtiSeen = createJtiReplayCache();
+  // TOFU proofs spent on root delegation, per process (like the caches above).
+  const tofuProofSeen = createJtiReplayCache();
   const allowRawTokens = config.allowRawTokens ?? false;
+  const webBotAuthMaxLifetimeSeconds = config.webBotAuthMaxSignatureLifetimeSeconds ?? 300;
   const allowAgentsWithoutPermission = config.allowAgentsWithoutPermission === true;
   const allowRedelegationAfterRevocation = config.allowRedelegationAfterRevocation === true;
   const classifyBrokerCalls = config.allowUnclassifiedBrokerCalls !== true;
@@ -970,10 +974,135 @@ export function createServer(config: ServerConfig) {
     return crypto.createHash('sha256').update(`${principal.type}:${stableId}`).digest('hex');
   }
 
+  // ── External identity (opt-in) ────────────────────────────────────────────
+  // A source verifies a credential Cred did not issue; an exact mapping names
+  // the existing agent it acts as. The request then runs as that agent's DID.
+  const externalIdentity = config.externalIdentity;
+  // Separate from dpopJtiSeen: a route that checks the same proof again (for
+  // example /api/v1/delegate) keeps its own replay check.
+  const externalDpopJtiSeen = createJtiReplayCache();
+  /** The agent a verified external identity mapped to, per request. */
+  const provenExternalAgent = new WeakMap<Request, { agentDid: string; identity: VerifiedExternalIdentity }>();
+
+  function refuseExternalIdentity(
+    req: Request,
+    res: Response,
+    kind: ExternalIdentityKind,
+    code: string,
+    detail: string,
+    subject?: string,
+  ): 'refused' {
+    // The response never says which check failed; the detail is for the
+    // operator's log and audit trail only.
+    console.warn(`[cred] ${kind} identity refused: ${code}: ${detail}`);
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: subject ?? 'unknown' },
+      action: 'deny',
+      resource: { type: 'agent', id: subject ?? 'unknown' },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      metadata: { identitySource: kind, reason: code, route: req.originalUrl.split('?')[0] },
+    });
+    if (code === 'agent_mismatch') {
+      res.status(403).json({ error: 'agent_mismatch', message: 'agent_did does not name the agent this identity maps to' });
+      return 'refused';
+    }
+    if (kind === 'wimse') res.setHeader('WWW-Authenticate', 'WPT');
+    res.status(401).json({ error: kind === 'wimse' ? 'invalid_workload_identity' : 'invalid_tailnet_identity' });
+    return 'refused';
+  }
+
+  /**
+   * Runs every configured source. `false`: no source credential on this
+   * request (the agent token path applies). `true`: authenticated, with
+   * `req.provenAgent` set. `'refused'`: a response was sent.
+   */
+  async function authenticateExternalIdentity(req: Request, res: Response): Promise<boolean | 'refused'> {
+    if (!externalIdentity || externalIdentity.sources.length === 0) return false;
+    const targetUri = `${publicBaseUri()}${req.originalUrl.split('?')[0]}`;
+    const request: IdentityRequest = {
+      method: req.method.toUpperCase(),
+      targetUri,
+      headers: req.headers,
+      rawHeaders: req.rawHeaders,
+      socket: req.socket,
+    };
+    const found: VerifiedExternalIdentity[] = [];
+    for (const source of externalIdentity.sources) {
+      try {
+        const identity = await source.authenticate(request);
+        if (identity) found.push(identity);
+      } catch (err) {
+        if (err instanceof IdentityRefusal) return refuseExternalIdentity(req, res, err.kind, err.code, err.detail);
+        return refuseExternalIdentity(req, res, source.kind, 'source_error', err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (found.length === 0) return false;
+    if (found.length > 1) {
+      return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','));
+    }
+    const identity = found[0];
+    // Sources apply their own clock skew to exp; this backstop allows the same 60s.
+    if (identity.expiresAt + 60 <= Math.floor(Date.now() / 1000)) {
+      return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject);
+    }
+    const agentDid = mappedAgentDid(externalIdentity.mappings, identity);
+    if (!agentDid) return refuseExternalIdentity(req, res, identity.kind, 'unmapped', 'no mapping for subject', identity.subject);
+    // The mapped agent must already exist and be active. Nothing is created
+    // from an identity Cred has not been told about.
+    const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
+    if (!record) return refuseExternalIdentity(req, res, identity.kind, 'agent_not_found', agentDid, identity.subject);
+    if (record.status !== 'active') {
+      return refuseExternalIdentity(req, res, identity.kind, `agent_${record.status}`, agentDid, identity.subject);
+    }
+    if (identity.proof === 'channel') {
+      // A channel identity (Tailscale) proves the node, not the agent on it:
+      // the mapped agent's did:key must sign this request too.
+      const proof = readDpopHeader(req.headers.dpop);
+      const checked = proof === 'multiple'
+        ? { ok: false as const, message: 'multiple DPoP headers' }
+        : verifyDpopProof(proof, { agentDid, htm: request.method, htu: targetUri, seenJti: externalDpopJtiSeen });
+      if (!checked.ok) return refuseExternalIdentity(req, res, identity.kind, 'dpop_required', checked.message, identity.subject);
+    }
+    const named = req.body?.agent_did;
+    if (typeof named === 'string' && named !== agentDid && named !== record.id) {
+      return refuseExternalIdentity(req, res, identity.kind, 'agent_mismatch', `${named} != ${agentDid}`, identity.subject);
+    }
+    const principal: RequestAgentPrincipal = {
+      type: identity.kind,
+      principalId: agentDid,
+      metadata: {
+        externalIdentity: {
+          kind: identity.kind,
+          subject: identity.subject,
+          trustDomain: identity.trustDomain,
+          attributes: identity.attributes,
+        },
+      },
+    };
+    (req as any).agentPrincipal = principal;
+    (req as any).agentTokenHash = hashAgentPrincipal(principal);
+    provenExternalAgent.set(req, { agentDid, identity });
+    return true;
+  }
+
   /**
    * Agent auth middleware for /api/* routes.
    */
   async function requireAgentAuth(req: Request, res: Response, next: NextFunction) {
+    try {
+      const external = await authenticateExternalIdentity(req, res);
+      if (external === 'refused') return;
+      if (external) {
+        next();
+        return;
+      }
+    } catch (err) {
+      next(err);
+      return;
+    }
     if (config.agentRequestVerifier) {
       try {
         const result = await config.agentRequestVerifier(req);
@@ -1331,6 +1460,11 @@ export function createServer(config: ServerConfig) {
     if (expires < nowSeconds - allowedSkewSeconds) {
       throw new Error('Signature has expired');
     }
+    // The nonce is kept until `expires`, so the signer must not choose how
+    // long the replay store holds its entry.
+    if (expires < created || expires - created > webBotAuthMaxLifetimeSeconds) {
+      throw new Error(`Signature lifetime must be between 0 and ${webBotAuthMaxLifetimeSeconds} seconds`);
+    }
 
     return expires;
   }
@@ -1539,12 +1673,6 @@ export function createServer(config: ServerConfig) {
     }
 
     const expires = assertSignatureTimeWindow(parsed.params);
-    webBotAuthNonceStore.remember({
-      signatureAgent,
-      keyId: parsed.params.keyid,
-      nonce: parsed.params.nonce,
-      expiresAtSeconds: expires,
-    });
     const signature = parseSignatureHeader(req.get('Signature') ?? undefined, parsed.label);
     const directory = await resolveWebBotAuthDirectory(signatureAgent);
     const key = directory.keys.find((candidate) => candidate.kid === parsed.params.keyid);
@@ -1563,6 +1691,14 @@ export function createServer(config: ServerConfig) {
     if (!valid) {
       throw new Error('Web Bot Auth signature verification failed');
     }
+    // Recorded only once the signature verifies, so unsigned requests cannot
+    // fill the store or claim a nonce a real signer will send later.
+    webBotAuthNonceStore.remember({
+      signatureAgent,
+      keyId: parsed.params.keyid,
+      nonce: parsed.params.nonce,
+      expiresAtSeconds: expires,
+    });
 
     const identity: VerifiedWebBotAuthIdentity = {
       keyId: parsed.params.keyid,
@@ -2490,7 +2626,26 @@ export function createServer(config: ServerConfig) {
       if ('maxDelegationDepth' in body) input.maxDelegationDepth = body.maxDelegationDepth;
       if ('expiresAt' in body) input.expiresAt = parseOptionalExpiresAt(body.expiresAt);
 
+      const before = input.requiresApproval === true ? await vault.getPermissionById(id) : null;
       const permission = await vault.updatePermission(id, input);
+
+      // Turning approval on ends what was issued without it: a live token
+      // would otherwise keep working until it expires. Consents and holds stay,
+      // so an approved request can be issued again at once.
+      let delegationsRevoked = 0;
+      if (before && !before.requiresApproval && permission.requiresApproval) {
+        const started = performance.now();
+        const cause = `permission-approval:${id}`;
+        const agentDids = (await agentIdsOf(permission.agentId)).filter((agentId) => agentId.startsWith('did:'));
+        for (const agentDid of agentDids) {
+          const cascade = await applyRevocation(await vault.revokeDelegations({ agentOnService: { agentDid, service: permission.connectionId } }), started, {
+            actor: { type: 'system', id: 'admin' },
+            correlationId: crypto.randomUUID(),
+            cause,
+          });
+          delegationsRevoked += cascade.count;
+        }
+      }
 
       writeAuditEventIfSupported({
         id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -2500,7 +2655,7 @@ export function createServer(config: ServerConfig) {
         resource: { type: 'permission', id },
         outcome: 'success',
         correlationId: crypto.randomUUID(),
-        metadata: { changed: Object.keys(input) },
+        metadata: { changed: Object.keys(input), ...(delegationsRevoked > 0 ? { delegationsRevoked } : {}) },
       });
 
       res.json({ permission });
@@ -3404,6 +3559,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
    * that key can use what a policy allowed. Undefined otherwise.
    */
   function agentDidForGuard(req: Request): string | undefined {
+    // An external identity Cred verified and mapped is proven identity.
+    const external = provenExternalAgent.get(req);
+    if (external) return external.agentDid;
     const proved = provedRawAgentDid.get(req);
     if (proved !== undefined) return proved;
     const path = req.route?.path;
@@ -3432,6 +3590,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         // Auth signature, a verified parent receipt, or claims a request verifier
         // attached to the caller. Never the request body, which is the caller's word.
         resolveVerifiedIdentity: async (req) => {
+          const external = provenExternalAgent.get(req);
           const signature = (req as any).webBotAuthIdentity as VerifiedWebBotAuthIdentity | undefined;
           const parent = (req as any).verifiedParentReceipt as { receiptClaims?: string[] } | undefined;
           let tofuFingerprint: string | undefined;
@@ -3459,6 +3618,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
             webBotAuthKeyId: signature?.keyId,
             signatureAgent: signature?.signatureAgent,
             receiptClaims: extractTrustedReceiptClaims(req) ?? parent?.receiptClaims,
+            ...(external
+              ? { externalIdentity: { kind: external.identity.kind, subject: external.identity.subject, trustDomain: external.identity.trustDomain, attributes: external.identity.attributes } }
+              : {}),
           };
         },
         onDeny: (req, res, decision) => {
@@ -4245,6 +4407,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       delegation: BrokeredDelegation;
       /** Link delegations: the scopes checkLinkAccess allowed for this call. */
       scopes?: string[];
+      /** The did:key the Delegation Token is bound to, proven by DPoP on this call. */
+      provenAgentDid?: string;
     },
   ): Promise<{ allowed: true; effectiveScopes: string[]; decision?: GuardDecision } | { allowed: false }> {
     const callScopes = input.scopes ?? input.delegation.scopes;
@@ -4270,6 +4434,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           ...(principal ? { authPrincipal: principal } : {}),
         },
         identitySource: webBotAuthIdentity ? 'web-bot-auth' : 'agent-token',
+        ...(input.provenAgentDid ? { agentDid: input.provenAgentDid } : {}),
         webBotAuthKeyId: webBotAuthIdentity?.keyId,
         signatureAgent: webBotAuthIdentity?.signatureAgent,
         ...(input.delegation.link
@@ -5303,6 +5468,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         method: normalizedMethod,
         delegation,
         scopes: scopesNow,
+        provenAgentDid: tokenBinding?.agentDid,
       });
       if (!guardResult.allowed) return;
 
@@ -5883,6 +6049,8 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
               appClientId,
               requestedScopes: effectiveRequestedScopes,
             },
+            new Date(),
+            tofuProofSeen,
           );
         } catch (err) {
           res.status(403).json({ error: err instanceof Error ? err.message : 'Invalid TOFU proof' });

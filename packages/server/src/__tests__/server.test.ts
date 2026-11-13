@@ -2640,14 +2640,22 @@ describe('@credninja/server', () => {
         createdBy: 'admin',
       });
 
+      // A TOFU proof is spent when it is presented, so the retry signs a new one.
+      const retryProof = createTofuProof(keypair.privateKeyDer, {
+        service: 'google',
+        userId: 'default',
+        appClientId: 'app_123',
+        scopes: ['calendar.readonly'],
+        timestamp: new Date(Date.now() + 1).toISOString(),
+      });
       const allowed = await delegateAs(app, await newAgent(), {
         service: 'google',
         user_id: 'default',
         appClientId: 'app_123',
         scopes: ['calendar.readonly'],
         tofu_fingerprint: registration.fingerprint,
-        tofu_payload: proof.payloadBase64,
-        tofu_signature: proof.signatureBase64,
+        tofu_payload: retryProof.payloadBase64,
+        tofu_signature: retryProof.signatureBase64,
       }, { bearer: TEST_TOKEN });
 
       expect(allowed.status).toBe(200);
