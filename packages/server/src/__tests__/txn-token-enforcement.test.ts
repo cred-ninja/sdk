@@ -9,8 +9,9 @@ import request from 'supertest';
 import { createDpopProof } from '@credninja/sdk';
 import { CredGuard, type CredPolicy } from '@credninja/guard';
 import {
-  ADMIN, BASE, BEARER, CALENDAR, cleanupDirs, delegateWithHttpSig, send, sha256b64url, trustDomain, txnIssuer, useWithHttpSig, wimseServer, wptHeaders,
+  ADMIN, BASE, BEARER, CALENDAR, cleanupDirs, delegateWithHttpSig, httpSigHeaders, send, sha256b64url, trustDomain, txnIssuer, useWithHttpSig, wimseServer, wptHeaders,
 } from './wimse-fixture.js';
+import { actorTokenFor, newAgent } from './token-helpers.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -102,12 +103,63 @@ describe('binding: a Txn-Token rides only on the proof that covers it', () => {
     expect(res.status).toBe(200);
   });
 
-  it('a workload from a domain that requires Txn-Tokens is refused without one, and accepted with required: false', async () => {
+  it('a workload from a domain that requires Txn-Tokens is refused without one on a credential route, and accepted with required: false', async () => {
+    const json = (agentDid: string) => JSON.stringify({ token_format: 'handle', agent_did: agentDid, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
     const strict = await setup();
-    const conn = '/api/v1/connections?user_id=default';
-    expect((await send(strict.app, 'get', conn, wptHeaders(strict.w, '/api/v1/connections'))).status).toBe(401);
+    const del = (s: Awaited<ReturnType<typeof setup>>) => send(s.app, 'post', '/api/v1/delegate', {
+      ...wptHeaders(s.w, '/api/v1/delegate'), dpop: createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`),
+    }, json(s.agent.did));
+    expect((await del(strict)).status).toBe(401);
     const lax = await setup({ required: false });
-    expect((await send(lax.app, 'get', conn, wptHeaders(lax.w, '/api/v1/connections'))).status).toBe(200);
+    expect((await del(lax)).status).toBe(200);
+  });
+
+  it('revocation and audit reads do not depend on the Txn-Token Service, even where Txn-Tokens are required', async () => {
+    const s = await setup();
+    expect((await send(s.app, 'get', '/api/v1/audit?user_id=default', wptHeaders(s.w, '/api/v1/audit'))).status).toBe(200);
+    expect((await send(s.app, 'get', '/api/v1/connections?user_id=default', wptHeaders(s.w, '/api/v1/connections'))).status).toBe(200);
+  });
+
+  it('an anonymous request carrying only a Txn-Token writes no audit row', async () => {
+    const s = await setup();
+    const before = (await auditFor(s.app)).length;
+    const res = await request(s.app).get('/api/v1/connections?user_id=default').set('Txn-Token', s.tts.mint());
+    expect(res.status).toBe(401);
+    expect((await auditFor(s.app)).length).toBe(before);
+  });
+
+  it('two Txn-Token values on one request are refused', async () => {
+    const s = await setup();
+    const t1 = s.tts.mint();
+    const res = await send(s.app, 'get', '/api/v1/connections?user_id=default', {
+      ...wptHeaders(s.w, '/api/v1/connections', { tth: sha256b64url(t1) }), 'txn-token': `${t1}, ${s.tts.mint()}`,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('an agent mapped from two trust domains keeps the strictest requirement: the laxer domain cannot shed the Txn-Token', async () => {
+    const b = trustDomain(TD);
+    const c = trustDomain('domain-c.example');
+    const wb = b.workload();
+    const wc = c.workload();
+    const tts = txnIssuer(TD);
+    const s = await wimseServer({
+      domains: [b, c],
+      mapSubject: (agent) => [
+        { kind: 'wimse', subject: wb.subject, agentDid: agent.did },
+        { kind: 'wimse', subject: wc.subject, agentDid: agent.did },
+      ],
+      txnTokens: { [TD]: tts.trust() },
+    });
+    const minted = await delegateWithHttpSig(s.app, s.agent, wb, {}, { 'txn-token': tts.mint() });
+    expect(minted.status).toBe(200);
+    const seen = provider();
+    // Through domain C (no Txn-Token trust), with no Txn-Token: refused.
+    const viaC = await useWithHttpSig(s.app, s.agent, minted.body.access_token, wc, { url: CALENDAR, method: 'GET' });
+    expect(viaC.status).toBe(400);
+    const delViaC = await delegateWithHttpSig(s.app, s.agent, wc);
+    expect(delViaC.status).toBe(400);
+    expect(seen).toHaveLength(0);
   });
 
   it('a Txn-Token issued for another trust domain is refused', async () => {
@@ -193,6 +245,43 @@ describe('authority only narrows', () => {
     expect(res.body.error).toBe('txn_token_required');
   });
 
+  it('naming the agent by its record id does not get around the Txn-Token requirement', async () => {
+    const s = await setup({ config: { allowRawTokens: true } });
+    const record = await s.vault.getAgentByDid!(s.agent.did);
+    const res = await request(s.app).post('/api/v1/delegate').set('Authorization', `Bearer ${BEARER}`)
+      .set('DPoP', createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`))
+      .send({ token_format: 'raw', agent_did: record!.id, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_token_required');
+  });
+
+  it('the compatibility raw-token route refuses a workload whose domain requires Txn-Tokens, and any verified Txn-Token', async () => {
+    const s = await setup({ config: { allowRawTokens: true, allowAgentsWithoutPermission: true } });
+    const txn = s.tts.mint();
+    const seen = provider();
+    const res = await send(s.app, 'get', '/api/token/google?user_id=default', {
+      ...wptHeaders(s.w, '/api/token/google', { tth: sha256b64url(txn) }), 'txn-token': txn,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_handle_required');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('an agent whose domain requires Txn-Tokens cannot sub-delegate', async () => {
+    const s = await setup();
+    const { createPrivateKey, sign } = await import('node:crypto');
+    const seed = (await import('node:crypto')).scryptSync('test-passphrase-not-for-production', 'cred:local-receipt:v1', 32);
+    const key = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8' });
+    const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64url');
+    const input = `${b64({ alg: 'EdDSA', typ: 'JWT' })}.${b64({ iss: BASE, iat: Math.floor(Date.now() / 1000), sub: s.agent.did, service: 'google', scopes: ['calendar.readonly'], userId: 'default', appClientId: 'local', delegationId: 'del_parent', chainDepth: 0 })}`;
+    const receipt = `${input}.${sign(null, Buffer.from(input), key).toString('base64url')}`;
+    const child = await newAgent();
+    const res = await request(s.app).post('/api/v1/subdelegate').set('Authorization', `Bearer ${BEARER}`)
+      .send({ parent_receipt: receipt, actor_token: actorTokenFor(s.agent, '/api/v1/subdelegate'), agent_did: child.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_subdelegation_refused');
+  });
+
   it('inside a transaction only a handle is issued, never a raw provider token', async () => {
     const s = await setup({ config: { allowRawTokens: true } });
     const res = await delegateWithHttpSig(s.app, s.agent, s.w, { token_format: 'raw' }, { 'txn-token': s.tts.mint() });
@@ -254,12 +343,55 @@ describe('audit context stays with its request', () => {
     }
   });
 
+  it('a refusal summary written later keeps the transaction of the requests it summarises', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    provider();
+    for (let i = 0; i < 3; i++) {
+      const r = await useWithHttpSig(s.app, s.agent, token, s.w, { url: CALENDAR, method: 'GET' }, { extraHeaders: { 'txn-token': s.tts.mint({ txn: 'txn-agg-1', scope: 'payments.send' }) } });
+      expect(r.status).toBe(403);
+    }
+    // Flushed outside any request: the summary must not lose (or borrow) a txn.
+    s.flushAuditAggregates();
+    const rows = (await auditFor(s.app)).filter((e) => e.metadata?.aggregated);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const e of rows) expect(e.metadata?.txn).toBe('txn-agg-1');
+  });
+
   it('audit lines of a WIMSE-authenticated request name the workload subject', async () => {
     const s = await setup();
     await delegated(s);
     const events = await auditFor(s.app);
     const del = events.find((e) => e.action === 'delegate' && e.outcome === 'success');
     expect(del?.metadata?.workload).toMatchObject({ subject: s.w.subject, trustDomain: TD, proof: 'http-sig' });
+  });
+});
+
+describe('proof and body handling on /use and form posts', () => {
+  it('a WIT with a WPT on /use is refused (Authorization carries the Delegation Token, so only an HTTP signature can bind it)', async () => {
+    const s = await setup();
+    const token = await delegated(s);
+    const seen = provider();
+    const res = await useWithHttpSig(s.app, s.agent, token, null, { url: CALENDAR, method: 'GET' }, {
+      extraHeaders: { 'workload-identity-token': s.w.wit, 'txn-token': s.tts.mint() },
+    });
+    // The WPT path refuses an Authorization that is not the WPT scheme.
+    expect(res.status).toBe(401);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('a WIMSE-signed form-encoded request keeps its parameters and its Content-Digest is checked', async () => {
+    const s = await setup({ required: false });
+    const form = 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=x';
+    const h = httpSigHeaders(s.w, 'POST', '/api/v1/token', { body: form, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    const ok = await send(s.app, 'post', '/api/v1/token', h, form);
+    // Authenticated, and the route saw the form fields (it refuses the exchange on its own terms).
+    expect(ok.body?.type).not.toBe('https://iana.org/assignments/http-problem-types#wimse-signature-invalid');
+    expect(JSON.stringify(ok.body)).not.toMatch(/grant_type.*required|unsupported_grant_type/);
+    const h2 = httpSigHeaders(s.w, 'POST', '/api/v1/token', { body: form, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    const bad = await send(s.app, 'post', '/api/v1/token', h2, form.replace('=x', '=y'));
+    expect(bad.status).toBe(400);
+    expect(bad.body.type).toBe('https://iana.org/assignments/http-problem-types#wimse-signature-invalid');
   });
 });
 

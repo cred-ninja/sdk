@@ -127,7 +127,8 @@ function userIdFrom(claims: Record<string, unknown>, rule: TxnUserSubjectRule | 
   const v = claimAt(claims, rule.claim);
   if (typeof v !== 'string' || v.length === 0 || v.length > MAX_SUBJECT_LENGTH) return undefined;
   if (rule.pattern === undefined) return v;
-  const m = new RegExp(rule.pattern).exec(v);
+  // Wrapped so an alternation in the pattern cannot leave a branch unanchored.
+  const m = new RegExp(`^(?:${rule.pattern})$`).exec(v);
   return m && typeof m[1] === 'string' && m[1].length > 0 ? m[1] : undefined;
 }
 
