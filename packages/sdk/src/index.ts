@@ -68,3 +68,7 @@ export type {
   CreatePermissionParams,
   UpdatePermissionParams,
 } from './types.js';
+
+// WIMSE HTTP-signature signer for the external-identity `signRequest` hook.
+export { createWimseHttpSigner } from './wimse-signer.js';
+export type { WimseHttpSignerOptions, SdkSignableRequest } from './wimse-signer.js';
