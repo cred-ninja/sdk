@@ -10,6 +10,7 @@ import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
+import type { ExternalIdentitySource, ExternalIdentityMapping } from './identity/types.js';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -39,6 +40,11 @@ export type AgentRequestAuthResult =
 export type AgentRequestVerifier =
   (req: Request) => AgentRequestAuthResult | Promise<AgentRequestAuthResult>;
 
+export interface ExternalIdentityConfig {
+  sources: readonly ExternalIdentitySource[];
+  mappings: readonly ExternalIdentityMapping[];
+}
+
 export interface ServerConfig {
   port: number;
   host: string;
@@ -56,6 +62,16 @@ export interface ServerConfig {
   adminToken: string;
   agentToken?: string;
   agentRequestVerifier?: AgentRequestVerifier;
+  /**
+   * Opt-in external identity (off when absent). Each source verifies a
+   * credential Cred did not issue (a WIMSE WIT with its WPT, a Tailscale node
+   * through WhoIs); `mappings` names, by exact subject, the existing agent
+   * DID each verified identity acts as. A request carrying a source's
+   * credential is authenticated by that source instead of the agent token;
+   * one that fails, or maps to no agent, is refused and never falls back to
+   * the agent token. Programmatic only: loadConfig() never sets it.
+   */
+  externalIdentity?: ExternalIdentityConfig;
 
   // OAuth providers (only those with both clientId and clientSecret)
   providers: ProviderConfig[];
@@ -174,6 +190,11 @@ export interface ServerConfig {
   // Web Bot Auth ingress verification mode
   webBotAuthMode?: 'off' | 'optional' | 'require';
   webBotAuthNonceStore?: 'memory' | 'sqlite';
+  /**
+   * Longest Web Bot Auth signature lifetime (expires - created) accepted, in
+   * seconds. The nonce is held until `expires`. Default 300.
+   */
+  webBotAuthMaxSignatureLifetimeSeconds?: number;
   webBotAuthNoncePath?: string;
   webBotAuthAllowedOrigins?: string[];
 

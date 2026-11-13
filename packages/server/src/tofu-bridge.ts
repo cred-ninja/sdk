@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { AgentVault } from '@credninja/tofu';
 import type { AgentIdentityRow } from '@credninja/tofu';
 import type { Permission } from '@credninja/vault';
@@ -43,6 +44,12 @@ export async function resolveTofuPrincipal(
     requestedScopes?: string[];
   },
   now = new Date(),
+  /**
+   * Replay check, run only after the proof verifies. Returns true when this
+   * proof was seen before. Pass it only where the proof is spent: a caller
+   * that inspects the same request first (Guard) must not record it.
+   */
+  seen?: (key: string, expiresAtSeconds: number) => boolean,
 ): Promise<ResolvedTofuIdentity> {
   const payloadBuffer = decodeBase64(proof.payloadBase64, 'Invalid tofu_payload');
   const signatureBuffer = decodeBase64(proof.signatureBase64, 'Invalid tofu_signature');
@@ -61,6 +68,13 @@ export async function resolveTofuPrincipal(
   }
   if (identity.status === 'revoked') {
     throw new Error('TOFU identity has been revoked');
+  }
+  if (seen) {
+    const key = `${proof.fingerprint}:${createHash('sha256').update(payloadBuffer).digest('base64url')}`;
+    const expiresAtSeconds = Math.floor((new Date(payload.timestamp).getTime() + MAX_PROOF_SKEW_MS) / 1000);
+    if (seen(key, expiresAtSeconds)) {
+      throw new Error('TOFU proof has already been used');
+    }
   }
 
   return {
