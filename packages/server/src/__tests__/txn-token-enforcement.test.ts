@@ -358,6 +358,28 @@ describe('audit context stays with its request', () => {
     for (const e of rows) expect(e.metadata?.txn).toBe('txn-agg-1');
   });
 
+  it('a receipt minted inside a transaction carries its txn, and one minted outside carries none', async () => {
+    const s = await setup({ required: false });
+    const inside = await delegateWithHttpSig(s.app, s.agent, s.w, {}, { 'txn-token': s.tts.mint({ txn: 'txn-receipt-1' }) });
+    const outside = await delegateWithHttpSig(s.app, s.agent, s.w);
+    const claims = (r: { body: Record<string, unknown> }) => {
+      const receipt = (r.body.receipt ?? r.body.delegation_receipt) as string;
+      return JSON.parse(Buffer.from(receipt.split('.')[1], 'base64url').toString());
+    };
+    expect(inside.status).toBe(200);
+    expect(claims(inside).txn).toBe('txn-receipt-1');
+    // The SDK's receipt verifier still accepts it (it reads named claims only).
+    const { verifyDelegationReceipt } = await import('@credninja/sdk');
+    const crypto = await import('node:crypto');
+    const seed = crypto.scryptSync('test-passphrase-not-for-production', 'cred:local-receipt:v1', 32);
+    const key = crypto.createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8' });
+    const pubHex = (crypto.createPublicKey(key).export({ format: 'der', type: 'spki' }) as Buffer).subarray(-32).toString('hex');
+    const receipt = (inside.body.receipt ?? inside.body.delegation_receipt) as string;
+    expect(await verifyDelegationReceipt(receipt, { expectedDid: s.agent.did, credPublicKey: pubHex })).toBe(true);
+    expect(outside.status).toBe(200);
+    expect(claims(outside).txn).toBeUndefined();
+  });
+
   it('audit lines of a WIMSE-authenticated request name the workload subject', async () => {
     const s = await setup();
     await delegated(s);

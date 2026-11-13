@@ -2278,6 +2278,11 @@ export function createServer(config: ServerConfig) {
       ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.chainProfile ? { chain_profile: { format: input.chainProfile.format, jti: input.chainProfile.jti, scope_mapping: input.chainProfile.scopeMapping } } : {}),
+      // The transaction this delegation was made in, when the request carried
+      // a verified Txn-Token (RFC 8417 §2.2 txn; draft-ietf-oauth-transaction-
+      // tokens-11 §9.2). Receipt verifiers read named claims only, so an
+      // added claim leaves existing verifiers unaffected.
+      ...(auditContext.getStore()?.txn ? { txn: auditContext.getStore()!.txn } : {}),
     };
     return signCompactJws(payload, getReceiptKeys().signer, { typ: 'JWT' });
   }
