@@ -1,0 +1,12 @@
+authgent Txn-Token header {"alg":"ES256","kid":"b8m9PpWdgrEGNDlcH9h8Ag","typ":"txntoken+jwt"}
+authgent Txn-Token claims {"iss":"http://127.0.0.1:8765","iat":1794601545,"aud":"domain-b.example","exp":1794601665,"txn":"KUyxNn27l_i44pHU8C2qBrvjzVmUAwhE","sub":"client:agnt_LQ2s7D3iABwMmKLJqKKdeQ","scope":"calendar.read","req_wl":"client:agnt_6I0rQb2_F42F87uqO0iSyw","tctx":{"user":"alice"},"rctx":{"req_ip":"127.0.0.1","authn":"urn:ietf:rfc:6749"}}
+PASS  WIT + WPT with the external Txn-Token (tth) obtains a delegation: HTTP 200 DPoP
+PASS  WIT + HTTP signature covering the external Txn-Token makes the delegated read: HTTP 200, provider 200
+PASS  An external Txn-Token swapped after signing is refused: HTTP 400
+PASS  An external Txn-Token for another user than the delegation's is refused: HTTP 403 txn_user_mismatch
+PASS  The provider never received the Txn-Token or other WIMSE headers: 1 call(s), leaked: none
+  audit delegate success txn=KUyxNn27l_i44pHU8C2qBrvjzVmUAwhE workload=spiffe://domain-b.example/ns/agents/sa/planner
+  audit access success txn=q5JoadmdAoWRTJXEuUyoAE8fIzNceBep workload=spiffe://domain-b.example/ns/agents/sa/planner
+  audit deny denied txn=m9OSLgEIIzcNyhx37cgLWt5kn_CaTASe workload=spiffe://domain-b.example/ns/agents/sa/planner
+PASS  Audit lines carry the transaction ids the external service minted: minted KUyxNn27l_i44pHU8C2qBrvjzVmUAwhE, q5JoadmdAoWRTJXEuUyoAE8fIzNceBep
+RESULT: PASS
