@@ -21,9 +21,26 @@ interface CredDelegateToolInput {
 }
 
 
+function resolveClient(options: { agentToken?: string; baseUrl: string; cred?: Cred }): Cred {
+  if (options.cred !== undefined) {
+    if (!(options.cred instanceof Cred)) throw new TypeError('cred must be a Cred client from @credninja/sdk');
+    if (options.agentToken) throw new Error('Pass agentToken or cred, not both');
+    if (!options.baseUrl) throw new Error('baseUrl is required: cached delegations are keyed on it');
+    return options.cred;
+  }
+  return new Cred({ agentToken: options.agentToken as string, baseUrl: options.baseUrl });
+}
+
 export interface CredDelegateToolOptions {
-  /** Agent token issued by Cred (starts with cred_at_) */
-  agentToken: string;
+  /** Agent token issued by Cred (starts with cred_at_). Omit it when passing `cred`. */
+  agentToken?: string;
+  /**
+   * A client you built yourself, for example one with `signRequest` from
+   * `createWimseHttpSigner` so requests carry a WIT and an HTTP Message
+   * Signature instead of an agent token. `baseUrl` must still be the URL it
+   * was built with: cached delegations are keyed on it.
+   */
+  cred?: Cred;
   /** The user whose credentials to delegate */
   userId: string;
   /** The Cred app client ID to delegate for */
@@ -49,8 +66,15 @@ export interface CredDelegateToolOptions {
 }
 
 export interface CredUseToolOptions {
-  /** Agent token issued by Cred (starts with cred_at_) */
-  agentToken: string;
+  /** Agent token issued by Cred (starts with cred_at_). Omit it when passing `cred`. */
+  agentToken?: string;
+  /**
+   * A client you built yourself, for example one with `signRequest` from
+   * `createWimseHttpSigner` so requests carry a WIT and an HTTP Message
+   * Signature instead of an agent token. `baseUrl` must still be the URL it
+   * was built with: cached delegations are keyed on it.
+   */
+  cred?: Cred;
   /** Your Cred server URL (e.g. https://cred.example.com or http://localhost:3456) */
   baseUrl: string;
   /**
@@ -117,7 +141,7 @@ function rememberDelegationToken(delegationId: string, entry: RememberedToken): 
 }
 
 export function credDelegateTool(options: CredDelegateToolOptions): Tool {
-  const { agentToken, userId, appClientId, baseUrl, tokenFormat = 'handle', agentIdentity } = options;
+  const { userId, appClientId, baseUrl, tokenFormat = 'handle', agentIdentity } = options;
   const inputSchema = z.object({
     service: z
       .string()
@@ -130,10 +154,7 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
       ),
   }) as z.ZodType<CredDelegateToolInput>;
 
-  const cred = new Cred({
-    agentToken,
-    baseUrl,
-  });
+  const cred = resolveClient(options);
   let cachedResult:
     | {
         accessToken?: string;
@@ -232,11 +253,8 @@ export function credDelegateTool(options: CredDelegateToolOptions): Tool {
  * Use this with `credDelegateTool({ tokenFormat: 'handle', ... })`.
  */
 export function credUseTool(options: CredUseToolOptions): Tool {
-  const { agentToken, baseUrl, agentIdentity } = options;
-  const cred = new Cred({
-    agentToken,
-    baseUrl,
-  });
+  const { baseUrl, agentIdentity } = options;
+  const cred = resolveClient(options);
 
   const inputSchema = z.object({
     delegationId: z.string().describe('Delegation handle returned by cred_delegate.'),

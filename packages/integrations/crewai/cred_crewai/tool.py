@@ -25,6 +25,21 @@ if TYPE_CHECKING:
     from cred import DpopSigningIdentity
 
 
+def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
+    """Use the caller's client when given (for example one built with
+    ``sign_request`` for WIMSE workload signing); otherwise build one from the
+    agent token, as before. The token cache keys on the client's server URL."""
+    if cred is None:
+        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
+    if not isinstance(cred, Cred):
+        raise TypeError("cred must be a synchronous cred.Cred client")
+    if agent_token:
+        raise ValueError("Pass agent_token or cred, not both")
+    if base_url and base_url.rstrip("/") != cred.base_url:
+        raise ValueError("base_url does not match the passed client's base_url")
+    return cred, cred.base_url
+
+
 def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
     """``agent_identity=`` for the SDK call, only when one is configured."""
     return {"agent_identity": agent_identity} if agent_identity is not None else {}
@@ -155,14 +170,15 @@ class CredTool(BaseTool):
 
     def __init__(
         self,
-        agent_token: str,
+        agent_token: Optional[str],
         user_id: str,
         service: str,
         app_client_id: str,
-        base_url: str,
+        base_url: Optional[str],
         scopes: Optional[list[str]] = None,
         token_format: str = "raw",
         *,
+        cred: Optional[Cred] = None,
         agent_identity: Optional[DpopSigningIdentity] = None,
         **kwargs: Any,
     ) -> None:
@@ -176,7 +192,7 @@ class CredTool(BaseTool):
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
         super().__init__(**kwargs)
-        self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._cred, base_url = _resolve_client(agent_token, base_url, cred)
         self._base_url = base_url
         self._user_id = user_id
         self._service = service
@@ -258,9 +274,10 @@ class CredUseTool(BaseTool):
 
     def __init__(
         self,
-        agent_token: str,
-        base_url: str,
+        agent_token: Optional[str],
+        base_url: Optional[str],
         *,
+        cred: Optional[Cred] = None,
         agent_identity: Optional[DpopSigningIdentity] = None,
         user_id: Optional[str] = None,
         **kwargs: Any,
@@ -276,7 +293,7 @@ class CredUseTool(BaseTool):
                 key stays in your process; it is never sent to the model or the server.
         """
         super().__init__(**kwargs)
-        self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._cred, base_url = _resolve_client(agent_token, base_url, cred)
         self._base_url = base_url
         self._agent_identity = agent_identity
         self._use_user_id = user_id
