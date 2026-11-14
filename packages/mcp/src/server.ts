@@ -15,11 +15,14 @@ import { Cred, importAgentIdentity } from '@credninja/sdk';
 import type { CredGuard } from '@credninja/guard';
 
 import { CredMcpConfig } from './config.js';
+import { loadWimseWorkload, type WimseWorkload } from './wimse.js';
+import { describeAuthentication } from './authentication.js';
 import { TokenCache } from './token-cache.js';
 import { createWebBotAuthSigner } from './web-bot-auth.js';
 import {
   agentTokenHashForLocalMode,
   agentTokenHashForCloudMode,
+  agentTokenHashForWimseMode,
   wireGuardedTool,
   syntheticProvider,
 } from './guard-wiring.js';
@@ -93,7 +96,7 @@ import {
 
 const MCP_SERVER_VERSION = '1.0.0';
 
-function createCredClient(config: CredMcpConfig): Cred {
+function createCredClient(config: CredMcpConfig, workload?: WimseWorkload): Cred {
   if (config.mode === 'local') {
     return new Cred({
       mode: 'local',
@@ -104,6 +107,10 @@ function createCredClient(config: CredMcpConfig): Cred {
       },
       providers: config.providers,
     });
+  }
+  if (config.wimse) {
+    if (!workload) throw new Error('WIMSE cloud mode needs its workload loaded');
+    return new Cred({ baseUrl: config.baseUrl, signRequest: workload.signRequest });
   }
   return new Cred({
     agentToken: config.agentToken,
@@ -121,7 +128,9 @@ function createCredClient(config: CredMcpConfig): Cred {
  * drift risk.
  */
 function buildServerState(config: CredMcpConfig) {
-  const cred = createCredClient(config);
+  // Loads the key and checks the WIT once, at startup.
+  const workload = config.mode === 'cloud' && config.wimse ? loadWimseWorkload(config.wimse) : undefined;
+  const cred = createCredClient(config, workload);
   const webBotAuthSigner = config.webBotAuth
     ? createWebBotAuthSigner(config.webBotAuth)
     : undefined;
@@ -141,7 +150,9 @@ function buildServerState(config: CredMcpConfig) {
   // an identity to hash when agentDid is configured.
   const agentTokenHash =
     config.mode === 'cloud'
-      ? agentTokenHashForCloudMode(config.agentToken)
+      ? workload
+        ? agentTokenHashForWimseMode(workload.subject)
+        : agentTokenHashForCloudMode(config.agentToken as string)
       : config.agentDid
         ? agentTokenHashForLocalMode(config.agentDid)
         : undefined;
@@ -166,8 +177,9 @@ function buildServerState(config: CredMcpConfig) {
       ? { delegatorIdentity: importAgentIdentity({ did: config.agentDid, privateKeyHex: config.agentPrivateKeyHex }) }
       : {}),
     guard,
-    ...(config.mode === 'cloud' ? { agentToken: config.agentToken } : {}),
+    ...(config.mode === 'cloud' && config.agentToken ? { agentToken: config.agentToken } : {}),
     ...(agentTokenHash ? { agentTokenHash } : {}),
+    authentication: describeAuthentication(config),
   };
 
   return { cred, tokenCache, toolContext, guard, mode: config.mode };

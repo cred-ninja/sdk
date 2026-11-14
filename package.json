@@ -33,7 +33,11 @@
     "release:hygiene": "node scripts/check-release-hygiene.mjs",
     "smoke:npm": "node scripts/smoke-npm-packages.mjs",
     "smoke:python": "bash scripts/smoke-python-wheels.sh",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "hackathon:demo": "node scripts/hackathon/demo.mjs",
+    "hackathon:serve": "node scripts/hackathon/serve.mjs",
+    "hackathon:python": "node scripts/hackathon/python-sdk/run.mjs",
+    "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs"
   },
   "devDependencies": {
     "eslint": "9.39.4",
@@ -45,7 +49,7 @@
     "esbuild": "0.28.2",
     "express-rate-limit": "8.5.2",
     "fast-uri": "3.1.9",
-    "hono": "4.13.13",
+    "hono": "4.13.18",
     "@hono/node-server": "2.1.8",
     "path-to-regexp": "8.4.2",
     "qs": "6.17.1",

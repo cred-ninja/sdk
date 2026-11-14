@@ -17,6 +17,7 @@ from .identity import (
     verify_delegation_receipt,
 )
 from .jcs import CanonicalJsonError, canonical_json
+from .wimse import WIMSE_SIGNATURE_TAG, create_wimse_http_signer
 from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
 __all__ = [
@@ -39,4 +40,6 @@ __all__ = [
     "DelegationHandleResult",
     "DelegationResult",
     "Connection",
+    "create_wimse_http_signer",
+    "WIMSE_SIGNATURE_TAG",
 ]

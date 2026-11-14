@@ -1,0 +1,67 @@
+wimsey: wimsey 0.10.1
+
+=== wimsey -> Cred (ES256 issuer and workload keys) ===
+WIT header: {"typ":"wit+jwt","alg":"ES256","kid":"wimsey-issuer-1"}
+WIT + WPT (wimsey): 200
+Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794608429;expires=1794608729;nonce="75e2169d2751c5f05a0246a75fad28b7";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
+WIT + HTTP signature (wimsey), GET: 200
+  same request replayed: 400
+WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","message":"A Delegation Token is bound to the agent's key: send agent_did as a did:key and a DPoP proof by that key"} 400
+  (authenticated: the route then asks for the agent's DPoP proof, which is Cred's delegation protocol, not WIMSE)
+  wimsey signature for /api/v1/connections sent to /api/v1/providers: 400
+  cred log: [cred] wimse identity refused: replay: nonce already used
+  cred log: [cred] wimse identity refused: bad_signature: signature invalid
+Cred http://127.0.0.1:53147; trusted domain-b.example from bundle-ES256.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6Mko7nLDFkQSyUPhrR1ViJEr298TTw7wnBWE6Qi1yG91Exc
+POST /api/v1/delegate (WIT + WPT): 200 DPoP
+POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
+provider calls 1; WIMSE headers at provider: none
+audit:
+  2026-11-13T22:20:29.648Z create success actor=admin {"agentId":"did:key:z6Mko7nLDFkQSyUPhrR1ViJEr298TTw7wnBWE6Qi1yG91Exc","connectionId":"google"}
+  2026-11-13T22:20:29.678Z delegate success actor=did:key:z6Mko7nLDFkQSyUPhrR1ViJEr298TTw7wnBWE6Qi1yG91Exc {"identitySource":"did","agentDid":"did:key:z6Mko7nLDFkQSyUPhrR1ViJEr298TTw7wnBWE6Qi1yG91Exc","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T22:20:29.687Z access success actor=did:key:z6Mko7nLDFkQSyUPhrR1ViJEr298TTw7wnBWE6Qi1yG91Exc {"delegationId":"del_868e3aa0ba5344d0b7680fe3c8b59dd9","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+RESULT: PASS
+
+=== wimsey -> Cred (Ed25519 issuer and workload keys) ===
+WIT header: {"typ":"wit+jwt","alg":"Ed25519","kid":"wimsey-issuer-1"}
+WIT + WPT (wimsey): 200
+Signature-Input (wimsey): wimse=("@method" "@path" "@query" "workload-identity-token");created=1794608430;expires=1794608730;nonce="a5fa3036428bf2e476bb25007d645780";tag="wimse-workload-to-workload";wimse-aud="http://127.0.0.1:3491/api/v1/connections"
+WIT + HTTP signature (wimsey), GET: 200
+  same request replayed: 400
+WIT + HTTP signature (wimsey), POST with body: {"error":"agent_key_required","message":"A Delegation Token is bound to the agent's key: send agent_did as a did:key and a DPoP proof by that key"} 400
+  (authenticated: the route then asks for the agent's DPoP proof, which is Cred's delegation protocol, not WIMSE)
+  wimsey signature for /api/v1/connections sent to /api/v1/providers: 400
+  cred log: [cred] wimse identity refused: replay: nonce already used
+  cred log: [cred] wimse identity refused: bad_signature: signature invalid
+Cred http://127.0.0.1:53165; trusted domain-b.example from bundle-Ed25519.json; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkmtrVgEyJhGjSbEFoAhLTbudaeMfAPeD83qQzFMqsZhhn
+POST /api/v1/delegate (WIT + WPT): 200 DPoP
+POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
+provider calls 1; WIMSE headers at provider: none
+audit:
+  2026-11-13T22:20:30.288Z create success actor=admin {"agentId":"did:key:z6MkmtrVgEyJhGjSbEFoAhLTbudaeMfAPeD83qQzFMqsZhhn","connectionId":"google"}
+  2026-11-13T22:20:30.318Z delegate success actor=did:key:z6MkmtrVgEyJhGjSbEFoAhLTbudaeMfAPeD83qQzFMqsZhhn {"identitySource":"did","agentDid":"did:key:z6MkmtrVgEyJhGjSbEFoAhLTbudaeMfAPeD83qQzFMqsZhhn","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T22:20:30.327Z access success actor=did:key:z6MkmtrVgEyJhGjSbEFoAhLTbudaeMfAPeD83qQzFMqsZhhn {"delegationId":"del_6a95ad7cd6314361a7df915fa4d87e7a","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+RESULT: PASS
+
+=== Cred signs a response; wimsey's response profile verifies it ===
+request: GET /api/v1/connections?user_id=alice with wimse-sign-response (nonce IgjS1lwYfwnhLayV0UoUYA)
+response: 200; Signature-Input: wimse=("@status" "workload-identity-token" "content-type" "content-digest" "@method";req "@path";req "@query";req);created=1794608430;expires=1794608490;nonce="f1fO1yk_IzYWmbKFThUQsQ";tag="wimse-workload-to-workload";wimse-req-nonce="IgjS1lwYfwnhLayV0UoUYA"
+response WIT is Cred's own (spiffe://domain-b.example/cred/final-hop): true
+wimsey response-profile verify: OK label=wimse components=["\"@status\"", "\"workload-identity-token\"", "\"content-type\"", "\"content-digest\"", "\"@method\";req", "\"@path\";req", "\"@query\";req"], content-digest matches the body
+wimsey wit verify of Cred's own WIT: OK
+
+=== Cred -> wimsey (Cred's demo issuer and signer, wimsey verifies) ===
+{
+  "label": "wimse",
+  "sub": "spiffe://domain-b.example/ns/agents/sa/planner"
+}
+wimsey httpsig verify of Cred's signature: OK
+{
+  "sub": "spiffe://domain-b.example/ns/agents/sa/planner",
+  "wpt": {
+    "aud": "http://127.0.0.1:3491/api/v1/connections",
+    "exp": 1794608494,
+    "jti": "s4YGx34X1ubfFdKEP3lYpg",
+    "wth": "s_reBQdqx6_tui8UlsaVB3Pm7Dp92JEWxwg8TyRxn5A"
+  }
+}
+wimsey wpt verify of Cred's WPT: OK

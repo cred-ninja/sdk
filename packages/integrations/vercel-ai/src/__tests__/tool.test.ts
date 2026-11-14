@@ -15,6 +15,7 @@ const mockUse = vi.fn();
 vi.mock('@credninja/sdk', () => {
   class MockCred {
     constructor(public config: any) {}
+    get serverUrl() { return this.config?.baseUrl; }
     delegate = mockDelegate;
     delegateHandle = mockDelegateHandle;
     use = mockUse;
@@ -45,7 +46,7 @@ vi.mock('@credninja/sdk', () => {
   };
 });
 
-const { ConsentRequiredError, CredError } = await import('@credninja/sdk');
+const { ConsentRequiredError, CredError, Cred } = await import('@credninja/sdk');
 import { credDelegateTool } from '../tool';
 import { credUseTool } from '../tool';
 
@@ -470,5 +471,33 @@ describe('credUseTool execute', () => {
       body: undefined,
       extraHeaders: { 'X-Test': '1' },
     });
+  });
+});
+
+// -- a caller-built client (e.g. one that signs WIMSE requests) --------------
+
+describe('passing a prebuilt cred client', () => {
+  const opts = { toolCallId: 'tc_1', messages: [], abortSignal: new AbortController().signal };
+
+  it('uses the passed client instead of building one from an agent token', async () => {
+    const own = new Cred({ baseUrl: BASE_URL } as any) as any;
+    own.delegate = vi.fn().mockResolvedValue({
+      accessToken: 'ya29.x', tokenType: 'Bearer', expiresIn: 60, expiresAt: new Date(Date.now() + 60_000),
+      service: 'google', scopes: ['calendar.readonly'], delegationId: 'del_own',
+    });
+    const t = credDelegateTool({ cred: own, baseUrl: BASE_URL, userId: USER_ID, appClientId: APP_CLIENT_ID, tokenFormat: 'raw' });
+    await t.execute!({ service: 'google', scopes: ['calendar.readonly'] }, opts);
+    expect(own.delegate).toHaveBeenCalledTimes(1);
+    expect(mockDelegate).not.toHaveBeenCalled();
+    expect(() => credUseTool({ cred: own, baseUrl: BASE_URL })).not.toThrow();
+  });
+
+  it('refuses a client together with an agent token, a non-client, or no baseUrl', () => {
+    const own = new Cred({ baseUrl: BASE_URL } as any);
+    expect(() => credUseTool({ cred: own, agentToken: TOKEN, baseUrl: BASE_URL })).toThrow(/not both/);
+    expect(() => credUseTool({ cred: {} as any, baseUrl: BASE_URL })).toThrow(/Cred client/);
+    expect(() => credDelegateTool({ cred: own, baseUrl: '', userId: USER_ID, appClientId: APP_CLIENT_ID })).toThrow(/baseUrl is required/);
+    expect(() => credUseTool({ cred: own, baseUrl: 'https://other.example.com' })).toThrow(/does not match/);
+    expect(() => credUseTool({ cred: own, baseUrl: `${BASE_URL}/` })).not.toThrow();
   });
 });

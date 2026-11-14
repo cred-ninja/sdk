@@ -90,6 +90,14 @@ When your MCP client needs your calendar, you approve interactively. The token i
 | `CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX` | No | | Raw 32-byte Ed25519 private key in hex. Enables native Web Bot Auth signing |
 | `CRED_WEB_BOT_AUTH_SIGNATURE_AGENT` | No | | HTTPS URL for the agent's `Signature-Agent` directory |
 | `CRED_WEB_BOT_AUTH_TTL_SECONDS` | No | `30` | Signature lifetime in seconds. Must be between `1` and `300` |
+| `CRED_WIMSE_WIT_FILE` | No | | File holding the workload's WIT. With `CRED_WIMSE_KEY_FILE` and `CRED_WIMSE_ALG`, requests to Cred carry the WIT and a WIMSE HTTP signature (draft-ietf-wimse-http-signature-08) instead of `CRED_AGENT_TOKEN`, which must then be unset. Read on every request, so a rotated file takes effect without a restart |
+| `CRED_WIMSE_KEY_FILE` | With the WIT file | | PKCS#8 PEM private key named by the WIT's `cnf.jwk`. Loaded once at startup |
+| `CRED_WIMSE_ALG` | With the WIT file | | `ES256` (P-256 key) or `EdDSA` (Ed25519 key) |
+| `CRED_TXN_TOKEN_FILE` | No | | File holding a Txn-Token to carry, covered by the signature, on each request. Read on every request |
+
+In WIMSE mode `CRED_AGENT_DID` and `CRED_AGENT_PRIVATE_KEY_HEX` are required, since delegation and brokered calls still carry a DPoP proof of the agent key. WIMSE cannot be combined with Web Bot Auth. Guard rate limits key on the WIT's `sub` as read at startup; a WIT with a different `sub` needs a restart.
+
+`cred_capabilities` and `cred_whoami` report this instance's `authentication`: `mode` (`agent-token`, `wimse-workload` or `local`), `txnToken` (a Txn-Token file is configured) and `webBotAuth`. They never include file paths, keys or tokens, and they describe this MCP instance only, not the server's configuration.
 
 ### Local Mode
 

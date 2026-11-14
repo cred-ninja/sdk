@@ -28,6 +28,7 @@
  * introspection caller.
  */
 
+import type { AuthenticationSummary } from '../authentication.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { CredGuard } from '@credninja/guard';
 import { RateLimitPolicy } from '@credninja/guard';
@@ -41,6 +42,7 @@ export const WHOAMI_TOOL_DEFINITION = {
   description:
     'Introspect the calling agent\'s own runtime permission state: active guard policy names, ' +
     'remaining rate-limit headroom, and (where available) its own effective delegated scopes. ' +
+    'Also reports how this server authenticates to Cred (agent token or WIMSE workload). ' +
     'Read-only and always available, including during a guard-subsystem outage.',
   inputSchema: {
     type: 'object' as const,
@@ -55,6 +57,8 @@ export interface WhoamiToolContext {
   guard?: CredGuard;
   agentTokenHash?: string;
   selfAgentId?: string;
+  /** How this MCP instance authenticates to Cred (omitted when not provided). */
+  authentication?: AuthenticationSummary;
 }
 
 interface RateLimitHeadroom {
@@ -126,7 +130,9 @@ export async function handleWhoami(
       guardPolicies?: string[];
       rateLimit?: RateLimitHeadroom[];
       effectiveScopes?: string[];
+      authentication?: AuthenticationSummary;
     } = {};
+    if (context.authentication) response.authentication = context.authentication;
 
     if (context.guard) {
       response.guardPolicies = context.guard.getPolicyNames();

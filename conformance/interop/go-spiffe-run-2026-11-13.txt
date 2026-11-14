@@ -1,0 +1,12 @@
+go-spiffe witsvid.ParseAndValidate: OK id=spiffe://domain-b.example/ns/agents/sa/planner kid=go-spiffe-wit-1
+bundle (go-spiffe spiffebundle.Marshal): {"keys":[{"use":"wit-svid","kty":"EC","kid":"go-spiffe-wit-1","crv":"P-256","x":"UU-OOIFGprwUYRU_JLVWDX_nUKDLdS8bPnH1sIz89A4","y":"fHhiDO8qpPqJCU8-sre5jxC356e-9V4cbG2PZV7zi1k"}]}
+Cred http://127.0.0.1:54085; trusted domain-b.example from $RUN; spiffe://domain-b.example/ns/agents/sa/planner -> did:key:z6MkjYzJCHHxD1THaGXHvc6KtfbYE8zPurzRL19JAyZBF3iF
+POST /api/v1/delegate (WIT + WPT): 200 DPoP
+POST /api/v1/use (WIT + HTTP signature + Delegation Token): 200, provider 200
+provider calls 1; WIMSE headers at provider: none
+audit:
+  2026-11-13T20:50:50.152Z create success actor=admin {"agentId":"did:key:z6MkjYzJCHHxD1THaGXHvc6KtfbYE8zPurzRL19JAyZBF3iF","connectionId":"google"}
+  2026-11-13T20:50:50.182Z delegate success actor=did:key:z6MkjYzJCHHxD1THaGXHvc6KtfbYE8zPurzRL19JAyZBF3iF {"identitySource":"did","agentDid":"did:key:z6MkjYzJCHHxD1THaGXHvc6KtfbYE8zPurzRL19JAyZBF3iF","workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"wpt"}}
+  2026-11-13T20:50:50.190Z access success actor=did:key:z6MkjYzJCHHxD1THaGXHvc6KtfbYE8zPurzRL19JAyZBF3iF {"delegationId":"del_596676895c354059958fe06259208c0f","origin":"https://www.googleapis.com","route":"/calendar/v3/calendars/{id}/events","brokered":true,"method":"GET","status":200,"workload":{"subject":"spiffe://domain-b.example/ns/agents/sa/planner","trustDomain":"domain-b.example","proof":"http-sig"}}
+RESULT: PASS
+go-spiffe witsvid.ParseAndValidate: OK id=spiffe://domain-b.example/ns/agents/sa/planner kid=domain-b.example-wit-1 exp=2026-11-13T21:50:50Z

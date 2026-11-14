@@ -29,6 +29,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { CredVault, validateSubDelegation, DelegationChainError, scopeCoveredBy, parseConstraints, constraintsSubsume, unresolvableRankLabels, cumulativeConstraints, producerConstraintViolations, CUMULATIVE_CONSTRAINT_UNENFORCEABLE, parseStrictJson, StrictJsonError, isReservedLinkVaultUserId, ReservedVaultUserIdError, DelegationRevokedError } from '@credninja/vault';
 import type { AgentRecord, Permission, UpdatePermissionInput, AuditEvent, AuditActor, DelegationConstraint, DelegationRevocationResult, RecordDelegationInput, CumulativeLedger, DelegationGrant, VaultEntry } from '@credninja/vault';
@@ -60,6 +61,7 @@ import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
 import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
+import { linkDelegateState } from './link/enforcement.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
 import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
@@ -85,6 +87,10 @@ import { ITEM_KEYS, REQUEST_METERS, RESPONSE_METERS, countItems, destinationWith
 import { ApprovalCapacityError, ApprovalStore, CIBA_GRANT_TYPE, askExternalProvider, type ApprovalRequest } from './ciba.js';
 import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, verifyDpopProof } from './dpop.js';
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
+import { signWimseResponse, WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
+import { parseDictionary } from './identity/structured-fields.js';
+import { checkTxnTokenTrust, mappedProviderScopes, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
+import { decideTxnToken, isCredentialRoute, txnTrustRequiredFor as policyTxnTrustRequiredFor } from './identity/txn-policy.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -299,6 +305,13 @@ const WEB_BOT_AUTH_SIGNS: readonly string[] = ['webBotAuthKeyId', 'signatureAgen
 const WEB_BOT_AUTH_FIELDS: readonly string[] = [...WEB_BOT_AUTH_SIGNS, 'identitySource'];
 
 const BLOCKED_BROKER_EXTRA_HEADERS = new Set([
+  // Workload and transaction credentials stay inside their trust domain:
+  // a provider is outside it (draft-ietf-oauth-transaction-tokens-11 §14).
+  'accept-signature',
+  'content-digest',
+  'dpop',
+  'txn-token',
+  'workload-identity-token',
   'authorization',
   'connection',
   'content-length',
@@ -376,8 +389,24 @@ export function createServer(config: ServerConfig) {
   // sent, before any middleware adds members to req.body (Web Bot Auth adds
   // web_bot_auth_key_id and signature_agent). Null: no canonical JSON form.
   const useRequestHashes = new WeakMap<object, string | null>();
+  /**
+   * Request-scoped audit context: the verified workload (WIMSE subject) and,
+   * once its Txn-Token verified, the transaction id. Every audit event the
+   * request writes afterwards carries them.
+   */
+  const auditContext = new AsyncLocalStorage<{
+    txn?: string;
+    workload?: { subject: string; trustDomain: string; proof: string };
+  }>();
+  // The exact bytes of a request that carries a Workload Identity Token, for
+  // Content-Digest (draft-ietf-wimse-http-signature-08 §3). Only kept when
+  // external identity is configured.
+  const workloadRequestBodies = new WeakMap<object, Buffer>();
+  const capturesWorkloadBody = (req: { headers: Record<string, unknown> }) =>
+    Boolean(config.externalIdentity) && req.headers['workload-identity-token'] !== undefined;
   app.use(express.json({
     verify(req, _res, buffer) {
+      if (capturesWorkloadBody(req)) workloadRequestBodies.set(req, Buffer.from(buffer));
       if (req.method === 'POST' && /^\/api\/v1\/use\/?(?:\?|$)/i.test(req.url ?? '')) {
         let hash: string | null = null;
         try {
@@ -403,7 +432,23 @@ export function createServer(config: ServerConfig) {
       }
     },
   }));
-  app.use(express.urlencoded({ extended: false }));
+  // Any other content type on a WIT-bearing request: keep its bytes too, so
+  // its Content-Digest can be checked. Routes read JSON only, so nothing else
+  // consumes these bodies.
+  app.use(express.raw({
+    // JSON and form bodies are captured by their own parsers' verify hooks.
+    type: (req) => capturesWorkloadBody(req as any) && !workloadRequestBodies.has(req)
+      && !/^application\/x-www-form-urlencoded\b/i.test(String((req as any).headers['content-type'] ?? '')),
+    verify(req, _res, buffer) {
+      workloadRequestBodies.set(req, Buffer.from(buffer));
+    },
+  }));
+  app.use(express.urlencoded({
+    extended: false,
+    verify(req, _res, buffer) {
+      if (capturesWorkloadBody(req)) workloadRequestBodies.set(req, Buffer.from(buffer));
+    },
+  }));
 
   // Advertise the selected wire-protocol version on every response. During the
   // 0.1.0 compatibility window, missing version headers are accepted because
@@ -983,6 +1028,137 @@ export function createServer(config: ServerConfig) {
   const externalDpopJtiSeen = createJtiReplayCache();
   /** The agent a verified external identity mapped to, per request. */
   const provenExternalAgent = new WeakMap<Request, { agentDid: string; identity: VerifiedExternalIdentity }>();
+  const txnTokenTrust = externalIdentity?.txnTokens;
+  for (const [td, trust] of Object.entries(txnTokenTrust ?? {})) {
+    try {
+      checkTxnTokenTrust(trust);
+    } catch (err) {
+      throw new Error(`externalIdentity.txnTokens["${td}"]: ${(err as Error).message}`);
+    }
+  }
+  /** The verified Txn-Token of a request, with the trust it verified under. */
+  const verifiedTxnTokens = new WeakMap<Request, { token: VerifiedTxnToken; trust: TxnTokenTrust }>();
+
+  function credentialRoute(req: Request): boolean {
+    return isCredentialRoute(req.originalUrl);
+  }
+
+  /** The trust domain configuration whose Txn-Tokens an agent must present on brokered calls, if any. */
+  function txnTrustRequiredFor(agentDid: string): TxnTokenTrust | undefined {
+    return externalIdentity ? policyTxnTrustRequiredFor(txnTokenTrust, externalIdentity.mappings, agentDid) : undefined;
+  }
+
+  /**
+   * The Txn-Token bounds on issuing a delegation (/api/v1/delegate and the
+   * CIBA path at /bc-authorize). An agent whose trust domain requires
+   * Txn-Tokens obtains credentials only inside a verified transaction, and
+   * only as a handle: a raw provider token would escape the per-call
+   * narrowing on /api/v1/use. Inside a transaction, its user must be the
+   * delegation's user and every requested scope within its mapping. Refused,
+   * never silently narrowed. Null when issuance may proceed.
+   */
+  function txnIssuanceRefusal(
+    req: Request,
+    input: { agentDid: string | undefined; userId: string; service: string; requestedScopes: string[] | undefined; handle: boolean },
+  ): { error: string; message: string } | null {
+    const txn = verifiedTxnTokens.get(req);
+    if (!txn) {
+      return input.agentDid && txnTrustRequiredFor(input.agentDid)
+        ? { error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token to obtain a delegation" }
+        : null;
+    }
+    if (!input.handle) return { error: 'txn_handle_required', message: 'Within a transaction only a brokered handle is issued, so each call can be narrowed' };
+    const { token, trust } = txn;
+    if (token.userId === undefined) return { error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' };
+    if (token.userId !== input.userId) return { error: 'txn_user_mismatch', message: 'The transaction is for another user than user_id' };
+    const mapped = mappedProviderScopes(trust, input.service, token.scopes);
+    const scopes = input.requestedScopes;
+    if (mapped === null || !scopes || scopes.length === 0 || !scopes.every((scope) => mapped.some((m) => scopeEquivalent(scope, m)))) {
+      return { error: 'txn_scope_exceeded', message: "The requested scopes are not within the transaction's scope" };
+    }
+    return null;
+  }
+
+  /** The agent a delegate request is for: body agent_did (a DID or a record id), else the proven workload's agent. */
+  async function delegatingAgentOf(req: Request): Promise<string | undefined> {
+    const named = req.body?.agent_did;
+    if (typeof named === 'string' && named.startsWith('did:')) return named;
+    const record = typeof named === 'string' ? await vault.getAgent(named) : null;
+    return record?.did ?? provenExternalAgent.get(req)?.agentDid;
+  }
+
+  /**
+   * Record the verified workload for this request's audit events. Synchronous
+   * on purpose: AsyncLocalStorage.enterWith inside an awaited callee would not
+   * reach the caller, so callers invoke this right after their await.
+   */
+  function enterAuditWorkload(req: Request): void {
+    const identity = provenExternalAgent.get(req)?.identity;
+    if (identity?.kind !== 'wimse') return;
+    auditContext.enterWith({ ...auditContext.getStore(), workload: { subject: identity.subject, trustDomain: identity.trustDomain, proof: identity.proof } });
+  }
+
+  /**
+   * Txn-Token checks once a request is authenticated (`identity` null: not by
+   * a WIMSE workload). With no txnTokens configuration the header is ignored.
+   * Otherwise it must come from a WIMSE workload whose proof bound it (WPT
+   * tth, or the HTTP signature covering it), verify under that workload's
+   * trust domain, and is required when that domain says so.
+   */
+  function checkTxnToken(req: Request, res: Response, identity: VerifiedExternalIdentity | null): 'ok' | 'refused' {
+    if (!txnTokenTrust) return 'ok';
+    const header = req.headers['txn-token'];
+    const refuseUnbound = (code: string, detail: string): 'refused' => {
+      if (identity) return refuseExternalIdentity(req, res, identity.kind, code, detail, identity.subject, identity.proof);
+      writeIdentityDenyAudit(req, code);
+      res.status(401).json({ error: 'txn_token_unbound', message: 'A Txn-Token is accepted only with the workload identity proof that binds it' });
+      return 'refused';
+    };
+    // "Required" binds the routes that obtain or use credentials; revocation
+    // and audit reads never depend on the Txn-Token Service.
+    const proven = provenExternalAgent.get(req);
+    const decision = decideTxnToken({
+      trustByDomain: txnTokenTrust,
+      identity: identity && identity.kind === 'wimse' ? identity : null,
+      header,
+      credentialRoute: credentialRoute(req),
+      requiredElsewhere: identity?.kind === 'wimse' && proven ? txnTrustRequiredFor(proven.agentDid) !== undefined : false,
+    });
+    if (!decision.ok) return refuseUnbound(decision.code, decision.detail);
+    if (!decision.accepted) return 'ok';
+    const { token, trust } = decision.accepted;
+    verifiedTxnTokens.set(req, { token, trust });
+    // From here on, every audit event this request writes carries txn.
+    auditContext.enterWith({ ...auditContext.getStore(), txn: token.txn });
+    return 'ok';
+  }
+
+  /**
+   * The deny audit event for an identity or Txn-Token refusal. `kind`, `subject`
+   * and `proof` are recorded when the refusal concerns a verified (or attempted)
+   * external identity; a refusal with none names the actor `unknown`.
+   */
+  function writeIdentityDenyAudit(
+    req: Request,
+    code: string,
+    who: { kind?: ExternalIdentityKind; subject?: string; proof?: VerifiedExternalIdentity['proof'] } = {},
+  ): void {
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: who.subject ?? 'unknown' },
+      action: 'deny',
+      resource: { type: 'agent', id: who.subject ?? 'unknown' },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      metadata: {
+        ...(who.kind ? { identitySource: who.kind } : {}),
+        reason: code,
+        route: req.originalUrl.split('?')[0],
+        ...(who.proof ? { proof: who.proof } : {}),
+      },
+    });
+  }
 
   function refuseExternalIdentity(
     req: Request,
@@ -991,20 +1167,18 @@ export function createServer(config: ServerConfig) {
     code: string,
     detail: string,
     subject?: string,
+    proof?: VerifiedExternalIdentity['proof'],
   ): 'refused' {
     // The response never says which check failed; the detail is for the
     // operator's log and audit trail only.
     console.warn(`[cred] ${kind} identity refused: ${code}: ${detail}`);
-    writeAuditEventIfSupported({
-      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-      timestamp: new Date(),
-      actor: { type: 'agent', id: subject ?? 'unknown' },
-      action: 'deny',
-      resource: { type: 'agent', id: subject ?? 'unknown' },
-      outcome: 'denied',
-      correlationId: crypto.randomUUID(),
-      metadata: { identitySource: kind, reason: code, route: req.originalUrl.split('?')[0] },
-    });
+    writeIdentityDenyAudit(req, code, { kind, subject, proof });
+    if (proof === 'http-sig') {
+      // draft-ietf-wimse-http-signature-08 §3.6: 400 with one problem type,
+      // whatever failed (the WIT, the signature, or the identity after them).
+      sendWimseSignatureInvalid(res);
+      return 'refused';
+    }
     if (code === 'agent_mismatch') {
       res.status(403).json({ error: 'agent_mismatch', message: 'agent_did does not name the agent this identity maps to' });
       return 'refused';
@@ -1015,19 +1189,82 @@ export function createServer(config: ServerConfig) {
   }
 
   /**
-   * Runs every configured source. `false`: no source credential on this
-   * request (the agent token path applies). `true`: authenticated, with
-   * `req.provenAgent` set. `'refused'`: a response was sent.
+   * Sign this request's response with Cred's own WIT (§3.5), whatever route
+   * answers it: every Express response ends in res.end, where the full body
+   * is known. Covers @status, the WIT, Content-Type and Content-Digest, and
+   * the request's @method/@path/@query (;req), with wimse-req-nonce.
    */
-  async function authenticateExternalIdentity(req: Request, res: Response): Promise<boolean | 'refused'> {
+  function armResponseSigning(req: Request, res: Response, requestNonce: string): void {
+    const signing = externalIdentity!.responseSigning!;
+    const queryAt = req.originalUrl.indexOf('?');
+    const request = {
+      method: req.method.toUpperCase(),
+      path: req.originalUrl.split('?')[0],
+      ...(queryAt === -1 ? {} : { query: req.originalUrl.slice(queryAt + 1) }),
+    };
+    const originalEnd = res.end.bind(res) as (...args: unknown[]) => Response;
+    let done = false;
+    (res as any).end = (...args: unknown[]) => {
+      if (done || res.headersSent) return originalEnd(...args);
+      done = true;
+      let [chunk, encoding] = args;
+      if (typeof chunk === 'function') chunk = undefined;
+      if (typeof encoding === 'function') encoding = undefined;
+      const body = chunk === undefined || chunk === null
+        ? undefined
+        : Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), (encoding as BufferEncoding | undefined) ?? 'utf8');
+      const contentType = res.getHeader('content-type');
+      const added = signWimseResponse({
+        status: res.statusCode,
+        headers: contentType === undefined ? {} : { 'content-type': String(contentType) },
+        ...(body ? { body } : {}),
+        request,
+        requestNonce,
+        wit: typeof signing.wit === 'function' ? signing.wit() : signing.wit,
+        privateKey: signing.privateKey,
+        alg: signing.alg,
+      });
+      for (const [name, value] of Object.entries(added)) res.setHeader(name, value);
+      return originalEnd(...args);
+    };
+  }
+
+  function sendWimseSignatureInvalid(res: Response): void {
+    res.status(400).type('application/problem+json').send(JSON.stringify({
+      type: WIMSE_PROBLEM_TYPES.signatureInvalid,
+      title: 'Workload authentication failed',
+      status: 400,
+    }));
+  }
+
+  /**
+   * Runs every configured source. `false`: no source credential on this
+   * request (the agent token path applies). `true`: authenticated, with the
+   * proven agent recorded for this request. `'refused'`: a response was sent.
+   * The identity also becomes the request's agent principal and rate-limit
+   * key, unless `assignPrincipal` is false: /use keeps keying on the
+   * Delegation Token, so `agentPrincipal` and `agentTokenHash` are left as
+   * they were.
+   */
+  async function authenticateExternalIdentity(
+    req: Request,
+    res: Response,
+    { assignPrincipal = true }: { assignPrincipal?: boolean } = {},
+  ): Promise<boolean | 'refused'> {
     if (!externalIdentity || externalIdentity.sources.length === 0) return false;
     const targetUri = `${publicBaseUri()}${req.originalUrl.split('?')[0]}`;
+    const queryAt = req.originalUrl.indexOf('?');
+    const contentLength = Number(req.headers['content-length'] ?? 0);
     const request: IdentityRequest = {
       method: req.method.toUpperCase(),
       targetUri,
       headers: req.headers,
       rawHeaders: req.rawHeaders,
       socket: req.socket,
+      path: req.originalUrl.split('?')[0],
+      ...(queryAt === -1 ? {} : { query: req.originalUrl.slice(queryAt + 1) }),
+      hasBody: contentLength > 0 || req.headers['transfer-encoding'] !== undefined,
+      body: workloadRequestBodies.get(req),
     };
     const found: VerifiedExternalIdentity[] = [];
     for (const source of externalIdentity.sources) {
@@ -1035,27 +1272,27 @@ export function createServer(config: ServerConfig) {
         const identity = await source.authenticate(request);
         if (identity) found.push(identity);
       } catch (err) {
-        if (err instanceof IdentityRefusal) return refuseExternalIdentity(req, res, err.kind, err.code, err.detail);
+        if (err instanceof IdentityRefusal) return refuseExternalIdentity(req, res, err.kind, err.code, err.detail, undefined, err.proof);
         return refuseExternalIdentity(req, res, source.kind, 'source_error', err instanceof Error ? err.message : String(err));
       }
     }
     if (found.length === 0) return false;
     if (found.length > 1) {
-      return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','));
+      return refuseExternalIdentity(req, res, found[0].kind, 'multiple_identities', found.map((i) => i.kind).join(','), undefined, found.some((i) => i.proof === 'http-sig') ? 'http-sig' : undefined);
     }
     const identity = found[0];
     // Sources apply their own clock skew to exp; this backstop allows the same 60s.
     if (identity.expiresAt + 60 <= Math.floor(Date.now() / 1000)) {
-      return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, 'expired', 'identity expired', identity.subject, identity.proof);
     }
     const agentDid = mappedAgentDid(externalIdentity.mappings, identity);
-    if (!agentDid) return refuseExternalIdentity(req, res, identity.kind, 'unmapped', 'no mapping for subject', identity.subject);
+    if (!agentDid) return refuseExternalIdentity(req, res, identity.kind, 'unmapped', 'no mapping for subject', identity.subject, identity.proof);
     // The mapped agent must already exist and be active. Nothing is created
     // from an identity Cred has not been told about.
     const record = vault.getAgentByDid ? await vault.getAgentByDid(agentDid) : null;
-    if (!record) return refuseExternalIdentity(req, res, identity.kind, 'agent_not_found', agentDid, identity.subject);
+    if (!record) return refuseExternalIdentity(req, res, identity.kind, 'agent_not_found', agentDid, identity.subject, identity.proof);
     if (record.status !== 'active') {
-      return refuseExternalIdentity(req, res, identity.kind, `agent_${record.status}`, agentDid, identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, `agent_${record.status}`, agentDid, identity.subject, identity.proof);
     }
     if (identity.proof === 'channel') {
       // A channel identity (Tailscale) proves the node, not the agent on it:
@@ -1064,11 +1301,11 @@ export function createServer(config: ServerConfig) {
       const checked = proof === 'multiple'
         ? { ok: false as const, message: 'multiple DPoP headers' }
         : verifyDpopProof(proof, { agentDid, htm: request.method, htu: targetUri, seenJti: externalDpopJtiSeen });
-      if (!checked.ok) return refuseExternalIdentity(req, res, identity.kind, 'dpop_required', checked.message, identity.subject);
+      if (!checked.ok) return refuseExternalIdentity(req, res, identity.kind, 'dpop_required', checked.message, identity.subject, identity.proof);
     }
     const named = req.body?.agent_did;
     if (typeof named === 'string' && named !== agentDid && named !== record.id) {
-      return refuseExternalIdentity(req, res, identity.kind, 'agent_mismatch', `${named} != ${agentDid}`, identity.subject);
+      return refuseExternalIdentity(req, res, identity.kind, 'agent_mismatch', `${named} != ${agentDid}`, identity.subject, identity.proof);
     }
     const principal: RequestAgentPrincipal = {
       type: identity.kind,
@@ -1082,10 +1319,61 @@ export function createServer(config: ServerConfig) {
         },
       },
     };
-    (req as any).agentPrincipal = principal;
-    (req as any).agentTokenHash = hashAgentPrincipal(principal);
+    if (identity.attributes.signResponse === 'true') {
+      // §3.3/§3.5/§3.6: a request that requires a signed response gets one,
+      // or an error, never a successful unsigned answer.
+      if (!externalIdentity.responseSigning) {
+        res.status(501).type('application/problem+json').send(JSON.stringify({
+          type: WIMSE_PROBLEM_TYPES.signedResponseUnsupported,
+          title: 'Signed responses are not supported',
+          status: 501,
+        }));
+        return 'refused';
+      }
+      if (req.originalUrl.split('?')[0].replace(/\/+$/, '') === '/api/v1/audit/stream') {
+        // A stream has no end to sign over.
+        res.status(400).type('application/problem+json').send(JSON.stringify({
+          type: WIMSE_PROBLEM_TYPES.signedResponseUnavailable,
+          title: 'This response cannot be signed',
+          status: 400,
+        }));
+        return 'refused';
+      }
+      armResponseSigning(req, res, String(identity.attributes.nonce ?? ''));
+    }
+    if (assignPrincipal) {
+      (req as any).agentPrincipal = principal;
+      (req as any).agentTokenHash = hashAgentPrincipal(principal);
+    }
     provenExternalAgent.set(req, { agentDid, identity });
     return true;
+  }
+
+  /**
+   * A WIT with an HTTP signature on /api/v1/use. The signature must cover
+   * Authorization (so the Delegation Token cannot be swapped), and the
+   * workload must map to the agent the Delegation Token was issued to.
+   */
+  async function authenticateUseWorkload(req: Request, res: Response, tokenAgentDid: string): Promise<'ok' | 'refused'> {
+    // Guard and audit keep keying on the Delegation Token's binding.
+    const result = await authenticateExternalIdentity(req, res, { assignPrincipal: false });
+    if (result === 'refused') return 'refused';
+    const proven = provenExternalAgent.get(req);
+    if (!result || !proven || proven.identity.kind !== 'wimse') {
+      return refuseExternalIdentity(req, res, 'wimse', 'proof_required', 'no workload identity verified on /use', undefined, 'http-sig');
+    }
+    const { identity, agentDid } = proven;
+    if (identity.proof !== 'http-sig') {
+      return refuseExternalIdentity(req, res, 'wimse', 'proof_required', '/use needs an HTTP signature', identity.subject, 'http-sig');
+    }
+    const covered = identity.attributes.covered;
+    if (!Array.isArray(covered) || !covered.includes('authorization')) {
+      return refuseExternalIdentity(req, res, 'wimse', 'authorization_not_covered', 'signature does not cover Authorization', identity.subject, 'http-sig');
+    }
+    if (agentDid !== tokenAgentDid) {
+      return refuseExternalIdentity(req, res, 'wimse', 'agent_mismatch', 'workload maps to another agent than the Delegation Token', identity.subject, 'http-sig');
+    }
+    return 'ok';
   }
 
   /**
@@ -1096,6 +1384,8 @@ export function createServer(config: ServerConfig) {
       const external = await authenticateExternalIdentity(req, res);
       if (external === 'refused') return;
       if (external) {
+        enterAuditWorkload(req);
+        if (checkTxnToken(req, res, provenExternalAgent.get(req)!.identity) === 'refused') return;
         next();
         return;
       }
@@ -1110,6 +1400,9 @@ export function createServer(config: ServerConfig) {
           const principal: RequestAgentPrincipal = result.principal ?? { type: 'custom-verifier' };
           (req as any).agentPrincipal = principal;
           (req as any).agentTokenHash = hashAgentPrincipal(principal);
+          // Checked only once the caller is authenticated, so an anonymous
+          // Txn-Token header writes no audit row.
+          if (checkTxnToken(req, res, null) === 'refused') return;
           next();
           return;
         }
@@ -1131,7 +1424,32 @@ export function createServer(config: ServerConfig) {
     const principal: RequestAgentPrincipal = { type: 'static-bearer' };
     (req as any).agentPrincipal = principal;
     (req as any).agentTokenHash = hashTokenValue(extractBearerToken(req) ?? '');
+    if (checkTxnToken(req, res, null) === 'refused') return;
     next();
+  }
+
+  /**
+   * Whether Signature-Input carries a WIMSE-tagged member. Throws when it
+   * carries one alongside any other member: such a request is ambiguous
+   * between Web Bot Auth and WIMSE, and is refused rather than guessed at.
+   */
+  function carriesWimseSignature(req: Request): boolean {
+    const input = req.get('Signature-Input');
+    if (!input) return false;
+    let dict;
+    try {
+      dict = parseDictionary(input);
+    } catch {
+      return false; // Not parseable: Web Bot Auth verification refuses it.
+    }
+    let wimse = 0;
+    for (const member of dict.values()) {
+      const tag = member.params.get('tag');
+      if (tag?.type === 'string' && tag.value === WIMSE_SIGNATURE_TAG) wimse++;
+    }
+    if (wimse === 0) return false;
+    if (dict.size > wimse) throw new Error('a WIMSE signature cannot be combined with another message signature here');
+    return true;
   }
 
   /**
@@ -1145,6 +1463,12 @@ export function createServer(config: ServerConfig) {
   async function attemptWebBotAuthIdentity(req: Request): Promise<boolean> {
     const hasHeaders = Boolean(req.get('Signature') || req.get('Signature-Input') || req.get('Signature-Agent'));
     if (!hasHeaders) {
+      return false;
+    }
+    if (externalIdentity && carriesWimseSignature(req)) {
+      // A WIMSE workload signature is verified by the external identity
+      // source, never as Web Bot Auth, and never satisfies Web Bot Auth
+      // identity. A request mixing it with another signature is refused here.
       return false;
     }
 
@@ -1749,7 +2073,26 @@ export function createServer(config: ServerConfig) {
   const adminAuditRateLimiter = makeRateLimiter(30);  // /admin/audit          — vault audit query per request
   const adminAgentsRateLimiter = makeRateLimiter(30);  // /admin/agents*        — tofu/vault query per request
 
-  function writeAuditEventIfSupported(event: Parameters<CredVault['writeAuditEvent']>[0]) {
+  type AuditEventInput = Parameters<CredVault['writeAuditEvent']>[0];
+  /**
+   * The event with the current request's audit context: every event a
+   * request writes after its Txn-Token verified carries the transaction id
+   * (draft-ietf-oauth-transaction-tokens-11 §9.2 txn), and every event of a
+   * WIMSE-authenticated request carries the workload.
+   */
+  function withAuditContext(event: AuditEventInput): AuditEventInput {
+    const ctx = auditContext.getStore();
+    if (ctx?.txn && !(event.metadata && 'txn' in event.metadata)) event = { ...event, metadata: { ...event.metadata, txn: ctx.txn } };
+    if (ctx?.workload && !(event.metadata && 'workload' in event.metadata)) event = { ...event, metadata: { ...event.metadata, workload: ctx.workload } };
+    return event;
+  }
+
+  function writeAuditEventIfSupported(event: AuditEventInput) {
+    writeAuditEventRaw(withAuditContext(event));
+  }
+
+  /** Writes the event as given. The refusal aggregator uses it: its summaries are written later, often while another request runs. */
+  function writeAuditEventRaw(event: AuditEventInput) {
     try {
       vault.writeAuditEvent(event);
     } catch (err) {
@@ -1762,7 +2105,14 @@ export function createServer(config: ServerConfig) {
   }
 
   // A flood of one refusal by one agent is one event and a count.
-  const refusals = createRefusalAggregator({ write: writeAuditEventIfSupported });
+  // Each refusal takes its own request's audit context when recorded; the
+  // aggregator then writes it, or its later summary, without reading the
+  // context of whatever request is running at that moment.
+  const refusalAggregator = createRefusalAggregator({ write: writeAuditEventRaw });
+  const refusals = {
+    ...refusalAggregator,
+    record: (event: Parameters<typeof refusalAggregator.record>[0]) => refusalAggregator.record(withAuditContext(event)),
+  };
   const refusalSweep = setInterval(() => {
     try {
       refusals.flushExpired();
@@ -1869,6 +2219,12 @@ export function createServer(config: ServerConfig) {
   // an agentRequestVerifier that binds each principal to its user, is not affected.
   if (config.agentToken && !config.agentRequestVerifier && !singleUserMode) {
     console.warn('[cred] One static AGENT_TOKEN serves every user on this server: the legacy routes take the user from the request\'s user_id, so anyone holding the token can act for any user. Run one server per user with SINGLE_USER_MODE=true, or bind each agent to its user with an agentRequestVerifier.');
+  }
+  if (externalIdentity && externalIdentity.sources.length > 0 && config.webBotAuthMode === 'require') {
+    const hasWimse = externalIdentity.sources.some((s) => s.kind === 'wimse');
+    console.warn(`[cred] webBotAuthMode is 'require' and externalIdentity is configured: ${hasWimse
+      ? 'a WIMSE workload using an HTTP signature is always refused (401), since a WIMSE-tagged signature is not a Web Bot Auth one and the two cannot be combined, and other external-identity requests'
+      : 'external-identity requests'} are refused unless they also carry a Web Bot Auth signature. Set webBotAuthMode to 'optional' to accept workload identities.`);
   }
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
@@ -2003,6 +2359,11 @@ export function createServer(config: ServerConfig) {
       ...(input.lineage && input.lineage.length > 0 ? { lineage: input.lineage } : {}),
       ...(input.constraints && input.constraints.length > 0 ? { constraints: input.constraints } : {}),
       ...(input.chainProfile ? { chain_profile: { format: input.chainProfile.format, jti: input.chainProfile.jti, scope_mapping: input.chainProfile.scopeMapping } } : {}),
+      // The transaction this delegation was made in, when the request carried
+      // a verified Txn-Token (RFC 8417 §2.2 txn; draft-ietf-oauth-transaction-
+      // tokens-11 §9.2). Receipt verifiers read named claims only, so an
+      // added claim leaves existing verifiers unaffected.
+      ...(auditContext.getStore()?.txn ? { txn: auditContext.getStore()!.txn } : {}),
     };
     return signCompactJws(payload, getReceiptKeys().signer, { typ: 'JWT' });
   }
@@ -4944,9 +5305,59 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   };
   const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false), requireRawAgentProof];
   if (linkService) {
+    // A Cred Link delegation is for a Link connection, never a transaction's
+    // user, so it is not issued inside a transaction. Runs before the Link precheck.
+    delegateRouteHandlers.push(async (req, res, next) => {
+      if (req.body?.connection_id === undefined) { next(); return; }
+      try {
+        const proven = provenExternalAgent.get(req)?.identity;
+        const who = proven ? { kind: proven.kind, subject: proven.subject, proof: proven.proof } : {};
+        if (verifiedTxnTokens.get(req)) {
+          writeIdentityDenyAudit(req, 'txn_user_mismatch', who);
+          res.status(403).json({ error: 'txn_user_mismatch', message: 'A Cred Link delegation is never for a transaction\'s user' });
+          return;
+        }
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
     // Runs checkLinkAccess for calls naming connection_id, before Guard and
     // before any vault access, whether or not a Guard is configured.
     delegateRouteHandlers.push(linkService.delegatePrecheck);
+    // A Txn-Token requirement binds did:keys, while a Link delegation's
+    // authority is the Link agent's Link Permission, which a fresh key could
+    // carry outside any transaction. So a Link agent with any did:key mapped
+    // from a trust domain that requires Txn-Tokens is refused Link
+    // delegations altogether. Its did:keys: the Link agent id itself if it
+    // is one, its vault agent record's, the key this request binds, and the
+    // caller's proven workload or principal.
+    delegateRouteHandlers.push(async (req, res, next) => {
+      const state = linkDelegateState(req);
+      if (!state || !txnTokenTrust || !externalIdentity) { next(); return; }
+      try {
+        const principalId = (req as any).agentPrincipal?.principalId;
+        const candidates = [
+          state.agentId,
+          (await vault.getAgent(state.agentId))?.did,
+          await delegatingAgentOf(req),
+          typeof principalId === 'string' ? principalId : undefined,
+        ].filter((d): d is string => typeof d === 'string' && d.startsWith('did:'));
+        const required = candidates.find((did) => txnTrustRequiredFor(did) !== undefined);
+        if (required) {
+          const proven = provenExternalAgent.get(req)?.identity;
+          writeIdentityDenyAudit(req, 'txn_required_link_unsupported', proven ? { kind: proven.kind, subject: proven.subject, proof: proven.proof } : {});
+          res.status(403).json({
+            error: 'txn_required_link_unsupported',
+            message: 'This Link agent has a did:key whose trust domain requires Txn-Tokens. A Cred Link delegation cannot be bound to a transaction, and a fresh key would carry the Link Permission outside one, so Link delegations are refused for this agent.',
+          });
+          return;
+        }
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
   }
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, exposeStoredScopesToGuard('user_id'), guardMiddleware);
@@ -4966,6 +5377,12 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       if (!allowRawTokens) {
         refuseRawToken(res);
+        return;
+      }
+      // A workload whose trust domain requires Txn-Tokens never receives a raw token.
+      const compatWorkload = provenExternalAgent.get(req);
+      if (verifiedTxnTokens.has(req) || (compatWorkload && txnTrustRequiredFor(compatWorkload.agentDid))) {
+        res.status(403).json({ error: 'txn_handle_required', message: 'This agent obtains credentials only as brokered handles inside a transaction' });
         return;
       }
       const userId = requestUserId(req, res, { agent: true });
@@ -5271,6 +5688,22 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(400).json({ error: 'invalid_request', message: 'delegation_id does not match the Delegation Token' });
           return;
         }
+        // Workload identity on a brokered call (draft-ietf-wimse-http-signature-08):
+        // checked in addition to the Delegation Token and its DPoP proof.
+        if (externalIdentity && req.headers['workload-identity-token'] !== undefined) {
+          if (await authenticateUseWorkload(req, res, verified.claims.client_id) === 'refused') return;
+          enterAuditWorkload(req);
+        } else if (txnTrustRequiredFor(verified.claims.client_id)) {
+          // An agent whose trust domain requires Txn-Tokens cannot drop its
+          // workload proof to escape the narrowing they impose.
+          refuseExternalIdentity(req, res, 'wimse', 'workload_proof_required', 'this agent must present its WIT and HTTP signature on /use', undefined, 'http-sig');
+          return;
+        }
+        if (checkTxnToken(req, res, provenExternalAgent.get(req)?.identity ?? null) === 'refused') return;
+        if (!verifiedTxnTokens.has(req) && txnTrustRequiredFor(verified.claims.client_id)) {
+          refuseExternalIdentity(req, res, 'wimse', 'txn_token_required', "this agent's trust domain requires a Txn-Token on /use", provenExternalAgent.get(req)?.identity.subject, 'http-sig');
+          return;
+        }
       } else {
         // Every delegation, Cred Link's included, is exercised with its
         // Delegation Token: an id alone authorizes nothing.
@@ -5391,7 +5824,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         refuseRevokedDelegation(res, delegationId, revokedBy, delegation);
         return;
       }
-      if (delegation.agentDid && (await vault.getAgentByDid?.(delegation.agentDid))?.status === 'suspended') {
+      // Read once here; the fresh check before the provider call compares against it.
+      const agentAtAuthorization = delegation.agentDid ? await vault.getAgentByDid?.(delegation.agentDid) : null;
+      if (agentAtAuthorization?.status === 'suspended') {
         res.status(403).json({ error: 'agent_suspended', message: 'Agent is suspended' });
         return;
       }
@@ -5454,13 +5889,43 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // A Link delegation was just re-checked against its grant and Permission above.
       // A handle restored by this request hands in the row it loaded its token
       // from, so this check and the credential it guards are one read.
-      const scopesNow = linkAccess
+      let scopesNow = linkAccess
         ? linkAccess.effective_scopes
         : await scopesAllowedNow(delegationId, delegation, restored.connection ?? undefined);
       if (scopesNow.length === 0) {
         refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_narrowed' });
         res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation no longer covers it: it was narrowed, replaced by a new grant, revoked or expired. Ask for a new delegation.' });
         return;
+      }
+      // A Txn-Token only narrows (draft-ietf-oauth-transaction-tokens-11 §9.2.1):
+      // the user it names must be the delegation's user, and its scope maps
+      // to provider-native scopes intersected with what the grant allows now.
+      const txn = verifiedTxnTokens.get(req);
+      if (txn) {
+        if (txn.token.userId === undefined) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_autonomous', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' });
+          return;
+        }
+        // A Cred Link delegation's user is a reserved vault id, never a
+        // transaction's user, even if a Txn-Token happens to name that id.
+        if (delegation.link || txn.token.userId !== delegation.userId) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_user_mismatch', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_user_mismatch', message: 'The transaction is for another user than this delegation' });
+          return;
+        }
+        const mapped = mappedProviderScopes(txn.trust, delegation.service, txn.token.scopes);
+        if (mapped === null) {
+          refuseBrokeredCall(delegationId, delegation, url, 'txn_scope_unmapped', { method: normalizedMethod });
+          res.status(403).json({ error: 'txn_scope_unmapped', message: `The transaction's scope does not map to ${delegation.service} scopes here` });
+          return;
+        }
+        scopesNow = scopesNow.filter((scope) => mapped.some((m) => scopeEquivalent(scope, m)));
+        if (scopesNow.length === 0) {
+          refuseBrokeredCall(delegationId, delegation, url, 'scope_insufficient', { method: normalizedMethod, reason: 'txn_scope' });
+          res.status(403).json({ error: 'scope_insufficient', message: "The transaction's scope does not cover this delegation" });
+          return;
+        }
       }
       const guardResult = await evaluateBrokerUseGuard(req, res, {
         delegationId,
@@ -5624,6 +6089,35 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       if (revokedInFlight !== null) {
         refuseRevokedDelegation(res, delegationId, revokedInFlight, delegation);
         return;
+      }
+      // Fresh authorization immediately before the provider call: the agent
+      // is still active, and the Permission still
+      // covers what this call was classified under. It refuses on a change,
+      // never because approval is on (turning approval on revokes live
+      // delegations, caught just above).
+      if (delegation.agentDid) {
+        const agentNow = await vault.getAgentByDid?.(delegation.agentDid);
+        if (agentNow && agentNow.status !== 'active') {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'agent_inactive', { method: normalizedMethod });
+          res.status(403).json({ error: `agent_${agentNow.status}`, message: 'The agent is no longer active' });
+          return;
+        }
+        // An agent record that existed when this call was authorized and is
+        // gone now was deleted mid-call: refused like a revoked agent. An agent
+        // that never had a record (allowed by older configurations) is not.
+        if (!agentNow && agentAtAuthorization) {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'agent_removed', { method: normalizedMethod });
+          res.status(403).json({ error: 'agent_revoked', message: 'The agent is no longer registered' });
+          return;
+        }
+      }
+      if (!linkAccess) {
+        const allowedNow = await scopesAllowedNow(delegationId, delegation, restored.connection ?? undefined);
+        if (!guardResult.effectiveScopes.every((scope) => allowedNow.includes(scope))) {
+          refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'scope_insufficient', { method: normalizedMethod, reason: 'permission_changed' });
+          res.status(403).json({ error: 'scope_insufficient', message: 'The Permission behind this delegation changed during the call. Ask for a new delegation.' });
+          return;
+        }
       }
       // A non-Link handle holds a copy of its connection's token. The
       // connection must still exist: this catches a revocation in another
@@ -5954,6 +6448,17 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         return;
       }
       const requestedScopes = normalizeRequestedScopes(scopes);
+      // A Txn-Token bounds what may be delegated in its transaction: its user
+      // must be the user named here, and every requested scope must be one
+      // its scope maps to. Refused, never silently narrowed.
+      // agent_did may name the agent by DID or by its record id.
+      const txnRefusal = txnIssuanceRefusal(req, {
+        agentDid: await delegatingAgentOf(req), userId, service, requestedScopes, handle: tokenFormatFromBody(req) === 'handle',
+      });
+      if (txnRefusal) {
+        res.status(403).json({ error: txnRefusal.error, message: txnRefusal.message });
+        return;
+      }
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
         if (vaultEntry.status === 404 && getProviderConfig(service)) {
@@ -7082,6 +7587,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           return;
         }
       }
+      // An agent whose trust domain requires Txn-Tokens holds authority only
+      // inside a transaction. A child delegation would outlive it and could go
+      // to an agent the transaction's narrowing never reaches, so none is made.
+      if (txnTrustRequiredFor(parent.sub)) {
+        res.status(403).json({ error: 'txn_subdelegation_refused', message: "This agent's trust domain requires Txn-Tokens, so its delegations cannot be sub-delegated" });
+        return;
+      }
 
       // ── Context matching (service, user, app) ────────────────────────────
 
@@ -8002,6 +8514,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const requestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(body.scopes));
       if (requestedScopes === null) return;
+      // The same Txn-Token bounds as /api/v1/delegate: a CIBA approval issues
+      // a DPoP-bound Delegation Token, a brokered handle.
+      const txnRefusal = txnIssuanceRefusal(req, { agentDid, userId: subject, service, requestedScopes, handle: true });
+      if (txnRefusal) {
+        res.status(403).json({ error: txnRefusal.error, error_description: txnRefusal.message });
+        return;
+      }
       const agentCheck = await didAgentCheck(agentDid, service, requestedScopes);
       if (!agentCheck.ok) {
         res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });

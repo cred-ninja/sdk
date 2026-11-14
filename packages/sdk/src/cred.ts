@@ -276,6 +276,7 @@ export class Cred {
   private readonly baseUrl?: string;
   private readonly webBotAuthSigner?: WebBotAuthSigner;
   private readonly authenticateRequest?: CredExternalIdentityCloudConfig['authenticateRequest'];
+  private readonly signRequest?: CredExternalIdentityCloudConfig['signRequest'];
 
   // ── Local mode fields ───────────────────────────────────────────────────────
   private readonly localConfig?: CredLocalConfig;
@@ -303,13 +304,18 @@ export class Cred {
       // ── Cloud mode (existing behavior — ZERO changes) ───────────────────────
       this.isLocal = false;
       const authenticate = 'authenticateRequest' in config ? config.authenticateRequest : undefined;
-      if (!config.agentToken && typeof authenticate !== 'function') {
+      const signer = 'signRequest' in config ? config.signRequest : undefined;
+      if (!config.agentToken && typeof authenticate !== 'function' && typeof signer !== 'function') {
         throw new CredError('agentToken is required', 'invalid_config', 0);
       }
-      if (config.agentToken && authenticate !== undefined) {
-        throw new CredError('Set agentToken or authenticateRequest, not both', 'invalid_config', 0);
+      if (config.agentToken && (authenticate !== undefined || signer !== undefined)) {
+        throw new CredError('Set agentToken or authenticateRequest/signRequest, not both', 'invalid_config', 0);
+      }
+      if (signer !== undefined && config.webBotAuth) {
+        throw new CredError('signRequest cannot be combined with webBotAuth: both sign the message', 'invalid_config', 0);
       }
       this.authenticateRequest = authenticate;
+      this.signRequest = signer;
       if (!config.baseUrl) {
         throw new CredError(
           'baseUrl is required. Set it to your Cred server URL (e.g. https://cred.example.com or http://localhost:3456 for local dev).',
@@ -323,6 +329,11 @@ export class Cred {
         ? createWebBotAuthSigner(config.webBotAuth)
         : undefined;
     }
+  }
+
+  /** The validated Cred server URL this client sends to (cloud mode); undefined in local mode. */
+  get serverUrl(): string | undefined {
+    return this.baseUrl;
   }
 
   private static validateBaseUrl(url: string): string {
@@ -2191,11 +2202,15 @@ export class Cred {
     };
   }
 
-  private async requestHeaders(path: string, method: string, extra?: Record<string, string>): Promise<Record<string, string>> {
+  private async requestHeaders(path: string, method: string, extra?: Record<string, string>, body?: string): Promise<Record<string, string>> {
     const identity = this.authenticateRequest
       ? await this.authenticateRequest({ method, url: `${this.baseUrl}${path.split('?')[0]}` })
       : {};
     const headers = { ...this.headers(), ...identity, ...(extra ?? {}) };
+    if (this.signRequest) {
+      // Last, over the final headers and the exact body, so the signature covers them.
+      return { ...headers, ...(await this.signRequest({ method, url: `${this.baseUrl}${path}`, headers, ...(body !== undefined ? { body } : {}) })) };
+    }
     if (!this.webBotAuthSigner || !this.baseUrl) return headers;
     return this.webBotAuthSigner.signRequest({
       url: `${this.baseUrl}${path}`,
@@ -2205,10 +2220,11 @@ export class Cred {
   }
 
   private async post<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+    const payload = JSON.stringify(body);
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: await this.requestHeaders(path, 'POST', extraHeaders),
-      body: JSON.stringify(body),
+      headers: await this.requestHeaders(path, 'POST', extraHeaders, payload),
+      body: payload,
     });
     return this.handleResponse<T>(res);
   }
@@ -2222,10 +2238,11 @@ export class Cred {
   }
 
   private async patch<T>(path: string, body: unknown): Promise<T> {
+    const payload = JSON.stringify(body);
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'PATCH',
-      headers: await this.requestHeaders(path, 'PATCH'),
-      body: JSON.stringify(body),
+      headers: await this.requestHeaders(path, 'PATCH', undefined, payload),
+      body: payload,
     });
     return this.handleResponse<T>(res);
   }
@@ -2280,6 +2297,15 @@ export class Cred {
       }
     } catch {
       // ignore parse errors
+    }
+
+    // RFC 9457 problem details (the WIMSE signature failures) carry no `error`:
+    // the code is the type URI's fragment or last path segment.
+    if (body.error === undefined && typeof body.type === 'string' && body.type) {
+      const code = body.type.split('#').pop()!.replace(/\/+$/, '').split('/').pop() || 'unknown';
+      const detail = typeof body.detail === 'string' ? body.detail
+        : typeof body.title === 'string' ? body.title : `Request failed with status ${res.status}`;
+      throw new CredError(detail, code, res.status);
     }
 
     const message = typeof body.message === 'string'

@@ -25,6 +25,76 @@
 - `@credninja/sdk`: `CredExternalIdentityCloudConfig` with `authenticateRequest`, an
   alternative to `agentToken` that supplies per-request authentication headers.
 
+### Added: WIMSE HTTP signatures and Transaction Tokens (opt-in)
+
+- `@credninja/server`: implements draft-ietf-wimse-http-signature-08 (an RFC 9421
+  profile) as a proof of possession for a WIT, as covered by the tests and by the
+  #419 test vectors (`conformance/wimse-419`, 28 of 28 pass). WIT + HTTP signature is
+  accepted wherever WIT + WPT is, and on `POST /api/v1/use` the signature must
+  cover the Delegation Token in `Authorization`. Every failure is the same `400`
+  `wimse-signature-invalid` problem. With `externalIdentity.responseSigning`
+  (Cred's own WIT and key) a request carrying `wimse-sign-response` gets a signed
+  response (§3.4-3.5: `@status`, the WIT, Content-Type, Content-Digest and the
+  request components, with `wimse-req-nonce`); without it, `501`. The event
+  stream answers `400 wimse-signed-response-unavailable`. Includes an RFC 8941
+  structured-field parser.
+- `@credninja/server`: delegation receipts minted inside a verified transaction
+  carry `txn`. The SDK's and the Python SDK's receipt verifiers accept them.
+- `@credninja/sdk`: `signRequest` on `CredExternalIdentityCloudConfig`, called
+  last with the final headers and exact body, and `createWimseHttpSigner`
+  (http-signature-08 request signing, optional bound Txn-Token). With it,
+  `authenticateRequest` is optional. No new dependencies. A refusal with an
+  RFC 9457 problem body (the WIMSE failures) now throws `CredError` with the
+  problem type as `code` (for example `wimse-signature-invalid`) instead of
+  `unknown`. New read-only `Cred.serverUrl`. `createWimseHttpSigner` refuses a
+  `lifetimeSec` above 300, which Cred would refuse on every request.
+- `cred-auth` (Python SDK): `sign_request` on `Cred` and `AsyncCred` and
+  `create_wimse_http_signer`, the same signing as the TypeScript SDK, applied by
+  an httpx request hook to the request as sent. `agent_token` is optional when a
+  signer is given, and the two together are refused. Errors with an RFC 9457
+  problem body (the WIMSE failures) now carry the problem type as `code`.
+  `Cred.base_url` is public. No new dependencies.
+- `@credninja/mcp`: cloud mode signs as a WIMSE workload when
+  `CRED_WIMSE_WIT_FILE`, `CRED_WIMSE_KEY_FILE` and `CRED_WIMSE_ALG` (and
+  optionally `CRED_TXN_TOKEN_FILE`) are set, instead of `CRED_AGENT_TOKEN`. The
+  WIT and Txn-Token files are read on every request.
+- `@credninja/server`: an optional `sharedReplay` store on the WIMSE source
+  (`SharedReplayStore`, `createInMemorySharedReplayStore`) lets replicas refuse
+  a WPT `jti` or signature nonce another replica accepted; a store error
+  refuses, as does no answer within `sharedReplayTimeoutMs`. A Cred Link
+  delegation is no longer issued inside a transaction or bound to a did:key
+  whose trust domain requires Txn-Tokens, and any Txn-Token on `/api/v1/use`
+  refuses one. `createServer` warns when external identity runs
+  with `webBotAuthMode: 'require'`. The Txn-Token decisions moved to
+  `identity/txn-policy.ts` with no behaviour change.
+- `@credninja/mcp`: `cred_capabilities` and `cred_whoami` report how the
+  instance authenticates (`authentication`: mode, `txnToken`, `webBotAuth`).
+- Framework integrations (LangChain, CrewAI, AutoGen, OpenAI Agents, Semantic
+  Kernel, Vercel AI): accept a caller-built client (`cred=` / `cred`), for
+  example one with a WIMSE signer. Construction from an agent token is unchanged.
+- `@credninja/server`: implements Txn-Token validation from
+  draft-ietf-oauth-transaction-tokens-11 (§9, §12.2) on the final hop, as covered by
+  the tests. `externalIdentity.txnTokens` configures trust per WIMSE trust domain.
+  A Txn-Token must be bound to the WPT (`tth`) or covered by the HTTP signature; it
+  narrows a brokered call's scopes through a configured scope map, and must name
+  the delegation's user.
+- `@credninja/server`: audit events of a WIMSE-authenticated request carry
+  `metadata.workload`, and, once a Txn-Token verifies, `metadata.txn`.
+- `@credninja/server`: a fresh check just before each brokered provider call,
+  for every caller: an agent with a vault record must still be active, and for
+  delegations other than Cred Link ones the Permission must still cover the
+  scopes the call was classified under (Link calls are re-checked by Link).
+- Hackathon tooling: `npm run hackathon:demo` (one-command final-hop demo, no
+  Docker), `npm run hackathon:serve`, `npm run conformance:wimse-419`, and recorded
+  interop runs in `conformance/interop` (SPIRE main WIT-SVIDs, go-spiffe v2.7.0,
+  wimsey, Cofide's PoC and minispire, authgent Txn-Tokens).
+
+### Changed
+
+- `@credninja/server`: `extra_headers` on `POST /api/v1/use` can no longer forward
+  `Txn-Token`, `Workload-Identity-Token`, `DPoP`, `Content-Digest` or
+  `Accept-Signature` to a provider.
+
 ### Fixed
 
 Two of these refuse requests 2.1.0 accepted: a Web Bot Auth signature living longer
