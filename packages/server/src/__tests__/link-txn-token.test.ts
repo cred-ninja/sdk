@@ -6,12 +6,13 @@
  * transaction's.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import request from 'supertest';
 import crypto from 'node:crypto';
 import { createReplayCache } from '../identity/types.js';
 import { createWimseIdentitySource } from '../identity/wimse.js';
 import type { ExternalIdentityMapping } from '../identity/types.js';
 import {
-  agentFor, CALENDAR_URL, connectAndActivate, delegate, makeHarness, registerClient, type Harness,
+  ADMIN_TOKEN, agentFor, CALENDAR_URL, connectAndActivate, delegate, makeHarness, registerClient, type Harness,
 } from './link-harness.js';
 import { linkVaultUserId } from '@credninja/vault';
 import { delegateWithHttpSig, trustDomain, txnIssuer, useWithHttpSig } from './wimse-fixture.js';
@@ -88,6 +89,11 @@ describe('Cred Link delegation with a Txn-Token', () => {
     const inTxn = await delegateWithHttpSig(lax.app, lax.agent, lax.w, { connection_id: lax.connectionId, service: undefined, user_id: undefined }, { 'txn-token': lax.tts.mint() });
     expect(inTxn.status).toBe(403);
     expect(inTxn.body.error).toBe('txn_user_mismatch');
+    const audit = await request(lax.app).get('/admin/audit?limit=200').set('Authorization', `Bearer ${ADMIN_TOKEN}`);
+    const denied = (audit.body.entries as Array<{ action: string; metadata?: { details?: Record<string, unknown> } }>)
+      .filter((e) => e.action === 'deny' && e.metadata?.details?.reason === 'txn_user_mismatch');
+    expect(denied).toHaveLength(1);
+    expect(denied[0].metadata?.details).toMatchObject({ identitySource: 'wimse', proof: 'http-sig', route: '/api/v1/delegate' });
     h?.close();
 
     const strict = await linkWithWorkload({});

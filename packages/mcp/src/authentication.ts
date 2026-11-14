@@ -15,7 +15,7 @@ export interface AuthenticationSummary {
 }
 
 export function describeAuthentication(config: CredMcpConfig): AuthenticationSummary {
-  if (config.mode === 'local') return { mode: 'local', txnToken: false, webBotAuth: false };
+  if (config.mode === 'local') return { mode: 'local', txnToken: false, webBotAuth: Boolean(config.webBotAuth) };
   if (config.wimse) return { mode: 'wimse-workload', txnToken: Boolean(config.wimse.txnTokenFile), webBotAuth: false };
   return { mode: 'agent-token', txnToken: false, webBotAuth: Boolean(config.webBotAuth) };
 }

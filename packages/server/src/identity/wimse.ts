@@ -39,6 +39,8 @@ export interface WimseSourceConfig {
    * it has seen, or a store error, refuses the request.
    */
   sharedReplay?: SharedReplayStore;
+  /** How long to wait for `sharedReplay` before refusing the request. Default 1000 ms. */
+  sharedReplayTimeoutMs?: number;
   /** Cap on WIT lifetime: exp - iat if iat is present, else exp - now. Default 86400. */
   maxWitLifetimeSec?: number;
   /** Cap on exp - now for a WPT (wpt-02 §2 "lifetimes MUST be short"). Default 300. */
@@ -562,11 +564,22 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
   /** The cross-instance replay check, after every local check has passed. Fails closed. */
   async function checkShared(key: string, until: number, proof: 'wpt' | 'http-sig'): Promise<void> {
     if (!config.sharedReplay) return;
+    // A relative lifetime, so the store's clock never decides it. One more
+    // skew of margin covers a replica whose clock lags this one's: it would
+    // still accept the value until then.
+    const ttlSeconds = Math.max(1, until - resolved.now() + resolved.clockSkewSec);
+    const timeoutMs = config.sharedReplayTimeoutMs ?? 1000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let fresh: boolean;
     try {
-      fresh = await config.sharedReplay.checkAndRecord(key, until);
+      fresh = await Promise.race([
+        config.sharedReplay.checkAndRecord(key, ttlSeconds),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeoutMs); }),
+      ]);
     } catch {
-      throw new IdentityRefusal('wimse', 'replay_store_unavailable', 'shared replay store failed', proof);
+      throw new IdentityRefusal('wimse', 'replay_store_unavailable', 'shared replay store failed or timed out', proof);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     if (fresh !== true) throw new IdentityRefusal('wimse', 'replay', 'already used at another instance', proof);
   }

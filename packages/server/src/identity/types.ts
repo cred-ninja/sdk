@@ -119,17 +119,18 @@ export interface ReplayCache {
 
 /**
  * A replay store several server instances share (for example one backed by
- * Redis `SET key 1 NX EXAT expiresAt`). The WIMSE source consults it after the
+ * Redis `SET key 1 NX EX ttlSeconds`). The WIMSE source consults it after the
  * per-process {@link ReplayCache} accepts a value, so a WPT `jti` or request
  * signature nonce used at one replica is refused at the others. The check and
  * the record must be one atomic operation (two replicas racing on one key must
  * not both see it as new). Resolve `false` when `key` is already recorded and
- * unexpired; otherwise record it and resolve `true`. A rejection refuses the
- * request. Keys are scoped to the presenting workload, so one workload cannot
+ * unexpired; otherwise record it for `ttlSeconds` (a relative lifetime, so no
+ * clock but the store's own decides it) and resolve `true`. A rejection, or no
+ * answer within the source's `sharedReplayTimeoutMs`, refuses the request. Keys are scoped to the presenting workload, so one workload cannot
  * burn another's values.
  */
 export interface SharedReplayStore {
-  checkAndRecord(key: string, expiresAtSeconds: number): Promise<boolean>;
+  checkAndRecord(key: string, ttlSeconds: number): Promise<boolean>;
 }
 
 /**
@@ -137,8 +138,23 @@ export interface SharedReplayStore {
  * one process. It shares nothing across processes.
  */
 export function createInMemorySharedReplayStore(maxEntries = 100_000): SharedReplayStore {
-  const cache = createReplayCache(maxEntries);
-  return { checkAndRecord: async (key, expiresAtSeconds) => cache.checkAndRecord(key, expiresAtSeconds) };
+  const seen = new Map<string, number>();
+  return {
+    async checkAndRecord(key, ttlSeconds) {
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAtSeconds = now + ttlSeconds;
+      const prior = seen.get(key);
+      if (prior !== undefined && prior >= now) return false;
+      if (seen.size >= maxEntries) {
+        for (const [k, exp] of seen) if (exp < now) seen.delete(k);
+        // Full of live entries: a capacity failure, not a replay. Rejecting
+        // makes the request refuse as replay_store_unavailable.
+        if (seen.size >= maxEntries) throw new Error('shared replay store is full');
+      }
+      seen.set(key, expiresAtSeconds);
+      return true;
+    },
+  };
 }
 
 export function createReplayCache(maxEntries = 100_000): ReplayCache {

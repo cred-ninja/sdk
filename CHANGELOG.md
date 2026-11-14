@@ -61,9 +61,10 @@
 - `@credninja/server`: an optional `sharedReplay` store on the WIMSE source
   (`SharedReplayStore`, `createInMemorySharedReplayStore`) lets replicas refuse
   a WPT `jti` or signature nonce another replica accepted; a store error
-  refuses. A Cred Link delegation is no longer issued inside a transaction or
-  to an agent whose trust domain requires Txn-Tokens, and any Txn-Token on
-  `/api/v1/use` refuses one. `createServer` warns when external identity runs
+  refuses, as does no answer within `sharedReplayTimeoutMs`. A Cred Link
+  delegation is no longer issued inside a transaction or bound to a did:key
+  whose trust domain requires Txn-Tokens, and any Txn-Token on `/api/v1/use`
+  refuses one. `createServer` warns when external identity runs
   with `webBotAuthMode: 'require'`. The Txn-Token decisions moved to
   `identity/txn-policy.ts` with no behaviour change.
 - `@credninja/mcp`: `cred_capabilities` and `cred_whoami` report how the

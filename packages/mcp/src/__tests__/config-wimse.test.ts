@@ -185,5 +185,6 @@ describe('cred_capabilities and cred_whoami report how this instance authenticat
     process.env.CRED_WEB_BOT_AUTH_SIGNATURE_AGENT = 'https://agent.example.com';
     expect(describeAuthentication(loadConfig([])).webBotAuth).toBe(true);
     expect(describeAuthentication({ mode: 'local' } as any)).toEqual({ mode: 'local', txnToken: false, webBotAuth: false });
+    expect(describeAuthentication({ mode: 'local', webBotAuth: { privateKeyHex: 'a', signatureAgent: 'https://a', ttlSeconds: 30 } } as any).webBotAuth).toBe(true);
   });
 });

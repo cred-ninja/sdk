@@ -56,6 +56,33 @@ describe('shared replay store', () => {
     expect(warn.mock.calls.some((c) => String(c[0]).includes('replay_store_unavailable'))).toBe(true);
   });
 
+  it('the in-memory store refuses as unavailable, not as a replay, when full of live entries', async () => {
+    const store = createInMemorySharedReplayStore(1);
+    await expect(store.checkAndRecord('a', 60)).resolves.toBe(true);
+    await expect(store.checkAndRecord('a', 60)).resolves.toBe(false);
+    await expect(store.checkAndRecord('b', 60)).rejects.toThrow(/full/);
+  });
+
+  it('a store that never answers refuses within the timeout instead of hanging', async () => {
+    const hung: SharedReplayStore = { checkAndRecord: () => new Promise<boolean>(() => {}) };
+    const b = trustDomain('domain-b.example');
+    const w = b.workload();
+    const one = await wimseServer({ domains: [b], mapSubject: () => w.subject, source: { sharedReplay: hung, sharedReplayTimeoutMs: 50 } });
+    const started = Date.now();
+    expect((await send(one.app, 'get', CONN, httpSigHeaders(w, 'GET', CONN))).status).toBe(400);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('passes a relative lifetime that outlasts the acceptance window by one more skew', async () => {
+    const seen: number[] = [];
+    const recording: SharedReplayStore = { checkAndRecord: async (_k, ttl) => { seen.push(ttl); return true; } };
+    const { w, one } = await replicas(recording);
+    await send(one.app, 'get', CONN, httpSigHeaders(w, 'GET', CONN));
+    // The fixture signs for 60 s; the source's skew is 60 s: 60 + 60 + 60.
+    expect(seen[0]).toBeGreaterThanOrEqual(175);
+    expect(seen[0]).toBeLessThanOrEqual(180);
+  });
+
   it('a store that resolves anything but true refuses', async () => {
     const odd = { checkAndRecord: async () => undefined } as unknown as SharedReplayStore;
     const { w, one } = await replicas(odd);

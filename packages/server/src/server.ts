@@ -1207,13 +1207,12 @@ export function createServer(config: ServerConfig) {
 
   /**
    * Runs every configured source. `false`: no source credential on this
-   * request (the agent token path applies). `true`: authenticated, with
-   * `req.provenAgent` set. `'refused'`: a response was sent.
-   */
-  /**
-   * Verify an external identity and record it as proven for this request.
-   * `assignPrincipal: false` verifies without making it the request's agent
-   * principal or rate-limit key: /use keeps keying on the Delegation Token.
+   * request (the agent token path applies). `true`: authenticated, with the
+   * proven agent recorded for this request. `'refused'`: a response was sent.
+   * The identity also becomes the request's agent principal and rate-limit
+   * key, unless `assignPrincipal` is false: /use keeps keying on the
+   * Delegation Token, so `agentPrincipal` and `agentTokenHash` are left as
+   * they were.
    */
   async function authenticateExternalIdentity(
     req: Request,
@@ -2190,7 +2189,10 @@ export function createServer(config: ServerConfig) {
     console.warn('[cred] One static AGENT_TOKEN serves every user on this server: the legacy routes take the user from the request\'s user_id, so anyone holding the token can act for any user. Run one server per user with SINGLE_USER_MODE=true, or bind each agent to its user with an agentRequestVerifier.');
   }
   if (externalIdentity && externalIdentity.sources.length > 0 && config.webBotAuthMode === 'require') {
-    console.warn('[cred] webBotAuthMode is \'require\' and externalIdentity is configured: a WIMSE workload using an HTTP signature is always refused (401), since a WIMSE-tagged signature is not a Web Bot Auth one and the two cannot be combined, and WPT or Tailscale requests are refused unless they also carry a Web Bot Auth signature. Set webBotAuthMode to \'optional\' to accept workload identities.');
+    const hasWimse = externalIdentity.sources.some((s) => s.kind === 'wimse');
+    console.warn(`[cred] webBotAuthMode is 'require' and externalIdentity is configured: ${hasWimse
+      ? 'a WIMSE workload using an HTTP signature is always refused (401), since a WIMSE-tagged signature is not a Web Bot Auth one and the two cannot be combined, and other external-identity requests'
+      : 'external-identity requests'} are refused unless they also carry a Web Bot Auth signature. Set webBotAuthMode to 'optional' to accept workload identities.`);
   }
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
@@ -5278,12 +5280,16 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     delegateRouteHandlers.push(async (req, res, next) => {
       if (req.body?.connection_id === undefined) { next(); return; }
       try {
+        const proven = provenExternalAgent.get(req)?.identity;
+        const who = proven ? { kind: proven.kind, subject: proven.subject, proof: proven.proof } : {};
         if (verifiedTxnTokens.get(req)) {
+          writeIdentityDenyAudit(req, 'txn_user_mismatch', who);
           res.status(403).json({ error: 'txn_user_mismatch', message: 'A Cred Link delegation is never for a transaction\'s user' });
           return;
         }
         const linkAgent = await delegatingAgentOf(req);
         if (linkAgent && txnTrustRequiredFor(linkAgent)) {
+          writeIdentityDenyAudit(req, 'txn_token_required', who);
           res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token, and a Cred Link delegation cannot carry one" });
           return;
         }
