@@ -331,6 +331,11 @@ export class Cred {
     }
   }
 
+  /** The validated Cred server URL this client sends to (cloud mode); undefined in local mode. */
+  get serverUrl(): string | undefined {
+    return this.baseUrl;
+  }
+
   private static validateBaseUrl(url: string): string {
     let parsed: URL;
     try {

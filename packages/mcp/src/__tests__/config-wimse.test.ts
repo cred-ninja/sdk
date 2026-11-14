@@ -81,6 +81,11 @@ describe('loadConfig with CRED_WIMSE_*', () => {
     expect(() => loadConfig([])).toThrow(/Web Bot Auth/);
   });
 
+  it('refuses CRED_WIMSE_* in local mode', () => {
+    process.env.CRED_MODE = 'local';
+    expect(() => loadConfig([])).toThrow(/cloud mode only/);
+  });
+
   it('refuses a partial config, an unknown alg, or a missing agent key', () => {
     delete process.env.CRED_WIMSE_KEY_FILE;
     expect(() => loadConfig([])).toThrow(/must be provided together/);
@@ -128,15 +133,19 @@ describe('the WIMSE workload signs each request with the current files', () => {
       const workload = loadWimseWorkload({ witFile, keyFile, alg: 'ES256', txnTokenFile: txnFile });
       const cred = new Cred({ baseUrl: `http://127.0.0.1:${port}`, signRequest: workload.signRequest });
       await cred.listProviders();
-      writeFileSync(witFile, wit('wimse://b.example/agent-rotated'));
+      writeFileSync(witFile, `${wit('wimse://b.example/agent')}.rotated`.replace(/\.c2ln\.rotated$/, '.bmV3'));
       writeFileSync(txnFile, 'txn-two');
       await cred.listProviders();
       expect(seen).toHaveLength(2);
       expect(seen[0]['workload-identity-token']).toBe(wit('wimse://b.example/agent'));
-      expect(seen[1]['workload-identity-token']).toBe(wit('wimse://b.example/agent-rotated'));
+      expect(seen[1]['workload-identity-token']).toBe(wit('wimse://b.example/agent').replace(/\.c2ln$/, '.bmV3'));
       expect([seen[0]['txn-token'], seen[1]['txn-token']]).toEqual(['txn-one', 'txn-two']);
       expect(seen[1]['signature-input']).toMatch(/"txn-token".*tag="wimse-workload-to-workload"/);
       expect(seen[1].authorization).toBeUndefined();
+
+      writeFileSync(witFile, wit('wimse://b.example/someone-else'));
+      const changed = await cred.listProviders().then(() => undefined, (e: Error) => e);
+      expect(changed?.message).toBe('wimse WIT subject changed; restart required');
 
       rmSync(witFile);
       const err = await cred.listProviders().then(() => undefined, (e: Error) => e);

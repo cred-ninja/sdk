@@ -26,6 +26,9 @@ function resolveClient(options: { agentToken?: string; baseUrl: string; cred?: C
     if (!(options.cred instanceof Cred)) throw new TypeError('cred must be a Cred client from @credninja/sdk');
     if (options.agentToken) throw new Error('Pass agentToken or cred, not both');
     if (!options.baseUrl) throw new Error('baseUrl is required: cached delegations are keyed on it');
+    if (options.baseUrl.replace(/\/+$/, '') !== options.cred.serverUrl?.replace(/\/+$/, '')) {
+      throw new Error("baseUrl does not match the passed client's server URL");
+    }
     return options.cred;
   }
   return new Cred({ agentToken: options.agentToken as string, baseUrl: options.baseUrl });

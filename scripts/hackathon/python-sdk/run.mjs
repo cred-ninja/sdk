@@ -54,7 +54,7 @@ try {
     JSON.stringify({ did: id.did, private_key_hex: Buffer.from(id.privateKey).toString('hex') }), { mode: 0o600 });
   const mint = () => tts.mint({ txn: crypto.randomUUID() });
   fs.writeFileSync(path.join(files, 'txns.json'), JSON.stringify({
-    planner: [mint(), mint(), mint()], stranger: [mint()],
+    planner: [mint(), mint(), mint(), mint()], stranger: [mint(), mint()],
   }));
   const before = provider.received.length;
   // Async: Cred runs in this process and must keep serving while Python runs.

@@ -93,6 +93,7 @@ describe('SDK signRequest with createWimseHttpSigner', () => {
   it('refuses a config that combines signRequest with webBotAuth or the agent token', async () => {
     const signRequest = createWimseHttpSigner({ wit: 'a.b.c', privateKey: (await import('node:crypto')).generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey, alg: 'ES256' });
     expect(() => new Cred({ baseUrl: 'http://127.0.0.1:1', agentToken: 'x', signRequest } as any)).toThrow(/not both/);
+    expect(() => createWimseHttpSigner({ wit: 'a.b.c', privateKey: undefined as any, alg: 'ES256', lifetimeSec: 301 })).toThrow(/1 to 300/);
     expect(() => new Cred({ baseUrl: 'http://127.0.0.1:1', signRequest, webBotAuth: { privateKey: 'k', keyId: 'k', signatureAgent: 'https://a', ttlSeconds: 60 } } as any)).toThrow(/webBotAuth/);
   });
 });

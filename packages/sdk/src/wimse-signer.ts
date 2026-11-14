@@ -59,6 +59,10 @@ function sfString(value: string): string {
 export function createWimseHttpSigner(options: WimseHttpSignerOptions): (request: SdkSignableRequest) => Record<string, string> {
   const alg = options.alg === 'Ed25519' ? 'EdDSA' : options.alg;
   if (alg !== 'ES256' && alg !== 'EdDSA') throw new Error(`wimse signer: unsupported alg ${String(options.alg)}`);
+  const lifetime = options.lifetimeSec ?? 60;
+  if (!Number.isInteger(lifetime) || lifetime < 1 || lifetime > 300) {
+    throw new Error('wimse signer: lifetimeSec must be an integer from 1 to 300 (Cred refuses longer)');
+  }
   return (request) => {
     const url = new URL(request.url);
     const headers: Record<string, string> = {};
@@ -83,7 +87,7 @@ export function createWimseHttpSigner(options: WimseHttpSignerOptions): (request
     const created = Math.floor(Date.now() / 1000);
     const audience = options.audience ? options.audience(url) : `${url.origin}${url.pathname}`;
     const params = `(${components.map(([n]) => sfString(n)).join(' ')})`
-      + `;created=${created};expires=${created + (options.lifetimeSec ?? 60)}`
+      + `;created=${created};expires=${created + lifetime}`
       + `;nonce=${sfString(randomBytes(16).toString('base64url'))};tag=${sfString(TAG)};wimse-aud=${sfString(audience)}`;
     const base = `${components.map(([n, v]) => `${sfString(n)}: ${v}`).join('\n')}\n"@signature-params": ${params}`;
     const signature = alg === 'ES256'

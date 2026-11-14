@@ -214,6 +214,8 @@ class TestConfig:
             create_wimse_http_signer(wit=WIT, private_key=ed25519.Ed25519PrivateKey.generate(), alg="ES256")
         with pytest.raises(CredError, match="Ed25519"):
             create_wimse_http_signer(wit=WIT, private_key=p256(), alg="EdDSA")
+        with pytest.raises(CredError, match="1 to 300"):
+            create_wimse_http_signer(wit=WIT, private_key=p256(), alg="ES256", lifetime_sec=301)
         with pytest.raises(CredError, match="unsupported alg"):
             create_wimse_http_signer(wit=WIT, private_key=p256(), alg="RS256")
         with pytest.raises(CredError, match="P-256"):

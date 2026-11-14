@@ -70,7 +70,14 @@ export function loadWimseWorkload(config: CredMcpWimseConfig): WimseWorkload {
     throw err;
   }
   const signRequest = createWimseHttpSigner({
-    wit: () => readTokenFile(config.witFile, 'WIT'),
+    // Rate limits key on the startup sub, so a rotated WIT must keep it.
+    wit: () => {
+      const wit = readTokenFile(config.witFile, 'WIT');
+      let current: string | undefined;
+      try { current = witSubject(wit); } catch { current = undefined; }
+      if (current !== subject) throw new CredError('wimse WIT subject changed; restart required', 'invalid_config', 0);
+      return wit;
+    },
     privateKey,
     alg: config.alg,
     ...(config.txnTokenFile ? { txnToken: () => readTokenFile(config.txnTokenFile as string, 'Txn-Token') } : {}),

@@ -88,8 +88,9 @@ def create_wimse_http_signer(
             raise CredError("wimse signer: EdDSA needs an Ed25519 private key", "invalid_config", 0)
     else:
         raise CredError(f"wimse signer: unsupported alg {alg!r}", "invalid_config", 0)
-    if not isinstance(lifetime_sec, int) or lifetime_sec < 1:
-        raise CredError("wimse signer: lifetime_sec must be a positive integer", "invalid_config", 0)
+    if not isinstance(lifetime_sec, int) or not 1 <= lifetime_sec <= 300:
+        raise CredError("wimse signer: lifetime_sec must be an integer from 1 to 300 (Cred refuses longer)",
+                        "invalid_config", 0)
 
     def sign(method: str, url: str, headers: Mapping[str, str], body: Optional[bytes]) -> dict:
         final = {k.lower(): v for k, v in headers.items()}

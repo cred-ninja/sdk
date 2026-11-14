@@ -15,6 +15,7 @@ const mockUse = vi.fn();
 vi.mock('@credninja/sdk', () => {
   class MockCred {
     constructor(public config: any) {}
+    get serverUrl() { return this.config?.baseUrl; }
     delegate = mockDelegate;
     delegateHandle = mockDelegateHandle;
     use = mockUse;
@@ -496,5 +497,7 @@ describe('passing a prebuilt cred client', () => {
     expect(() => credUseTool({ cred: own, agentToken: TOKEN, baseUrl: BASE_URL })).toThrow(/not both/);
     expect(() => credUseTool({ cred: {} as any, baseUrl: BASE_URL })).toThrow(/Cred client/);
     expect(() => credDelegateTool({ cred: own, baseUrl: '', userId: USER_ID, appClientId: APP_CLIENT_ID })).toThrow(/baseUrl is required/);
+    expect(() => credUseTool({ cred: own, baseUrl: 'https://other.example.com' })).toThrow(/does not match/);
+    expect(() => credUseTool({ cred: own, baseUrl: `${BASE_URL}/` })).not.toThrow();
   });
 });

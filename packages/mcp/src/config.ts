@@ -218,8 +218,10 @@ export function loadConfig(args?: string[]): CredMcpConfig {
     process.env.CRED_MODE === 'local' ||
     (args ?? process.argv).includes('--local');
   const webBotAuth = parseWebBotAuthConfig();
+  const wimseEnv = parseWimseConfig();
 
   if (isLocal) {
+    if (wimseEnv) throw new Error('CRED_WIMSE_* applies to cloud mode only: local mode makes no requests to a Cred server');
     const vaultPassphrase = process.env.CRED_VAULT_PASSPHRASE;
     if (!vaultPassphrase) {
       throw new Error('CRED_VAULT_PASSPHRASE environment variable is required for local mode');
@@ -250,7 +252,7 @@ export function loadConfig(args?: string[]): CredMcpConfig {
     throw new Error('CRED_BASE_URL environment variable is required. Set it to your Cred server URL (e.g. https://cred.example.com)');
   }
 
-  const wimse = parseWimseConfig();
+  const wimse = wimseEnv;
   if (wimse && agentToken) {
     throw new Error('Set CRED_AGENT_TOKEN or the CRED_WIMSE_* variables, not both: a workload authenticates with its WIT');
   }

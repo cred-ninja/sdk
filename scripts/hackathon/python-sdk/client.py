@@ -53,9 +53,17 @@ try:
     planner.use(token=handle.token, url=CALENDAR, method="POST", body={"summary": "x"}, agent_identity=agent)
     check("Python SDK: a write under the read-only grant is refused", False, "accepted")
 except CredError as err:
-    check("Python SDK: a write under the read-only grant is refused", True, f"{err.status_code} {err.code}")
+    check("Python SDK: a write under the read-only grant is refused",
+          err.status_code == 403 and err.code == "scope_insufficient", f"{err.status_code} {err.code}")
+
+conns = planner.get_user_connections("alice")
+check("Python SDK: a signed GET with a query string is accepted", isinstance(conns, list), f"{len(conns)} connection(s)")
 
 stranger = workload("stranger", txns["stranger"])
+# A valid signed call first, so the refusal below can only come from the agent mapping.
+stranger_conns = stranger.get_user_connections("alice")
+check("Python SDK: the stranger workload's own signature is valid", isinstance(stranger_conns, list),
+      f"{len(stranger_conns)} connection(s)")
 try:
     stranger.delegate_handle(service="google", user_id="alice", scopes=["calendar.readonly"],
                              app_client_id="local", agent_identity=agent)
