@@ -21,12 +21,19 @@ interface CredDelegateToolInput {
 }
 
 
+/** Drop trailing '/' characters in linear time (no regex on caller input). */
+function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  return url.slice(0, end);
+}
+
 function resolveClient(options: { agentToken?: string; baseUrl: string; cred?: Cred }): Cred {
   if (options.cred !== undefined) {
     if (!(options.cred instanceof Cred)) throw new TypeError('cred must be a Cred client from @credninja/sdk');
     if (options.agentToken) throw new Error('Pass agentToken or cred, not both');
     if (!options.baseUrl) throw new Error('baseUrl is required: cached delegations are keyed on it');
-    if (options.baseUrl.replace(/\/+$/, '') !== options.cred.serverUrl?.replace(/\/+$/, '')) {
+    if (trimTrailingSlashes(options.baseUrl) !== trimTrailingSlashes(options.cred.serverUrl ?? '')) {
       throw new Error("baseUrl does not match the passed client's server URL");
     }
     return options.cred;
