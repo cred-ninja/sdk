@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -16,6 +16,7 @@ from .exceptions import (
     ScopeCeilingException,
 )
 from .identity import DpopSigningIdentity, create_dpop_proof
+from .wimse import RequestSigner
 from .models import BrokeredUseResult, Connection, DelegationHandleResult, DelegationResult
 
 _LOCALHOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -32,8 +33,22 @@ def _parse_expires_at(raw_value: Any, expires_in: int) -> datetime:
 
 
 class _CredBase:
-    def __init__(self, agent_token: str, base_url: Optional[str] = None) -> None:
-        if not agent_token:
+    def __init__(
+        self,
+        agent_token: Optional[str] = None,
+        base_url: Optional[str] = None,
+        sign_request: Optional[RequestSigner] = None,
+    ) -> None:
+        if sign_request is not None and agent_token:
+            raise CredError(
+                "Pass agent_token or sign_request, not both: a signed workload request "
+                "authenticates with its WIT, not with an agent token",
+                "invalid_config",
+                0,
+            )
+        if sign_request is not None and not callable(sign_request):
+            raise CredError("sign_request must be callable", "invalid_config", 0)
+        if not agent_token and sign_request is None:
             raise CredError("agent_token is required", "invalid_config", 0)
         if not base_url:
             raise CredError(
@@ -43,7 +58,13 @@ class _CredBase:
                 0,
             )
         self._agent_token = agent_token
+        self._sign_request = sign_request
         self._base_url = self._validate_base_url(base_url)
+
+    @property
+    def base_url(self) -> str:
+        """The validated Cred server URL this client sends to (no trailing slash)."""
+        return self._base_url
 
     @staticmethod
     def _validate_base_url(url: str) -> str:
@@ -65,11 +86,33 @@ class _CredBase:
         )
 
     def _auth_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._agent_token}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if self._agent_token:
+            headers["Authorization"] = f"Bearer {self._agent_token}"
+        return headers
+
+    def _sign_final_request(self, request: httpx.Request) -> None:
+        """Sign the request exactly as it will be sent (final headers and body bytes)."""
+        if self._sign_request is None:
+            return
+        body = request.read()
+        added = self._sign_request(request.method, str(request.url), dict(request.headers), body or None)
+        for name, value in added.items():
+            request.headers[name] = value
+
+    def _event_hooks(self, asynchronous: bool) -> dict[str, list[Callable[..., Any]]]:
+        if self._sign_request is None:
+            return {}
+        if not asynchronous:
+            return {"request": [self._sign_final_request]}
+
+        async def sign_async(request: httpx.Request) -> None:
+            self._sign_final_request(request)
+
+        return {"request": [sign_async]}
 
     def _delegate_handle_request(
         self,
@@ -222,6 +265,14 @@ class _CredBase:
         except Exception:
             pass
 
+        # RFC 9457 problem details (the WIMSE signature failures): the code is the
+        # type URI's fragment or last path segment, the message its title/detail.
+        problem_type = body.get("type") if "error" not in body else None
+        if isinstance(problem_type, str) and problem_type:
+            code = problem_type.rsplit("#", 1)[-1].rstrip("/").rsplit("/", 1)[-1] or "unknown"
+            detail = body.get("detail") or body.get("title") or f"Request failed with status {response.status_code}"
+            return body, str(detail), code
+
         message = body.get("message") or body.get("error") or f"Request failed with status {response.status_code}"
         error_code = str(body.get("error", "unknown"))
         return body, str(message), error_code
@@ -270,14 +321,16 @@ class Cred(_CredBase):
 
     def __init__(
         self,
-        agent_token: str,
+        agent_token: Optional[str] = None,
         base_url: Optional[str] = None,
+        sign_request: Optional[RequestSigner] = None,
     ) -> None:
-        super().__init__(agent_token=agent_token, base_url=base_url)
+        super().__init__(agent_token=agent_token, base_url=base_url, sign_request=sign_request)
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._auth_headers(),
             timeout=30.0,
+            event_hooks=self._event_hooks(asynchronous=False),
         )
 
     def delegate(
@@ -419,14 +472,16 @@ class AsyncCred(_CredBase):
 
     def __init__(
         self,
-        agent_token: str,
+        agent_token: Optional[str] = None,
         base_url: Optional[str] = None,
+        sign_request: Optional[RequestSigner] = None,
     ) -> None:
-        super().__init__(agent_token=agent_token, base_url=base_url)
+        super().__init__(agent_token=agent_token, base_url=base_url, sign_request=sign_request)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers=self._auth_headers(),
             timeout=30.0,
+            event_hooks=self._event_hooks(asynchronous=True),
         )
 
     async def delegate(

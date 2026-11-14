@@ -2294,6 +2294,15 @@ export class Cred {
       // ignore parse errors
     }
 
+    // RFC 9457 problem details (the WIMSE signature failures) carry no `error`:
+    // the code is the type URI's fragment or last path segment.
+    if (body.error === undefined && typeof body.type === 'string' && body.type) {
+      const code = body.type.split('#').pop()!.replace(/\/+$/, '').split('/').pop() || 'unknown';
+      const detail = typeof body.detail === 'string' ? body.detail
+        : typeof body.title === 'string' ? body.title : `Request failed with status ${res.status}`;
+      throw new CredError(detail, code, res.status);
+    }
+
     const message = typeof body.message === 'string'
       ? body.message
       : typeof body.error === 'string'

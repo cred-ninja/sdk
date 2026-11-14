@@ -80,6 +80,16 @@ describe('SDK signRequest with createWimseHttpSigner', () => {
       .rejects.toThrow();
   });
 
+  it('surfaces a refused signature as CredError code wimse-signature-invalid (RFC 9457 problem type)', async () => {
+    const s = await listening();
+    const cred = new Cred({
+      baseUrl: s.baseUrl,
+      signRequest: createWimseHttpSigner({ wit: s.w.wit, privateKey: s.w.key.privateKey, alg: 'ES256', audience: () => 'https://other.example/api' }),
+    });
+    await expect(cred.delegateHandle({ service: 'google', userId: 'default', appClientId: 'local', scopes: ['calendar.readonly'], agentIdentity: s.agent }))
+      .rejects.toMatchObject({ code: 'wimse-signature-invalid', statusCode: 400 });
+  });
+
   it('refuses a config that combines signRequest with webBotAuth or the agent token', async () => {
     const signRequest = createWimseHttpSigner({ wit: 'a.b.c', privateKey: (await import('node:crypto')).generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey, alg: 'ES256' });
     expect(() => new Cred({ baseUrl: 'http://127.0.0.1:1', agentToken: 'x', signRequest } as any)).toThrow(/not both/);

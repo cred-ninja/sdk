@@ -36,6 +36,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "hackathon:demo": "node scripts/hackathon/demo.mjs",
     "hackathon:serve": "node scripts/hackathon/serve.mjs",
+    "hackathon:python": "node scripts/hackathon/python-sdk/run.mjs",
     "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs"
   },
   "devDependencies": {
