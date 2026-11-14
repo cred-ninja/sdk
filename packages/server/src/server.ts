@@ -88,8 +88,8 @@ import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, ve
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
 import { signWimseResponse, WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
 import { parseDictionary } from './identity/structured-fields.js';
-import { checkTxnTokenTrust, mappedProviderScopes, TxnTokenRefusal, verifyTxnToken, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
-import { validateWorkloadIdentifier } from './identity/wimse.js';
+import { checkTxnTokenTrust, mappedProviderScopes, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
+import { decideTxnToken, isCredentialRoute, txnTrustRequiredFor as policyTxnTrustRequiredFor } from './identity/txn-policy.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -1038,26 +1038,13 @@ export function createServer(config: ServerConfig) {
   /** The verified Txn-Token of a request, with the trust it verified under. */
   const verifiedTxnTokens = new WeakMap<Request, { token: VerifiedTxnToken; trust: TxnTokenTrust }>();
 
-  /** Routes that issue or exercise credentials: the ones a required Txn-Token gates. */
   function credentialRoute(req: Request): boolean {
-    const p = req.originalUrl.split('?')[0].replace(/\/+$/, '').toLowerCase();
-    return p === '/api/v1/delegate' || p === '/api/v1/subdelegate' || p === '/api/v1/token' || p === '/bc-authorize'
-      || p === '/api/v1/use' || p.startsWith('/api/token/');
+    return isCredentialRoute(req.originalUrl);
   }
 
   /** The trust domain configuration whose Txn-Tokens an agent must present on brokered calls, if any. */
   function txnTrustRequiredFor(agentDid: string): TxnTokenTrust | undefined {
-    if (!txnTokenTrust || !externalIdentity) return undefined;
-    for (const m of externalIdentity.mappings) {
-      if (m.kind !== 'wimse' || m.agentDid !== agentDid) continue;
-      try {
-        const trust = txnTokenTrust[validateWorkloadIdentifier(m.subject).trustDomain];
-        if (trust && trust.required !== false) return trust;
-      } catch {
-        // A mapping whose subject is not a Workload Identifier maps nothing.
-      }
-    }
-    return undefined;
+    return externalIdentity ? policyTxnTrustRequiredFor(txnTokenTrust, externalIdentity.mappings, agentDid) : undefined;
   }
 
   /** The agent a delegate request is for: body agent_did (a DID or a record id), else the proven workload's agent. */
@@ -1089,58 +1076,56 @@ export function createServer(config: ServerConfig) {
   function checkTxnToken(req: Request, res: Response, identity: VerifiedExternalIdentity | null): 'ok' | 'refused' {
     if (!txnTokenTrust) return 'ok';
     const header = req.headers['txn-token'];
-    const present = header !== undefined;
     const refuseUnbound = (code: string, detail: string): 'refused' => {
       if (identity) return refuseExternalIdentity(req, res, identity.kind, code, detail, identity.subject, identity.proof);
-      writeAuditEventIfSupported({
-        id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-        timestamp: new Date(),
-        actor: { type: 'agent', id: 'unknown' },
-        action: 'deny',
-        resource: { type: 'agent', id: 'unknown' },
-        outcome: 'denied',
-        correlationId: crypto.randomUUID(),
-        metadata: { reason: code, route: req.originalUrl.split('?')[0] },
-      });
+      writeIdentityDenyAudit(req, code);
       res.status(401).json({ error: 'txn_token_unbound', message: 'A Txn-Token is accepted only with the workload identity proof that binds it' });
       return 'refused';
     };
-    if (!identity || identity.kind !== 'wimse') {
-      return present ? refuseUnbound('txn_token_unbound', 'Txn-Token without a WIMSE proof that binds it') : 'ok';
-    }
-    const trust = txnTokenTrust[identity.trustDomain];
-    // The strictest requirement of any trust domain this agent is mapped
-    // from applies, so presenting the workload of a laxer domain does not
-    // shed it. "Required" binds the routes that obtain or use credentials;
-    // revocation and audit reads never depend on the Txn-Token Service.
+    // "Required" binds the routes that obtain or use credentials; revocation
+    // and audit reads never depend on the Txn-Token Service.
     const proven = provenExternalAgent.get(req);
-    const requiredElsewhere = proven ? txnTrustRequiredFor(proven.agentDid) !== undefined : false;
-    const mustCarry = credentialRoute(req) && ((trust !== undefined && trust.required !== false) || requiredElsewhere);
-    if (!trust) {
-      if (present) return refuseUnbound('txn_token_untrusted', 'no Txn-Token trust for this trust domain');
-      return mustCarry ? refuseUnbound('txn_token_required', "this agent's trust domain requires a Txn-Token") : 'ok';
-    }
-    if (!present) return mustCarry ? refuseUnbound('txn_token_required', 'this trust domain requires a Txn-Token') : 'ok';
-    // The binding (SPEC-NOTES #10): the WPT source has already required a
-    // matching tth; an HTTP signature must cover the header.
-    if (identity.proof === 'http-sig') {
-      const covered = identity.attributes.covered;
-      if (!Array.isArray(covered) || !covered.includes('txn-token')) return refuseUnbound('txn_token_unbound', 'signature does not cover Txn-Token');
-    } else if (identity.proof !== 'wpt') {
-      return refuseUnbound('txn_token_unbound', 'proof cannot bind a Txn-Token');
-    }
-    if (Array.isArray(header) || String(header).includes(',')) return refuseUnbound('txn_token_invalid', 'more than one Txn-Token');
-    let token: VerifiedTxnToken;
-    try {
-      token = verifyTxnToken(String(header), trust);
-    } catch (err) {
-      if (err instanceof TxnTokenRefusal) return refuseUnbound(`txn_token_${err.code}`, err.detail);
-      throw err;
-    }
+    const decision = decideTxnToken({
+      trustByDomain: txnTokenTrust,
+      identity: identity && identity.kind === 'wimse' ? identity : null,
+      header,
+      credentialRoute: credentialRoute(req),
+      requiredElsewhere: identity?.kind === 'wimse' && proven ? txnTrustRequiredFor(proven.agentDid) !== undefined : false,
+    });
+    if (!decision.ok) return refuseUnbound(decision.code, decision.detail);
+    if (!decision.accepted) return 'ok';
+    const { token, trust } = decision.accepted;
     verifiedTxnTokens.set(req, { token, trust });
     // From here on, every audit event this request writes carries txn.
     auditContext.enterWith({ ...auditContext.getStore(), txn: token.txn });
     return 'ok';
+  }
+
+  /**
+   * The deny audit event for an identity or Txn-Token refusal. `kind`, `subject`
+   * and `proof` are recorded when the refusal concerns a verified (or attempted)
+   * external identity; a refusal with none names the actor `unknown`.
+   */
+  function writeIdentityDenyAudit(
+    req: Request,
+    code: string,
+    who: { kind?: ExternalIdentityKind; subject?: string; proof?: VerifiedExternalIdentity['proof'] } = {},
+  ): void {
+    writeAuditEventIfSupported({
+      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
+      timestamp: new Date(),
+      actor: { type: 'agent', id: who.subject ?? 'unknown' },
+      action: 'deny',
+      resource: { type: 'agent', id: who.subject ?? 'unknown' },
+      outcome: 'denied',
+      correlationId: crypto.randomUUID(),
+      metadata: {
+        ...(who.kind ? { identitySource: who.kind } : {}),
+        reason: code,
+        route: req.originalUrl.split('?')[0],
+        ...(who.proof ? { proof: who.proof } : {}),
+      },
+    });
   }
 
   function refuseExternalIdentity(
@@ -1155,16 +1140,7 @@ export function createServer(config: ServerConfig) {
     // The response never says which check failed; the detail is for the
     // operator's log and audit trail only.
     console.warn(`[cred] ${kind} identity refused: ${code}: ${detail}`);
-    writeAuditEventIfSupported({
-      id: `evt_${crypto.randomUUID().replace(/-/g, '')}`,
-      timestamp: new Date(),
-      actor: { type: 'agent', id: subject ?? 'unknown' },
-      action: 'deny',
-      resource: { type: 'agent', id: subject ?? 'unknown' },
-      outcome: 'denied',
-      correlationId: crypto.randomUUID(),
-      metadata: { identitySource: kind, reason: code, route: req.originalUrl.split('?')[0], ...(proof ? { proof } : {}) },
-    });
+    writeIdentityDenyAudit(req, code, { kind, subject, proof });
     if (proof === 'http-sig') {
       // draft-ietf-wimse-http-signature-08 §3.6: 400 with one problem type,
       // whatever failed (the WIT, the signature, or the identity after them).
@@ -1234,7 +1210,16 @@ export function createServer(config: ServerConfig) {
    * request (the agent token path applies). `true`: authenticated, with
    * `req.provenAgent` set. `'refused'`: a response was sent.
    */
-  async function authenticateExternalIdentity(req: Request, res: Response): Promise<boolean | 'refused'> {
+  /**
+   * Verify an external identity and record it as proven for this request.
+   * `assignPrincipal: false` verifies without making it the request's agent
+   * principal or rate-limit key: /use keeps keying on the Delegation Token.
+   */
+  async function authenticateExternalIdentity(
+    req: Request,
+    res: Response,
+    { assignPrincipal = true }: { assignPrincipal?: boolean } = {},
+  ): Promise<boolean | 'refused'> {
     if (!externalIdentity || externalIdentity.sources.length === 0) return false;
     const targetUri = `${publicBaseUri()}${req.originalUrl.split('?')[0]}`;
     const queryAt = req.originalUrl.indexOf('?');
@@ -1325,8 +1310,10 @@ export function createServer(config: ServerConfig) {
       }
       armResponseSigning(req, res, String(identity.attributes.nonce ?? ''));
     }
-    (req as any).agentPrincipal = principal;
-    (req as any).agentTokenHash = hashAgentPrincipal(principal);
+    if (assignPrincipal) {
+      (req as any).agentPrincipal = principal;
+      (req as any).agentTokenHash = hashAgentPrincipal(principal);
+    }
     provenExternalAgent.set(req, { agentDid, identity });
     return true;
   }
@@ -1338,13 +1325,9 @@ export function createServer(config: ServerConfig) {
    */
   async function authenticateUseWorkload(req: Request, res: Response, tokenAgentDid: string): Promise<'ok' | 'refused'> {
     // Guard and audit keep keying on the Delegation Token's binding.
-    const keepHash = (req as any).agentTokenHash;
-    const keepPrincipal = (req as any).agentPrincipal;
-    const result = await authenticateExternalIdentity(req, res);
+    const result = await authenticateExternalIdentity(req, res, { assignPrincipal: false });
     if (result === 'refused') return 'refused';
     const proven = provenExternalAgent.get(req);
-    (req as any).agentTokenHash = keepHash;
-    (req as any).agentPrincipal = keepPrincipal;
     if (!result || !proven || proven.identity.kind !== 'wimse') {
       return refuseExternalIdentity(req, res, 'wimse', 'proof_required', 'no workload identity verified on /use', undefined, 'http-sig');
     }
