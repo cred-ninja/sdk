@@ -1048,6 +1048,37 @@ export function createServer(config: ServerConfig) {
     return externalIdentity ? policyTxnTrustRequiredFor(txnTokenTrust, externalIdentity.mappings, agentDid) : undefined;
   }
 
+  /**
+   * The Txn-Token bounds on issuing a delegation (/api/v1/delegate and the
+   * CIBA path at /bc-authorize). An agent whose trust domain requires
+   * Txn-Tokens obtains credentials only inside a verified transaction, and
+   * only as a handle: a raw provider token would escape the per-call
+   * narrowing on /api/v1/use. Inside a transaction, its user must be the
+   * delegation's user and every requested scope within its mapping. Refused,
+   * never silently narrowed. Null when issuance may proceed.
+   */
+  function txnIssuanceRefusal(
+    req: Request,
+    input: { agentDid: string | undefined; userId: string; service: string; requestedScopes: string[] | undefined; handle: boolean },
+  ): { error: string; message: string } | null {
+    const txn = verifiedTxnTokens.get(req);
+    if (!txn) {
+      return input.agentDid && txnTrustRequiredFor(input.agentDid)
+        ? { error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token to obtain a delegation" }
+        : null;
+    }
+    if (!input.handle) return { error: 'txn_handle_required', message: 'Within a transaction only a brokered handle is issued, so each call can be narrowed' };
+    const { token, trust } = txn;
+    if (token.userId === undefined) return { error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' };
+    if (token.userId !== input.userId) return { error: 'txn_user_mismatch', message: 'The transaction is for another user than user_id' };
+    const mapped = mappedProviderScopes(trust, input.service, token.scopes);
+    const scopes = input.requestedScopes;
+    if (mapped === null || !scopes || scopes.length === 0 || !scopes.every((scope) => mapped.some((m) => scopeEquivalent(scope, m)))) {
+      return { error: 'txn_scope_exceeded', message: "The requested scopes are not within the transaction's scope" };
+    }
+    return null;
+  }
+
   /** The agent a delegate request is for: body agent_did (a DID or a record id), else the proven workload's agent. */
   async function delegatingAgentOf(req: Request): Promise<string | undefined> {
     const named = req.body?.agent_did;
@@ -6420,36 +6451,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // A Txn-Token bounds what may be delegated in its transaction: its user
       // must be the user named here, and every requested scope must be one
       // its scope maps to. Refused, never silently narrowed.
-      const txnForDelegate = verifiedTxnTokens.get(req);
-      // An agent whose trust domain requires Txn-Tokens obtains credentials
-      // only inside a verified transaction, and only as a handle: a raw
-      // provider token would escape the per-call narrowing on /api/v1/use.
       // agent_did may name the agent by DID or by its record id.
-      const delegatingAgent = await delegatingAgentOf(req);
-      if (!txnForDelegate && delegatingAgent && txnTrustRequiredFor(delegatingAgent)) {
-        res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token to obtain a delegation" });
+      const txnRefusal = txnIssuanceRefusal(req, {
+        agentDid: await delegatingAgentOf(req), userId, service, requestedScopes, handle: tokenFormatFromBody(req) === 'handle',
+      });
+      if (txnRefusal) {
+        res.status(403).json({ error: txnRefusal.error, message: txnRefusal.message });
         return;
-      }
-      if (txnForDelegate && tokenFormatFromBody(req) !== 'handle') {
-        res.status(403).json({ error: 'txn_handle_required', message: 'Within a transaction only a brokered handle is issued, so each call can be narrowed' });
-        return;
-      }
-      if (txnForDelegate) {
-        const { token, trust } = txnForDelegate;
-        if (token.userId === undefined) {
-          res.status(403).json({ error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' });
-          return;
-        }
-        if (token.userId !== userId) {
-          res.status(403).json({ error: 'txn_user_mismatch', message: 'The transaction is for another user than user_id' });
-          return;
-        }
-        const mapped = mappedProviderScopes(trust, service, token.scopes);
-        if (mapped === null || !requestedScopes || requestedScopes.length === 0
-          || !requestedScopes.every((scope) => mapped.some((m) => scopeEquivalent(scope, m)))) {
-          res.status(403).json({ error: 'txn_scope_exceeded', message: "The requested scopes are not within the transaction's scope" });
-          return;
-        }
       }
       const vaultEntry = await getVaultEntry(service, userId);
       if ('status' in vaultEntry) {
@@ -8506,6 +8514,13 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       }
       const requestedScopes = guardedRequestedScopes(req, res, normalizeRequestedScopes(body.scopes));
       if (requestedScopes === null) return;
+      // The same Txn-Token bounds as /api/v1/delegate: a CIBA approval issues
+      // a DPoP-bound Delegation Token, a brokered handle.
+      const txnRefusal = txnIssuanceRefusal(req, { agentDid, userId: subject, service, requestedScopes, handle: true });
+      if (txnRefusal) {
+        res.status(403).json({ error: txnRefusal.error, error_description: txnRefusal.message });
+        return;
+      }
       const agentCheck = await didAgentCheck(agentDid, service, requestedScopes);
       if (!agentCheck.ok) {
         res.status(403).json({ error: agentCheck.error, error_description: agentCheck.message });
