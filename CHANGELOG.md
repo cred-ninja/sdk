@@ -46,7 +46,8 @@
   `authenticateRequest` is optional. No new dependencies. A refusal with an
   RFC 9457 problem body (the WIMSE failures) now throws `CredError` with the
   problem type as `code` (for example `wimse-signature-invalid`) instead of
-  `unknown`.
+  `unknown`. New read-only `Cred.serverUrl`. `createWimseHttpSigner` refuses a
+  `lifetimeSec` above 300, which Cred would refuse on every request.
 - `cred-auth` (Python SDK): `sign_request` on `Cred` and `AsyncCred` and
   `create_wimse_http_signer`, the same signing as the TypeScript SDK, applied by
   an httpx request hook to the request as sent. `agent_token` is optional when a
