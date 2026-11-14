@@ -14,7 +14,7 @@ import base64
 import hashlib
 import secrets
 import time
-from typing import Callable, Mapping, Optional, Union
+from typing import Callable, Dict, Mapping, Optional, Union
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes
@@ -29,7 +29,7 @@ _COVER_IF_PRESENT = ("content-type", "content-digest", "authorization", "txn-tok
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 StringSource = Union[str, Callable[[], str]]
-RequestSigner = Callable[[str, str, Mapping[str, str], Optional[bytes]], dict]
+RequestSigner = Callable[[str, str, Mapping[str, str], Optional[bytes]], Dict[str, str]]
 WimsePrivateKey = Union[ec.EllipticCurvePrivateKey, ed25519.Ed25519PrivateKey]
 
 
@@ -92,7 +92,7 @@ def create_wimse_http_signer(
         raise CredError("wimse signer: lifetime_sec must be an integer from 1 to 300 (Cred refuses longer)",
                         "invalid_config", 0)
 
-    def sign(method: str, url: str, headers: Mapping[str, str], body: Optional[bytes]) -> dict:
+    def sign(method: str, url: str, headers: Mapping[str, str], body: Optional[bytes]) -> Dict[str, str]:
         final = {k.lower(): v for k, v in headers.items()}
         added: dict[str, str] = {}
         current_wit = _resolve(wit)
