@@ -28,7 +28,7 @@ export { loadTrustBundle, TrustBundleError } from './identity/trust-bundle.js';
 export type { TrustAnchorKeys, TrustAnchorKey } from './identity/trust-bundle.js';
 export { startTailscaleListener, checkListenerSocket, checkLocalApiSocket, DEFAULT_LOCALAPI_SOCKET } from './identity/tailscale.js';
 export type { TailscaleSourceConfig, TailscaleListener, SocketCheck } from './identity/tailscale.js';
-export { IdentityRefusal, createReplayCache, mappedAgentDid } from './identity/types.js';
+export { IdentityRefusal, createReplayCache, createInMemorySharedReplayStore, mappedAgentDid } from './identity/types.js';
 // draft-ietf-wimse-http-signature-08 (RFC 9421 profile) and RFC 8941 parsing.
 export {
   verifyWimseRequestSignature,
@@ -52,6 +52,7 @@ export type {
   IdentityRequest,
   VerifiedExternalIdentity,
   ReplayCache,
+  SharedReplayStore,
 } from './identity/types.js';
 export type { AgentPrincipal, TofuProofInput, TofuDelegationPayload, ResolvedTofuIdentity } from './tofu-bridge.js';
 

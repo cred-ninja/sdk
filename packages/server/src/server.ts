@@ -1060,6 +1060,14 @@ export function createServer(config: ServerConfig) {
     return undefined;
   }
 
+  /** The agent a delegate request is for: body agent_did (a DID or a record id), else the proven workload's agent. */
+  async function delegatingAgentOf(req: Request): Promise<string | undefined> {
+    const named = req.body?.agent_did;
+    if (typeof named === 'string' && named.startsWith('did:')) return named;
+    const record = typeof named === 'string' ? await vault.getAgent(named) : null;
+    return record?.did ?? provenExternalAgent.get(req)?.agentDid;
+  }
+
   /**
    * Record the verified workload for this request's audit events. Synchronous
    * on purpose: AsyncLocalStorage.enterWith inside an awaited callee would not
@@ -2197,6 +2205,9 @@ export function createServer(config: ServerConfig) {
   // an agentRequestVerifier that binds each principal to its user, is not affected.
   if (config.agentToken && !config.agentRequestVerifier && !singleUserMode) {
     console.warn('[cred] One static AGENT_TOKEN serves every user on this server: the legacy routes take the user from the request\'s user_id, so anyone holding the token can act for any user. Run one server per user with SINGLE_USER_MODE=true, or bind each agent to its user with an agentRequestVerifier.');
+  }
+  if (externalIdentity && externalIdentity.sources.length > 0 && config.webBotAuthMode === 'require') {
+    console.warn('[cred] webBotAuthMode is \'require\' and externalIdentity is configured: a WIMSE workload using an HTTP signature is always refused (401), since a WIMSE-tagged signature is not a Web Bot Auth one and the two cannot be combined, and WPT or Tailscale requests are refused unless they also carry a Web Bot Auth signature. Set webBotAuthMode to \'optional\' to accept workload identities.');
   }
   if (allowRawTokens) {
     console.warn('[cred] DEPRECATED: CRED_ALLOW_RAW_TOKENS=true hands provider access tokens to callers. A raw token is a bearer credential with the connection\'s full scope that the server can neither bind to an agent key nor revoke per delegation. Use brokered handles; this setting will be removed.');
@@ -5277,6 +5288,27 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   };
   const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false), requireRawAgentProof];
   if (linkService) {
+    // A Cred Link delegation is for a Link connection, never a transaction's
+    // user, so it is not issued inside a transaction. An agent whose trust
+    // domain requires Txn-Tokens gets none this way either: Link would
+    // otherwise escape the requirement. Runs before the Link precheck.
+    delegateRouteHandlers.push(async (req, res, next) => {
+      if (req.body?.connection_id === undefined) { next(); return; }
+      try {
+        if (verifiedTxnTokens.get(req)) {
+          res.status(403).json({ error: 'txn_user_mismatch', message: 'A Cred Link delegation is never for a transaction\'s user' });
+          return;
+        }
+        const linkAgent = await delegatingAgentOf(req);
+        if (linkAgent && txnTrustRequiredFor(linkAgent)) {
+          res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token, and a Cred Link delegation cannot carry one" });
+          return;
+        }
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
     // Runs checkLinkAccess for calls naming connection_id, before Guard and
     // before any vault access, whether or not a Guard is configured.
     delegateRouteHandlers.push(linkService.delegatePrecheck);
@@ -5829,7 +5861,9 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(403).json({ error: 'txn_autonomous', message: 'This transaction names no user, so it cannot use a credential a user delegated' });
           return;
         }
-        if (txn.token.userId !== delegation.userId) {
+        // A Cred Link delegation's user is a reserved vault id, never a
+        // transaction's user, even if a Txn-Token happens to name that id.
+        if (delegation.link || txn.token.userId !== delegation.userId) {
           refuseBrokeredCall(delegationId, delegation, url, 'txn_user_mismatch', { method: normalizedMethod });
           res.status(403).json({ error: 'txn_user_mismatch', message: 'The transaction is for another user than this delegation' });
           return;
@@ -6376,9 +6410,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
       // only inside a verified transaction, and only as a handle: a raw
       // provider token would escape the per-call narrowing on /api/v1/use.
       // agent_did may name the agent by DID or by its record id.
-      const namedRecord = typeof agentDid === 'string' && !agentDid.startsWith('did:') ? await vault.getAgent(agentDid) : null;
-      const delegatingAgent = (typeof agentDid === 'string' && agentDid.startsWith('did:') ? agentDid : namedRecord?.did)
-        ?? provenExternalAgent.get(req)?.agentDid;
+      const delegatingAgent = await delegatingAgentOf(req);
       if (!txnForDelegate && delegatingAgent && txnTrustRequiredFor(delegatingAgent)) {
         res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token to obtain a delegation" });
         return;

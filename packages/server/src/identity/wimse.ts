@@ -23,6 +23,7 @@ import {
   type ExternalIdentitySource,
   type IdentityRequest,
   type ReplayCache,
+  type SharedReplayStore,
   type VerifiedExternalIdentity,
 } from './types.js';
 import type { TrustAnchorKeys } from './trust-bundle.js';
@@ -32,6 +33,12 @@ export interface WimseSourceConfig {
   /** Allowlist: exactly these trust domains, each with its own anchors (workload-creds-03 §3). */
   trustDomains: Record<string, TrustAnchorKeys>;
   replay: ReplayCache;
+  /**
+   * Optional replay store shared by every server instance. Checked after the
+   * per-process `replay` cache accepts a WPT jti or signature nonce; a value
+   * it has seen, or a store error, refuses the request.
+   */
+  sharedReplay?: SharedReplayStore;
   /** Cap on WIT lifetime: exp - iat if iat is present, else exp - now. Default 86400. */
   maxWitLifetimeSec?: number;
   /** Cap on exp - now for a WPT (wpt-02 §2 "lifetimes MUST be short"). Default 300. */
@@ -514,7 +521,9 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       if (wptScheme && tagged) refuse('proof_ambiguous', 'both a WPT and a WIMSE HTTP signature');
       if (tagged) {
         if (authFields > 1) throw new IdentityRefusal('wimse', 'multiple_authorization', 'more than one authorization header', 'http-sig');
-        return authenticateHttpSig(req, rawWit as string);
+        const { identity, nonce, expires } = authenticateHttpSig(req, rawWit as string);
+        await checkShared(`${identity.trustDomain}|${identity.subject}|httpsig:${nonce}`, expires + resolved.clockSkewSec, 'http-sig');
+        return identity;
       }
 
       // wpt-02 §2.2: exactly one Authorization field using the WPT scheme;
@@ -537,6 +546,7 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       if (!config.replay.checkAndRecord(`wpt:${wpt.jti}`, replayUntil, resolved.now())) {
         refuse('replay', 'wpt jti already used');
       }
+      await checkShared(`${wit.trustDomain}|${wit.subject}|wpt:${wpt.jti}`, replayUntil, 'wpt');
 
       return {
         kind: 'wimse',
@@ -549,7 +559,19 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
     },
   };
 
-  function authenticateHttpSig(req: IdentityRequest, rawWit: string): VerifiedExternalIdentity {
+  /** The cross-instance replay check, after every local check has passed. Fails closed. */
+  async function checkShared(key: string, until: number, proof: 'wpt' | 'http-sig'): Promise<void> {
+    if (!config.sharedReplay) return;
+    let fresh: boolean;
+    try {
+      fresh = await config.sharedReplay.checkAndRecord(key, until);
+    } catch {
+      throw new IdentityRefusal('wimse', 'replay_store_unavailable', 'shared replay store failed', proof);
+    }
+    if (fresh !== true) throw new IdentityRefusal('wimse', 'replay', 'already used at another instance', proof);
+  }
+
+  function authenticateHttpSig(req: IdentityRequest, rawWit: string): { identity: VerifiedExternalIdentity; nonce: string; expires: number } {
     const fail = (code: string, detail: string): never => {
       throw new IdentityRefusal('wimse', code, detail, 'http-sig');
     };
@@ -577,7 +599,7 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
     );
     if (!verified) fail('proof_required', 'no WIMSE signature');
     const v = verified!;
-    return {
+    const identity: VerifiedExternalIdentity = {
       kind: 'wimse',
       subject: v.wit.subject,
       trustDomain: v.wit.trustDomain,
@@ -590,5 +612,6 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       proof: 'http-sig',
       expiresAt: Math.min(v.wit.exp, v.expires),
     };
+    return { identity, nonce: v.nonce, expires: v.expires };
   }
 }

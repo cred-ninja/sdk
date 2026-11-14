@@ -146,6 +146,18 @@ describe('WIT + HTTP signature on agent routes', () => {
     expect(sig.body).toEqual(wpt.body);
   });
 
+  it('warns once at startup when external identity runs with Web Bot Auth required, and not otherwise', async () => {
+    const warns = (spy: ReturnType<typeof vi.spyOn>) => spy.mock.calls.filter((c) => String(c[0]).includes("webBotAuthMode is 'require' and externalIdentity")).length;
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await domainB({ webBotAuthMode: 'require' });
+    expect(warns(spy)).toBe(1);
+    spy.mockClear();
+    await domainB({ webBotAuthMode: 'optional' });
+    await domainB();
+    expect(warns(spy)).toBe(0);
+    spy.mockRestore();
+  });
+
   it('a WIMSE signature mixed with another signature is refused where Web Bot Auth runs', async () => {
     const { app, w } = await domainB({ webBotAuthMode: 'optional' });
     const h = httpSigHeaders(w, 'GET', CONN);

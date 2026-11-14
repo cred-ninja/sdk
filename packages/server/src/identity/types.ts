@@ -117,6 +117,30 @@ export interface ReplayCache {
   checkAndRecord(key: string, expiresAtSeconds: number, nowSeconds?: number): boolean;
 }
 
+/**
+ * A replay store several server instances share (for example one backed by
+ * Redis `SET key 1 NX EXAT expiresAt`). The WIMSE source consults it after the
+ * per-process {@link ReplayCache} accepts a value, so a WPT `jti` or request
+ * signature nonce used at one replica is refused at the others. The check and
+ * the record must be one atomic operation (two replicas racing on one key must
+ * not both see it as new). Resolve `false` when `key` is already recorded and
+ * unexpired; otherwise record it and resolve `true`. A rejection refuses the
+ * request. Keys are scoped to the presenting workload, so one workload cannot
+ * burn another's values.
+ */
+export interface SharedReplayStore {
+  checkAndRecord(key: string, expiresAtSeconds: number): Promise<boolean>;
+}
+
+/**
+ * An in-process {@link SharedReplayStore}: for tests, or several sources in
+ * one process. It shares nothing across processes.
+ */
+export function createInMemorySharedReplayStore(maxEntries = 100_000): SharedReplayStore {
+  const cache = createReplayCache(maxEntries);
+  return { checkAndRecord: async (key, expiresAtSeconds) => cache.checkAndRecord(key, expiresAtSeconds) };
+}
+
 export function createReplayCache(maxEntries = 100_000): ReplayCache {
   const seen = new Map<string, number>();
   return {
