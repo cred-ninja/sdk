@@ -97,6 +97,8 @@ When your MCP client needs your calendar, you approve interactively. The token i
 
 In WIMSE mode `CRED_AGENT_DID` and `CRED_AGENT_PRIVATE_KEY_HEX` are required, since delegation and brokered calls still carry a DPoP proof of the agent key. WIMSE cannot be combined with Web Bot Auth. Guard rate limits key on the WIT's `sub` as read at startup; a WIT with a different `sub` needs a restart.
 
+`cred_capabilities` and `cred_whoami` report this instance's `authentication`: `mode` (`agent-token`, `wimse-workload` or `local`), `txnToken` (a Txn-Token file is configured) and `webBotAuth`. They never include file paths, keys or tokens, and they describe this MCP instance only, not the server's configuration.
+
 ### Local Mode
 
 | Variable | Required | Default | Description |

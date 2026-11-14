@@ -58,6 +58,16 @@
   `CRED_WIMSE_WIT_FILE`, `CRED_WIMSE_KEY_FILE` and `CRED_WIMSE_ALG` (and
   optionally `CRED_TXN_TOKEN_FILE`) are set, instead of `CRED_AGENT_TOKEN`. The
   WIT and Txn-Token files are read on every request.
+- `@credninja/server`: an optional `sharedReplay` store on the WIMSE source
+  (`SharedReplayStore`, `createInMemorySharedReplayStore`) lets replicas refuse
+  a WPT `jti` or signature nonce another replica accepted; a store error
+  refuses. A Cred Link delegation is no longer issued inside a transaction or
+  to an agent whose trust domain requires Txn-Tokens, and any Txn-Token on
+  `/api/v1/use` refuses one. `createServer` warns when external identity runs
+  with `webBotAuthMode: 'require'`. The Txn-Token decisions moved to
+  `identity/txn-policy.ts` with no behaviour change.
+- `@credninja/mcp`: `cred_capabilities` and `cred_whoami` report how the
+  instance authenticates (`authentication`: mode, `txnToken`, `webBotAuth`).
 - Framework integrations (LangChain, CrewAI, AutoGen, OpenAI Agents, Semantic
   Kernel, Vercel AI): accept a caller-built client (`cred=` / `cred`), for
   example one with a WIMSE signer. Construction from an agent token is unchanged.

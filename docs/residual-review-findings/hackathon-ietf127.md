@@ -4,16 +4,16 @@ From the multi-reviewer code review of `hackathon/ietf127` against `45fb411` (co
 
 ## Residual Review Findings
 
-- P2 `packages/server/src/server.ts` (WIMSE and Txn-Token helpers): the workload-identity and Txn-Token policy lives inside `createServer`. Extract it into a module under `identity/` (for example a factory returning the route-facing checks). Manual refactor; needs a design decision.
-- P2 `packages/server/src/server.ts` `refuseExternalIdentity` / `checkTxnToken` refusal: the deny audit event is built in two places. Extract one helper.
-- P2 `packages/server/src/server.ts` `authenticateUseWorkload`: saves and restores `agentPrincipal` and `agentTokenHash` through `any`. Split verification from principal assignment.
+- Resolved: P2 `packages/server/src/server.ts` (WIMSE and Txn-Token helpers): the Txn-Token policy lived inside `createServer`. Its decisions are now pure functions in `identity/txn-policy.ts` (`txn-policy.test.ts`); `server.ts` keeps the audit, response and request-state wiring.
+- Resolved: P2 `refuseExternalIdentity` / `checkTxnToken` refusal: one `writeIdentityDenyAudit` helper writes both deny events, with the same fields as before.
+- Resolved: P2 `authenticateUseWorkload`: `authenticateExternalIdentity(..., { assignPrincipal: false })` verifies without assigning the principal, so nothing is saved and restored.
 - Resolved: P2 `packages/sdk/src/types.ts` `authenticateRequest(method, url)` received no body. `signRequest` (called last, with the final headers and body) and `createWimseHttpSigner` were added; see `sdk-wimse-signer.test.ts`.
 - Resolved: P2 `packages/mcp`, `packages/integrations/*`, `packages/sdk-python`: no path to the WIT + HTTP-signature or Txn-Token authentication. The Python SDK has `sign_request` and `create_wimse_http_signer` (`tests/test_wimse.py`, and `npm run hackathon:python` against a real server). MCP cloud mode signs from `CRED_WIMSE_*` files (`config-wimse.test.ts`). The integrations accept a caller-built client.
-- P3 `cred_capabilities` / `cred_whoami`: do not report whether external identity or Txn-Tokens are enabled.
+- Resolved: P3 `cred_capabilities` / `cred_whoami`: both report this MCP instance's `authentication` (`agent-token`, `wimse-workload` or `local`, plus `txnToken` and `webBotAuth`). Whether the server has WIMSE or Txn-Tokens on is not visible to MCP and is not reported.
 - Resolved: P3 HTTP-signature refusal body: `application/problem+json` without an `error` member, so envelope-based clients got no code. Both SDKs now take the problem `type` as the error code (`wimse-signature-invalid`). Other clients still need to read the problem type.
 - Resolved: P3 Fresh pre-fetch check. An agent record present at authorization and gone at the provider call is now refused (test "an agent record that disappears …").
-- P3 Cred Link delegations with a Txn-Token: Link user ids are reserved vault ids, so `txn_user_mismatch` will refuse such exercises. Fails closed; untested.
+- Resolved: P3 Cred Link delegations with a Txn-Token. Now tested (`link-txn-token.test.ts`), and closed where it relied on an assumption: a Txn-Token naming the Link connection's reserved vault id is refused too, a Link delegation is not issued inside a transaction, and an agent whose trust domain requires Txn-Tokens cannot use Link to escape the requirement.
 - P3 Txn-Token `req_wl` is not compared with the presenting workload. Any workload in the trust domain that holds a bound Txn-Token can present it for its own mapped agent within the token's lifetime.
-- P3 Replay cache: WPT `jti` and signature nonces share one bounded per-process cache that fails closed when full. High-rate valid traffic can exhaust it; replicas do not share it.
-- P3 `webBotAuthMode: 'require'` with WIMSE: every WIMSE request also needs a Web Bot Auth signature. No startup warning.
+- Partly resolved: P3 Replay cache. Replicas can share a `sharedReplay` store (`wimse-shared-replay.test.ts`); Cred ships the interface and an in-memory store, not a network one. The per-process cache still fails closed when full, so high-rate valid traffic can exhaust it.
+- Resolved: P3 `webBotAuthMode: 'require'` with external identity: `createServer` now warns that HTTP-signature workloads are always refused and WPT or Tailscale requests need a Web Bot Auth signature too.
 - Testing gap: chunked (`Transfer-Encoding`) bodies through the raw-capture path, and concurrent interleaved requests on one connection for the audit context.
