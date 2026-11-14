@@ -43,7 +43,23 @@
 - `@credninja/sdk`: `signRequest` on `CredExternalIdentityCloudConfig`, called
   last with the final headers and exact body, and `createWimseHttpSigner`
   (http-signature-08 request signing, optional bound Txn-Token). With it,
-  `authenticateRequest` is optional. No new dependencies.
+  `authenticateRequest` is optional. No new dependencies. A refusal with an
+  RFC 9457 problem body (the WIMSE failures) now throws `CredError` with the
+  problem type as `code` (for example `wimse-signature-invalid`) instead of
+  `unknown`.
+- `cred-auth` (Python SDK): `sign_request` on `Cred` and `AsyncCred` and
+  `create_wimse_http_signer`, the same signing as the TypeScript SDK, applied by
+  an httpx request hook to the request as sent. `agent_token` is optional when a
+  signer is given, and the two together are refused. Errors with an RFC 9457
+  problem body (the WIMSE failures) now carry the problem type as `code`.
+  `Cred.base_url` is public. No new dependencies.
+- `@credninja/mcp`: cloud mode signs as a WIMSE workload when
+  `CRED_WIMSE_WIT_FILE`, `CRED_WIMSE_KEY_FILE` and `CRED_WIMSE_ALG` (and
+  optionally `CRED_TXN_TOKEN_FILE`) are set, instead of `CRED_AGENT_TOKEN`. The
+  WIT and Txn-Token files are read on every request.
+- Framework integrations (LangChain, CrewAI, AutoGen, OpenAI Agents, Semantic
+  Kernel, Vercel AI): accept a caller-built client (`cred=` / `cred`), for
+  example one with a WIMSE signer. Construction from an agent token is unchanged.
 - `@credninja/server`: implements Txn-Token validation from
   draft-ietf-oauth-transaction-tokens-11 (§9, §12.2) on the final hop, as covered by
   the tests. `externalIdentity.txnTokens` configures trust per WIMSE trust domain.

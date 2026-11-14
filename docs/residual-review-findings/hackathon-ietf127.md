@@ -8,9 +8,9 @@ From the multi-reviewer code review of `hackathon/ietf127` against `45fb411` (co
 - P2 `packages/server/src/server.ts` `refuseExternalIdentity` / `checkTxnToken` refusal: the deny audit event is built in two places. Extract one helper.
 - P2 `packages/server/src/server.ts` `authenticateUseWorkload`: saves and restores `agentPrincipal` and `agentTokenHash` through `any`. Split verification from principal assignment.
 - Resolved: P2 `packages/sdk/src/types.ts` `authenticateRequest(method, url)` received no body. `signRequest` (called last, with the final headers and body) and `createWimseHttpSigner` were added; see `sdk-wimse-signer.test.ts`.
-- P2 `packages/mcp`, `packages/integrations/*`, `packages/sdk-python`: no path to the WIT + HTTP-signature or Txn-Token authentication. Parity work.
+- Resolved: P2 `packages/mcp`, `packages/integrations/*`, `packages/sdk-python`: no path to the WIT + HTTP-signature or Txn-Token authentication. The Python SDK has `sign_request` and `create_wimse_http_signer` (`tests/test_wimse.py`, and `npm run hackathon:python` against a real server). MCP cloud mode signs from `CRED_WIMSE_*` files (`config-wimse.test.ts`). The integrations accept a caller-built client.
 - P3 `cred_capabilities` / `cred_whoami`: do not report whether external identity or Txn-Tokens are enabled.
-- P3 HTTP-signature refusal body: `application/problem+json` without an `error` member. Envelope-based clients get no code. Consider adding one.
+- Resolved: P3 HTTP-signature refusal body: `application/problem+json` without an `error` member, so envelope-based clients got no code. Both SDKs now take the problem `type` as the error code (`wimse-signature-invalid`). Other clients still need to read the problem type.
 - Resolved: P3 Fresh pre-fetch check. An agent record present at authorization and gone at the provider call is now refused (test "an agent record that disappears …").
 - P3 Cred Link delegations with a Txn-Token: Link user ids are reserved vault ids, so `txn_user_mismatch` will refuse such exercises. Fails closed; untested.
 - P3 Txn-Token `req_wl` is not compared with the presenting workload. Any workload in the trust domain that holds a bound Txn-Token can present it for its own mapped agent within the token's lifetime.

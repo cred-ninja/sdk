@@ -97,6 +97,29 @@ await cred.use({ token, url: 'https://www.googleapis.com/calendar/v3/calendars/p
 
 `agentIdentity` is the agent's did:key, from the section above. `signRequest` is on this branch only and not yet published to npm.
 
+### With the Cred SDK (Python)
+
+`packages/sdk-python` signs the same way: an httpx request hook signs each request as it is sent, with the encoded body and every header.
+
+```python
+from cred import AgentIdentity, Cred, create_wimse_http_signer
+
+cred = Cred(
+    base_url="http://127.0.0.1:3456",
+    sign_request=create_wimse_http_signer(wit=lambda: open("wit.jwt").read().strip(), private_key=key,
+                                          alg="ES256", txn_token=lambda: current_txn_token),
+)
+handle = cred.delegate_handle(service="google", user_id="alice", app_client_id="local",
+                              scopes=["calendar.readonly"], agent_identity=agent)
+cred.use(token=handle.token, url="https://www.googleapis.com/calendar/v3/calendars/primary/events", agent_identity=agent)
+```
+
+`npm run hackathon:python` runs this against a local Cred, with a read, a refused write and a refused workload. It needs `packages/sdk-python` installed in `PYTHON` (default `python3`). It exercises Cred's own Python SDK, so it is not an interop run.
+
+### With the MCP server or a framework integration
+
+The MCP server's cloud mode signs as a workload when `CRED_WIMSE_WIT_FILE`, `CRED_WIMSE_KEY_FILE` and `CRED_WIMSE_ALG` are set, in place of `CRED_AGENT_TOKEN`. See `packages/mcp/README.md`. The LangChain, CrewAI, AutoGen, OpenAI Agents, Semantic Kernel and Vercel AI integrations accept a client you built with a signer (`cred=`, or `cred` in Vercel AI).
+
 ### Signed responses
 
 To have Cred sign its responses, give it its own WIT in your trust domain and the matching key: `externalIdentity.responseSigning: { wit, privateKey, alg }`. A request that sets `wimse-sign-response` then gets a response signed per §3.4-3.5, which your client checks against Cred's WIT and your own request nonce. The demo does this.
