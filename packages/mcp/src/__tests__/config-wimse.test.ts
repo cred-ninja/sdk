@@ -13,6 +13,9 @@ import { loadConfig } from '../config';
 import { buildMcpServer } from '../server';
 import { loadWimseWorkload } from '../wimse';
 import { agentTokenHashForCloudMode, agentTokenHashForWimseMode } from '../guard-wiring';
+import { describeAuthentication } from '../authentication';
+import { handleCapabilities } from '../tools/capabilities';
+import { handleWhoami } from '../tools/whoami';
 
 const ENV_KEYS = [
   'CRED_MODE', 'CRED_AGENT_TOKEN', 'CRED_APP_CLIENT_ID', 'CRED_BASE_URL', 'CRED_AGENT_DID',
@@ -156,5 +159,31 @@ describe('the WIMSE workload signs each request with the current files', () => {
       server.closeAllConnections();
       await new Promise((r) => server.close(r));
     }
+  });
+});
+
+describe('cred_capabilities and cred_whoami report how this instance authenticates', () => {
+  it('reports wimse-workload with the Txn-Token flag, and never a path, key or token', async () => {
+    process.env.CRED_TXN_TOKEN_FILE = join(dir, 'txn.jwt');
+    const authentication = describeAuthentication(loadConfig([]));
+    expect(authentication).toEqual({ mode: 'wimse-workload', txnToken: true, webBotAuth: false });
+    const caps = await handleCapabilities({}, { cred: { listProviders: async () => [] } as any, authentication });
+    const who = await handleWhoami({}, { authentication });
+    for (const result of [caps, who]) {
+      const text = String(result.content[0]?.text);
+      expect(JSON.parse(text).authentication).toEqual(authentication);
+      expect(text).not.toContain(dir);
+      expect(text).not.toContain(process.env.CRED_AGENT_PRIVATE_KEY_HEX as string);
+    }
+  });
+
+  it('reports agent-token (with Web Bot Auth when set) and local modes', () => {
+    for (const k of ['CRED_WIMSE_WIT_FILE', 'CRED_WIMSE_KEY_FILE', 'CRED_WIMSE_ALG']) delete process.env[k];
+    process.env.CRED_AGENT_TOKEN = 'cred_at_x';
+    expect(describeAuthentication(loadConfig([]))).toEqual({ mode: 'agent-token', txnToken: false, webBotAuth: false });
+    process.env.CRED_WEB_BOT_AUTH_PRIVATE_KEY_HEX = 'a'.repeat(64);
+    process.env.CRED_WEB_BOT_AUTH_SIGNATURE_AGENT = 'https://agent.example.com';
+    expect(describeAuthentication(loadConfig([])).webBotAuth).toBe(true);
+    expect(describeAuthentication({ mode: 'local' } as any)).toEqual({ mode: 'local', txnToken: false, webBotAuth: false });
   });
 });

@@ -16,6 +16,7 @@ import type { CredGuard } from '@credninja/guard';
 
 import { CredMcpConfig } from './config.js';
 import { loadWimseWorkload, type WimseWorkload } from './wimse.js';
+import { describeAuthentication } from './authentication.js';
 import { TokenCache } from './token-cache.js';
 import { createWebBotAuthSigner } from './web-bot-auth.js';
 import {
@@ -178,6 +179,7 @@ function buildServerState(config: CredMcpConfig) {
     guard,
     ...(config.mode === 'cloud' && config.agentToken ? { agentToken: config.agentToken } : {}),
     ...(agentTokenHash ? { agentTokenHash } : {}),
+    authentication: describeAuthentication(config),
   };
 
   return { cred, tokenCache, toolContext, guard, mode: config.mode };
