@@ -12,9 +12,10 @@ import { createReplayCache } from '../identity/types.js';
 import { createWimseIdentitySource } from '../identity/wimse.js';
 import type { ExternalIdentityMapping } from '../identity/types.js';
 import {
-  ADMIN_TOKEN, agentFor, CALENDAR_URL, connectAndActivate, delegate, makeHarness, registerClient, type Harness,
+  ADMIN_TOKEN, AGENT_TOKEN, agentFor, BASE, CALENDAR_URL, LINK_AGENT_ID, connectAndActivate, delegate, makeHarness, registerClient, type Harness,
 } from './link-harness.js';
 import { linkVaultUserId } from '@credninja/vault';
+import { delegateAs, newAgent } from './token-helpers.js';
 import { delegateWithHttpSig, trustDomain, txnIssuer, useWithHttpSig } from './wimse-fixture.js';
 
 let h: Harness | null = null;
@@ -24,7 +25,7 @@ afterEach(() => {
 });
 
 describe('Cred Link delegation with a Txn-Token', () => {
-  async function linkWithWorkload(trustOver: Record<string, unknown> = { required: false }) {
+  async function linkWithWorkload(trustOver: Record<string, unknown> = { required: false }, opts: { agentRecordId?: string } = {}) {
     const b = trustDomain('domain-b.example');
     const w = b.workload();
     const tts = txnIssuer('domain-b.example');
@@ -43,7 +44,7 @@ describe('Cred Link delegation with a Txn-Token', () => {
     // An external identity maps only to an agent already in the vault.
     const now = new Date().toISOString();
     await h.server.vault.registerAgent({
-      id: `agt_${crypto.randomBytes(6).toString('hex')}`, did: agent.did, fingerprint: crypto.randomBytes(16).toString('hex'),
+      id: opts.agentRecordId ?? `agt_${crypto.randomBytes(6).toString('hex')}`, did: agent.did, fingerprint: crypto.randomBytes(16).toString('hex'),
       name: 'link-agent', scopeCeiling: [], status: 'active', createdBy: 'admin', createdAt: now, updatedAt: now,
     });
     const client = await registerClient(app);
@@ -99,6 +100,17 @@ describe('Cred Link delegation with a Txn-Token', () => {
     const strict = await linkWithWorkload({});
     const required = await delegate(strict.app, { connection_id: strict.connectionId });
     expect(required.status).toBe(403);
-    expect(required.body.error).toBe('txn_token_required');
+    expect(required.body.error).toBe('txn_required_link_unsupported');
+  });
+
+  it('refuses a Link agent whose own did:key is Txn-required, even when it binds the delegation to a fresh key', async () => {
+    // The Link agent (principal server-agent) is the vault agent whose did:key
+    // is mapped from a trust domain that requires Txn-Tokens.
+    const { app, connectionId } = await linkWithWorkload({}, { agentRecordId: LINK_AGENT_ID });
+    const fresh = await newAgent();
+    const res = await delegateAs(app, fresh, { connection_id: connectionId }, { bearer: AGENT_TOKEN, base: BASE });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('txn_required_link_unsupported');
+    expect(res.body.access_token).toBeUndefined();
   });
 });

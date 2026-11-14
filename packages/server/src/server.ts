@@ -61,6 +61,7 @@ import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { ServerConfig, ProviderConfig, RequestAgentPrincipal } from './config.js';
 import { assertLinkConfig, resolveLinkStorePath } from './config.js';
 import { createLinkService } from './link/index.js';
+import { linkDelegateState } from './link/enforcement.js';
 import { brokerScopeEquivalent, isAllowedGoogleScopeEndpoint } from './google-scopes.js';
 import type { LinkHandleBinding, LinkService } from './link/index.js';
 import { contentTypeMismatch, createExpressMiddleware, evaluateOperation, isBrokerOnlyScope, methodOverrideChannel, providerScopesFor, withDerivedScopes, withDerivedScopesUnder, withStoredDerivedScopes, withoutRedundantDerivedScopes, type GuardContext, type GuardDecision } from '@credninja/guard';
@@ -5274,9 +5275,7 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
   const delegateRouteHandlers: Array<express.RequestHandler> = [delegateRateLimiter, requireAgentAuth, verifyWebBotAuth, refuseUncheckableLinkCall(false), requireRawAgentProof];
   if (linkService) {
     // A Cred Link delegation is for a Link connection, never a transaction's
-    // user, so it is not issued inside a transaction. An agent whose trust
-    // domain requires Txn-Tokens gets none this way either: Link would
-    // otherwise escape the requirement. Runs before the Link precheck.
+    // user, so it is not issued inside a transaction. Runs before the Link precheck.
     delegateRouteHandlers.push(async (req, res, next) => {
       if (req.body?.connection_id === undefined) { next(); return; }
       try {
@@ -5287,12 +5286,6 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
           res.status(403).json({ error: 'txn_user_mismatch', message: 'A Cred Link delegation is never for a transaction\'s user' });
           return;
         }
-        const linkAgent = await delegatingAgentOf(req);
-        if (linkAgent && txnTrustRequiredFor(linkAgent)) {
-          writeIdentityDenyAudit(req, 'txn_token_required', who);
-          res.status(403).json({ error: 'txn_token_required', message: "This agent's trust domain requires a bound Txn-Token, and a Cred Link delegation cannot carry one" });
-          return;
-        }
         next();
       } catch (err) {
         next(err);
@@ -5301,6 +5294,39 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
     // Runs checkLinkAccess for calls naming connection_id, before Guard and
     // before any vault access, whether or not a Guard is configured.
     delegateRouteHandlers.push(linkService.delegatePrecheck);
+    // A Txn-Token requirement binds did:keys, while a Link delegation's
+    // authority is the Link agent's Link Permission, which a fresh key could
+    // carry outside any transaction. So a Link agent with any did:key mapped
+    // from a trust domain that requires Txn-Tokens is refused Link
+    // delegations altogether. Its did:keys: the Link agent id itself if it
+    // is one, its vault agent record's, the key this request binds, and the
+    // caller's proven workload or principal.
+    delegateRouteHandlers.push(async (req, res, next) => {
+      const state = linkDelegateState(req);
+      if (!state || !txnTokenTrust || !externalIdentity) { next(); return; }
+      try {
+        const principalId = (req as any).agentPrincipal?.principalId;
+        const candidates = [
+          state.agentId,
+          (await vault.getAgent(state.agentId))?.did,
+          await delegatingAgentOf(req),
+          typeof principalId === 'string' ? principalId : undefined,
+        ].filter((d): d is string => typeof d === 'string' && d.startsWith('did:'));
+        const required = candidates.find((did) => txnTrustRequiredFor(did) !== undefined);
+        if (required) {
+          const proven = provenExternalAgent.get(req)?.identity;
+          writeIdentityDenyAudit(req, 'txn_required_link_unsupported', proven ? { kind: proven.kind, subject: proven.subject, proof: proven.proof } : {});
+          res.status(403).json({
+            error: 'txn_required_link_unsupported',
+            message: 'This Link agent has a did:key whose trust domain requires Txn-Tokens. A Cred Link delegation cannot be bound to a transaction, and a fresh key would carry the Link Permission outside one, so Link delegations are refused for this agent.',
+          });
+          return;
+        }
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
   }
   if (guardMiddleware) {
     delegateRouteHandlers.push(assignProviderFromBody, exposeStoredScopesToGuard('user_id'), guardMiddleware);
