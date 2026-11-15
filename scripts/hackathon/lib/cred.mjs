@@ -40,7 +40,7 @@ async function freePort(host) {
  *   agents: [ { name, workload: "spiffe://<td>/<path>", allowedScopes: [...] } ]
  * }
  */
-export async function startCred(cfg, { stateDir, quiet = true, responseSigning } = {}) {
+export async function startCred(cfg, { stateDir, quiet = true, responseSigning, serverOptions = {} } = {}) {
   const { server: cred, sdk } = await loadPackages();
   const host = cfg.host ?? '127.0.0.1';
   const port = cfg.port && cfg.port !== 0 ? cfg.port : await freePort(host);
@@ -104,6 +104,7 @@ export async function startCred(cfg, { stateDir, quiet = true, responseSigning }
     tofuStorage: 'sqlite', tofuPath: path.join(stateDir, 'tofu.sqlite'),
     adminToken, agentToken, redirectBaseUri: baseUrl,
     providers: [{ slug: 'google', clientId: 'hackathon-demo', clientSecret: 'hackathon-demo', defaultScopes: [] }],
+    ...serverOptions,
     externalIdentity: {
       sources: [source], mappings,
       ...(Object.keys(txnTokens).length ? { txnTokens } : {}),
