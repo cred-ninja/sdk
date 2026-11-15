@@ -188,9 +188,10 @@ fs.writeFileSync(jsonl, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 const manifest = {
   scenario: 'P8', format: 'ietf127-wimse-scenario/1', impl: 'cred',
-  repository: 'https://github.com/cred-ninja/sdk', branch, commit, packages_modified: dirty,
+  repository: 'https://github.com/cred-ninja/sdk', branch, commit, packages_src_modified: dirty,
+  packages_note: 'packages_src_modified checks git status of packages/ only; the runner builds dist only when it is missing, so run npm run build first to be sure dist matches the source.',
   node: process.version, run_at_utc: new Date().toISOString(), clock: 'wall',
-  reproduce: 'git clone -b hackathon/ietf127 https://github.com/cred-ninja/sdk.git cred && cd cred && npm ci && node scripts/hackathon/interop/p8.mjs',
+  reproduce: `git clone -b ${branch} https://github.com/cred-ninja/sdk.git cred && cd cred && git checkout ${commit} && npm ci && npm run build && node scripts/hackathon/interop/p8.mjs`,
   provider_note: 'The provider is a local mock of the Google Calendar API that accepts any bearer token (scripts/hackathon/lib/mock-provider.mjs). It cannot introspect or revoke, which is the bearer-only property P8 is about.',
   configurations: {
     A: 'hackathon configuration: WIMSE (WIT + WPT / HTTP signature) with required Txn-Tokens for domain-b.example; brokered handles only (default)',
@@ -198,6 +199,8 @@ const manifest = {
   },
   txn_id_note: 'In A, txn_id is the txn claim of the Txn-Tokens Cred verified for that case. In B there is no Txn-Token; txn_id is a label from this runner only.',
   reason_mapping: REASON_MAP,
+  reason_mapping_note: 'Partial: covers the Cred codes this run produced. Cred returns invalid_token also for a forged, expired or mismatched Delegation Token, and scope_insufficient also when the Permission behind a delegation was narrowed, revoked or expired. token-not-released is this runner\'s name for Cred\'s 403 raw_token_disabled; it is not a scenario reason.',
+  checker_note: 'Not verified by observes_p1_p8.py. Cred answers with its own HTTP statuses and {error, message} bodies: 401 for no-delegation (use) and status-revoked, 403 for scope-exceeded and for no-delegation (ask), 403 raw_token_disabled for case 4 under configuration A.',
   files: { 'cred-P8.jsonl': { lines: lines.length, sha256: sha(jsonl) } },
 };
 fs.writeFileSync(path.join(outDir, 'cred-P8.manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
