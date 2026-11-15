@@ -1,0 +1,31 @@
+{
+  "scenario": "P8",
+  "format": "ietf127-wimse-scenario/1",
+  "impl": "cred",
+  "repository": "https://github.com/cred-ninja/sdk",
+  "branch": "hackathon/ietf127-p8",
+  "commit": "76ed97efb5a4d4f31cc06b95e854556aa81f55a8",
+  "packages_modified": false,
+  "node": "v22.23.4",
+  "run_at_utc": "2026-11-15T18:22:24.587Z",
+  "clock": "wall",
+  "reproduce": "git clone -b hackathon/ietf127 https://github.com/cred-ninja/sdk.git cred && cd cred && npm ci && node scripts/hackathon/interop/p8.mjs",
+  "provider_note": "The provider is a local mock of the Google Calendar API that accepts any bearer token (scripts/hackathon/lib/mock-provider.mjs). It cannot introspect or revoke, which is the bearer-only property P8 is about.",
+  "configurations": {
+    "A": "hackathon configuration: WIMSE (WIT + WPT / HTTP signature) with required Txn-Tokens for domain-b.example; brokered handles only (default)",
+    "B": "deprecated opt-out allowRawTokens: true, WIMSE without Txn-Tokens, read-only connection (Cred refuses a raw token wider than the grant); the only Cred path that releases the provider bearer token to the agent"
+  },
+  "txn_id_note": "In A, txn_id is the txn claim of the Txn-Tokens Cred verified for that case. In B there is no Txn-Token; txn_id is a label from this runner only.",
+  "reason_mapping": {
+    "invalid_token": "no-delegation",
+    "permission_required": "no-delegation",
+    "scope_insufficient": "scope-exceeded",
+    "delegation_revoked": "status-revoked"
+  },
+  "files": {
+    "cred-P8.jsonl": {
+      "lines": 11,
+      "sha256": "7eeb6847ba9d0522c08e1df5e57c16993ded9e33c23710bc5d192f92b77f3037"
+    }
+  }
+}
