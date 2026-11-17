@@ -101,6 +101,10 @@ Two of these refuse requests 2.1.0 accepted: a Web Bot Auth signature living lon
 than 300 seconds (raise the limit with `webBotAuthMaxSignatureLifetimeSeconds`), and a
 TOFU proof sent a second time (sign a new one for each request).
 
+- `@credninja/server`: `externalIdentity.txnTokens` trust-domain keys match
+  case-insensitively, as the WIMSE source's `trustDomains` do. A key written with an
+  upper-case letter previously never matched, so the `required` default silently did
+  not apply to the domain it named.
 - `@credninja/server`: turning `requiresApproval` on for a Permission
   (`PATCH /admin/permissions/:id`) now revokes the delegations already issued under
   it, so a live token stops working instead of lasting until it expires.
