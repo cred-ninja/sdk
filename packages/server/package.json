@@ -1,6 +1,6 @@
 {
   "name": "@credninja/server",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Self-hosted credential delegation server for AI agents. Uses @credninja/oauth + @credninja/vault",
   "private": false,
   "type": "module",
@@ -39,12 +39,12 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@credninja/attenuation": "^2.1.0",
-    "@credninja/guard": "^2.1.0",
-    "@credninja/oauth": "^2.1.0",
-    "@credninja/protocol": "^2.1.0",
-    "@credninja/tofu": "^2.1.0",
-    "@credninja/vault": "^2.1.0",
+    "@credninja/attenuation": "^2.2.0",
+    "@credninja/guard": "^2.2.0",
+    "@credninja/oauth": "^2.2.0",
+    "@credninja/protocol": "^2.2.0",
+    "@credninja/tofu": "^2.2.0",
+    "@credninja/vault": "^2.2.0",
     "@types/express": "^5.0.5",
     "better-sqlite3": "^12.6.2",
     "express": "^5.2.1",
