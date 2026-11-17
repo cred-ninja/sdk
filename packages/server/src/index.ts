@@ -18,7 +18,25 @@ export type {
   RequestAgentPrincipal,
   AgentRequestAuthResult,
   AgentRequestVerifier,
+  ExternalIdentityConfig,
 } from './config.js';
+
+// External identity (opt-in): verified identities Cred does not issue.
+export { createWimseIdentitySource, verifyWit, verifyWpt, validateWorkloadIdentifier } from './identity/wimse.js';
+export type { WimseSourceConfig, WimseVerifyConfig, VerifiedWit, VerifiedWpt } from './identity/wimse.js';
+export { loadTrustBundle, TrustBundleError } from './identity/trust-bundle.js';
+export type { TrustAnchorKeys, TrustAnchorKey } from './identity/trust-bundle.js';
+export { startTailscaleListener, checkListenerSocket, checkLocalApiSocket, DEFAULT_LOCALAPI_SOCKET } from './identity/tailscale.js';
+export type { TailscaleSourceConfig, TailscaleListener, SocketCheck } from './identity/tailscale.js';
+export { IdentityRefusal, createReplayCache, mappedAgentDid } from './identity/types.js';
+export type {
+  ExternalIdentityKind,
+  ExternalIdentitySource,
+  ExternalIdentityMapping,
+  IdentityRequest,
+  VerifiedExternalIdentity,
+  ReplayCache,
+} from './identity/types.js';
 export type { AgentPrincipal, TofuProofInput, TofuDelegationPayload, ResolvedTofuIdentity } from './tofu-bridge.js';
 
 // Re-export guard for convenience — users can configure guard inline

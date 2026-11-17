@@ -15,7 +15,8 @@ import type {
  * StorageBackend — the interface that all vault storage backends must implement.
  *
  * All token fields in StoredRow are ciphertext — the backend never sees plaintext tokens.
- * Implementors can target SQLite, files, Redis, PostgreSQL, etc.
+ * CredVault constructs only the built-in SQLite and file backends
+ * (`VaultOptions.storage`); it does not accept a custom backend instance.
  */
 export interface StorageBackend {
   /**

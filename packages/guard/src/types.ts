@@ -3,6 +3,17 @@
  */
 
 /** Context provided to every policy evaluation */
+/** A verified external identity, as the server proved it. */
+export interface GuardExternalIdentity {
+  /** The identity source, e.g. 'wimse' or 'tailscale'. */
+  kind: string;
+  /** e.g. a spiffe:// Workload Identifier, or tailscale:node:<StableID>. */
+  subject: string;
+  /** The WIMSE trust domain, or the tailnet name. */
+  trustDomain: string;
+  attributes: Readonly<Record<string, string | readonly string[]>>;
+}
+
 export interface GuardContext {
   /** Which provider is being accessed */
   provider: string;
@@ -34,6 +45,12 @@ export interface GuardContext {
   signatureAgent?: string;
   /** Optional claims carried by a delegation receipt chain */
   receiptClaims?: string[];
+  /**
+   * Set only by the server from an external identity it verified and mapped
+   * (a WIMSE workload or a Tailscale node). Never read from the request body
+   * or metadata. `agentDid` is then the agent it maps to.
+   */
+  externalIdentity?: GuardExternalIdentity;
   /**
    * Set only when the call names a Cred Link connection. Absent for every
    * other call, and Link policies (clientGrantPolicy) SKIP when it is absent.

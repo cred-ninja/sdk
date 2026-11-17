@@ -62,6 +62,7 @@ export type {
   WebBotAuthPolicyConfig,
   ReceiptClaimsPolicyConfig,
   GuardLinkContext,
+  GuardExternalIdentity,
 } from './types.js';
 
 // Policies

@@ -1,0 +1,13 @@
+{
+  "spiffe_sequence": 1,
+  "keys": [
+    {
+      "use": "wit-svid",
+      "kty": "EC",
+      "kid": "June 5",
+      "crv": "P-256",
+      "x": "kXqnA2Op7hgd4zRMbw0iFcc_hDxUxhojxOFVGjE2gks",
+      "y": "n__VndPMR021-59UAs0b9qDTFT-EZtT6xSNs_xFskLo"
+    }
+  ]
+}

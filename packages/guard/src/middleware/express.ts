@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { CredGuard } from '../guard.js';
-import type { GuardContext, GuardDecision, GuardLinkContext } from '../types.js';
+import type { GuardContext, GuardDecision, GuardExternalIdentity, GuardLinkContext } from '../types.js';
 import { buildAuditEvent } from '../audit.js';
 
 /** Identity facts verified in front of the adapter. See `resolveVerifiedIdentity`. */
@@ -22,6 +22,8 @@ export interface VerifiedGuardIdentity {
   webBotAuthKeyId?: string;
   signatureAgent?: string;
   receiptClaims?: string[];
+  /** An external identity the server verified and mapped to `agentDid`. */
+  externalIdentity?: GuardExternalIdentity;
 }
 
 /** Options for express middleware */
@@ -157,6 +159,7 @@ export function createExpressMiddleware(
         webBotAuthKeyId: identity.webBotAuthKeyId,
         signatureAgent: identity.signatureAgent,
         receiptClaims: identity.receiptClaims && identity.receiptClaims.length > 0 ? identity.receiptClaims : undefined,
+        ...('externalIdentity' in identity && identity.externalIdentity ? { externalIdentity: identity.externalIdentity } : {}),
         ...(link ? { link } : {}),
       };
 

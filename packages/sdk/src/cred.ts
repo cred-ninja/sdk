@@ -9,6 +9,7 @@ import { hasDerivedReadScope, widestDerivedReadSources, withDerivedScopes, withD
 import {
   CredConfig,
   CredLocalConfig,
+  CredExternalIdentityCloudConfig,
   DelegateParams,
   TofuDelegateParams,
   DelegationResult,
@@ -274,6 +275,7 @@ export class Cred {
   private readonly agentToken?: string;
   private readonly baseUrl?: string;
   private readonly webBotAuthSigner?: WebBotAuthSigner;
+  private readonly authenticateRequest?: CredExternalIdentityCloudConfig['authenticateRequest'];
 
   // ── Local mode fields ───────────────────────────────────────────────────────
   private readonly localConfig?: CredLocalConfig;
@@ -300,9 +302,14 @@ export class Cred {
     } else {
       // ── Cloud mode (existing behavior — ZERO changes) ───────────────────────
       this.isLocal = false;
-      if (!config.agentToken) {
+      const authenticate = 'authenticateRequest' in config ? config.authenticateRequest : undefined;
+      if (!config.agentToken && typeof authenticate !== 'function') {
         throw new CredError('agentToken is required', 'invalid_config', 0);
       }
+      if (config.agentToken && authenticate !== undefined) {
+        throw new CredError('Set agentToken or authenticateRequest, not both', 'invalid_config', 0);
+      }
+      this.authenticateRequest = authenticate;
       if (!config.baseUrl) {
         throw new CredError(
           'baseUrl is required. Set it to your Cred server URL (e.g. https://cred.example.com or http://localhost:3456 for local dev).',
@@ -2177,15 +2184,18 @@ export class Cred {
 
   private headers(): Record<string, string> {
     return {
-      'Authorization': `Bearer ${this.agentToken}`,
+      ...(this.agentToken ? { 'Authorization': `Bearer ${this.agentToken}` } : {}),
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       [CRED_PROTOCOL_VERSION_HEADER]: CRED_PROTOCOL_VERSION,
     };
   }
 
-  private requestHeaders(path: string, method: string, extra?: Record<string, string>): Record<string, string> {
-    const headers = { ...this.headers(), ...(extra ?? {}) };
+  private async requestHeaders(path: string, method: string, extra?: Record<string, string>): Promise<Record<string, string>> {
+    const identity = this.authenticateRequest
+      ? await this.authenticateRequest({ method, url: `${this.baseUrl}${path.split('?')[0]}` })
+      : {};
+    const headers = { ...this.headers(), ...identity, ...(extra ?? {}) };
     if (!this.webBotAuthSigner || !this.baseUrl) return headers;
     return this.webBotAuthSigner.signRequest({
       url: `${this.baseUrl}${path}`,
@@ -2197,7 +2207,7 @@ export class Cred {
   private async post<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: this.requestHeaders(path, 'POST', extraHeaders),
+      headers: await this.requestHeaders(path, 'POST', extraHeaders),
       body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);
@@ -2206,7 +2216,7 @@ export class Cred {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: this.requestHeaders(path, 'GET'),
+      headers: await this.requestHeaders(path, 'GET'),
     });
     return this.handleResponse<T>(res);
   }
@@ -2214,7 +2224,7 @@ export class Cred {
   private async patch<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'PATCH',
-      headers: this.requestHeaders(path, 'PATCH'),
+      headers: await this.requestHeaders(path, 'PATCH'),
       body: JSON.stringify(body),
     });
     return this.handleResponse<T>(res);
@@ -2249,7 +2259,7 @@ export class Cred {
   private async delete(path: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
-      headers: this.requestHeaders(path, 'DELETE'),
+      headers: await this.requestHeaders(path, 'DELETE'),
     });
     if (res.status === 204) return;
     await this.handleResponse(res);

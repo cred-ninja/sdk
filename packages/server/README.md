@@ -1057,6 +1057,47 @@ This keeps Cred core generic while letting adapters for external runtimes transl
 
 If your verifier returns a stable `principalId`, Cred can derive a stable per-agent hash for downstream Guard policies and rate limits even when no bearer token is present on the request.
 
+### External identity: WIMSE workloads and Tailscale nodes
+
+Off unless `externalIdentity` is set. An agent can authenticate with an identity Cred verifies but does not issue, instead of the agent token. Cred never issues workload credentials and never creates an agent or a Permission from an identity: each verified subject maps, by exact string, to an agent DID that already exists in the vault. From there the request runs as that DID, so Permissions, Guard, receipts and audit behave as they do for a did:key agent. A did:key DPoP proof is still required wherever the route requires one today; a body `agent_did` naming a different agent is refused (`403 agent_mismatch`).
+
+```typescript
+import {
+  createServer, createWimseIdentitySource, loadTrustBundle, createReplayCache, startTailscaleListener,
+} from '@credninja/server';
+
+const wimse = createWimseIdentitySource({
+  trustDomains: { 'prod.example': loadTrustBundle({ path: '/etc/cred/prod.example.bundle.json' }, { keyUse: 'wit-svid' }) },
+  replay: createReplayCache(),
+});
+const { app, vault } = createServer({
+  /* ...usual config... */
+  externalIdentity: {
+    sources: [wimse],
+    mappings: [{ kind: 'wimse', subject: 'spiffe://prod.example/ns/agents/sa/planner', agentDid: 'did:key:z6Mk...' }],
+  },
+});
+```
+
+**WIMSE.** Implements Workload Identity Token validation from draft-ietf-wimse-workload-creds-03 (§5.1, §5.1.3), the Workload Proof Token from draft-ietf-wimse-wpt-02 (§2) and identifier checks from draft-ietf-wimse-identifier-04 (§4), as far as the tests in `src/__tests__/identity-wimse.test.ts` cover them. Requests carry `Workload-Identity-Token` and `Authorization: WPT <token>`; a WIT without a WPT is refused.
+- Trust anchors are configured per trust domain only (a JWKS or a SPIFFE trust bundle, filtered by the key `use` you name, for example `wit-svid`). Keys are never taken from a token. A trust domain not configured is refused.
+- The WPT `aud` must equal the broker's configured base URI plus the request path, without the query; it is never derived from `Host`.
+- `wth` binds the WPT to the WIT. If a `Txn-Token` header is present, `tth` must match it. Unknown `oth` entries are refused.
+- Replay: each WPT `jti` is accepted once; it is held until the WPT expires plus 60 seconds of clock skew (a WPT may expire at most 300 seconds ahead, plus skew). The cache is per process, like the DPoP and actor-token caches: replicas behind a load balancer do not share it.
+- Supported workload keys: ES256 and Ed25519. HTTP message signatures (draft-ietf-wimse-http-signature) and Transaction Tokens are not implemented in this release.
+
+**Tailscale.** `startTailscaleListener(app, config)` listens on a unix socket that `tailscale serve` forwards to, and Cred asks the local tailscaled (LocalAPI WhoIs) who the peer is. The identity is the node's `StableID` (`tailscale:node:<StableID>`); `requireTags` limits which tagged nodes are accepted.
+- Identity comes only from WhoIs. `Tailscale-User-*` headers are never read, and a request that did not arrive on the listener socket never gets a Tailscale identity.
+- At startup the listener socket and its directory must be owned by Cred's user or the tailscaled user, not be symlinks, and not be writable by other users (group-writable only for a configured `allowedGid`); tailscaled's socket and directory must be owned by `localApiOwnerUid` (root by default). If any check fails the source is disabled and every request on that listener is refused.
+- Expired, shared-in and WireGuard-only nodes, nodes outside the configured tailnet and Funnel requests are refused.
+- A node is not an agent: every Tailscale-authenticated request must also carry a DPoP proof by the mapped agent's did:key, so two agents on one node are told apart by their keys.
+- `POST /api/v1/use` with a Delegation Token is authenticated by the token and its DPoP proof on any listener, as today; the Tailscale source is not consulted there.
+- Limits: Linux only (the macOS LocalAPI is not supported). The checks run at startup only. The root of trust is the tailnet's control plane and the admins who assign tags. The tests use a fake LocalAPI; no run on a live tailnet is recorded.
+
+Credential refusals return one response per source (`401 invalid_workload_identity` with `WWW-Authenticate: WPT`, or `401 invalid_tailnet_identity`) and never say which credential check failed (the separate `403 agent_mismatch` is about the request body, not the credential); the reason goes to the server log and a `deny` audit event. A request carrying a source's credential that fails is refused; it never falls back to the agent token.
+
+In the SDK, set `authenticateRequest` instead of `agentToken` to send these headers on every request.
+
 ## License
 
 Apache License 2.0

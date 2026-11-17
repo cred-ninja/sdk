@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Added: external identity for agents (opt-in)
+
+- `@credninja/server`: `externalIdentity` in `ServerConfig` lets an agent authenticate
+  with an identity Cred verifies but does not issue, instead of the agent token. Each
+  verified subject maps by exact string to an agent DID already in the vault; nothing
+  is created from an unknown identity, and a body `agent_did` naming another agent is
+  refused (`403 agent_mismatch`). Off when unset; existing auth paths are unchanged.
+- WIMSE source (`createWimseIdentitySource`, `loadTrustBundle`): implements WIT
+  validation from draft-ietf-wimse-workload-creds-03, the WPT from
+  draft-ietf-wimse-wpt-02 and identifier checks from draft-ietf-wimse-identifier-04,
+  as covered by the tests. Trust anchors are configured per trust domain (JWKS or
+  SPIFFE trust bundle), audience is bound to the configured base URI and path, and
+  each WPT `jti` is accepted once (per-process cache).
+- Tailscale source (`startTailscaleListener`): node identity from the local
+  tailscaled's WhoIs, behind `tailscale serve` on a unix socket whose ownership and
+  mode are checked at startup. Every request also needs a DPoP proof by the mapped
+  agent. Linux only.
+- `@credninja/guard`: optional `externalIdentity` on `GuardContext` and
+  `VerifiedGuardIdentity`, set only from server-verified state. `identitySource` is
+  unchanged (`'did'` for a mapped agent).
+- `@credninja/sdk`: `CredExternalIdentityCloudConfig` with `authenticateRequest`, an
+  alternative to `agentToken` that supplies per-request authentication headers.
+
+### Fixed
+
+Two of these refuse requests 2.1.0 accepted: a Web Bot Auth signature living longer
+than 300 seconds (raise the limit with `webBotAuthMaxSignatureLifetimeSeconds`), and a
+TOFU proof sent a second time (sign a new one for each request).
+
+- `@credninja/server`: turning `requiresApproval` on for a Permission
+  (`PATCH /admin/permissions/:id`) now revokes the delegations already issued under
+  it, so a live token stops working instead of lasting until it expires.
+- `@credninja/server`: Guard on `POST /api/v1/use` now receives the Delegation
+  Token's DPoP-proven `agentDid`.
+- `@credninja/server`: Web Bot Auth records a nonce only after the signature
+  verifies, and refuses a signature whose lifetime (`expires - created`) exceeds
+  `webBotAuthMaxSignatureLifetimeSeconds` (default 300).
+- `@credninja/server`: a TOFU proof is accepted once on `POST /api/v1/delegate`
+  (per-process cache); presenting it again is refused.
+- `@credninja/attenuation`: `verifyAgentDelegationChain` refuses a token at the instant
+  it expires (`nbf <= now < exp`, draft-asor-wimse-agent-delegation-chain-03 step 5).
+  It accepted `now = exp`, the -02 rule. Configured clock skew still extends the window.
+- `@credninja/vault`: the `StorageBackend` comment no longer suggests that custom
+  backends can be plugged into `CredVault`.
+
 ## [2.1.0] - 2026-11-13
 
 npm 2.1.0 for every `@credninja` package, PyPI 2.0.1 for the Python packages. Read the
@@ -187,7 +232,7 @@ has none, and Salesforce connections must be reconnected.
   covers every scope on the connection (`403 raw_token_wider_than_grant`), and an agent revoked
   under its record id stays revoked when named by that id.
 - `@credninja/guard`: Google metadata grants cannot download Drive content through
-  `$alt` (including `%24alt`) or search Gmail messages/threads/drafts with `q`. Repeated or
+  `$alt` (including `%24alt`) or search Gmail's messages, threads or drafts with `q`. Repeated or
   ambiguous `alt`, `format` and `q` spellings fail closed for every scope; ordinary
   broad-scope downloads, full message reads and searches remain supported.
   `gmail.metadata` no longer lists or reads drafts, which Gmail gives it no method for,

@@ -18,6 +18,27 @@ export interface CredCloudConfig {
   mode?: never;
 }
 
+/**
+ * Cloud mode authenticated by an identity Cred verifies but does not issue
+ * (a WIMSE workload's WIT and WPT, or a Tailscale node plus the agent's DPoP
+ * proof), instead of an agent token. The server must map that identity to an
+ * agent (`externalIdentity` in the server config).
+ */
+export interface CredExternalIdentityCloudConfig {
+  /** Your Cred server URL. */
+  baseUrl: string;
+  /**
+   * Headers that authenticate one request, e.g. `Workload-Identity-Token` and
+   * `Authorization: WPT ...`. Called for every request with its method and
+   * absolute URL without the query. Headers the SDK sets for a specific call
+   * (such as a DPoP proof) take precedence.
+   */
+  authenticateRequest: (request: { method: string; url: string }) => Record<string, string> | Promise<Record<string, string>>;
+  webBotAuth?: CredCloudConfig['webBotAuth'];
+  agentToken?: never;
+  mode?: never;
+}
+
 // ── Local mode config (new) ──────────────────────────────────────────────────
 
 export interface CredLocalVaultConfig {
@@ -56,7 +77,7 @@ export interface CredLocalConfig {
  * Backwards-compatible: existing `{ agentToken }` usage still works.
  * New local mode: `{ mode: 'local', vault: {...}, providers: {...} }`.
  */
-export type CredConfig = CredCloudConfig | CredLocalConfig;
+export type CredConfig = CredCloudConfig | CredExternalIdentityCloudConfig | CredLocalConfig;
 
 // ── Shared types (unchanged) ─────────────────────────────────────────────────
 
