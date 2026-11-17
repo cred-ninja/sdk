@@ -41,6 +41,9 @@ TOFU proof sent a second time (sign a new one for each request).
   `webBotAuthMaxSignatureLifetimeSeconds` (default 300).
 - `@credninja/server`: a TOFU proof is accepted once on `POST /api/v1/delegate`
   (per-process cache); presenting it again is refused.
+- `@credninja/attenuation`: `verifyAgentDelegationChain` refuses a token at the instant
+  it expires (`nbf <= now < exp`, draft-asor-wimse-agent-delegation-chain-03 step 5).
+  It accepted `now = exp`, the -02 rule. Configured clock skew still extends the window.
 - `@credninja/vault`: the `StorageBackend` comment no longer suggests that custom
   backends can be plugged into `CredVault`.
 
