@@ -90,7 +90,7 @@ import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type Identi
 import { signWimseResponse, WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
 import { parseDictionary } from './identity/structured-fields.js';
 import { checkTxnTokenTrust, mappedProviderScopes, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
-import { decideTxnToken, isCredentialRoute, txnTrustRequiredFor as policyTxnTrustRequiredFor } from './identity/txn-policy.js';
+import { decideTxnToken, isCredentialRoute, normalizeTxnTrustDomains, txnTrustRequiredFor as policyTxnTrustRequiredFor } from './identity/txn-policy.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -1028,7 +1028,7 @@ export function createServer(config: ServerConfig) {
   const externalDpopJtiSeen = createJtiReplayCache();
   /** The agent a verified external identity mapped to, per request. */
   const provenExternalAgent = new WeakMap<Request, { agentDid: string; identity: VerifiedExternalIdentity }>();
-  const txnTokenTrust = externalIdentity?.txnTokens;
+  const txnTokenTrust = normalizeTxnTrustDomains(externalIdentity?.txnTokens);
   for (const [td, trust] of Object.entries(txnTokenTrust ?? {})) {
     try {
       checkTxnTokenTrust(trust);

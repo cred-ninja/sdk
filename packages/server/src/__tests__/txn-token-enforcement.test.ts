@@ -114,6 +114,19 @@ describe('binding: a Txn-Token rides only on the proof that covers it', () => {
     expect((await del(lax)).status).toBe(200);
   });
 
+  it('a txnTokens key written in mixed case still applies: trust-domain keys match case-insensitively', async () => {
+    const b = trustDomain(TD);
+    const w = b.workload();
+    const tts = txnIssuer(TD);
+    const s = await wimseServer({ domains: [b], mapSubject: () => w.subject, txnTokens: { 'Domain-B.Example': tts.trust() } });
+    const json = JSON.stringify({ token_format: 'handle', agent_did: s.agent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    const res = await send(s.app, 'post', '/api/v1/delegate', {
+      ...wptHeaders(w, '/api/v1/delegate'), dpop: createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`),
+    }, json);
+    // Before the fix the mixed-case key never matched, so the requirement was off and this answered 200.
+    expect(res.status).toBe(401);
+  });
+
   it('revocation and audit reads do not depend on the Txn-Token Service, even where Txn-Tokens are required', async () => {
     const s = await setup();
     expect((await send(s.app, 'get', '/api/v1/audit?user_id=default', wptHeaders(s.w, '/api/v1/audit'))).status).toBe(200);

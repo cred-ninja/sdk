@@ -1,6 +1,6 @@
 /** Unit tests for the Txn-Token policy decisions (identity/txn-policy.ts). */
 import { describe, it, expect } from 'vitest';
-import { decideTxnToken, isCredentialRoute, txnTrustRequiredFor } from '../identity/txn-policy.js';
+import { decideTxnToken, isCredentialRoute, normalizeTxnTrustDomains, txnTrustRequiredFor } from '../identity/txn-policy.js';
 import type { VerifiedExternalIdentity } from '../identity/types.js';
 import { txnIssuer } from './wimse-fixture.js';
 
@@ -39,6 +39,24 @@ describe('txnTrustRequiredFor', () => {
     expect(txnTrustRequiredFor({ [TD]: tts.trust({ required: false }) }, mappings, 'did:key:z6MkA')).toBeUndefined();
     expect(txnTrustRequiredFor({ [TD]: tts.trust() }, mappings, 'did:key:z6MkB')).toBeUndefined();
     expect(txnTrustRequiredFor(undefined, mappings, 'did:key:z6MkA')).toBeUndefined();
+  });
+});
+
+describe('normalizeTxnTrustDomains', () => {
+  it('lower-cases keys so a mixed-case trust domain still matches, and passes undefined through', () => {
+    const trust = tts.trust();
+    const normalized = normalizeTxnTrustDomains({ 'Domain-B.Example': trust })!;
+    expect(Object.keys(normalized)).toEqual([TD]);
+    expect(normalized[TD]).toBe(trust);
+    expect(normalizeTxnTrustDomains(undefined)).toBeUndefined();
+  });
+
+  it('a mixed-case key, once normalised, still requires a Txn-Token on a credential route', () => {
+    // Before normalisation the key never matched, so the requirement silently
+    // did not apply and this decision was { ok: true }.
+    const raw = { 'Domain-B.Example': tts.trust() };
+    const normalized = normalizeTxnTrustDomains(raw)!;
+    expect(code(decide({ trustByDomain: normalized }))).toBe('txn_token_required');
   });
 });
 
