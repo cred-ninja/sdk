@@ -227,4 +227,17 @@ describe('mintAgentDelegationToken / verifyAgentDelegationChain', () => {
     expect(() => root(undefined, { constraints: [{ key: 'egress', rank: 'none' }] })).toThrow(/order/);
     expect(() => root(undefined, { delMaxDepth: undefined })).toThrow(/del_max_depth/);
   });
+
+  it('refuses a chain at the instant its earliest token expires (now < exp)', () => {
+    const t0 = root();
+    const t1 = child(t0);
+    const opts = { acceptedAlgs: ['EdDSA' as const], resolveKey: staticKeyResolver([createVerificationKey(ed.publicKey)]) };
+    // The child expires at 1900. One second before is accepted; at and after are not.
+    expect(verifyAgentDelegationChain([t0, t1], { ...opts, now: 1899 }).ok).toBe(true);
+    expect(verifyAgentDelegationChain([t0, t1], { ...opts, now: 1900 })).toMatchObject({ ok: false, reason: 'expired', hop: 1 });
+    expect(verifyAgentDelegationChain([t0, t1], { ...opts, now: 1901 })).toMatchObject({ ok: false, reason: 'expired', hop: 1 });
+    // Configured skew moves the boundary; it stays exclusive.
+    expect(verifyAgentDelegationChain([t0, t1], { ...opts, now: 1909, clockSkewSeconds: 10 }).ok).toBe(true);
+    expect(verifyAgentDelegationChain([t0, t1], { ...opts, now: 1910, clockSkewSeconds: 10 }).ok).toBe(false);
+  });
 });
