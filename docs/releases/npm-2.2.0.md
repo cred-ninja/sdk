@@ -50,7 +50,10 @@ Configure it only when you mean to: it is documented in `packages/server/README.
 | `requiresApproval` turned on for a Permission | the delegations already issued under it are revoked, so a live token stops working | none — the agent obtains a new one (which waits for approval) |
 | `extra_headers` on `POST /api/v1/use` naming `Txn-Token`, `Workload-Identity-Token`, `DPoP`, `Content-Digest` or `Accept-Signature` | the header is dropped and not forwarded to the provider | none — workload and transaction credentials stay inside the trust domain |
 | Guard on `POST /api/v1/use` | now receives the Delegation Token's DPoP-proven `agentDid` | review any Guard policy that judges identity |
-| `externalIdentity.txnTokens` trust-domain keys | match case-insensitively; a mixed-case key that previously never matched now applies the `required` default | none |
+| `externalIdentity.txnTokens` trust-domain keys | match case-insensitively; a mixed-case key that previously never matched now applies the `required` default; duplicate canonical keys refuse startup instead of overwriting policy | remove duplicate entries; each canonical domain must appear once |
+| WIMSE replay deployment configuration | startup refuses a source with neither `sharedReplay` nor `replayMode: 'single-process'` | choose a shared cross-process store for replicas, or acknowledge single-process operation |
+| WIMSE local replay keys | a verified workload's `jti` or nonce no longer consumes another workload's value; same-workload replays are still refused | none |
+| HTTP request and response signatures at `now == expires` | refused rather than accepted at that boundary | sign before expiration; no expiration skew is applied |
 
 ## Upgrade checklist
 
@@ -64,7 +67,9 @@ Configure it only when you mean to: it is documented in `packages/server/README.
    single-use; sign a fresh one per request instead of reusing it.
 5. Expiry boundary: an `agent_delegation` token and a receipt-chain hop are now refused at
    the instant they expire (`now == exp`), where 2.1.0 accepted them. If a verifier's clock
-   can run behind the issuer's, pass `clockSkewSeconds`. Without it the default skew is 0.
+   needs leeway for clock differences, pass a bounded `clockSkewSeconds`. Without it
+   the default skew is 0. HTTP request and response signatures also expire exclusively
+   (`now < expires`), with no leeway after their expiration.
 6. If you turn `requiresApproval` on for a Permission
    (`PATCH /admin/permissions/:id`), the delegations already issued under it stop working.
    Plan for affected agents to obtain a new delegation, which waits for approval.
@@ -77,9 +82,10 @@ Configure it only when you mean to: it is documented in `packages/server/README.
 9. If you are adding `externalIdentity` (new in 2.2.0): supply one source per identity
    system and exact-subject mappings to agent DIDs that already exist, key `txnTokens` by
    the trust domain, and set `responseSigning` only if you want signed responses. On more
-   than one replica, pass a `sharedReplay` store; otherwise each replica keeps its own
-   WPT-`jti` / signature-nonce cache.
-10. Carried from 2.1.0: with `webBotAuthMode: 'require'` and `externalIdentity`
+   than one replica, pass a cross-process `sharedReplay` store. For one process, choose
+   `replayMode: 'single-process'` explicitly; startup refuses a source with neither
+   choice. `createInMemorySharedReplayStore` does not protect separate processes.
+10. With `webBotAuthMode: 'require'` and `externalIdentity`
     configured, an HTTP-signature workload is always refused (the server warns about the
     combination at startup).
 
