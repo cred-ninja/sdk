@@ -41,8 +41,8 @@ We'll acknowledge within 48 hours and aim to resolve critical issues within 14 d
 
 The [review-gate runbook](./docs/ci-review-gate.md) defines the candidate CI policy
 and its protected bootstrap requirements. Automated reviews are advisory evidence
-within a required aggregate, not proof of security or a replacement for independent
-human/code-owner approval. Two isolated Claude sessions share one provider; that
+in a non-atomic **advisory-only** aggregate, not a required merge context or a
+replacement for independent human/code-owner approval. Two isolated Claude sessions share one provider; that
 is not independent-provider review. The candidate policy must be deployed and
 verified on a hosted canary before claiming that it protects the default branch.
 
@@ -51,8 +51,8 @@ commands in a job holding model credentials or a repository-write token. The
 trusted target workflow reads PR/issue diffs as data, disables model tools and
 keeps check publication in a separate non-model job. Future workers must not
 change security/release policy, branch protection, approvals or publishing
-without explicit maintainer authorization. A missing check or service failure
-blocks merge; it is never permission to weaken the policy.
+without explicit maintainer authorization. A missing required check or review-service failure
+is never permission to bypass native approvals or weaken the policy.
 
 ## Disclosure policy
 

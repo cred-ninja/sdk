@@ -10,6 +10,30 @@ concurrency:
   group: strict-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
+  runtime:
+    name: Verify native reviewer runtime (no model credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node scripts/ci/claude-runtime.mjs fetch
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-claude-native
+          path: ${{ runner.temp }}/claude-runtime/claude
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
   prepare:
     name: Initialize Review Gate
     runs-on: ubuntu-latest
@@ -39,92 +63,66 @@ jobs:
           GH_TOKEN: ${{ github.token }}
   security:
     name: Claude Security Review
-    needs: prepare
+    needs: [prepare, runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     outputs:
-      passed: ${{ steps.validate.outputs.passed }}
+      passed: ${{ steps.review.outputs.passed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           sparse-checkout: scripts/ci
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
+      # Use the hosted runner's preinstalled Node; no runtime/package installers.
       - id: prompt
         run: node scripts/ci/review-gate.mjs prompt
         env:
           SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
           REVIEW_KIND: security
-      - id: review
-        uses: anthropics/claude-code-action/base-action@469588f42e6b1e94cd14ad09dccfeaec772ce0fd # v1
-        env:
-          NODE_VERSION: '24'
-          CLAUDE_WORKING_DIR: ${{ runner.temp }}/review-empty
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt_file: ${{ runner.temp }}/review-prompt.txt
-          settings: '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
-          claude_args: >-
-            --tools="" --strict-mcp-config --mcp-config ${{ runner.temp }}/empty-mcp.json
-            --setting-sources="" --settings '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
-            --disable-slash-commands --no-session-persistence --permission-mode dontAsk --permission-prompts none
-            --max-turns 3 --json-schema '${{ steps.prompt.outputs.schema }}'
-      - id: validate
-        run: node scripts/ci/review-gate.mjs validate
+          name: verified-claude-native
+          path: ${{ runner.temp }}/claude-runtime
+      - run: node scripts/ci/claude-runtime.mjs verify
+      - id: review
+        run: node scripts/ci/claude-runtime.mjs review
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
-          REVIEW_OUTPUT: ${{ steps.review.outputs.structured_output }}
-          REVIEW_CONCLUSION: ${{ steps.review.outputs.conclusion }}
   diff:
     name: Independent Diff and Issue Review
-    needs: prepare
+    needs: [prepare, runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     outputs:
-      passed: ${{ steps.validate.outputs.passed }}
+      passed: ${{ steps.review.outputs.passed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           sparse-checkout: scripts/ci
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
+      # Use the hosted runner's preinstalled Node; no runtime/package installers.
       - id: prompt
         run: node scripts/ci/review-gate.mjs prompt
         env:
           SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
           REVIEW_KIND: diff
-      - id: review
-        uses: anthropics/claude-code-action/base-action@469588f42e6b1e94cd14ad09dccfeaec772ce0fd # v1
-        env:
-          NODE_VERSION: '24'
-          CLAUDE_WORKING_DIR: ${{ runner.temp }}/review-empty
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt_file: ${{ runner.temp }}/review-prompt.txt
-          settings: '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
-          claude_args: >-
-            --tools="" --strict-mcp-config --mcp-config ${{ runner.temp }}/empty-mcp.json
-            --setting-sources="" --settings '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
-            --disable-slash-commands --no-session-persistence --permission-mode dontAsk --permission-prompts none
-            --max-turns 3 --json-schema '${{ steps.prompt.outputs.schema }}'
-      - id: validate
-        run: node scripts/ci/review-gate.mjs validate
+          name: verified-claude-native
+          path: ${{ runner.temp }}/claude-runtime
+      - run: node scripts/ci/claude-runtime.mjs verify
+      - id: review
+        run: node scripts/ci/claude-runtime.mjs review
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
-          REVIEW_OUTPUT: ${{ steps.review.outputs.structured_output }}
-          REVIEW_CONCLUSION: ${{ steps.review.outputs.conclusion }}
   publish:
     name: Publish Review Gate
     needs: [prepare, security, diff]

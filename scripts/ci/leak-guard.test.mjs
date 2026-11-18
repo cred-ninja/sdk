@@ -9,19 +9,23 @@ import { readFileSync } from 'node:fs';
 const steps = yaml.load(readFileSync(new URL('../../.github/workflows/public-leak-guard.yml', import.meta.url), 'utf8')).jobs['leak-guard'].steps;
 function run(name, env = {}, prefix = '') {
   const step = steps.find((s) => s.name === name);
-  const dir = mkdtempSync(join(tmpdir(), 'cred-ci-'));
+  const dir = mkdtempSync(join(tmpdir(), 'cred ci spaces-'));
   try {
     writeFileSync(join(dir, 'tracked-files.txt'), env.TEST_PATH ?? 'README.md');
-    return spawnSync('bash', ['-c', prefix + '\n' + step.run.replaceAll('/tmp/tracked-files.txt', `${dir}/tracked-files.txt`).replaceAll('/tmp/pack.json', `${dir}/pack.json`)], { env: { ...process.env, RUNNER_TEMP: dir, ...env }, encoding: 'utf8' });
+    const result = spawnSync('bash', ['-c', prefix + '\n' + step.run], { env: { ...process.env, RUNNER_TEMP: dir, ...env }, encoding: 'utf8' });
+    if (result.error) throw result.error;
+    assert.equal(typeof result.status, 'number', 'Bash must exit normally');
+    return result;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 test('denylist blocks lowercase plan files and plan directories', () => {
-  for (const path of ['plan.md', 'docs/plans/example.md', 'docs/PLAN.md']) {
+  for (const path of ['plan.md', 'docs/plans/example.md', 'docs/PLAN.md', 'docs/release-plan.md', 'RELEASE-PLAN.MD']) {
     // Tests execute the real workflow shell, without changing tracked files.
     const result = run('Block denylisted paths', { TEST_PATH: path });
     assert.notEqual(result.status, 0, path);
   }
 });
+test('ordinary README path remains allowed', () => assert.equal(run('Block denylisted paths', { TEST_PATH: 'README.md' }).status, 0));
 test('commit scan fails closed when git log fails, even without a marker match', () => {
   const result = run('Block private correspondence markers in PR text and commits', { PR_TITLE: 'Clean', PR_BODY: '', BASE_SHA: 'bad', HEAD_SHA: 'bad' }, 'function git() { return 17; }');
   assert.notEqual(result.status, 0);

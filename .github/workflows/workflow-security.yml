@@ -18,6 +18,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Nonsecret pinned Linux native runtime smoke
+        run: node scripts/ci/claude-runtime.mjs fetch
       - name: Install exact-version workflow security tools
         run: |
           set -euo pipefail
@@ -30,10 +36,14 @@ jobs:
         run: '"$RUNNER_TEMP/ci-tools/actionlint" -color'
       - name: Audit workflow security offline (plain output, not SARIF)
         run: '"$RUNNER_TEMP/zizmor/bin/zizmor" --offline --format plain .github/workflows'
+      - name: Exercise exact scanner exceptions and tracked-tree export
+        run: node --test scripts/ci/scanner.probe.mjs
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/ci-tools/gitleaks
       - name: Scan tracked public snapshot with redacted Gitleaks CLI
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/public-snapshot"
-          git archive HEAD | tar -x -C "$RUNNER_TEMP/public-snapshot"
+          git ls-files -z | tar --null -T - -cf - | tar -xf - -C "$RUNNER_TEMP/public-snapshot"
           cd "$RUNNER_TEMP/public-snapshot"
           "$RUNNER_TEMP/ci-tools/gitleaks" dir . --redact=100 --no-banner

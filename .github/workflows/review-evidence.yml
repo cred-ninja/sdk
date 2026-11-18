@@ -2,11 +2,19 @@ name: Invalidate Changed CodeRabbit Evidence
 on:
   check_run:
     types: [created, completed, rerequested]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  issue_comment: # zizmor: ignore[dangerous-triggers] default-branch data-only invalidation, no PR code or artifacts
+    types: [created, edited, deleted]
+  schedule:
+    - cron: '7,22,37,52 * * * *'
 permissions:
   contents: read
 jobs:
   invalidate:
-    if: github.event.check_run.app.slug == 'coderabbitai'
+    if: github.event_name != 'check_run' || github.event.check_run.app.slug == 'coderabbitai'
     name: Invalidate changed CodeRabbit evidence
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -18,12 +26,18 @@ jobs:
       # check_run loads trusted default-branch code; never execute PR content.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
           sparse-checkout: scripts/ci
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           package-manager-cache: false
-      - run: node scripts/ci/review-gate.mjs invalidate-check
+      - if: github.event_name == 'check_run'
+        run: node scripts/ci/review-gate.mjs invalidate-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - if: github.event_name != 'check_run'
+        run: node scripts/ci/review-gate.mjs invalidate-evidence
         env:
           GH_TOKEN: ${{ github.token }}

@@ -8,10 +8,14 @@
   pin external Actions, restrict checkout credentials and workflow permissions,
   and add actionlint, offline zizmor and redacted Gitleaks checks.
 - Replace the optional Claude plugin review with isolated structured security and
-  diff/issue reviews, plus a SHA-bound aggregate requiring real CodeRabbit
-  approval. Reject incomplete/stale evidence; preserve same-SHA retry recovery
-  and append-only invalidation during publication. Hosted rollout and canary
-  verification remain required before enabling the new contexts on main.
+  diff/issue reviews and SHA-bound advisory evidence requiring real CodeRabbit
+  approval. Use a checksum-pinned native runtime artifact, not runtime installers
+  in credential jobs. Bound UTF-8 snapshot transport, validate complete hunks,
+  reconcile publication errors and independently invalidate/expire stale evidence.
+  The aggregate is not atomic merge enforcement and must remain advisory; native
+  independent human approval remains the final merge wall. Hosted rollout and
+  canaries remain required; only deterministic Workflow Security is a candidate
+  additional required context.
 - Repair planning-artifact detection and fail-closed leak-guard error handling;
   remove tracked planning artifacts without rewriting history.
 

@@ -52,6 +52,26 @@ for (const [name, mutate] of [
   ['pending review', (r) => { r.reviews.push({ ...r.reviews[0], id: 2, state: 'PENDING' }); }],
   ['unresolved discussion', (r) => { r.threads.push({ isResolved: false }); }],
 ]) test(`CodeRabbit refuses ${name}`, () => { const r = rabbit(); mutate(r); assert.throws(() => validateRabbit(r, snapshot)); });
+test('hunk body must fulfill declared context counts, not only total changes', () => {
+  const f = { ...snapshot.files[0], patch: '@@ -1,20 +1,20 @@\n-old\n+new' };
+  assert.throws(() => validateFiles([f], 1), /hunk|Truncated/i);
+});
+test('complete multi-hunk patches count context and ignore no-newline markers', () => {
+  const f = { ...snapshot.files[0], additions: 2, deletions: 1, patch: '@@ -1,2 +1,2 @@\n context\n-old\n+new\n\\ No newline at end of file\n@@ -9,0 +10 @@\n+tail' };
+  assert.equal(validateFiles([f], 1), true);
+});
+test('complete textual patches accept the standard final newline terminator', () => {
+  assert.equal(validateFiles([{ ...snapshot.files[0], patch: snapshot.files[0].patch + '\n' }], 1), true);
+});
+for (const patch of [
+  '@@ -1,2 +1 @@\n-old\n+new',
+  '@@ -1 +1,2 @@\n-old\n+new',
+  '@@ -1 +1 @@\n context\n-old\n+new',
+  '@@ -1 +1 @@\n-old\n+new\n@@ -5,2 +5,2 @@\n context',
+  '-old\n+new',
+]) test(`malformed or incomplete hunk refused: ${JSON.stringify(patch)}`, () => {
+  assert.throws(() => validateFiles([{ ...snapshot.files[0], patch }], 1));
+});
 test('complete textual file patches accepted', () => assert.equal(validateFiles(snapshot.files, 1), true));
 for (const [name, files, count] of [
   ['truncated file list', snapshot.files, 2], ['empty diff', [], 0],

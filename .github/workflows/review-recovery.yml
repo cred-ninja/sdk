@@ -1,0 +1,31 @@
+name: Recover Failed Review Publication
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] trusted default code/API identity checks only, no artifacts
+    workflows: [Claude Code Review]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  recover:
+    if: github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
+      actions: read
+    steps:
+      # Trusted default branch only. No PR artifacts, code, dependencies or model.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node scripts/ci/review-gate.mjs recover
+        env:
+          GH_TOKEN: ${{ github.token }}

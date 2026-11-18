@@ -61,5 +61,6 @@ for (const boundary of ['run-read', 'success-write']) test(`CodeRabbit invalidat
     const newest = checks.filter((c) => c.name === 'Review Gate').sort((a, b) => b.id - a.id)[0];
     assert.ok(newest.id > gate.id, 'invalidation must create a separate monotonic marker');
     assert.equal(newest.conclusion, 'failure', 'older publisher must not overwrite invalidation');
+    assert.equal(gate.conclusion, 'failure');
   } finally { process.env = prior; rmSync(dir, { recursive: true, force: true }); }
 });

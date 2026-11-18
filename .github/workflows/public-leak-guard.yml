@@ -31,18 +31,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git ls-files | sed '/^$/d' > /tmp/tracked-files.txt
+          git ls-files | sed '/^$/d' > "$RUNNER_TEMP/tracked-files.txt"
           echo "Tracked files under review:"
-          cat /tmp/tracked-files.txt
+          cat "$RUNNER_TEMP/tracked-files.txt"
 
       - name: Block denylisted paths
         shell: bash
         run: |
           set -euo pipefail
 
-          deny='(^|/)(reports/|plans/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
+          deny='(^|/)(reports/|plans/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|[^/]*-plan\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
 
-          if grep -niE "$deny" /tmp/tracked-files.txt; then
+          if grep -niE "$deny" "$RUNNER_TEMP/tracked-files.txt"; then
             echo "::error::Denylisted private artifact path detected in public repository."
             exit 1
           fi
@@ -68,7 +68,7 @@ jobs:
               echo "::error file=$path::Internal process marker found in public file."
               fail=1
             fi
-          done < /tmp/tracked-files.txt
+          done < "$RUNNER_TEMP/tracked-files.txt"
 
           exit "$fail"
 
@@ -97,7 +97,7 @@ jobs:
               echo "::error file=$path::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
               fail=1
             fi
-          done < /tmp/tracked-files.txt
+          done < "$RUNNER_TEMP/tracked-files.txt"
 
           exit "$fail"
 
@@ -139,11 +139,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          npm pack --dry-run --json --workspaces --ignore-scripts > /tmp/pack.json
+          npm pack --dry-run --json --workspaces --ignore-scripts > "$RUNNER_TEMP/pack.json"
           # JavaScript template literals must reach Node without shell expansion.
           # shellcheck disable=SC2016
           node -e '
-            const pkgs = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"));
+            const pkgs = JSON.parse(require("fs").readFileSync(process.env.RUNNER_TEMP + "/pack.json", "utf8"));
             if (!Array.isArray(pkgs) || !pkgs.length || pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => typeof f.path !== "string"))) {
               throw new Error("Invalid or empty npm pack inventory");
             }

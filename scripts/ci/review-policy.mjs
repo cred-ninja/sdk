@@ -34,7 +34,27 @@ export function validateFiles(files, count) {
   for (const file of files) {
     requirePolicy(typeof file.filename === 'string' && typeof file.patch === 'string', 'Binary, missing or truncated patch requires manual redesign');
     const lines = file.patch.split('\n');
-    requirePolicy(lines.filter((s) => s.startsWith('+')).length === file.additions && lines.filter((s) => s.startsWith('-')).length === file.deletions, 'Truncated patch');
+    if (lines.at(-1) === '') lines.pop(); // A final newline terminates a line, not an extra hunk record.
+    let hunk, additions = 0, deletions = 0;
+    const complete = () => requirePolicy(hunk && hunk.old === 0 && hunk.next === 0, 'Truncated hunk');
+    for (const line of lines) {
+      const header = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@(?:.*)$/.exec(line);
+      if (header) {
+        if (hunk) complete();
+        hunk = { old: Number(header[1] ?? 1), next: Number(header[2] ?? 1) };
+      } else {
+        requirePolicy(hunk, 'Missing hunk header');
+        if (line === '\\ No newline at end of file') continue;
+        requirePolicy([' ', '+', '-'].includes(line[0]), 'Invalid hunk body');
+        if (line[0] !== '+') hunk.old--;
+        if (line[0] !== '-') hunk.next--;
+        if (line[0] === '+') additions++;
+        if (line[0] === '-') deletions++;
+        requirePolicy(hunk.old >= 0 && hunk.next >= 0, 'Overfull hunk');
+      }
+    }
+    complete();
+    requirePolicy(additions === file.additions && deletions === file.deletions, 'Truncated patch');
   }
   requirePolicy(Buffer.byteLength(JSON.stringify(files)) <= 180000, 'Diff exceeds review context limit');
   return true;

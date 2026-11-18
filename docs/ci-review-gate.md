@@ -8,18 +8,29 @@ It cannot exercise this new implementation on its own rollout PR before those
 scripts are merged into `main`. Do not execute the PR version with credentials,
 turn off protection, self-approve, or bypass the existing approval rule to land it.
 A separately authorized maintainer must arrange a protected rollout, then verify
-the checks on a non-draft canary PR before adding new required check contexts.
+the checks on a non-draft canary PR before adding deterministic required contexts.
+The canary must exercise the exact Linux native executable's version/help and
+real authenticated structured-output execution, artifact tampering refusal,
+post-success API faults, workflow cancellation and the completion recovery handler.
+It must also show CodeRabbit check changes on an Actions-associated SHA trigger
+invalidation through an independent event or scheduled fallback. Same-SHA check
+precedence must be observed in GitHub's merge decision under separately authorized
+canary rules: a newer failed marker refuses and a newer successful aggregate
+supersedes earlier failures with all other requirements satisfied. These observations
+are necessary evidence, not proof of atomic merge enforcement.
 No releases, registry publication, live settings changes, or autonomous dispatcher
 are implemented by this refresh.
 
-The intended additional required contexts are **Workflow Security** and
-**Review Gate**. Keep the existing build, test, lint, Python, leak, dependency,
-CodeQL and raw CodeRabbit checks; coordinate the replacement of the old optional
-Claude job context with Review Gate. Bind the aggregate to the GitHub Actions
-application in branch protection rather than accepting a same-named status from
-an arbitrary application. Preserve required human approval, last-push approval,
-conversation resolution, branch freshness and no-bypass rules. Local tests do
-not prove those server-side settings.
+The only intended additional required context is **Workflow Security**, after
+its hosted canary. **Review Gate is ADVISORY EVIDENCE ONLY; do not make it a
+required context or rely on it for autonomous merge.** Its final observation and
+asynchronous invalidation cannot atomically control GitHub's merge decision. A
+required aggregate is deferred until an atomic enforcement design is implemented
+and proven; this repository does not implement such an engine. Keep existing
+build, test, lint, Python, leak, dependency, CodeQL and raw CodeRabbit checks.
+Preserve native independent human approval, last-push approval, conversation
+resolution, branch freshness and no-bypass rules as the final merge wall. Local
+tests do not prove those server-side settings. This is not fully unattended CI.
 
 `CODEOWNERS` names `@kierandotai`, including CI/release/security-sensitive paths.
 An author cannot approve their own PR. A single-maintainer author therefore
@@ -37,10 +48,13 @@ that identity. Do not relax the rule or enable blanket unattended tool approval.
   runs `npm run test:ci`, which includes behavioral policy and failure-path tests.
 - Workflow Security requires actionlint **1.7.12**, offline zizmor **1.32.0** with
   **plain** output (not SARIF), and Gitleaks CLI **8.30.1** with full redaction.
-  Gitleaks scans a clean `git archive HEAD` snapshot, not environment files,
-  ignored local files or history. Two exact pre-existing Python test-vector
-  fingerprints are excluded in `.gitleaksignore`; no test directory is exempt.
-  Re-review those two locations if their data/line numbers change.
+  Gitleaks scans a clean tracked-tree snapshot, including `export-ignore` files,
+  not untracked environment files, ignored local files or history. Two Python
+  test-vector values have rule/path/value-specific AND exceptions in
+  `.gitleaks.toml`, not line-number fingerprints. The existing global config
+  still excludes documented sample/test/docs/generated paths and placeholders;
+  this is not exhaustive scanning of every tracked byte. Behavioral probes prove
+  each new exception reports a changed matching value at the same location.
 - External actions are SHA-pinned; checkout does not persist credentials.
   Dependabot covers Actions, npm and each Python package. Tool CLI version pins
   in Workflow Security need maintainer updates as well.
@@ -88,14 +102,24 @@ in a credential-bearing review job. Collection uses bounded GitHub API reads;
 PR/issue text and patches are JSON data, never shell arguments or instructions.
 The model starts in an empty directory with tools disabled, an empty strict MCP
 configuration, no setting sources, slash commands disabled, hooks disabled and
-no session persistence. The equals-form `--tools=""` and `--setting-sources=""`
-are intentional: the pinned base action's argument parser loses quoted empty
-values in space-form flags. A local probe against that exact parser and SDK
-confirmed literal `--tools=` and final `--setting-sources=` reach the executable.
-Explicit CLI settings disable hooks even when ordinary settings sources are off.
-Do not replace these with space-form flags or use `--bare` with OAuth (that CLI
-mode supports API-key authentication, not OAuth). No old comments or plugin skip
-heuristics are accepted.
+no session persistence. A non-model, noncredential job downloads the official
+Claude **2.1.327 linux-x64** native executable, verifies its literal SHA-256
+`343c744baa14bfd38286a7cb90871051f04379956da6c5b803a9e66019a76ac9`
+and **372904464-byte** size, then exercises version/help without authentication.
+It uploads a same-workflow immutable artifact with one-day retention and no
+compression. Each model job downloads that artifact and re-verifies its bytes
+before execution, including immediately before spawning. There is no Bun/npm/pip
+installation, installer script or curl-to-shell chain in a model job.
+A trusted preinstalled runner Node launcher (no runtime installer in either model
+job) passes explicit argument-array empty values for tools and
+setting sources, reads the prompt from a file into stdin, and creates a fresh cwd,
+HOME and config directory. Only its CLI child receives the OAuth token in an
+allowlisted environment (no GitHub token or inherited Node options). It disables
+updating and nonessential traffic, hooks, MCP servers, slash commands and session
+persistence. It checks native `type`, `subtype`, `is_error` and `structured_output`
+and then the review policy; nonzero, malformed, absent, excessive or incomplete
+output fails without logging provider text. Do not use `--bare` with OAuth.
+Explicit CLI settings disable hooks even when ordinary setting sources are off.
 The narrowly annotated zizmor dangerous-trigger suppression exists only for this
 base-code/data-only design. Do not copy it to a workflow that runs PR code.
 
@@ -104,7 +128,9 @@ exact head SHA, a context digest, an exact duplicate-free reviewed-file inventor
 and findings. Only a successful execution returning `pass` with no findings can
 advance. Missing secret, malformed/empty output, missing files, truncation, API
 failure, missing issue, drafts, forks or unsupported context sizes block. Limits
-are 300 textual files, 180 KB of file inventory, 220 KB total context, at most
+are 300 textual files, 180 KB of file inventory and a stricter **less than 100 KiB**
+UTF-8 serialized snapshot transport budget, including every metadata field, digest,
+`SNAPSHOT=` name and NUL terminator (no truncation), at most
 100 linked issues/review threads (no additional page), and bounded REST pages.
 Binary/patchless changes need a policy redesign and human review, not a waiver.
 A closing link to at least one issue in this same public repository is required;
@@ -116,21 +142,28 @@ have that permission. It creates/updates the strict aggregate on the **PR head**
 not the target workflow's base commit, and reads back publication. It re-fetches
 the PR, issues, CodeRabbit checks, reviews and threads, rejects newer runs/attempts
 or invalidations, and never turns a skipped/failed prerequisite into success.
-A cancelled workflow can leave an in-progress aggregate, which still blocks.
-PR head/title/body edits trigger fresh sessions. Same-repository issue edits,
-deletions or transfers conservatively invalidate **all** open PRs; rerun reviews.
-Trusted default-branch `check_run` handlers also invalidate completed green
-aggregates when CodeRabbit creates, completes or re-requests a check on that SHA.
-They create a separate newer failed aggregate, including while a publisher is
-active. An older publisher cannot overwrite that append-only invalidation.
-Publication revalidates current provider evidence and checks for newer markers
-again after its write. A late-delivered event can require another complete run.
-Same-event reruns retain the original workflow creation timestamp; changed PR
-metadata is refused and changed issue requirements advance freshness.
-GitHub events and check publication are asynchronous, not an atomic merge lock.
-After a post-publication review/thread change, rerun the gate; keep GitHub's
-native required-review/conversation protections enabled. The aggregate does not
-replace those native protections or prove a merge-time external runner exists.
+Collection errors attempt to mark the initialized check failed before returning.
+After a success write, verification/API/marker failures attempt bounded restoration
+and readback of failure on that same attempt's check; the job still fails. A
+trusted default-branch `workflow_run` completion handler reconciles failed or
+cancelled review attempts by verified run identity and external ID, without
+consuming PR artifacts. If GitHub remains unavailable, recovery can also fail;
+it is not an atomic guarantee and hosted fault canaries remain necessary.
+PR head/title/body edits trigger fresh sessions. Issue changes conservatively
+invalidate all open PRs. CodeRabbit `check_run` events are only one input:
+GitHub can suppress them for Actions-associated SHAs. Independent review,
+dismissal, review-comment and issue-comment events also invalidate completed
+successes, and a 15-minute schedule conservatively expires successful evidence
+on all open PRs. Schedule delivery itself can be delayed by GitHub; this is not a
+15-minute enforcement guarantee. Rerun complete reviews after evidence expires.
+Per-PR invalidations retry twice after the initial attempt and continue after a
+failure; successful marker POSTs reuse their returned ID for verification.
+The final publisher rechecks evidence and newer markers, but an event can still
+arrive after its final observation. The aggregate cannot guarantee that a review
+is not running at merge time; keep it advisory, retain native human approval and
+never arm unattended merge based on its color. Same-event reruns retain the
+original workflow creation timestamp; changed PR metadata is refused and changed
+issue requirements advance freshness.
 
 ## Operating and retrying
 
@@ -158,9 +191,11 @@ replace those native protections or prove a merge-time external runner exists.
 5. For an actual code defect, allow at most **two** fix/review cycles, with tests
    and fresh reviews on each changed SHA. Then hand off to a maintainer. A block,
    unavailable service or missing independent approval is never a bypass signal.
-6. After editing PR requirements or a linked issue, rerun the entire workflow
-   and request fresh CodeRabbit review. Do not rerun only the publisher: the
-   security and diff outputs must come from this same workflow attempt.
+6. After a PR-body/title edit, use the **new workflow run triggered by that edit**;
+   the original run's event metadata is stale and cannot be repaired by rerunning
+   it. After an issue-only edit, rerun the full current PR workflow and request
+   fresh CodeRabbit approval. Never rerun only the publisher: security and diff
+   outputs must come from the same workflow attempt.
 7. Before merge, verify current SHA/context, all required checks and independent
    human/code-owner approval in GitHub. No worker may merge or publish merely
    because local tests or model reviews passed.

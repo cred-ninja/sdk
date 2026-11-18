@@ -15,7 +15,9 @@ export async function collect(api, repo, number, started) {
   if (!linked || linked.pageInfo.hasNextPage || !linked.nodes.length || linked.nodes.some((i) => i.repository.nameWithOwner !== repo)) throw new Error('A complete same-repository closing issue is required');
   const context = { head: pr.head.sha, base: pr.base.sha, title: pr.title, body: pr.body, issues: linked.nodes, files };
   if (Buffer.byteLength(JSON.stringify(context)) > 220000) throw new Error('Review context too large');
-  return { ...context, repo, number, started, digest: digest(context) };
+  const snapshot = { ...context, repo, number, started, digest: digest(context) };
+  if (Buffer.byteLength(`SNAPSHOT=${JSON.stringify(snapshot)}\0`, 'utf8') >= 100 * 1024) throw new Error('Snapshot transport exceeds 100 KiB environment budget');
+  return snapshot;
 }
 export async function pages(api, path, key) {
   const all = [];
@@ -48,13 +50,45 @@ export async function github(path, body, method) {
   if (value.errors) throw new Error('GitHub GraphQL query failed');
   return value;
 }
+async function retry(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await operation(); } catch {
+      if (attempt === 2) throw new Error('GitHub reconciliation exhausted');
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+}
+async function restoreFailure(api, repo, id, head, external) {
+  await retry(async () => {
+    const own = await api(`/repos/${repo}/check-runs/${id}`);
+    if (own.name !== 'Review Gate' || own.head_sha !== head || own.external_id !== external) throw new Error('Check identity mismatch');
+    await api(`/repos/${repo}/check-runs/${id}`, { status: 'completed', conclusion: 'failure', output: { title: 'Review evidence unverified', summary: 'Advisory evidence only. Publication or execution failed; rerun complete reviews. Native human approval remains required.' } }, 'PATCH');
+    const verified = await api(`/repos/${repo}/check-runs/${id}`);
+    if (verified.conclusion !== 'failure') throw new Error('Refusal not verified');
+  });
+}
+async function invalidatePRs(api, repo, prs, title, eligible = async () => true) {
+  const failures = [];
+  for (const pr of prs) {
+    try {
+      if (!await retry(() => eligible(pr))) continue;
+      // Once creation returns an ID, retry only its verification, not POST.
+      const marker = await retry(() => api(`/repos/${repo}/check-runs`, { name: 'Review Gate', head_sha: pr.head.sha, status: 'completed', conclusion: 'failure', output: { title, summary: 'Advisory evidence invalidated. Rerun the complete trusted workflow after provider checks settle. Native human approval remains required.' } }));
+      await retry(async () => {
+        const verified = await api(`/repos/${repo}/check-runs/${marker.id}`);
+        if (verified.name !== 'Review Gate' || verified.conclusion !== 'failure' || verified.head_sha !== pr.head.sha) throw new Error('Invalidation not verified');
+      });
+    } catch { failures.push(pr.number); }
+  }
+  if (failures.length) throw new Error(`Invalidation unresolved for PRs: ${failures.join(',')}`);
+}
 const output = (name, value) => appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${typeof value === 'string' ? value : JSON.stringify(value)}\n`);
 export async function main(mode, api = github) {
   const repo = process.env.GITHUB_REPOSITORY;
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
   if (mode === 'begin') {
     const pr = event.pull_request;
-    const check = await api(`/repos/${repo}/check-runs`, { name: 'Review Gate', head_sha: pr.head.sha, status: 'in_progress', external_id: `${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT}`, output: { title: 'Review in progress', summary: 'Three current, complete reviews are required. Missing output blocks merge.' } });
+    const check = await api(`/repos/${repo}/check-runs`, { name: 'Review Gate', head_sha: pr.head.sha, status: 'in_progress', external_id: `${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT}`, output: { title: 'Review in progress', summary: 'Advisory evidence only; three complete reviews requested. Native independent human approval is the final merge wall.' } });
     const posted = await api(`/repos/${repo}/check-runs/${check.id}`);
     if (posted.name !== 'Review Gate' || posted.head_sha !== pr.head.sha || posted.status !== 'in_progress') throw new Error('Initial check publication not verified');
     output('check', String(check.id));
@@ -63,9 +97,14 @@ export async function main(mode, api = github) {
     // and its check events would invalidate that retry again.
     const run = await api(`/repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`);
     if (!Number.isFinite(Date.parse(run.created_at))) throw new Error('Missing original workflow start');
-    const s = await collect(api, repo, pr.number, run.created_at);
-    if (s.head !== pr.head.sha || s.base !== pr.base.sha || s.title !== pr.title || s.body !== pr.body) throw new Error('Event superseded');
-    output('snapshot', s);
+    try {
+      const s = await collect(api, repo, pr.number, run.created_at);
+      if (s.head !== pr.head.sha || s.base !== pr.base.sha || s.title !== pr.title || s.body !== pr.body) throw new Error('Event superseded');
+      output('snapshot', s);
+    } catch {
+      await restoreFailure(api, repo, check.id, pr.head.sha, `${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT}`);
+      throw new Error('Initial review collection failed');
+    }
   } else if (mode === 'prompt') {
     const s = JSON.parse(process.env.SNAPSHOT);
     const dir = join(process.env.RUNNER_TEMP, 'review-empty'); mkdirSync(dir, { recursive: true });
@@ -101,17 +140,18 @@ export async function main(mode, api = github) {
       await fresh(api, s);
       validateRabbit(await rabbitState(api, s), s);
       pass = true;
-    } catch (error) {
-      console.error(`Review Gate refused: ${error.message}`);
+    } catch {
+      console.error('Review Gate refused: incomplete, stale or unavailable evidence.');
       pass = false;
     }
     const existing = await api(`/repos/${repo}/check-runs/${id}`);
     if (existing.name !== 'Review Gate' || existing.head_sha !== event.pull_request.head.sha || existing.external_id !== `${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT}`) throw new Error('Check identity mismatch');
-    await api(`/repos/${repo}/check-runs/${id}`, { status: 'completed', conclusion: pass ? 'success' : 'failure', output: { title: pass ? 'Three reviews passed' : 'Review blocked or incomplete', summary: pass ? 'Fresh CodeRabbit approval, security review and isolated diff/issue review passed for this exact SHA and context.' : 'Missing, stale, unsuccessful or incomplete review evidence. See the runbook; never bypass the check.' } }, 'PATCH');
+    try {
+    await api(`/repos/${repo}/check-runs/${id}`, { status: 'completed', conclusion: pass ? 'success' : 'failure', output: { title: pass ? 'Three reviews passed' : 'Review blocked or incomplete', summary: pass ? 'ADVISORY EVIDENCE ONLY: three reviews passed for this SHA/context at observation time. Not an atomic merge lock; native independent human approval remains required.' : 'Missing, stale, unsuccessful or incomplete review evidence. See the runbook; never bypass the check.' } }, 'PATCH');
     const verified = await api(`/repos/${repo}/check-runs/${id}`);
     if (verified.conclusion !== (pass ? 'success' : 'failure')) throw new Error('Check publication not verified');
-    // Invalidation is append-only: even one arriving between the last read and
-    // this PATCH remains a separate newer failure that this writer cannot erase.
+    // Best-effort advisory reconciliation, NOT atomic merge-time enforcement.
+    // A pending or late event can still arrive after the last observation.
     if (pass) {
       const gates = await pages(api, `/repos/${repo}/commits/${s.head}/check-runs?filter=all`, 'check_runs');
       if (gates.some((c) => c.name === 'Review Gate' && c.id > Number(id))) {
@@ -121,29 +161,50 @@ export async function main(mode, api = github) {
         pass = false;
       }
     }
+    } catch {
+      await restoreFailure(api, repo, id, event.pull_request.head.sha, `${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT}`);
+      throw new Error('Review Gate publication failed');
+    }
     if (!pass) throw new Error('Review Gate blocked');
   } else if (mode === 'invalidate-check') {
     if (event.check_run?.app?.slug !== 'coderabbitai' || !Number.isSafeInteger(event.check_run.id)) throw new Error('Unexpected check event');
     const changed = await api(`/repos/${repo}/check-runs/${event.check_run.id}`);
     if (changed.app?.slug !== 'coderabbitai' || !/^[0-9a-f]{40}$/.test(changed.head_sha)) throw new Error('Unverified CodeRabbit event');
     const prs = await pages(api, `/repos/${repo}/pulls?state=open`);
-    for (const pr of prs.filter((p) => p.head.sha === changed.head_sha)) {
+    await invalidatePRs(api, repo, prs.filter((p) => p.head.sha === changed.head_sha), 'CodeRabbit evidence changed', async (pr) => {
       const checks = await pages(api, `/repos/${repo}/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs');
-      if (checks.some((c) => c.name === 'Review Gate' && c.app?.slug === 'github-actions' && (c.status !== 'completed' || c.conclusion === 'success'))) {
-        const marker = await api(`/repos/${repo}/check-runs`, { name: 'Review Gate', head_sha: pr.head.sha, status: 'completed', conclusion: 'failure', output: { title: 'CodeRabbit evidence changed', summary: 'Provider evidence changed during or after review. This separate invalidation cannot be overwritten by an older publisher. Rerun the complete trusted workflow after provider checks settle.' } });
-        const verified = await api(`/repos/${repo}/check-runs/${marker.id}`);
-        if (verified.conclusion !== 'failure' || verified.head_sha !== pr.head.sha) throw new Error('Check evidence invalidation not verified');
-      }
+      return checks.some((c) => c.name === 'Review Gate' && c.app?.slug === 'github-actions' && (c.status !== 'completed' || c.conclusion === 'success'));
+    });
+  } else if (mode === 'recover') {
+    const id = event.workflow_run?.id;
+    if (!Number.isSafeInteger(id)) throw new Error('Invalid workflow identity');
+    const run = await retry(() => api(`/repos/${repo}/actions/runs/${id}`));
+    if (run.repository?.full_name !== repo || run.path !== '.github/workflows/claude-code-review.yml' || run.event !== 'pull_request_target' || run.status !== 'completed') throw new Error('Untrusted recovery event');
+    if (run.conclusion === 'success') return;
+    const failures = [];
+    const prs = await pages(api, `/repos/${repo}/pulls?state=open`);
+    for (const pr of prs) {
+      try {
+        const checks = await retry(() => pages(api, `/repos/${repo}/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'));
+        for (const check of checks.filter((c) => c.app?.slug === 'github-actions' && c.name === 'Review Gate' && c.external_id === `${id}:${run.run_attempt}`)) {
+          await restoreFailure(api, repo, check.id, pr.head.sha, check.external_id);
+        }
+      } catch { failures.push(pr.number); }
     }
+    if (failures.length) throw new Error(`Recovery unresolved for PRs: ${failures.join(',')}`);
+  } else if (mode === 'invalidate-evidence') {
+    // Independent review/comment events and periodic expiry do not depend on
+    // check_run delivery (which GitHub suppresses for Actions-associated SHAs).
+    const prs = await pages(api, `/repos/${repo}/pulls?state=open`);
+    await invalidatePRs(api, repo, prs, 'Review evidence changed or expired', async (pr) => {
+      const checks = await pages(api, `/repos/${repo}/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs');
+      return checks.some((c) => c.name === 'Review Gate' && c.app?.slug === 'github-actions' && c.conclusion === 'success');
+    });
   } else if (mode === 'invalidate') {
     // Conservative invalidation: any same-repository issue edit invalidates all
     // open PRs, so removed links and deleted issues cannot evade invalidation.
     const prs = await pages(api, `/repos/${repo}/pulls?state=open`);
-    for (const pr of prs) {
-      const check = await api(`/repos/${repo}/check-runs`, { name: 'Review Gate', head_sha: pr.head.sha, status: 'completed', conclusion: 'failure', output: { title: 'Issue context changed', summary: 'Rerun the complete trusted review workflow and request a fresh CodeRabbit review. Issue edits conservatively invalidate all open PRs.' } });
-      const verified = await api(`/repos/${repo}/check-runs/${check.id}`);
-      if (verified.conclusion !== 'failure') throw new Error('Invalidation not verified');
-    }
+    await invalidatePRs(api, repo, prs, 'Issue context changed');
   } else { throw new Error('Unknown mode'); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
