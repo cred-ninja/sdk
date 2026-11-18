@@ -34,6 +34,12 @@ export interface WimseSourceConfig {
   trustDomains: Record<string, TrustAnchorKeys>;
   replay: ReplayCache;
   /**
+   * Explicit acknowledgement that replay protection is local to this process.
+   * Required when sharedReplay is absent. Never use this mode for replicas
+   * that must reject one another's replays; configure a shared store instead.
+   */
+  replayMode?: 'single-process';
+  /**
    * Optional replay store shared by every server instance. Checked after the
    * per-process `replay` cache accepts a WPT jti or signature nonce; a value
    * it has seen, or a store error, refuses the request.
@@ -490,6 +496,9 @@ export function verifyWpt(token: string, wit: VerifiedWit, req: IdentityRequest,
 
 export function createWimseIdentitySource(config: WimseSourceConfig): ExternalIdentitySource {
   if (!config || !config.replay) throw new Error('wimse: replay cache is required');
+  if (!config.sharedReplay && config.replayMode !== 'single-process') {
+    throw new Error('wimse: configure sharedReplay or explicitly choose replayMode: single-process');
+  }
   if (!config.trustDomains || Object.keys(config.trustDomains).length === 0) {
     throw new Error('wimse: at least one trust domain is required');
   }
@@ -545,7 +554,7 @@ export function createWimseIdentitySource(config: WimseSourceConfig): ExternalId
       // proof cannot burn a legitimate jti (wpt-02 §3.1.4). The entry lives
       // until exp + skew: that is how long verifyWpt would still accept it.
       const replayUntil = wpt.exp + resolved.clockSkewSec;
-      if (!config.replay.checkAndRecord(`wpt:${wpt.jti}`, replayUntil, resolved.now())) {
+      if (!config.replay.checkAndRecord(`wpt:${JSON.stringify([wit.trustDomain, wit.subject, wpt.jti])}`, replayUntil, resolved.now())) {
         refuse('replay', 'wpt jti already used');
       }
       await checkShared(`${wit.trustDomain}|${wit.subject}|wpt:${wpt.jti}`, replayUntil, 'wpt');

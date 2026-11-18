@@ -321,7 +321,7 @@ function checkWindow(p: CommonParams, cfg: HttpSigVerifyConfig, now: number): vo
   if (p.expires - p.created > max) refuse('bad_window', 'signature lifetime exceeds the configured maximum');
   if (p.created > now + skew) refuse('bad_window', 'created is in the future');
   // §3: "Recipients MUST reject signatures that fall outside their validity time window."
-  if (now > p.expires) refuse('expired_signature', 'signature expired');
+  if (now >= p.expires) refuse('expired_signature', 'signature expired');
 }
 
 function checkCryptoSignature(base: string, signature: Buffer, wit: VerifiedWit): void {
@@ -387,7 +387,7 @@ export function verifyWimseRequestSignature(msg: HttpSigMessage, cfg: HttpSigVer
   if (!cfg.audiences.includes(aud!)) refuse('audience', 'wimse-aud is not a configured audience');
   if (cfg.replay) {
     const until = common.expires + (cfg.clockSkewSec ?? DEFAULT_SKEW);
-    if (!cfg.replay.checkAndRecord(`httpsig:${common.nonce}`, until, now)) refuse('replay', 'nonce already used');
+    if (!cfg.replay.checkAndRecord(`httpsig:${JSON.stringify([wit.trustDomain, wit.subject, common.nonce])}`, until, now)) refuse('replay', 'nonce already used');
   }
   return {
     wit,
@@ -452,7 +452,7 @@ export function verifyWimseResponseSignature(
   checkCryptoSignature(signatureBase(input, response, request), signature, wit);
   if (cfg.replay) {
     const until = common.expires + (cfg.clockSkewSec ?? DEFAULT_SKEW);
-    if (!cfg.replay.checkAndRecord(`httpsig-resp:${common.nonce}`, until, now)) refuse('replay', 'response nonce already used');
+    if (!cfg.replay.checkAndRecord(`httpsig-resp:${JSON.stringify([wit.trustDomain, wit.subject, common.nonce])}`, until, now)) refuse('replay', 'response nonce already used');
   }
   return { wit, label, nonce: common.nonce, created: common.created, expires: common.expires, covered, signResponse: false };
 }

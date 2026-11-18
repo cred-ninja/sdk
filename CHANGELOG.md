@@ -101,6 +101,15 @@ Two of these refuse requests 2.1.0 accepted: a Web Bot Auth signature living lon
 than 300 seconds (raise the limit with `webBotAuthMaxSignatureLifetimeSeconds`), and a
 TOFU proof sent a second time (sign a new one for each request).
 
+- `@credninja/server`: WIMSE local replay keys are scoped to the verified workload
+  and trust domain, so one workload cannot consume another's WPT `jti` or HTTP
+  request/response signature nonce. Replays by the same workload remain refused.
+- `@credninja/server`: WIMSE source startup requires either `sharedReplay` or an
+  explicit `replayMode: 'single-process'` choice; process-local protection is no
+  longer silently selected for replicas.
+- `@credninja/server`: HTTP request and response signatures are refused at the
+  instant `now == expires`, not just afterwards.
+
 - `@credninja/server`: turning `requiresApproval` on for a Permission
   (`PATCH /admin/permissions/:id`) now revokes the delegations already issued under
   it, so a live token stops working instead of lasting until it expires.

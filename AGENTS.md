@@ -154,6 +154,11 @@ With `externalIdentity` configured (opt-in), any `Bearer` route above also accep
 is scoped to the requesting agent's own `userId`; the latter is
 admin-authenticated and unscoped, covering all agents.
 
+WIMSE source construction requires `sharedReplay` or an explicit
+`replayMode: 'single-process'`. Only a cross-process store can reject replays
+across replicas; the in-memory store is not such a store. HTTP request and
+response signatures expire exclusively (`now < expires`).
+
 ## Framework integration tool names (`packages/integrations`)
 
 Each of the six framework integrations wraps the same underlying delegate /

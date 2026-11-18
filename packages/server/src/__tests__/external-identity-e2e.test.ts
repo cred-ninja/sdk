@@ -64,7 +64,7 @@ function wimse() {
   const issuer = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const workload = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const bundle = { keys: [{ ...issuer.publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'wit-svid' }] };
-  const source = createWimseIdentitySource({ trustDomains: { [TD]: loadTrustBundle({ jwks: bundle as any }, { keyUse: 'wit-svid' }) }, replay: createReplayCache() });
+  const source = createWimseIdentitySource({ trustDomains: { [TD]: loadTrustBundle({ jwks: bundle as any }, { keyUse: 'wit-svid' }) }, replay: createReplayCache(), replayMode: 'single-process' });
   const now = Math.floor(Date.now() / 1000);
   const wit = es256({ alg: 'ES256', kid: 'k1', typ: 'wit+jwt' },
     { sub: SUB, iat: now - 10, exp: now + 3600, cnf: { jwk: { ...workload.publicKey.export({ format: 'jwk' }), alg: 'ES256' } } }, issuer.privateKey);

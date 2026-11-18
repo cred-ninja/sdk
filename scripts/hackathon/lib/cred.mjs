@@ -90,6 +90,7 @@ export async function startCred(cfg, { stateDir, quiet = true, responseSigning, 
   const source = cred.createWimseIdentitySource({
     trustDomains,
     replay: cred.createReplayCache(),
+    replayMode: 'single-process', // This loopback harness runs one server process.
     httpSignature: cfg.httpSignature ?? {},
   });
 

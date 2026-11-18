@@ -161,6 +161,7 @@ export async function wimseServer(opts: {
   const source = createWimseIdentitySource({
     trustDomains: Object.fromEntries(opts.domains.map((d) => [d.name, d.anchors])),
     replay: createReplayCache(),
+    replayMode: 'single-process',
     ...opts.source,
   });
   const mapped = opts.mapSubject(agent);

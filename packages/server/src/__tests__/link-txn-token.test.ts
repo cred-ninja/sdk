@@ -33,7 +33,7 @@ describe('Cred Link delegation with a Txn-Token', () => {
     const mappings: ExternalIdentityMapping[] = [];
     h = await makeHarness({
       externalIdentity: {
-        sources: [createWimseIdentitySource({ trustDomains: { [b.name]: b.anchors }, replay: createReplayCache() })],
+        sources: [createWimseIdentitySource({ trustDomains: { [b.name]: b.anchors }, replay: createReplayCache(), replayMode: 'single-process' })],
         mappings,
         txnTokens: { [b.name]: tts.trust(trustOver as any) },
       },
