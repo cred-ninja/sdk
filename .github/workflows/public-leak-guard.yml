@@ -140,6 +140,8 @@ jobs:
           set -euo pipefail
 
           npm pack --dry-run --json --workspaces --ignore-scripts > /tmp/pack.json
+          # JavaScript template literals must reach Node without shell expansion.
+          # shellcheck disable=SC2016
           node -e '
             const pkgs = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"));
             if (!Array.isArray(pkgs) || !pkgs.length || pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => typeof f.path !== "string"))) {
