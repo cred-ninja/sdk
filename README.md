@@ -250,6 +250,14 @@ For production deployments, [`@credninja/server`](./packages/server) includes Do
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). SDK, integration, and documentation contributions welcome.
 
+### CI and review policy
+
+The [CI/review-gate runbook](./docs/ci-review-gate.md) documents the required
+checks, isolated security and diff/issue reviews, retry limits, agent restrictions
+and protected rollout prerequisites. Local policy tests do not establish hosted
+reviewer quality or prove that live branch settings require the candidate gates.
+Interactive agent mentions and automated package publication are not enabled.
+
 ## Security
 
 See [SECURITY.md](./SECURITY.md) for vulnerability disclosure. Maintainer review notes are in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).

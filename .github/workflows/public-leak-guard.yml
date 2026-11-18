@@ -22,8 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Collect tracked files
@@ -39,9 +40,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          deny='(^|/)(reports/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
+          deny='(^|/)(reports/|plans/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
 
-          if grep -nE "$deny" /tmp/tracked-files.txt; then
+          if grep -niE "$deny" /tmp/tracked-files.txt; then
             echo "::error::Denylisted private artifact path detected in public repository."
             exit 1
           fi
@@ -92,7 +93,7 @@ jobs:
                 ;;
             esac
 
-            if [[ -f "$path" ]] && grep -nE "$private" "$path"; then
+            if [[ -f "$path" ]] && grep -qE "$private" "$path"; then
               echo "::error file=$path::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
               fail=1
             fi
@@ -118,12 +119,13 @@ jobs:
           # itself is checked file by file above, so skip that generated block.
           body=$(printf '%s\n' "$PR_BODY" | sed '/<!-- This is an auto-generated comment: release notes by coderabbit.ai -->/,/<!-- end of auto-generated comment: release notes by coderabbit.ai -->/d')
 
-          if printf '%s\n%s\n' "$PR_TITLE" "$body" | grep -nE "$private"; then
+          if printf '%s\n%s\n' "$PR_TITLE" "$body" | grep -E "$private" >/dev/null; then
             echo "::error::Private correspondence marker found in the PR title or body."
             fail=1
           fi
 
-          if git log --format='%H%n%B' "$BASE_SHA..$HEAD_SHA" | grep -nE "$private"; then
+          commits=$(git log --format='%H%n%B' "$BASE_SHA..$HEAD_SHA")
+          if printf '%s\n' "$commits" | grep -E "$private" >/dev/null; then
             echo "::error::Private correspondence marker found in a commit message on this PR."
             fail=1
           fi
@@ -138,12 +140,12 @@ jobs:
           set -euo pipefail
 
           npm pack --dry-run --json --workspaces --ignore-scripts > /tmp/pack.json
-          if node -e '
+          node -e '
             const pkgs = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"));
+            if (!Array.isArray(pkgs) || !pkgs.length || pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => typeof f.path !== "string"))) {
+              throw new Error("Invalid or empty npm pack inventory");
+            }
             const bad = pkgs.flatMap((p) => p.files.map((f) => `${p.name}: ${f.path}`)).filter((f) => /(^|\/|: )reports\//.test(f));
             bad.forEach((f) => console.log(f));
-            process.exit(bad.length ? 0 : 1);
-          '; then
-            echo "::error::A published package would include reports/."
-            exit 1
-          fi
+            process.exit(bad.length ? 1 : 0);
+          '

@@ -1,47 +1,159 @@
 name: Claude Code Review
-
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
-
+  # Trusted base scripts only, no PR checkout/dependencies/tools. PR diff is API data.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] isolated data-only reviewers; checks writer is a separate job
+    branches: [main]
+    types: [opened, synchronize, ready_for_review, reopened, edited, converted_to_draft]
+permissions:
+  contents: read
+concurrency:
+  group: strict-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
-  claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+  prepare:
+    name: Initialize Review Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
       issues: read
-      id-token: write
-
+      checks: write
+      actions: read
+    outputs:
+      snapshot: ${{ steps.begin.outputs.snapshot }}
+      check: ${{ steps.begin.outputs.check }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
-
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@v1
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - id: begin
+        run: node scripts/ci/review-gate.mjs begin
+        env:
+          GH_TOKEN: ${{ github.token }}
+  security:
+    name: Claude Security Review
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.validate.outputs.passed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - id: prompt
+        run: node scripts/ci/review-gate.mjs prompt
+        env:
+          SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          REVIEW_KIND: security
+      - id: review
+        uses: anthropics/claude-code-action/base-action@469588f42e6b1e94cd14ad09dccfeaec772ce0fd # v1
+        env:
+          NODE_VERSION: '24'
+          CLAUDE_WORKING_DIR: ${{ runner.temp }}/review-empty
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-
+          prompt_file: ${{ runner.temp }}/review-prompt.txt
+          settings: '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
+          claude_args: >-
+            --tools="" --strict-mcp-config --mcp-config ${{ runner.temp }}/empty-mcp.json
+            --setting-sources="" --settings '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
+            --disable-slash-commands --no-session-persistence --permission-mode dontAsk --permission-prompts none
+            --max-turns 3 --json-schema '${{ steps.prompt.outputs.schema }}'
+      - id: validate
+        run: node scripts/ci/review-gate.mjs validate
+        env:
+          SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          REVIEW_OUTPUT: ${{ steps.review.outputs.structured_output }}
+          REVIEW_CONCLUSION: ${{ steps.review.outputs.conclusion }}
+  diff:
+    name: Independent Diff and Issue Review
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.validate.outputs.passed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - id: prompt
+        run: node scripts/ci/review-gate.mjs prompt
+        env:
+          SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          REVIEW_KIND: diff
+      - id: review
+        uses: anthropics/claude-code-action/base-action@469588f42e6b1e94cd14ad09dccfeaec772ce0fd # v1
+        env:
+          NODE_VERSION: '24'
+          CLAUDE_WORKING_DIR: ${{ runner.temp }}/review-empty
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: ${{ runner.temp }}/review-prompt.txt
+          settings: '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
+          claude_args: >-
+            --tools="" --strict-mcp-config --mcp-config ${{ runner.temp }}/empty-mcp.json
+            --setting-sources="" --settings '{"disableAllHooks":true,"enableAllProjectMcpServers":false}'
+            --disable-slash-commands --no-session-persistence --permission-mode dontAsk --permission-prompts none
+            --max-turns 3 --json-schema '${{ steps.prompt.outputs.schema }}'
+      - id: validate
+        run: node scripts/ci/review-gate.mjs validate
+        env:
+          SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          REVIEW_OUTPUT: ${{ steps.review.outputs.structured_output }}
+          REVIEW_CONCLUSION: ${{ steps.review.outputs.conclusion }}
+  publish:
+    name: Publish Review Gate
+    needs: [prepare, security, diff]
+    # Failed/skipped reviewers cause a FAILURE; this is not an always-green mask.
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node scripts/ci/review-gate.mjs finish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          CHECK_ID: ${{ needs.prepare.outputs.check }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          DIFF_RESULT: ${{ needs.diff.result }}
+          SECURITY_PASSED: ${{ needs.security.outputs.passed }}
+          DIFF_PASSED: ${{ needs.diff.outputs.passed }}

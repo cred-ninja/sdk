@@ -7,6 +7,8 @@
 # that touches a .ts file. Disable that one tool here; the review itself and
 # the other tools stay on.
 reviews:
+  # Formal approval is required by Review Gate, not a neutral/skipped check.
+  request_changes_workflow: true
   tools:
     eslint:
       enabled: false

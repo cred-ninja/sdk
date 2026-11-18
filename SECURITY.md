@@ -37,6 +37,23 @@ We'll acknowledge within 48 hours and aim to resolve critical issues within 14 d
 - Issues in dependencies without a clear exploit path
 - Rate limiting or availability issues
 
+## CI and automated review boundaries
+
+The [review-gate runbook](./docs/ci-review-gate.md) defines the candidate CI policy
+and its protected bootstrap requirements. Automated reviews are advisory evidence
+within a required aggregate, not proof of security or a replacement for independent
+human/code-owner approval. Two isolated Claude sessions share one provider; that
+is not independent-provider review. The candidate policy must be deployed and
+verified on a hosted canary before claiming that it protects the default branch.
+
+Do not run pull-request code, dependency installation, hooks or arbitrary mention
+commands in a job holding model credentials or a repository-write token. The
+trusted target workflow reads PR/issue diffs as data, disables model tools and
+keeps check publication in a separate non-model job. Future workers must not
+change security/release policy, branch protection, approvals or publishing
+without explicit maintainer authorization. A missing check or service failure
+blocks merge; it is never permission to weaken the policy.
+
 ## Disclosure policy
 
 We follow coordinated disclosure. We'll work with you to understand and fix the issue before public disclosure. Credit is given to researchers who report valid vulnerabilities.

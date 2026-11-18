@@ -1,5 +1,13 @@
-# Default owner for public OSS changes.
-* @kilroycreative
+# A valid maintainer owns public source; authors cannot approve their own PRs.
+* @kierandotai
 
-# CI and release policy changes require maintainer review.
-/.github/ @kilroycreative
+# Review policy, release tooling and security-sensitive sources.
+/.github/ @kierandotai
+/.coderabbit.yaml @kierandotai
+/SECURITY.md @kierandotai
+/scripts/ @kierandotai
+/package.json @kierandotai
+/package-lock.json @kierandotai
+/packages/vault/ @kierandotai
+/packages/server/ @kierandotai
+/packages/protocol/ @kierandotai

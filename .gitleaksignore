@@ -1,0 +1,4 @@
+# Two pre-existing synthetic test vectors only. No directory/file-wide bypass.
+# Review these exact fixture locations whenever tests move or fixture data changes.
+packages/sdk-python/tests/test_dpop.py:jwt:23
+packages/sdk-python/tests/test_identity.py:generic-api-key:37
