@@ -43,6 +43,20 @@ describe('txnTrustRequiredFor', () => {
 });
 
 describe('normalizeTxnTrustDomains', () => {
+  it.each([true, false])('rejects duplicate canonical domains, strict policy first: %s', (strictFirst) => {
+    const strict = tts.trust({ required: true });
+    const lax = tts.trust({ required: false });
+    const configured = Object.fromEntries(strictFirst
+      ? [['Domain-B.Example', strict], [TD, lax]]
+      : [[TD, lax], ['Domain-B.Example', strict]]);
+    expect(() => normalizeTxnTrustDomains(configured)).toThrow(/duplicate.*trust domain/i);
+  });
+
+  it('rejects duplicate canonical domains even when both values are identical', () => {
+    const trust = tts.trust();
+    expect(() => normalizeTxnTrustDomains({ [TD]: trust, 'Domain-B.Example': trust })).toThrow(/duplicate.*trust domain/i);
+  });
+
   it('lower-cases keys so a mixed-case trust domain still matches, and passes undefined through', () => {
     const trust = tts.trust();
     const normalized = normalizeTxnTrustDomains({ 'Domain-B.Example': trust })!;

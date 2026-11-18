@@ -57,6 +57,19 @@ async function delegated(s: Awaited<ReturnType<typeof setup>>, txnClaims: Record
 }
 
 describe('binding: a Txn-Token rides only on the proof that covers it', () => {
+  it.each([true, false])('rejects startup for duplicate canonical Txn trust domains, strict first: %s', async (strictFirst) => {
+    const b = trustDomain(TD);
+    const w = b.workload();
+    const tts = txnIssuer(TD);
+    const strict = tts.trust({ required: true });
+    const lax = tts.trust({ required: false });
+    const txnTokens = Object.fromEntries(strictFirst
+      ? [['Domain-B.Example', strict], [TD, lax]]
+      : [[TD, lax], ['Domain-B.Example', strict]]);
+    await expect(wimseServer({ domains: [b], mapSubject: () => w.subject, txnTokens }))
+      .rejects.toThrow(/duplicate.*trust domain/i);
+  });
+
   it('WPT with a matching tth is accepted on an agent route', async () => {
     const s = await setup();
     const txn = s.tts.mint();

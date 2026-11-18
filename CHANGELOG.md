@@ -104,7 +104,8 @@ TOFU proof sent a second time (sign a new one for each request).
 - `@credninja/server`: `externalIdentity.txnTokens` trust-domain keys match
   case-insensitively, as the WIMSE source's `trustDomains` do. A key written with an
   upper-case letter previously never matched, so the `required` default silently did
-  not apply to the domain it named.
+  not apply to the domain it named. Duplicate keys that canonicalize to the same
+  domain now refuse startup rather than silently overwrite a stricter policy.
 - `@credninja/server`: turning `requiresApproval` on for a Permission
   (`PATCH /admin/permissions/:id`) now revokes the delegations already issued under
   it, so a live token stops working instead of lasting until it expires.

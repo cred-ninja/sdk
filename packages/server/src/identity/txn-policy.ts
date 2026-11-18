@@ -46,8 +46,14 @@ export function normalizeTxnTrustDomains(
   configured: Readonly<Record<string, TxnTokenTrust>> | undefined,
 ): Readonly<Record<string, TxnTokenTrust>> | undefined {
   if (!configured) return undefined;
-  const out: Record<string, TxnTokenTrust> = {};
-  for (const [trustDomain, trust] of Object.entries(configured)) out[trustDomain.toLowerCase()] = trust;
+  const out: Record<string, TxnTokenTrust> = Object.create(null);
+  for (const [trustDomain, trust] of Object.entries(configured)) {
+    const canonical = trustDomain.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(out, canonical)) {
+      throw new Error('txn-token: duplicate canonical trust domain');
+    }
+    out[canonical] = trust;
+  }
   return out;
 }
 
