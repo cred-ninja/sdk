@@ -17,7 +17,9 @@
   canaries remain required; only deterministic Workflow Security is a candidate
   additional required context.
 - Repair planning-artifact detection and fail-closed leak-guard error handling;
-  remove tracked planning artifacts without rewriting history.
+  use NUL-delimited Git inventories throughout to handle Unicode, tabs, newlines
+  and leading-dash filenames, and refuse marker scanner errors. Remove tracked
+  planning artifacts without rewriting history.
 
 ### Added: external identity for agents (opt-in)
 
