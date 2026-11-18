@@ -38,11 +38,19 @@ function trackedStep(filename, content, name, prefix = '') {
       return result;
     };
     assert.equal(execute('git', ['init', '-q']).status, 0);
-    assert.equal(execute('git', ['add', '--', filename]).status, 0);
-    assert.equal(execute('bash', ['-c', steps.find((s) => s.name === 'Collect tracked files').run]).status, 0);
-    return execute('bash', ['-c', prefix + '\n' + steps.find((s) => s.name === name).run]);
+    assert.equal(execute('git', ['--literal-pathspecs', 'add', '--', filename]).status, 0);
+    const collection = execute('bash', ['-c', steps.find((s) => s.name === 'Collect tracked files').run]);
+    assert.equal(collection.status, 0);
+    const result = execute('bash', ['-c', prefix + '\n' + steps.find((s) => s.name === name).run]);
+    result.collectedOutput = collection.stdout;
+    return result;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
+test('tracked filenames cannot emit GitHub workflow commands in collection logs', () => {
+  const result = trackedStep('::add-mask::fixture.md', 'ordinary fixture', 'Block denylisted paths');
+  assert.equal(result.status, 0);
+  assert.ok(!result.collectedOutput.split('\n').some((line) => line.startsWith('::')));
+});
 for (const filename of ['docs/é-release-plan.md', 'docs/tab\t-release-plan.md', 'docs/line\n-release-plan.md']) {
   test(`real Git inventory blocks quoted plan filename ${JSON.stringify(filename)}`, () => {
     assert.notEqual(trackedStep(filename, 'ordinary fixture', 'Block denylisted paths').status, 0);

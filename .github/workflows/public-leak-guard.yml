@@ -34,7 +34,7 @@ jobs:
           git ls-files -z > "$RUNNER_TEMP/tracked-files.txt"
           echo "Tracked files under review:"
           while IFS= read -r -d '' path; do
-            printf '%q\n' "$path"
+            printf 'Tracked path: %q\n' "$path"
           done < "$RUNNER_TEMP/tracked-files.txt"
 
       - name: Block denylisted paths
