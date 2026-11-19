@@ -252,11 +252,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md). SDK, integration, and documentation co
 
 ### CI and review policy
 
-The [CI/review-gate runbook](./docs/ci-review-gate.md) documents the required
-checks, isolated security and diff/issue reviews, retry limits, agent restrictions
-and protected rollout prerequisites. Local policy tests do not establish hosted
-reviewer quality or prove that live branch settings require the candidate gates.
-Interactive agent mentions and automated package publication are not enabled.
+The [CI and change-review runbook](./docs/ci-review.md) describes deterministic
+checks, independent review and manual squash-merging. Python CI runs on every
+main-target PR. CodeRabbit findings and current-head review evidence are inspected
+before merging; there is no custom review-gate service or automated Claude runner.
+Package releases remain a separate manual action.
 
 ## Security
 

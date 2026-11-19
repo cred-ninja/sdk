@@ -39,20 +39,19 @@ We'll acknowledge within 48 hours and aim to resolve critical issues within 14 d
 
 ## CI and automated review boundaries
 
-The [review-gate runbook](./docs/ci-review-gate.md) defines the candidate CI policy
-and its protected bootstrap requirements. Automated reviews are advisory evidence
-in a non-atomic **advisory-only** aggregate, not a required merge context or a
-replacement for independent human/code-owner approval. Two isolated Claude sessions share one provider; that
-is not independent-provider review. The candidate policy must be deployed and
-verified on a hosted canary before claiming that it protects the default branch.
+The [CI and change-review runbook](./docs/ci-review.md) describes deterministic
+CI, CodeRabbit and independent review. Changes to security-sensitive code or CI
+need focused security review. Inspect findings and current-head evidence rather
+than treating a green review process as approval. Merge manually and never while
+a review is running; no asynchronous review aggregate claims to enforce that
+condition atomically.
 
 Do not run pull-request code, dependency installation, hooks or arbitrary mention
-commands in a job holding model credentials or a repository-write token. The
-trusted target workflow reads PR/issue diffs as data, disables model tools and
-keeps check publication in a separate non-model job. Future workers must not
-change security/release policy, branch protection, approvals or publishing
-without explicit maintainer authorization. A missing required check or review-service failure
-is never permission to bypass native approvals or weaken the policy.
+commands in a job holding model credentials or a repository-write token. There
+is no credential-bearing Claude workflow or interactive agent-mention workflow.
+Workers must not change security/release policy, branch protection, approvals or
+publishing without explicit maintainer authorization. A missing required check
+or review-service failure is never permission to bypass native approval rules.
 
 ## Disclosure policy
 

@@ -7,15 +7,12 @@
 - Run Python checks on every main-target PR, add explicit workspace typechecking,
   pin external Actions, restrict checkout credentials and workflow permissions,
   and add actionlint, offline zizmor and redacted Gitleaks checks.
-- Replace the optional Claude plugin review with isolated structured security and
-  diff/issue reviews and SHA-bound advisory evidence requiring real CodeRabbit
-  approval. Use a checksum-pinned native runtime artifact, not runtime installers
-  in credential jobs. Bound UTF-8 snapshot transport, validate complete hunks,
-  reconcile publication errors and independently invalidate/expire stale evidence.
-  The aggregate is not atomic merge enforcement and must remain advisory; native
-  independent human approval remains the final merge wall. Hosted rollout and
-  canaries remain required; only deterministic Workflow Security is a candidate
-  additional required context.
+- Remove automated Claude review and interactive agent workflows rather than
+  introducing a custom review-gate service. Retain CodeRabbit with formal review
+  verdicts and document current-head independent review, focused security review
+  for sensitive changes and manual squash-merging. Live protection and required
+  check changes need a separately authorized migration; no dummy review check
+  or automatic merge is introduced.
 - Repair planning-artifact detection and fail-closed leak-guard error handling;
   use NUL-delimited Git inventories throughout to handle Unicode, tabs, newlines
   and leading-dash filenames, and refuse marker scanner errors. Remove tracked
