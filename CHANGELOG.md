@@ -61,7 +61,9 @@ TOFU proof sent a second time (sign a new one for each request).
   it expires (`nbf <= now < exp`, draft-asor-wimse-agent-delegation-chain-03 step 5).
   It accepted `now = exp`, the -02 rule. Configured clock skew still extends the window.
 - `@credninja/attenuation`: `verifyDelegationChain` applies the same rule to receipt
-  chains: a hop is refused at the instant it expires, where it was accepted at `now = exp`.
+  chains: with zero clock skew, a hop is refused at the instant it expires, where it
+  was accepted at `now = exp`. Configured clock skew extends the window; the exclusive
+  expiry boundary is `exp + clockSkewSeconds`.
 - `@credninja/vault`: the `StorageBackend` comment no longer suggests that custom
   backends can be plugged into `CredVault`.
 

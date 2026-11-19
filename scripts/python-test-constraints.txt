@@ -43,7 +43,7 @@ defusedxml==0.7.1
 deprecation==2.1.0
 distro==1.9.0
 dnspython==2.8.0 ; python_full_version < '3.11'
-dnspython==2.9.1 ; python_full_version >= '3.11'
+dnspython==2.9.2 ; python_full_version >= '3.11'
 docstring-parser==0.18.0
 durationpy==0.11
 et-xmlfile==2.0.0
