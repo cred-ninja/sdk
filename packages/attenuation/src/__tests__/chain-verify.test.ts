@@ -85,6 +85,14 @@ describe('verifyDelegationChain', () => {
     expect(verifyDelegationChain(chain(), { now: 301, clockSkewSeconds: 60 }).ok).toBe(true);
   });
 
+  it('refuses a hop at the instant it expires (now < exp)', () => {
+    // The last hop expires at 300.
+    expect(verifyDelegationChain(chain(), { now: 299 }).ok).toBe(true);
+    expect(verifyDelegationChain(chain(), { now: 300 })).toMatchObject({ ok: false, reason: 'expired', hop: 2 });
+    expect(verifyDelegationChain(chain(), { now: 359, clockSkewSeconds: 60 }).ok).toBe(true);
+    expect(verifyDelegationChain(chain(), { now: 360, clockSkewSeconds: 60 }).ok).toBe(false);
+  });
+
   it('rejects a child that expires after its parent', () => {
     const hops = chain();
     hops[2].iat = 100000;
