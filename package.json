@@ -45,7 +45,7 @@
   "overrides": {
     "body-parser": "2.4.0",
     "esbuild": "0.28.2",
-    "express-rate-limit": "8.5.2",
+    "express-rate-limit": "8.7.4",
     "fast-uri": "3.1.9",
     "hono": "4.13.18",
     "@hono/node-server": "2.1.8",
