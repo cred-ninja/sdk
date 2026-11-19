@@ -37,17 +37,19 @@
     "hackathon:demo": "node scripts/hackathon/demo.mjs",
     "hackathon:serve": "node scripts/hackathon/serve.mjs",
     "hackathon:python": "node scripts/hackathon/python-sdk/run.mjs",
-    "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs"
+    "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs",
+    "test:ci": "node --test scripts/ci/*.test.mjs"
   },
   "devDependencies": {
     "eslint": "9.39.4",
     "globals": "17.6.0",
+    "js-yaml": "4.3.2",
     "typescript-eslint": "8.60.1"
   },
   "overrides": {
     "body-parser": "2.4.0",
     "esbuild": "0.28.2",
-    "express-rate-limit": "8.5.2",
+    "express-rate-limit": "8.7.4",
     "fast-uri": "3.1.9",
     "hono": "4.13.18",
     "@hono/node-server": "2.1.8",
