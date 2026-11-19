@@ -89,7 +89,7 @@ import { DPOP_ACCEPTED_ALGS, dpopBindingFor, dpopRequestHash, readDpopHeader, ve
 import { IdentityRefusal, mappedAgentDid, type ExternalIdentityKind, type IdentityRequest, type VerifiedExternalIdentity } from './identity/types.js';
 import { signWimseResponse, WIMSE_PROBLEM_TYPES, WIMSE_SIGNATURE_TAG } from './identity/http-signature.js';
 import { parseDictionary } from './identity/structured-fields.js';
-import { checkTxnTokenTrust, mappedProviderScopes, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
+import { checkTxnTokenTrust, mappedProviderScopes, txnTokenExpired, type TxnTokenTrust, type VerifiedTxnToken } from './identity/txn-token.js';
 import { decideTxnToken, isCredentialRoute, txnTrustRequiredFor as policyTxnTrustRequiredFor } from './identity/txn-policy.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -6171,6 +6171,15 @@ for (const button of document.querySelectorAll('[data-revoke-provider]')) {
         if (requestDebit) cumulativeLedger.refund(requestDebit.debited, requestQuantities);
         requestDebit = null;
       };
+      // Authentication preceded asynchronous Guard and storage work. The same
+      // verified transaction must still be live when its protected action runs.
+      // Do not rerun Guard admission or repeat proof/replay verification.
+      if (txn && txnTokenExpired(txn.token.exp, txn.trust)) {
+        refundRequestDebit();
+        refuseBrokeredCall(delegationId, delegation, upstreamUrl, 'txn_token_expired', { method: normalizedMethod });
+        res.status(403).json({ error: 'txn_token_expired', message: 'The transaction expired before the provider call' });
+        return;
+      }
       let upstream: globalThis.Response;
       try {
         upstream = await fetch(meteredUrl, {

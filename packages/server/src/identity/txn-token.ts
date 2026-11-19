@@ -132,6 +132,15 @@ function userIdFrom(claims: Record<string, unknown>, rule: TxnUserSubjectRule | 
   return m && typeof m[1] === 'string' && m[1].length > 0 ? m[1] : undefined;
 }
 
+/** Shared exclusive expiry boundary for authentication and final provider dispatch. */
+export function txnTokenExpired(
+  exp: number,
+  trust: TxnTokenTrust,
+  now = (trust.now ?? (() => Math.floor(Date.now() / 1000)))(),
+): boolean {
+  return exp + (trust.clockSkewSec ?? 60) <= now;
+}
+
 export function verifyTxnToken(token: string, trust: TxnTokenTrust): VerifiedTxnToken {
   const now = (trust.now ?? (() => Math.floor(Date.now() / 1000)))();
   const skew = trust.clockSkewSec ?? 60;
@@ -178,7 +187,7 @@ export function verifyTxnToken(token: string, trust: TxnTokenTrust): VerifiedTxn
   };
   const iat = num('iat');
   const exp = num('exp');
-  if (exp + skew <= now) refuse('expired', 'exp has passed');
+  if (txnTokenExpired(exp, trust, now)) refuse('expired', 'exp has passed');
   if (iat > now + skew) refuse('iat', 'iat is in the future');
   if (exp <= iat) refuse('lifetime', 'exp is not after iat');
   if (exp - iat > (trust.maxLifetimeSec ?? 3600)) refuse('lifetime', 'lifetime exceeds the configured maximum');
