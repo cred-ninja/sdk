@@ -128,7 +128,8 @@ export function verifyDelegationChain(
     if (hop.signatureValid !== true) {
       return fail('signature_invalid', i, `Hop ${i} signature did not verify`);
     }
-    if (typeof hop.exp === 'number' && now > hop.exp + skew) {
+    // A hop is not usable at its expiry (now < exp), as in agent-delegation.ts and delegation-token.ts.
+    if (typeof hop.exp === 'number' && now >= hop.exp + skew) {
       return fail('expired', i, `Hop ${i} expired at ${hop.exp}, now is ${now}`);
     }
     if (hop.chainDepth !== i) {

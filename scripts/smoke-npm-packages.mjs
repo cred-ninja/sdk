@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { npmPackFilename } from './npm-pack.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -61,11 +62,7 @@ function runOutput(command, args, options = {}) {
 
 function packWorkspace(workspace) {
   const output = runOutput('npm', ['pack', '--json', '--pack-destination', tmp, '--workspace', workspace]);
-  const packed = JSON.parse(output);
-  if (!packed[0]?.filename) {
-    throw new Error(`npm pack did not return a filename for ${workspace}`);
-  }
-  return join(tmp, packed[0].filename);
+  return join(tmp, npmPackFilename(JSON.parse(output)));
 }
 
 function freePort() {
@@ -209,6 +206,12 @@ function runInstalledTypeSmoke(consumerDir) {
 async function runFreshInstallSmoke(tarballsByWorkspace) {
   const consumerDir = join(tmp, 'consumer');
   run('npm', ['init', '-y'], { cwd: tmp, stdio: 'pipe' });
+  // npm 12 requires explicit lifecycle approval even in this fresh consumer.
+  // Reuse only the exact package versions already approved by this repository.
+  const consumerManifest = join(tmp, 'package.json');
+  const consumerPackage = JSON.parse(readFileSync(consumerManifest, 'utf8'));
+  consumerPackage.allowScripts = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).allowScripts;
+  writeFileSync(consumerManifest, `${JSON.stringify(consumerPackage, null, 2)}\n`);
   run('npm', ['install', '--no-audit', '--no-fund', ...Object.values(tarballsByWorkspace)], {
     cwd: tmp,
   });

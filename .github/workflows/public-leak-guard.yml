@@ -160,9 +160,11 @@ jobs:
           npm pack --dry-run --json --workspaces --ignore-scripts > "$RUNNER_TEMP/pack.json"
           # JavaScript template literals must reach Node without shell expansion.
           # shellcheck disable=SC2016
-          node -e '
-            const pkgs = JSON.parse(require("fs").readFileSync(process.env.RUNNER_TEMP + "/pack.json", "utf8"));
-            if (!Array.isArray(pkgs) || !pkgs.length || pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => typeof f.path !== "string"))) {
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { npmPackEntries } from "./scripts/npm-pack.mjs";
+            const pkgs = npmPackEntries(JSON.parse(readFileSync(process.env.RUNNER_TEMP + "/pack.json", "utf8")));
+            if (pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => !f || typeof f.path !== "string"))) {
               throw new Error("Invalid or empty npm pack inventory");
             }
             const bad = pkgs.flatMap((p) => p.files.map((f) => `${p.name}: ${f.path}`)).filter((f) => /(^|\/|: )reports\//.test(f));

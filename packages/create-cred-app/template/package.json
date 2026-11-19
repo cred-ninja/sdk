@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "@credninja/server": "^2.1.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
   }
 }

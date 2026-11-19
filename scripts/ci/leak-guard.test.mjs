@@ -4,15 +4,17 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import * as yaml from 'js-yaml';
 import { readFileSync } from 'node:fs';
 const steps = yaml.load(readFileSync(new URL('../../.github/workflows/public-leak-guard.yml', import.meta.url), 'utf8')).jobs['leak-guard'].steps;
+const root = fileURLToPath(new URL('../../', import.meta.url));
 function run(name, env = {}, prefix = '') {
   const step = steps.find((s) => s.name === name);
   const dir = mkdtempSync(join(tmpdir(), 'cred ci spaces-'));
   try {
     writeFileSync(join(dir, 'tracked-files.txt'), `${env.TEST_PATH ?? 'README.md'}\0`);
-    const result = spawnSync('bash', ['-c', prefix + '\n' + step.run], { env: { ...process.env, RUNNER_TEMP: dir, ...env }, encoding: 'utf8' });
+    const result = spawnSync('bash', ['-c', prefix + '\n' + step.run], { cwd: root, env: { ...process.env, RUNNER_TEMP: dir, ...env }, encoding: 'utf8' });
     if (result.error) throw result.error;
     assert.equal(typeof result.status, 'number', 'Bash must exit normally');
     return result;
@@ -87,6 +89,13 @@ test('pack validation rejects empty or structurally invalid inventories', () => 
 test('pack validation accepts clean inventory and rejects private paths', () => {
   for (const [path, expected] of [['dist/index.js', 0], ['reports/note.txt', 1]]) {
     const result = run('Block reports from npm packages', {}, `function npm() { printf '%s' '[{"name":"example","files":[{"path":"${path}"}]}]'; }`);
+    assert.equal(result.status, expected, result.stderr);
+  }
+});
+test('pack validation accepts npm 12 keyed inventory and still rejects forbidden paths', () => {
+  for (const [path, expected] of [['dist/index.js', 0], ['reports/note.txt', 1]]) {
+    const value = JSON.stringify({ example: { name: 'example', files: [{ path }] } });
+    const result = run('Block reports from npm packages', {}, `function npm() { printf '%s' '${value}'; }`);
     assert.equal(result.status, expected, result.stderr);
   }
 });
