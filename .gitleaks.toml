@@ -16,7 +16,7 @@ title = "cred-ninja/sdk gitleaks config"
 # Start from gitleaks' default ruleset, then add the allowlist below.
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Known-safe sample, test, and generated values"
 
 # Path patterns (matched against the file path). These trees contain only
@@ -43,3 +43,20 @@ regexes = [
   '''test-agent-token''',
   '''your_agent_token''',
 ]
+
+# Exact rule/path/value exceptions; no line-number bypass.
+[[allowlists]]
+targetRules = ['jwt', 'generic-api-key']
+description = 'Exact synthetic fixture value only; changed values remain reportable'
+condition = 'AND'
+regexTarget = 'secret'
+paths = ['''^packages/sdk\-python/tests/test_dpop\.py$''']
+regexes = ['''^\x65\x79\x4a\x68\x62\x47\x63\x69\x4f\x69\x4a\x46\x5a\x45\x52\x54\x51\x53\x4a\x39\x2e\x65\x79\x4a\x71\x64\x47\x6b\x69\x4f\x69\x4a\x6b\x5a\x57\x78\x66\x61\x47\x46\x75\x5a\x47\x78\x6c\x58\x32\x46\x69\x59\x79\x4a\x39\x2e\x63\x32\x6c\x6e\x62\x6d\x46\x30\x64\x58\x4a\x6c$''']
+
+[[allowlists]]
+targetRules = ['generic-api-key']
+description = 'Exact synthetic fixture value only; changed values remain reportable'
+condition = 'AND'
+regexTarget = 'secret'
+paths = ['''^packages/sdk\-python/tests/test_identity\.py$''']
+regexes = ['''^\x7a\x36\x4d\x6b\x68\x61\x58\x67\x42\x5a\x44\x76\x6f\x74\x44\x6b\x4c\x35\x32\x35\x37\x66\x61\x69\x7a\x74\x69\x47\x69\x43\x32\x51\x74\x4b\x4c\x47\x70\x62\x6e\x6e\x45\x47\x74\x61\x32\x64\x6f\x4b$''']

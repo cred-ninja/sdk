@@ -22,29 +22,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Collect tracked files
         shell: bash
         run: |
           set -euo pipefail
-          git ls-files | sed '/^$/d' > /tmp/tracked-files.txt
+          git ls-files -z > "$RUNNER_TEMP/tracked-files.txt"
           echo "Tracked files under review:"
-          cat /tmp/tracked-files.txt
+          while IFS= read -r -d '' path; do
+            printf 'Tracked path: %q\n' "$path"
+          done < "$RUNNER_TEMP/tracked-files.txt"
 
       - name: Block denylisted paths
         shell: bash
         run: |
           set -euo pipefail
 
-          deny='(^|/)(reports/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
+          deny='(^|/)(reports/|plans/|\.factory/|\.sprint-|\.sprint-logs/|\.sprint-prompts/|\.content-|\.rewire-|CLAUDE\.md$|PLAN\.md$|[^/]*-plan\.md$|HANDOFF\.md$|VALIDATION\.md$|FINAL-SUBMISSION-VALIDATION\.md$|MARKETING-VALIDATION\.md$|SESSION_PACKAGE\.md$|run-sprint\.sh$|validate\.sh$|\.hubspot-done$|\.integrations-done$|\.done$)'
 
-          if grep -nE "$deny" /tmp/tracked-files.txt; then
-            echo "::error::Denylisted private artifact path detected in public repository."
-            exit 1
-          fi
+          shopt -s nocasematch
+          fail=0
+          while IFS= read -r -d '' path; do
+            if [[ "$path" =~ $deny ]]; then
+              printf 'Denylisted path: %q\n' "$path"
+              echo "::error::Denylisted private artifact path detected in public repository."
+              fail=1
+            fi
+          done < "$RUNNER_TEMP/tracked-files.txt"
+          exit "$fail"
 
       - name: Block internal markers in public files
         shell: bash
@@ -54,7 +63,7 @@ jobs:
           marker='(\.factory/|SESSION_PACKAGE|DEBT-[0-9]{3}|FINDING-[0-9]{3}|AUDIT-[0-9]+)'
           fail=0
 
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             [[ -z "$path" ]] && continue
 
             case "$path" in
@@ -63,11 +72,16 @@ jobs:
                 ;;
             esac
 
-            if [[ -f "$path" ]] && grep -nE "$marker" "$path"; then
-              echo "::error file=$path::Internal process marker found in public file."
+            if [[ -f "$path" ]] && grep -qE -- "$marker" "$path"; then
+              printf 'Flagged path: %q\n' "$path"
+              echo "::error::Internal process marker found in public file."
+              fail=1
+            elif [[ $? -gt 1 ]]; then
+              printf 'Unreadable scan path: %q\n' "$path"
+              echo "::error::Internal marker scan failed."
               fail=1
             fi
-          done < /tmp/tracked-files.txt
+          done < "$RUNNER_TEMP/tracked-files.txt"
 
           exit "$fail"
 
@@ -83,7 +97,7 @@ jobs:
           private='Gmail (draft|drafts|thread|message|messages|id|ids|evidence|checked|delay|HOLD)\b|[Pp]rivate Gmail\b|Gmail r-?[0-9]{10,}|Gmail[^|)]{0,40}\b[0-9a-f]{16}\b|\b[Oo]ff-list\b|\b[Pp]rivately\b|Stance: (SPEAK|WATCH|DROP)\b|\b[Ss]peak[- ]by\b'
           fail=0
 
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             [[ -z "$path" ]] && continue
 
             case "$path" in
@@ -92,11 +106,16 @@ jobs:
                 ;;
             esac
 
-            if [[ -f "$path" ]] && grep -nE "$private" "$path"; then
-              echo "::error file=$path::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
+            if [[ -f "$path" ]] && grep -qE -- "$private" "$path"; then
+              printf 'Flagged path: %q\n' "$path"
+              echo "::error::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
+              fail=1
+            elif [[ $? -gt 1 ]]; then
+              printf 'Unreadable scan path: %q\n' "$path"
+              echo "::error::Correspondence marker scan failed."
               fail=1
             fi
-          done < /tmp/tracked-files.txt
+          done < "$RUNNER_TEMP/tracked-files.txt"
 
           exit "$fail"
 
@@ -118,12 +137,13 @@ jobs:
           # itself is checked file by file above, so skip that generated block.
           body=$(printf '%s\n' "$PR_BODY" | sed '/<!-- This is an auto-generated comment: release notes by coderabbit.ai -->/,/<!-- end of auto-generated comment: release notes by coderabbit.ai -->/d')
 
-          if printf '%s\n%s\n' "$PR_TITLE" "$body" | grep -nE "$private"; then
+          if printf '%s\n%s\n' "$PR_TITLE" "$body" | grep -E "$private" >/dev/null; then
             echo "::error::Private correspondence marker found in the PR title or body."
             fail=1
           fi
 
-          if git log --format='%H%n%B' "$BASE_SHA..$HEAD_SHA" | grep -nE "$private"; then
+          commits=$(git log --format='%H%n%B' "$BASE_SHA..$HEAD_SHA")
+          if printf '%s\n' "$commits" | grep -E "$private" >/dev/null; then
             echo "::error::Private correspondence marker found in a commit message on this PR."
             fail=1
           fi
@@ -137,13 +157,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          npm pack --dry-run --json --workspaces --ignore-scripts > /tmp/pack.json
-          if node -e '
-            const pkgs = JSON.parse(require("fs").readFileSync("/tmp/pack.json", "utf8"));
+          npm pack --dry-run --json --workspaces --ignore-scripts > "$RUNNER_TEMP/pack.json"
+          # JavaScript template literals must reach Node without shell expansion.
+          # shellcheck disable=SC2016
+          node -e '
+            const pkgs = JSON.parse(require("fs").readFileSync(process.env.RUNNER_TEMP + "/pack.json", "utf8"));
+            if (!Array.isArray(pkgs) || !pkgs.length || pkgs.some((p) => typeof p.name !== "string" || !Array.isArray(p.files) || !p.files.length || p.files.some((f) => typeof f.path !== "string"))) {
+              throw new Error("Invalid or empty npm pack inventory");
+            }
             const bad = pkgs.flatMap((p) => p.files.map((f) => `${p.name}: ${f.path}`)).filter((f) => /(^|\/|: )reports\//.test(f));
             bad.forEach((f) => console.log(f));
-            process.exit(bad.length ? 0 : 1);
-          '; then
-            echo "::error::A published package would include reports/."
-            exit 1
-          fi
+            process.exit(bad.length ? 1 : 0);
+          '
