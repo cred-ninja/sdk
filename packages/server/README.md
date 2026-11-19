@@ -1069,6 +1069,7 @@ import {
 const wimse = createWimseIdentitySource({
   trustDomains: { 'prod.example': loadTrustBundle({ path: '/etc/cred/prod.example.bundle.json' }, { keyUse: 'wit-svid' }) },
   replay: createReplayCache(),
+  replayMode: 'single-process', // Explicit choice for one process, not replicas.
 });
 const { app, vault } = createServer({
   /* ...usual config... */
@@ -1086,11 +1087,20 @@ const { app, vault } = createServer({
 - Replay: each WPT `jti` is accepted once; it is held until the WPT expires plus 60 seconds of clock skew (a WPT may expire at most 300 seconds ahead, plus skew). The cache is per process, like the DPoP and actor-token caches. For replicas behind a load balancer, pass `sharedReplay`: a `SharedReplayStore` (`checkAndRecord(key, ttlSeconds)`, returning a Promise) whose check and record are one atomic operation, for example Redis `SET key 1 NX EX <ttlSeconds>`. It is consulted once per request, after the per-process cache accepts a WPT `jti` or signature nonce, with keys scoped to the presenting workload, and given a relative lifetime: the acceptance window plus one more clock skew, so a replica whose clock lags still finds the entry. A value it has already seen, a store error, or no answer within `sharedReplayTimeoutMs` (default 1000 ms) refuses the request. Cred ships no network store, only `createInMemorySharedReplayStore` for tests and single-process use.
 - Supported workload keys: ES256 and Ed25519.
 
+`createWimseIdentitySource` requires an explicit deployment choice: provide
+`sharedReplay` for replicas, or set `replayMode: 'single-process'` to acknowledge
+process-local replay protection. Without either, startup fails. The in-memory
+shared-store helper does not provide cross-process protection. Local replay keys
+are scoped to the verified trust domain and workload subject, for WPTs and HTTP
+request/response signatures alike. Equal random values from different workloads
+do not interfere; repeating one for the same workload is refused.
+
 **HTTP message signatures.** Implements draft-ietf-wimse-http-signature-08 (an RFC 9421 profile) as an alternative proof to the WPT, as far as the tests and the #419 test vectors (`conformance/wimse-419`, 28 of 28) cover it. A request carries `Workload-Identity-Token` plus `Signature-Input`/`Signature`. It is accepted wherever WIT + WPT is.
 - The WIMSE signature is the one tagged `wimse-workload-to-workload`, chosen by tag and never by label. Two such signatures are refused. `keyid` and `alg` parameters are refused, because the key and algorithm come from the WIT's `cnf.jwk`.
 - It must cover `@method`, `@path`, `@query`, `workload-identity-token`, and `content-type`, `content-digest`, `authorization` and `txn-token` whenever they are present. A body needs a `Content-Digest` that matches the bytes received (sha-256 or sha-512), for any content type. A `Content-Encoding` is refused.
 - `created`, `expires` (at most 300 s apart by default, `httpSignature.maxSignatureLifetimeSec`), `nonce` (16+ characters by default, `httpSignature.minNonceLength`) and `wimse-aud` are required. `wimse-aud` must equal the broker's base URI plus path or one of `httpSignature.audiences`, by exact string, never derived from `Host`.
 - The WIT is validated before the signature. The nonce is recorded only after every check passes, in the same per-process replay cache.
+- Request and response signatures are refused at `now == expires` as well as after it; sign fresh requests before that boundary.
 - Every failure, including an unmapped workload, is the same `400` `application/problem+json` with type `https://iana.org/assignments/http-problem-types#wimse-signature-invalid`. A request with `wimse-sign-response` gets a signed response when `externalIdentity.responseSigning` holds Cred's own WIT and key (§3.4-3.5): the signature covers `@status`, the WIT, Content-Type, Content-Digest and `@method;req`/`@path;req`/`@query;req`, carries `wimse-req-nonce`, and applies to whatever the route answers, including refusals. Without `responseSigning` the answer is `501` `…#wimse-signed-response-unsupported`. The event stream (`/api/v1/audit/stream`) cannot be signed and gets `400` `…#wimse-signed-response-unavailable`.
 - On `POST /api/v1/use`, a WIT + HTTP signature may accompany the Delegation Token and its DPoP proof. The signature must cover `Authorization` (the Delegation Token), and the workload must map to the agent the token was issued to.
 - A signature tagged for WIMSE is never treated as Web Bot Auth. A request mixing it with another signature is refused where Web Bot Auth runs. So with `webBotAuthMode: 'require'`, an HTTP-signature workload is always refused, and Cred warns about that combination at startup.

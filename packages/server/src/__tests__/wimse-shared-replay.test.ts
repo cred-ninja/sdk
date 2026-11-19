@@ -1,7 +1,7 @@
 /**
  * A shared replay store across server instances: a WPT jti or request
  * signature nonce accepted at one replica is refused at another. Without one,
- * each process keeps its own cache (the default).
+ * each process keeps its own cache only after explicitly choosing single-process mode.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createInMemorySharedReplayStore, type SharedReplayStore } from '../identity/types.js';
@@ -39,7 +39,7 @@ describe('shared replay store', () => {
     expect((await send(two.app, 'get', CONN, h)).status).toBe(401);
   });
 
-  it('without a shared store each instance keeps its own cache (the per-process default)', async () => {
+  it('with explicit single-process mode each instance keeps its own cache', async () => {
     const { w, one, two } = await replicas();
     const h = httpSigHeaders(w, 'GET', CONN);
     expect((await send(one.app, 'get', CONN, h)).status).toBe(200);

@@ -105,6 +105,17 @@
   interop runs in `conformance/interop` (SPIRE main WIT-SVIDs, go-spiffe v2.7.0,
   wimsey, Cofide's PoC and minispire, authgent Txn-Tokens).
 
+### Fixed: WIMSE replay and signature windows
+
+- `@credninja/server`: WIMSE local replay keys are scoped to the verified workload
+  and trust domain, so one workload cannot consume another's WPT `jti` or HTTP
+  request/response signature nonce. Replays by the same workload remain refused.
+- `@credninja/server`: WIMSE source startup requires either `sharedReplay` or an
+  explicit `replayMode: 'single-process'` choice; process-local protection is no
+  longer silently selected for replicas.
+- `@credninja/server`: HTTP request and response signatures are refused at the
+  instant `now == expires`, not just afterwards.
+
 ### Changed
 
 - `@credninja/server`: `extra_headers` on `POST /api/v1/use` can no longer forward

@@ -121,7 +121,7 @@ function mint(o: MintOpts = {}): { req: IdentityRequest; wit: string; wpt: strin
 }
 
 function source(overrides: Partial<WimseSourceConfig> = {}) {
-  return createWimseIdentitySource({ trustDomains: anchors, replay: createReplayCache(), now: () => NOW, ...overrides });
+  return createWimseIdentitySource({ trustDomains: anchors, replay: createReplayCache(), replayMode: 'single-process', now: () => NOW, ...overrides });
 }
 
 async function refusalCode(p: Promise<unknown>): Promise<string> {
@@ -440,7 +440,7 @@ describe('draft example vectors (fixed clock)', () => {
   ])('%s verifies; one clock tick past WIT exp + skew does not', async (_name, witFile, wptFile) => {
     const wit = read(witFile);
     const wpt = read(wptFile);
-    const src = createWimseIdentitySource({ trustDomains: { 'example.com': bundle() }, replay: createReplayCache(), now: () => 1_745_509_800 });
+    const src = createWimseIdentitySource({ trustDomains: { 'example.com': bundle() }, replay: createReplayCache(), replayMode: 'single-process', now: () => 1_745_509_800 });
     await expect(src.authenticate(req(wit, wpt))).resolves.toMatchObject({
       subject: 'wimse://example.com/specific-workload',
       trustDomain: 'example.com',

@@ -39,7 +39,7 @@ async function setup(agent: AgentIdentity) {
     adminToken: ADMIN, agentToken: TOKEN, redirectBaseUri: BASE,
     providers: [{ slug: 'google', clientId: 'cid', clientSecret: 'secret', defaultScopes: ['openid', 'email'] }],
     externalIdentity: {
-      sources: [createWimseIdentitySource({ trustDomains: { [b.name]: b.anchors }, replay: createReplayCache() })],
+      sources: [createWimseIdentitySource({ trustDomains: { [b.name]: b.anchors }, replay: createReplayCache(), replayMode: 'single-process' })],
       mappings: [{ kind: 'wimse', subject: w.subject, agentDid: agent.did }],
       // Required (the default): this agent obtains credentials only inside a verified transaction.
       txnTokens: { [b.name]: tts.trust() },
