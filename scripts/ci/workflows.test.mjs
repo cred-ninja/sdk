@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const load = (name) => yaml.load(readFileSync(`${root}.github/workflows/${name}.yml`, 'utf8'));

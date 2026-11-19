@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { readFileSync } from 'node:fs';
 const steps = yaml.load(readFileSync(new URL('../../.github/workflows/public-leak-guard.yml', import.meta.url), 'utf8')).jobs['leak-guard'].steps;
 function run(name, env = {}, prefix = '') {
