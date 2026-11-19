@@ -35,6 +35,28 @@ export function txnTrustRequiredFor(
   return undefined;
 }
 
+/**
+ * Trust-domain keys are matched against a lower-cased trust domain (the WIMSE
+ * source lower-cases its own `trustDomains`), so normalise the configured
+ * `txnTokens` keys the same way. Without this, a key written with any upper-case
+ * letter never matches and the `required` default (and its narrowing) silently
+ * does not apply to the domain it names.
+ */
+export function normalizeTxnTrustDomains(
+  configured: Readonly<Record<string, TxnTokenTrust>> | undefined,
+): Readonly<Record<string, TxnTokenTrust>> | undefined {
+  if (!configured) return undefined;
+  const out: Record<string, TxnTokenTrust> = Object.create(null);
+  for (const [trustDomain, trust] of Object.entries(configured)) {
+    const canonical = trustDomain.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(out, canonical)) {
+      throw new Error('txn-token: duplicate canonical trust domain');
+    }
+    out[canonical] = trust;
+  }
+  return out;
+}
+
 export type TxnTokenDecision =
   | { ok: true; accepted?: { token: VerifiedTxnToken; trust: TxnTokenTrust } }
   | { ok: false; code: string; detail: string };

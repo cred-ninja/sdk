@@ -57,6 +57,19 @@ async function delegated(s: Awaited<ReturnType<typeof setup>>, txnClaims: Record
 }
 
 describe('binding: a Txn-Token rides only on the proof that covers it', () => {
+  it.each([true, false])('rejects startup for duplicate canonical Txn trust domains, strict first: %s', async (strictFirst) => {
+    const b = trustDomain(TD);
+    const w = b.workload();
+    const tts = txnIssuer(TD);
+    const strict = tts.trust({ required: true });
+    const lax = tts.trust({ required: false });
+    const txnTokens = Object.fromEntries(strictFirst
+      ? [['Domain-B.Example', strict], [TD, lax]]
+      : [[TD, lax], ['Domain-B.Example', strict]]);
+    await expect(wimseServer({ domains: [b], mapSubject: () => w.subject, txnTokens }))
+      .rejects.toThrow(/duplicate.*trust domain/i);
+  });
+
   it('WPT with a matching tth is accepted on an agent route', async () => {
     const s = await setup();
     const txn = s.tts.mint();
@@ -112,6 +125,19 @@ describe('binding: a Txn-Token rides only on the proof that covers it', () => {
     expect((await del(strict)).status).toBe(401);
     const lax = await setup({ required: false });
     expect((await del(lax)).status).toBe(200);
+  });
+
+  it('a txnTokens key written in mixed case still applies: trust-domain keys match case-insensitively', async () => {
+    const b = trustDomain(TD);
+    const w = b.workload();
+    const tts = txnIssuer(TD);
+    const s = await wimseServer({ domains: [b], mapSubject: () => w.subject, txnTokens: { 'Domain-B.Example': tts.trust() } });
+    const json = JSON.stringify({ token_format: 'handle', agent_did: s.agent.did, service: 'google', user_id: 'default', scopes: ['calendar.readonly'] });
+    const res = await send(s.app, 'post', '/api/v1/delegate', {
+      ...wptHeaders(w, '/api/v1/delegate'), dpop: createDpopProof(s.agent, 'POST', `${BASE}/api/v1/delegate`),
+    }, json);
+    // Before the fix the mixed-case key never matched, so the requirement was off and this answered 200.
+    expect(res.status).toBe(401);
   });
 
   it('revocation and audit reads do not depend on the Txn-Token Service, even where Txn-Tokens are required', async () => {
