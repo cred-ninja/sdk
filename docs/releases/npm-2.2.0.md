@@ -54,6 +54,7 @@ Configure it only when you mean to: it is documented in `packages/server/README.
 | WIMSE replay deployment configuration | startup refuses a source with neither `sharedReplay` nor `replayMode: 'single-process'` | choose a shared cross-process store for replicas, or acknowledge single-process operation |
 | WIMSE local replay keys | a verified workload's `jti` or nonce no longer consumes another workload's value; same-workload replays are still refused | none |
 | HTTP request and response signatures at `now == expires` | refused rather than accepted at that boundary | sign before expiration; no expiration skew is applied |
+| A verified Txn-Token expires while Guard or storage work awaits on `POST /api/v1/use` | refused with `403 txn_token_expired` before provider dispatch; the unperformed call's cumulative debit is refunded without repeating Guard | use the authentication clock and configured `clockSkewSec` (default 60 seconds); `exp + clockSkewSec` is exclusive |
 
 ## Upgrade checklist
 

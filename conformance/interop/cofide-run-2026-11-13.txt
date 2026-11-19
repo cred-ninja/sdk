@@ -34,7 +34,7 @@ WIT header and payload:
 
 Request:
 GET /api/v1/connections HTTP/1.1
-Workload-Identity-Token: eyJhbGciOiJFUzI1NiIsImtpZCI6ImtpZCIsInR5cCI6IndpdCtqd3QifQ.eyJhdWQiOiIiLCJjbmYiOnsiandrIjp7InVzZSI6InNpZyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJhbGciOiJFUzI1NiIsIngiOiJaOElFSHdvUmF0a0h0eDVGMDN3enNXMXoyRVpuNm95UXluWUVxTF9CRGNvIiwieSI6Ik9QM1JxNlhiUjFuNjlRbjJJZFdlTkpHVTI2R3U3ZTNSUlF0cm4xcWFPNWMifX0sImV4cCI6MTc5NDYwMzM0OSwiaWF0IjoxNzk0NjAzMDQ5LCJpc3MiOiJ3aW1zZTovL2V4YW1wbGUuY29tIiwianRpIjoiNmNhODMwZWUyOTNhMTlmOTBmNjkyNTU0MGZmMTE0M2QwZjM1Zjg1NzFhYzk2ZGQ4MTk3MzdkNmY3YmI0Mjc5YiIsInN1YiI6IndpbXNlOi8vZXhhbXBsZS5jb20vZ2lkLzIwL3BpZC81NTE5NS91aWQvNTAxIn0.7761QS6hgU-21q6j4uO-rbaM28S-0W6GLgCdYrI-2e10BKfbUm10AYM9mwlnzGo42Wr5-rJbLUeESkqdzM420A
+Workload-Identity-Token: [REDACTED_RUNTIME_WIT]
 Signature: wimse=:VJfy3KruZvDerATbsLHV9L2kJqcLP8EBSdQZipe5S5C8VjsTTxUlp0EygOqPjFoNqrvhZFLkKWBiv0ReoXt4Nw==:
 Signature-Input: wimse=("@method" "@request-target" "workload-identity-token");created=1794603049;expires=1794603349;nonce="e6c35618d9c4219063311ddc02335401d5f4b7212f6ab8a906180dfddd92f420";alg="ecdsa-p256-sha256";tag="wimse-workload-to-workload"
 
@@ -54,3 +54,8 @@ Etag: W/"88-rJ7Vxu/tKSOJYGFq1SwNU1lvYF8"
 Keep-Alive: timeout=5
 client error: unable to parse token: go-jose/go-jose: compact JWS format must have three parts
 [cred] wimse identity refused: forbidden_parameter: alg present
+
+# Evidence sanitization: 2026-11-19. One runtime-issued workload JWT was redacted
+# from the request header above; it expired 2026-11-13 at 20:55:49 UTC.
+# This sanitized log is not byte-complete input for replaying that signature.
+# Original evidence is retained separately; no Git history was rewritten.

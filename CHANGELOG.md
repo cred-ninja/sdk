@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.2.0] - 2026-11-17
+## [2.2.0] - Unreleased
 
 npm 2.2.0 for every `@credninja` package, PyPI 2.2.0 for the Python packages. Read the
 [release and upgrade notes](docs/releases/npm-2.2.0.md) before upgrading a running
@@ -111,6 +111,10 @@ deployment.
 
 ### Fixed: WIMSE replay and signature windows
 
+- `@credninja/server`: `POST /api/v1/use` checks the verified Txn-Token again
+  immediately before provider dispatch, after asynchronous Guard and storage work.
+  At `exp + clockSkewSec` it refuses with `txn_token_expired`, refunds the
+  unperformed call's cumulative debit and does not repeat Guard admission.
 - `@credninja/server`: WIMSE local replay keys are scoped to the verified workload
   and trust domain, so one workload cannot consume another's WPT `jti` or HTTP
   request/response signature nonce. Replays by the same workload remain refused.
