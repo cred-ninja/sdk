@@ -250,6 +250,14 @@ For production deployments, [`@credninja/server`](./packages/server) includes Do
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). SDK, integration, and documentation contributions welcome.
 
+### CI and review policy
+
+The [CI and change-review runbook](./docs/ci-review.md) describes deterministic
+checks, independent review and manual squash-merging. Python CI runs on every
+main-target PR. CodeRabbit findings and current-head review evidence are inspected
+before merging; there is no custom review-gate service or automated Claude runner.
+Package releases remain a separate manual action.
+
 ## Security
 
 See [SECURITY.md](./SECURITY.md) for vulnerability disclosure. Maintainer review notes are in [SECURITY-AUDITS.md](./SECURITY-AUDITS.md).
