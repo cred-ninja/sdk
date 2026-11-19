@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [2.2.0] - 2026-11-17
+
+npm 2.2.0 for every `@credninja` package, PyPI 2.2.0 for the Python packages. Read the
+[release and upgrade notes](docs/releases/npm-2.2.0.md) before upgrading a running
+deployment.
 
 ### CI security
 
