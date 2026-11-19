@@ -54,17 +54,17 @@ clear the queue. Package releases remain a separate manual action.
 
 ## Rollout
 
-This branch does not change live protection, approvals or repository settings.
-Before landing it, an authorized maintainer must coordinate retirement of the
-obsolete required `claude-review` context, because its producer is removed.
-Do not emit a dummy green replacement. Preserve the other required checks,
-conversation resolution, stale-review/last-push handling, the extra approval for
-unattributed changes and the separate CodeQL security result.
+Workflow files do not change live protection or repository settings. Retiring the
+obsolete required `claude-review` context needs an authorized settings change,
+because its producer is removed. Do not emit a dummy green replacement. Preserve
+the other required checks, conversation resolution, stale-review dismissal, the
+extra approval for unattributed changes and the separate CodeQL security result.
 
-Native approval also needs an eligible reviewer other than the author. Correcting
-CODEOWNERS does not create that person or grant repository access. If no eligible
-approver is available, the maintainer must explicitly decide how to resolve that
-setup; this change neither bypasses nor relaxes the approval rule.
+Native approval needs an eligible reviewer other than the author; CODEOWNERS does
+not create that person or grant access. For a single-maintainer repository, the
+owner may explicitly authorize zero required approving reviews and disable
+last-push approval. That settings decision does not waive current-head independent
+review, unresolved findings, manual merging or any required CI/security check.
 
 After publication, verify Python CI appears on a main-target PR without Python
 changes and inspect the hosted Workflow Security result. Do not add a new
