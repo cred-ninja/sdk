@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### CI security
+
+- Run Python checks on every main-target PR, add explicit workspace typechecking,
+  pin external Actions, restrict checkout credentials and workflow permissions,
+  and add actionlint, offline zizmor and redacted Gitleaks checks.
+- Remove automated Claude review and interactive agent workflows rather than
+  introducing a custom review-gate service. Retain CodeRabbit with formal review
+  verdicts and document current-head independent review, focused security review
+  for sensitive changes and manual squash-merging. Live protection and required
+  check changes need a separately authorized migration; no dummy review check
+  or automatic merge is introduced.
+- Repair planning-artifact detection and fail-closed leak-guard error handling;
+  use NUL-delimited Git inventories throughout to handle Unicode, tabs, newlines
+  and leading-dash filenames, and refuse marker scanner errors. Remove tracked
+  planning artifacts without rewriting history.
+
 ### Added: external identity for agents (opt-in)
 
 - `@credninja/server`: `externalIdentity` in `ServerConfig` lets an agent authenticate

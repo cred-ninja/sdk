@@ -33,11 +33,13 @@
     "release:hygiene": "node scripts/check-release-hygiene.mjs",
     "smoke:npm": "node scripts/smoke-npm-packages.mjs",
     "smoke:python": "bash scripts/smoke-python-wheels.sh",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test:ci": "node --test scripts/ci/*.test.mjs"
   },
   "devDependencies": {
     "eslint": "9.39.4",
     "globals": "17.6.0",
+    "js-yaml": "4.3.2",
     "typescript-eslint": "8.60.1"
   },
   "overrides": {
