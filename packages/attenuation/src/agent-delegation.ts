@@ -414,7 +414,8 @@ export function verifyAgentDelegationChain(
   for (let i = 0; i < verified.length; i++) {
     const c = verified[i]!.claims;
     if (c.nbf !== undefined && now + skew < c.nbf) return fail('expired', i, `token[${i}] is not valid before ${c.nbf}`);
-    if (now > c.exp + skew) return fail('expired', i, `token[${i}] expired at ${c.exp}`);
+    // draft-asor -03 step 5: nbf <= now < exp. A token is not usable at its expiry.
+    if (now >= c.exp + skew) return fail('expired', i, `token[${i}] expired at ${c.exp}`);
     if (i > 0 && c.exp > verified[i - 1]!.claims.exp) {
       return fail('expired', i, `token[${i}] expires at ${c.exp}, after its parent at ${verified[i - 1]!.claims.exp}`);
     }
