@@ -46,7 +46,7 @@
     "@credninja/tofu": "^2.2.0",
     "@credninja/vault": "^2.2.0",
     "@types/express": "^5.0.5",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.2.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.4"
   },
