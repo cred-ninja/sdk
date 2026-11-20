@@ -32,7 +32,7 @@
   "dependencies": {
     "@credninja/attenuation": "^2.1.0",
     "@credninja/protocol": "^2.1.0",
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": "^13.2.0"
   },
   "peerDependencies": {
     "@credninja/oauth": "^2.1.0"
