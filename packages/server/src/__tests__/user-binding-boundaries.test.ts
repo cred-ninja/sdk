@@ -88,6 +88,7 @@ describe('a caller bound to one user', () => {
     const claims = JSON.parse(Buffer.from(viaQuery.body.access_token.split('.')[1], 'base64url').toString('utf8'));
     expect(claims.sub).toBe('alice');
     expect(claims.client_id).toBe(agent.did);
+    expect(JSON.stringify(claims)).not.toContain('ya29.bob-secret');
     expect(JSON.stringify(viaQuery.body)).not.toContain('ya29.bob-secret');
   });
 
