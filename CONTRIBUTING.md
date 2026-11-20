@@ -20,7 +20,9 @@ Cred is an agent credential delegation protocol — it lets AI agents receive an
 
 ## Development Setup
 
-**Requirements:** Node.js 22+ (develop on 26, see `.nvmrc`), npm 10+
+**Requirements:** Node.js 22.x, 24.x, or 26+ (develop on 26, see `.nvmrc`), npm 10+.
+The workspace follows GraphQL's runtime range, `^22.0.0 || ^24.0.0 || >=26.0.0`;
+Node 23 and 25 are excluded.
 
 ```bash
 # Clone the repo
@@ -91,10 +93,10 @@ Run in watch mode during development:
 
 ```bash
 cd packages/oauth
-npx jest --watch
+npm run test:watch
 ```
 
-Tests use Jest with `ts-jest`. All new code requires tests. PRs that reduce coverage will not be merged.
+Package tests use Vitest. All new code requires tests. PRs that reduce coverage will not be merged.
 
 ---
 

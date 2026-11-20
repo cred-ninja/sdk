@@ -6,6 +6,17 @@ npm 2.2.0 for every `@credninja` package, PyPI 2.2.0 for the Python packages. Re
 [release and upgrade notes](docs/releases/npm-2.2.0.md) before upgrading a running
 deployment.
 
+### GraphQL compatibility
+
+- Align the workspace, guard, server, MCP and generated server Node engine ranges
+  with GraphQL 17: `^22.0.0 || ^24.0.0 || >=26.0.0`. Node 23 and 25 are no longer
+  advertised for these consumers; packages without that runtime dependency keep
+  their existing declarations.
+- Adopt GraphQL 17's empty-selection grammar. Empty queries still require a query
+  grant, Linear empty mutations still require `write`, and GitHub empty mutations
+  remain unmapped. Provider schema validation is not performed by the classifier.
+  Add classifier and broker-route regressions for the grammar and grant boundaries.
+
 ### CI security
 
 - Run Python checks on every main-target PR, add explicit workspace typechecking,

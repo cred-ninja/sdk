@@ -11,7 +11,8 @@ client's `sign_request`, covering the WIMSE HTTP-signature request signing.
 
 2.2.0 adds opt-in agent authentication by an external workload identity (WIMSE) and by
 Transaction Tokens, and tightens several checks that already existed. No export, type or
-route is removed, and code written against 2.1.0 compiles and runs.
+route is removed, and code written against 2.1.0 compiles and runs on the supported
+Node versions below.
 
 It is not a drop-in upgrade for a running deployment. A server that upgrades and changes
 nothing else will refuse calls that worked on 2.1.0, and one Guard input changes. A
@@ -21,6 +22,21 @@ install reaches production.
 The new authentication is off unless `externalIdentity` is set on `ServerConfig`, and that
 is programmatic only — no environment variable enables it — so a deployment that does not
 configure it keeps 2.1.0's authentication behavior exactly.
+
+## Node and GraphQL compatibility
+
+The workspace, `@credninja/guard`, `@credninja/server`, `@credninja/mcp` and
+generated server projects require Node.js 22.x, 24.x, or 26+
+(`^22.0.0 || ^24.0.0 || >=26.0.0`), matching GraphQL 17. Node 23 and 25 are
+excluded; move those deployments to a supported runtime before upgrading.
+Packages without the GraphQL runtime dependency keep their existing declarations.
+
+The classifier adopts GraphQL 17 grammar, including empty selections such as `{}`,
+`mutation {}` and nested empty selections. Syntax acceptance does not replace grant
+checks: queries still need their provider's query scope, a Linear empty mutation
+needs `write` (not `read`, `admin` or a narrow creation scope), and a GitHub empty
+mutation remains unmapped. Every operation is classified even when `operationName`
+selects an empty query. The provider, not Cred's classifier, validates its schema.
 
 ## Authentication this release adds (opt-in)
 

@@ -4,6 +4,9 @@ Policy engine for credential delegation guardrails. Add rate limiting, scope fil
 
 ## Install
 
+Requires Node.js 22.x, 24.x, or 26+ (`^22.0.0 || ^24.0.0 || >=26.0.0`),
+matching the GraphQL runtime dependency. Node 23 and 25 are excluded.
+
 ```bash
 npm install @credninja/guard
 ```

@@ -67,7 +67,7 @@
     }
   },
   "engines": {
-    "node": ">=22"
+    "node": "^22.0.0 || ^24.0.0 || >=26.0.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

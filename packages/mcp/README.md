@@ -13,6 +13,9 @@ This MCP server enables AI agents running in MCP-compatible runtimes to request 
 
 ## Installation
 
+Requires Node.js 22.x, 24.x, or 26+ (`^22.0.0 || ^24.0.0 || >=26.0.0`),
+matching the guard's GraphQL dependency in both modes. Node 23 and 25 are excluded.
+
 Run directly with npx (recommended):
 
 ```bash

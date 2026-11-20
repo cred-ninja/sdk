@@ -602,6 +602,8 @@ function classifyGraphql(body: unknown): GraphqlShape {
   if (typeof query !== 'string') return { kind: 'refused', reason: 'graphql_body' };
   let document: DocumentNode;
   try {
+    // Adopt GraphQL 17 grammar, including empty selections. Parsing is not
+    // provider schema validation; every operation still needs a covering grant.
     document = parse(query, { noLocation: true, maxTokens: 10_000 });
   } catch {
     return { kind: 'refused', reason: 'graphql_unparseable' };

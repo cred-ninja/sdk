@@ -6,6 +6,9 @@ Stores OAuth tokens in an encrypted vault and can either serve delegated access 
 
 ## Quick Start
 
+Requires Node.js 22.x, 24.x, or 26+ (`^22.0.0 || ^24.0.0 || >=26.0.0`),
+matching the guard's GraphQL dependency. Node 23 and 25 are excluded.
+
 ```bash
 # Install
 npm install @credninja/server

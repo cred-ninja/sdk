@@ -12,7 +12,7 @@ Seven battle-tested provider adapters: Google, GitHub, Slack, Notion, Salesforce
 npm install @credninja/oauth
 ```
 
-**Requirements:** Node.js ≥ 18 (uses built-in `fetch` and `crypto`).
+**Requirements:** Node.js ≥ 22 (uses built-in `fetch` and `crypto`).
 
 ---
 
