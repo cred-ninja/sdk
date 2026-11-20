@@ -26,6 +26,16 @@ export interface IdentityRequest {
   rawHeaders?: readonly string[];
   /** The connection's socket, so a source can tell which listener accepted it. */
   socket: unknown;
+  /** The request's path as received (`@path`), e.g. `/api/v1/use`. */
+  path?: string;
+  /** The query without its leading `?`, or undefined when the target has none. */
+  query?: string;
+  /**
+   * The exact bytes received, for Content-Digest. Undefined when the server
+   * did not capture them; `hasBody` says whether the request carried a body.
+   */
+  body?: Buffer;
+  hasBody?: boolean;
 }
 
 /** An identity a source has verified for this one request. */
@@ -56,13 +66,19 @@ export class IdentityRefusal extends Error {
   readonly code: string;
   readonly detail: string;
   readonly kind: ExternalIdentityKind;
+  /**
+   * The proof profile the refused request used, when known. HTTP-signature
+   * refusals answer differently (draft-ietf-wimse-http-signature-08 §3.6).
+   */
+  readonly proof?: VerifiedExternalIdentity['proof'];
 
-  constructor(kind: ExternalIdentityKind, code: string, detail: string) {
+  constructor(kind: ExternalIdentityKind, code: string, detail: string, proof?: VerifiedExternalIdentity['proof']) {
     super(`${kind}: ${code}`);
     this.name = 'IdentityRefusal';
     this.kind = kind;
     this.code = code;
     this.detail = detail;
+    if (proof) this.proof = proof;
   }
 }
 
@@ -99,6 +115,46 @@ export function mappedAgentDid(
 export interface ReplayCache {
   /** Returns false if `key` was already recorded and has not expired; otherwise records it. */
   checkAndRecord(key: string, expiresAtSeconds: number, nowSeconds?: number): boolean;
+}
+
+/**
+ * A replay store several server instances share (for example one backed by
+ * Redis `SET key 1 NX EX ttlSeconds`). The WIMSE source consults it after the
+ * per-process {@link ReplayCache} accepts a value, so a WPT `jti` or request
+ * signature nonce used at one replica is refused at the others. The check and
+ * the record must be one atomic operation (two replicas racing on one key must
+ * not both see it as new). Resolve `false` when `key` is already recorded and
+ * unexpired; otherwise record it for `ttlSeconds` (a relative lifetime, so no
+ * clock but the store's own decides it) and resolve `true`. A rejection, or no
+ * answer within the source's `sharedReplayTimeoutMs`, refuses the request. Keys are scoped to the presenting workload, so one workload cannot
+ * burn another's values.
+ */
+export interface SharedReplayStore {
+  checkAndRecord(key: string, ttlSeconds: number): Promise<boolean>;
+}
+
+/**
+ * An in-process {@link SharedReplayStore}: for tests, or several sources in
+ * one process. It shares nothing across processes.
+ */
+export function createInMemorySharedReplayStore(maxEntries = 100_000): SharedReplayStore {
+  const seen = new Map<string, number>();
+  return {
+    async checkAndRecord(key, ttlSeconds) {
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAtSeconds = now + ttlSeconds;
+      const prior = seen.get(key);
+      if (prior !== undefined && prior >= now) return false;
+      if (seen.size >= maxEntries) {
+        for (const [k, exp] of seen) if (exp < now) seen.delete(k);
+        // Full of live entries: a capacity failure, not a replay. Rejecting
+        // makes the request refuse as replay_store_unavailable.
+        if (seen.size >= maxEntries) throw new Error('shared replay store is full');
+      }
+      seen.set(key, expiresAtSeconds);
+      return true;
+    },
+  };
 }
 
 export function createReplayCache(maxEntries = 100_000): ReplayCache {

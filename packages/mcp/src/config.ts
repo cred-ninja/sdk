@@ -35,6 +35,8 @@ export interface CredMcpCloudConfig {
   baseUrl: string;
   /** Optional native Web Bot Auth request signing config */
   webBotAuth?: CredMcpWebBotAuthConfig;
+  /** Set only in {@link CredMcpCloudWimseConfig}. */
+  wimse?: undefined;
   /**
    * Optional pre-built CredGuard instance. When configured, MCP tool calls
    * are evaluated against its policies before executing (opt-in — omitting
@@ -90,7 +92,34 @@ export interface CredMcpLocalConfig {
   selfAgentId?: string;
 }
 
-export type CredMcpConfig = CredMcpCloudConfig | CredMcpLocalConfig;
+/**
+ * Files for WIMSE workload signing (env CRED_WIMSE_WIT_FILE, CRED_WIMSE_KEY_FILE,
+ * CRED_WIMSE_ALG, CRED_TXN_TOKEN_FILE). The WIT and Txn-Token files are read on
+ * every request so rotation needs no restart.
+ */
+export interface CredMcpWimseConfig {
+  witFile: string;
+  /** PKCS#8 PEM private key named by the WIT's cnf.jwk */
+  keyFile: string;
+  alg: 'ES256' | 'EdDSA';
+  txnTokenFile?: string;
+}
+
+/**
+ * Cloud mode as a WIMSE workload: requests carry a WIT and an HTTP Message
+ * Signature instead of an agent token. The agent's did:key is still required,
+ * because delegation and brokered calls carry a DPoP proof of it.
+ */
+export interface CredMcpCloudWimseConfig
+  extends Omit<CredMcpCloudConfig, 'agentToken' | 'webBotAuth' | 'agentDid' | 'agentPrivateKeyHex' | 'wimse'> {
+  agentToken?: undefined;
+  webBotAuth?: undefined;
+  agentDid: string;
+  agentPrivateKeyHex: string;
+  wimse: CredMcpWimseConfig;
+}
+
+export type CredMcpConfig = CredMcpCloudConfig | CredMcpCloudWimseConfig | CredMcpLocalConfig;
 
 // No default — users must provide their server URL
 
@@ -171,13 +200,28 @@ function parseWebBotAuthConfig(): CredMcpWebBotAuthConfig | undefined {
   };
 }
 
+function parseWimseConfig(): CredMcpWimseConfig | undefined {
+  const witFile = process.env.CRED_WIMSE_WIT_FILE;
+  const keyFile = process.env.CRED_WIMSE_KEY_FILE;
+  const alg = process.env.CRED_WIMSE_ALG;
+  const txnTokenFile = process.env.CRED_TXN_TOKEN_FILE;
+  if (!witFile && !keyFile && !alg && !txnTokenFile) return undefined;
+  if (!witFile || !keyFile || !alg) {
+    throw new Error('CRED_WIMSE_WIT_FILE, CRED_WIMSE_KEY_FILE and CRED_WIMSE_ALG must be provided together');
+  }
+  if (alg !== 'ES256' && alg !== 'EdDSA') throw new Error('CRED_WIMSE_ALG must be ES256 or EdDSA');
+  return { witFile, keyFile, alg, ...(txnTokenFile ? { txnTokenFile } : {}) };
+}
+
 export function loadConfig(args?: string[]): CredMcpConfig {
   const isLocal =
     process.env.CRED_MODE === 'local' ||
     (args ?? process.argv).includes('--local');
   const webBotAuth = parseWebBotAuthConfig();
+  const wimseEnv = parseWimseConfig();
 
   if (isLocal) {
+    if (wimseEnv) throw new Error('CRED_WIMSE_* applies to cloud mode only: local mode makes no requests to a Cred server');
     const vaultPassphrase = process.env.CRED_VAULT_PASSPHRASE;
     if (!vaultPassphrase) {
       throw new Error('CRED_VAULT_PASSPHRASE environment variable is required for local mode');
@@ -208,7 +252,14 @@ export function loadConfig(args?: string[]): CredMcpConfig {
     throw new Error('CRED_BASE_URL environment variable is required. Set it to your Cred server URL (e.g. https://cred.example.com)');
   }
 
-  if (!agentToken) {
+  const wimse = wimseEnv;
+  if (wimse && agentToken) {
+    throw new Error('Set CRED_AGENT_TOKEN or the CRED_WIMSE_* variables, not both: a workload authenticates with its WIT');
+  }
+  if (wimse && webBotAuth) {
+    throw new Error('CRED_WIMSE_* cannot be combined with Web Bot Auth: both sign the message');
+  }
+  if (!agentToken && !wimse) {
     throw new Error('CRED_AGENT_TOKEN environment variable is required');
   }
   if (!appClientId) {
@@ -223,6 +274,22 @@ export function loadConfig(args?: string[]): CredMcpConfig {
       throw new Error('CRED_AGENT_PRIVATE_KEY_HEX must be 64 hex characters (32-byte Ed25519 private key)');
     }
   }
+
+  if (wimse) {
+    const agentDid = process.env.CRED_AGENT_DID;
+    if (!agentDid || !agentPrivateKeyHex) {
+      throw new Error('CRED_WIMSE_* needs CRED_AGENT_DID and CRED_AGENT_PRIVATE_KEY_HEX: delegation and brokered calls carry a DPoP proof of the agent key');
+    }
+    return {
+      mode: 'cloud',
+      agentDid,
+      agentPrivateKeyHex: agentPrivateKeyHex.toLowerCase(),
+      appClientId,
+      baseUrl,
+      wimse,
+    };
+  }
+  if (!agentToken) throw new Error('CRED_AGENT_TOKEN environment variable is required');
 
   return {
     mode: 'cloud',

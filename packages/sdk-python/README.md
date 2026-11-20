@@ -58,6 +58,10 @@ events = cred.use(
 
 ### `Cred(agent_token, base_url)`
 
+### `Cred(base_url=..., sign_request=create_wimse_http_signer(wit, private_key, alg, audience=None, txn_token=None, lifetime_sec=60))`
+
+Authenticates as a WIMSE workload instead of with an agent token: every request carries the WIT and an HTTP Message Signature (draft-ietf-wimse-http-signature-08) over the request as sent, covering `Authorization`, `Content-Type`, `Content-Digest`, `Txn-Token` and the WIT. `wit` and `txn_token` may be callables, read per request. `private_key` is a `cryptography` P-256 key for `ES256` or an Ed25519 key for `EdDSA`. Pass `agent_token` or `sign_request`, not both. `AsyncCred` takes the same option.
+
 ### `delegate(service, user_id, app_client_id, scopes=None) → DelegationResult`
 
 Get a delegated access token for a service on behalf of a user.

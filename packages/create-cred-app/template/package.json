@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || >=26.0.0"
+  },
   "scripts": {
     "start": "cred-server",
     "dev": "cred-server",
     "grant": "node grant-agent.mjs"
   },
   "dependencies": {
-    "@credninja/server": "^2.1.0"
-  },
-  "allowScripts": {
-    "better-sqlite3@12.11.1": true
+    "@credninja/server": "^2.2.0"
   }
 }

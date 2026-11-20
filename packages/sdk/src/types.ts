@@ -33,7 +33,16 @@ export interface CredExternalIdentityCloudConfig {
    * absolute URL without the query. Headers the SDK sets for a specific call
    * (such as a DPoP proof) take precedence.
    */
-  authenticateRequest: (request: { method: string; url: string }) => Record<string, string> | Promise<Record<string, string>>;
+  authenticateRequest?: (request: { method: string; url: string }) => Record<string, string> | Promise<Record<string, string>>;
+  /**
+   * Called last, with the final headers and the exact body bytes the SDK is
+   * about to send, so an HTTP message signature (draft-ietf-wimse-http-
+   * signature-08) can cover them, including the SDK's own
+   * `Authorization: DPoP <Delegation Token>` on brokered calls. Returns headers
+   * to add. `createWimseHttpSigner` builds one. Set this, `authenticateRequest`,
+   * or both; it cannot be combined with `webBotAuth`.
+   */
+  signRequest?: (request: { method: string; url: string; headers: Record<string, string>; body?: string }) => Record<string, string> | Promise<Record<string, string>>;
   webBotAuth?: CredCloudConfig['webBotAuth'];
   agentToken?: never;
   mode?: never;

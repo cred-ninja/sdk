@@ -204,6 +204,38 @@ describe('Slack', () => {
   });
 });
 
+describe('GraphQL 17 empty selections at /api/v1/use', () => {
+  it('forwards an authorized empty query unchanged but refuses an empty mutation under read', async () => {
+    const ctx = await connected('linear', ['read', 'write'], ['read']);
+    const upstream = stubUpstream();
+    const body = { query: 'query Empty {}' };
+    const res = await call(ctx.app, ctx.agent, ctx.token, 'https://api.linear.app/graphql', 'POST', body);
+    expect(res.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((upstream.mock.calls[0]![1] as RequestInit).body as string)).toEqual(body);
+    await expectRefused(ctx, 'https://api.linear.app/graphql', 'POST', { query: 'mutation {}' }, 'scope_insufficient');
+    await expectRefused(ctx, 'https://api.linear.app/graphql', 'POST', { query: 'query A {} mutation B {}', operationName: 'A' }, 'scope_insufficient');
+  });
+
+  it('allows an empty Linear mutation only with a covering write grant', async () => {
+    const write = await connected('linear', ['write', 'comments:create'], ['write']);
+    await expectAllowed(write, 'https://api.linear.app/graphql', 'POST', { query: 'mutation {}' });
+    const narrow = await connected('linear', ['write', 'comments:create'], ['comments:create']);
+    await expectRefused(narrow, 'https://api.linear.app/graphql', 'POST', { query: 'mutation {}' }, 'scope_insufficient');
+    await expectAllowed(narrow, 'https://api.linear.app/graphql', 'POST', { query: 'mutation { commentCreate(input: {}) {} }' });
+  });
+
+  it('retains GitHub scope and mutation-table checks with empty selections', async () => {
+    const repo = await connected('github', ['repo'], ['repo']);
+    await expectAllowed(repo, 'https://api.github.com/graphql', 'POST', { query: '{}' });
+    await expectAllowed(repo, 'https://api.github.com/graphql', 'POST', { query: 'mutation { createIssue(input: {}) {} }' });
+    await expectRefused(repo, 'https://api.github.com/graphql', 'POST', { query: 'mutation {}' }, 'operation_not_mapped');
+    await expectRefused(repo, 'https://api.github.com/graphql', 'POST', { query: 'mutation { createIssue: deleteRepository(input: {}) {} }' }, 'operation_not_mapped');
+    const identity = await connected('github', ['read:user'], ['read:user']);
+    await expectRefused(identity, 'https://api.github.com/graphql', 'POST', { query: '{}' }, 'scope_insufficient');
+  });
+});
+
 describe('Linear', () => {
   const LINEAR = 'https://api.linear.app/graphql';
 

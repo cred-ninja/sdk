@@ -237,6 +237,54 @@ describe('evaluateOperation', () => {
     expect(outcome('linear', 'POST', url, ['read'], { query: `{ ${'a '.repeat(20_000)} }` })).toBe('not_mapped');
   });
 
+  describe('GraphQL 17 empty selections', () => {
+    const linear = 'https://api.linear.app/graphql';
+    const github = 'https://api.github.com/graphql';
+
+    it.each(['{}', 'query {}', 'query Empty {}', '{ viewer {} }'])('classifies %s as a query without bypassing scopes', (query) => {
+      expect(outcome('linear', 'POST', linear, ['read'], { query })).toBe('allowed');
+      expect(outcome('linear', 'POST', linear, [], { query })).toBe('insufficient');
+      expect(outcome('linear', 'POST', linear, ['comments:create'], { query })).toBe('insufficient');
+      expect(outcome('github', 'POST', github, ['repo'], { query })).toBe('allowed');
+      expect(outcome('github', 'POST', github, ['read:user'], { query })).toBe('insufficient');
+      expect(outcome('github', 'POST', github, [], { query })).toBe('insufficient');
+    });
+
+    it.each(['mutation {}', 'mutation Empty {}'])('still requires Linear write and refuses an unmapped GitHub mutation: %s', (query) => {
+      expect(outcome('linear', 'POST', linear, ['write'], { query })).toBe('allowed');
+      for (const scopes of [[], ['read'], ['admin'], ['issues:create'], ['comments:create']]) {
+        expect(outcome('linear', 'POST', linear, scopes, { query })).toBe('insufficient');
+      }
+      expect(evaluateOperation({ service: 'github', method: 'POST', url: github, body: { query } }, ['repo']))
+        .toMatchObject({ outcome: 'not_mapped', reason: 'mutation_not_in_table' });
+    });
+
+    it('classifies nested empty selections by the mutation field, never its alias', () => {
+      expect(outcome('linear', 'POST', linear, ['comments:create'], { query: 'mutation { commentCreate(input: {}) {} }' })).toBe('allowed');
+      expect(outcome('linear', 'POST', linear, ['comments:create'], { query: 'mutation { commentCreate: issueDelete(id: "x") {} }' })).toBe('insufficient');
+      expect(outcome('github', 'POST', github, ['repo'], { query: 'mutation { createIssue(input: {}) {} }' })).toBe('allowed');
+      expect(outcome('github', 'POST', github, ['repo'], { query: 'mutation { createIssue: deleteRepository(input: {}) {} }' })).toBe('not_mapped');
+    });
+
+    it('does not let an empty selected query hide a mutation or subscription', () => {
+      expect(outcome('linear', 'POST', linear, ['read'], { query: 'query A {} mutation B {}', operationName: 'A' })).toBe('insufficient');
+      expect(outcome('linear', 'POST', linear, ['write'], { query: 'query A {} mutation B {}', operationName: 'A' })).toBe('allowed');
+      expect(outcome('github', 'POST', github, ['repo'], { query: 'query A {} mutation B {}', operationName: 'A' })).toBe('not_mapped');
+      expect(outcome('linear', 'POST', linear, ['write'], { query: 'query A {} subscription B {}', operationName: 'A' })).toBe('not_mapped');
+    });
+
+    it('still refuses fragment-only documents, batches, persisted queries and malformed syntax', () => {
+      for (const body of [
+        { query: 'fragment F on Query {}' },
+        [{ query: '{}' }],
+        { query: '{}', extensions: { persistedQuery: { version: 1, sha256Hash: 'synthetic' } } },
+        { query: 'query {' },
+      ]) {
+        expect(outcome('linear', 'POST', linear, ['write'], body)).toBe('not_mapped');
+      }
+    });
+  });
+
   it('a narrow Linear scope allows only its own mutations, by field name and not alias', () => {
     const url = 'https://api.linear.app/graphql';
     expect(outcome('linear', 'POST', url, ['comments:create'], { query: 'mutation { commentCreate(input:{}) { success } }' })).toBe('allowed');

@@ -13,6 +13,21 @@ if TYPE_CHECKING:
     from cred import DpopSigningIdentity
 
 
+def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
+    """Use the caller's client when given (for example one built with
+    ``sign_request`` for WIMSE workload signing); otherwise build one from the
+    agent token, as before. The token cache keys on the client's server URL."""
+    if cred is None:
+        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
+    if not isinstance(cred, Cred):
+        raise TypeError("cred must be a synchronous cred.Cred client")
+    if agent_token:
+        raise ValueError("Pass agent_token or cred, not both")
+    if base_url and base_url.rstrip("/") != cred.base_url:
+        raise ValueError("base_url does not match the passed client's base_url")
+    return cred, cred.base_url
+
+
 class CredToolkit:
     """LangChain toolkit that provides Cred credential delegation tools.
 
@@ -36,11 +51,12 @@ class CredToolkit:
 
     def __init__(
         self,
-        agent_token: str,
+        agent_token: Optional[str],
         user_id: str,
-        base_url: str,
+        base_url: Optional[str],
         token_format: str = "raw",
         *,
+        cred: Optional[Cred] = None,
         agent_identity: Optional[DpopSigningIdentity] = None,
     ) -> None:
         """
@@ -52,7 +68,7 @@ class CredToolkit:
         """
         if token_format not in {"raw", "handle"}:
             raise ValueError("token_format must be 'raw' or 'handle'")
-        self._cred = Cred(agent_token=agent_token, base_url=base_url)
+        self._cred, base_url = _resolve_client(agent_token, base_url, cred)
         self._base_url = base_url
         self._user_id = user_id
         self._token_format = token_format

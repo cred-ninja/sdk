@@ -84,6 +84,15 @@ export function agentTokenHashForCloudMode(agentToken: string): string {
   return crypto.createHash('sha256').update(agentToken).digest('hex');
 }
 
+/**
+ * WIMSE cloud mode has no agent token either. Rate limits key on the WIT's
+ * `sub` (the workload identity), with its own prefix so the bucket can never
+ * collide with an agent-token or did:key bucket.
+ */
+export function agentTokenHashForWimseMode(witSubject: string): string {
+  return crypto.createHash('sha256').update(`wit-sub:${witSubject}`).digest('hex');
+}
+
 export interface GuardResponseSummary {
   ttl?: { maxTtlSeconds: number; expiresAt: string };
   rateLimit?: { limit: number; windowMs: number; remaining: number };

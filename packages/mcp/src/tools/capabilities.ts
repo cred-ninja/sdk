@@ -17,6 +17,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Cred } from '@credninja/sdk';
 import { summarizeGuardDecision } from '../guard-wiring.js';
 import { toolErrorResult } from '../tool-errors.js';
+import type { AuthenticationSummary } from '../authentication.js';
 
 export const CAPABILITIES_TOOL_NAME = 'cred_capabilities';
 
@@ -24,7 +25,8 @@ export const CAPABILITIES_TOOL_DEFINITION = {
   name: CAPABILITIES_TOOL_NAME,
   description:
     'Discover which providers are configured on this deployment, and their default scopes. ' +
-    'Use this before cred_delegate/cred_subdelegate to avoid guessing a provider slug or scope set.',
+    'Use this before cred_delegate/cred_subdelegate to avoid guessing a provider slug or scope set. ' +
+    'Also reports how this server authenticates to Cred (agent token or WIMSE workload, and whether a Txn-Token is carried).',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -35,6 +37,8 @@ export type CapabilitiesToolInput = Record<string, never>;
 
 export interface CapabilitiesToolContext {
   cred: Cred;
+  /** How this MCP instance authenticates to Cred (omitted when not provided). */
+  authentication?: AuthenticationSummary;
 }
 
 export async function handleCapabilities(
@@ -49,7 +53,11 @@ export async function handleCapabilities(
       content: [
         {
           type: 'text',
-          text: JSON.stringify(guard ? { providers, guard } : { providers }, null, 2),
+          text: JSON.stringify({
+            providers,
+            ...(guard ? { guard } : {}),
+            ...(context.authentication ? { authentication: context.authentication } : {}),
+          }, null, 2),
         },
       ],
     };

@@ -1,6 +1,6 @@
 {
   "name": "@credninja/mcp",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "MCP server for OAuth2 credential delegation. Secure token brokering for AI agents",
   "private": false,
   "type": "module",
@@ -34,16 +34,16 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=22"
+    "node": "^22.0.0 || ^24.0.0 || >=26.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@credninja/sdk": "^2.1.0",
-    "@credninja/guard": "^2.1.0"
+    "@credninja/sdk": "^2.2.0",
+    "@credninja/guard": "^2.2.0"
   },
   "peerDependencies": {
-    "@credninja/oauth": "^2.1.0",
-    "@credninja/vault": "^2.1.0"
+    "@credninja/oauth": "^2.2.0",
+    "@credninja/vault": "^2.2.0"
   },
   "peerDependenciesMeta": {
     "@credninja/oauth": {

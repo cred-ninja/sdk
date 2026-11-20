@@ -1,0 +1,379 @@
+{
+  "source": "https://github.com/ietf-wg-wimse/draft-ietf-wimse-s2s-protocol/issues/419",
+  "draft": "draft-ietf-wimse-http-signature-08",
+  "corrections": [
+    "P-01, P-02, P-06 (sig2), N-15: @query value with leading \"?\", signatures from the 2026-11-07T04:36:50Z comment",
+    "P-04: @authority without :443, signature from the 2026-11-13T04:09:52Z comment"
+  ],
+  "T0": 1795000000,
+  "verifyAt": 1795000060,
+  "trust": {
+    "trustDomain": "example.com",
+    "issuerKid": "issuer-key",
+    "audiences": [
+      "https://svcb.example.com/gimme-ice-cream",
+      "https://svcb.example.com/inventory/cones",
+      "https://svcb.example.com/status",
+      "https://svcb.example.com"
+    ]
+  },
+  "keys": {
+    "issuer-key": {
+      "alg": "Ed25519",
+      "crv": "Ed25519",
+      "kid": "issuer-key",
+      "kty": "OKP",
+      "x": "QH_Zu0pnwyO8xdFQm9upOUFAbpb4nhMrGc29L3uJXDA",
+      "d": "4nRAPQQyr8cUgAtCESLc4ZIGIxZT9-guqxcc3wV-2NI"
+    },
+    "vec-a-key": {
+      "alg": "Ed25519",
+      "crv": "Ed25519",
+      "kid": "vec-a-key",
+      "kty": "OKP",
+      "x": "O3OfVmPJ3peYhdDrMweNIiBOQU6JZCNcYMK2kjV0i3Y",
+      "d": "F8BhX5poMswcVwTgEMGETOhdN72PaxIiwuGYWrzSUvk"
+    },
+    "vec-b-key": {
+      "alg": "Ed25519",
+      "crv": "Ed25519",
+      "kid": "vec-b-key",
+      "kty": "OKP",
+      "x": "4jVAzgEPO5n-6jujSiyQME5t-tIzZApbhR5cTPoedII",
+      "d": "4MaIKp1h5mkTS7ZSawz6QYN6FYA_rOYBPDfGEZCpPDg"
+    },
+    "vec-c-key": {
+      "alg": "ES256",
+      "crv": "P-256",
+      "kid": "vec-c-key",
+      "kty": "EC",
+      "x": "jZjfUBQgD1l9R_lm4nzo1rP82pGVDBxHD6YmOo_xoCo",
+      "y": "CBGv9b8hB-l0mov9rlu223g-vNE_SquCC2IhPi2IweE",
+      "d": "X94ti7AkOiC4JcxdbSmLkwWEzyEU4wMqBX_9LHfXQaU"
+    },
+    "other-key": {
+      "alg": "Ed25519",
+      "crv": "Ed25519",
+      "kid": "other-key",
+      "kty": "OKP",
+      "x": "Lo6grJBjN252d2huS1-ckJIql2FZR2vrTOF2qKRBTm4",
+      "d": "KL4_B1CdV7qwZkVYvyK0I5SrsEzv6yb1p1PNAfbC7LY"
+    }
+  },
+  "wits": {
+    "WIT-A": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+    "WIT-B": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWIta2V5Iiwia3R5IjoiT0tQIiwieCI6IjRqVkF6Z0VQTzVuLTZqdWpTaXlRTUU1dC10SXpaQXBiaFI1Y1RQb2VkSUkifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1iLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0IifQ.iBAAT-2xF6Polfa49cDu4THgh3zhCdbAitBM5JIgxuuCEdbjMKglKVskt7E78jdE42i3FMMP9-Lw0PLRXwXaBQ",
+    "WIT-C": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJraWQiOiJ2ZWMtYy1rZXkiLCJrdHkiOiJFQyIsIngiOiJqWmpmVUJRZ0QxbDlSX2xtNG56bzFyUDgycEdWREJ4SEQ2WW1Pb194b0NvIiwieSI6IkNCR3Y5YjhoQi1sMG1vdjlybHUyMjNnLXZORV9TcXVDQzJJaFBpMkl3ZUUifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1jLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0MifQ.8-bmHNavOVSxyr2hAtnKfrC-kdm5L4XMP4n1cGGMLh5DjSPmdjTWkpKtTO9tPZfKMIfLVC7xGaDvoJXUdizGCg"
+  },
+  "positive": [
+    {
+      "id": "P-01",
+      "kind": "request",
+      "message": {
+        "method": "GET",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"7f3a9c1e5b284d06a1f4e8c2b6d50937\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/gimme-ice-cream\";wimse-sign-response",
+          "signature": "sig1=:qrIGE6wS80/UvhJx96iDiz90OIYmUX8CFO4vOeK/40D7pnukeikqvsYGDs6aqXx099ILxgZliEepCw1P5M7YDg==:"
+        },
+        "path": "/gimme-ice-cream",
+        "query": "flavor=vanilla"
+      },
+      "expect": "accept",
+      "signResponse": true
+    },
+    {
+      "id": "P-02",
+      "kind": "response",
+      "message": {
+        "status": 404,
+        "method": "GET",
+        "headers": {
+          "content-type": "text/plain",
+          "content-digest": "sha-256=:uJC3qmCc7n6/6w4N2I0vAfj1cd/hTOAhxLEYXmPbNno=:",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWIta2V5Iiwia3R5IjoiT0tQIiwieCI6IjRqVkF6Z0VQTzVuLTZqdWpTaXlRTUU1dC10SXpaQXBiaFI1Y1RQb2VkSUkifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1iLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0IifQ.iBAAT-2xF6Polfa49cDu4THgh3zhCdbAitBM5JIgxuuCEdbjMKglKVskt7E78jdE42i3FMMP9-Lw0PLRXwXaBQ",
+          "signature-input": "sig1=(\"@status\" \"workload-identity-token\" \"content-type\" \"content-digest\" \"@method\";req \"@path\";req \"@query\";req);created=1795000002;expires=1795000302;nonce=\"2b8e4f0a9d1c3756e0a2b4c6d8f0a1b3\";tag=\"wimse-workload-to-workload\";wimse-req-nonce=\"7f3a9c1e5b284d06a1f4e8c2b6d50937\"",
+          "signature": "sig1=:XugjjXCtpc0lkt5QSnjVF/OcQwqhQAqAzuykBUw36FsGV6BmXcMKfY0YZTMTnvpsjIZkmOeTN+PvQEzAb/veDQ==:"
+        },
+        "body": "No ice cream today.\n"
+      },
+      "request": {
+        "method": "GET",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"7f3a9c1e5b284d06a1f4e8c2b6d50937\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/gimme-ice-cream\";wimse-sign-response",
+          "signature": "sig1=:qrIGE6wS80/UvhJx96iDiz90OIYmUX8CFO4vOeK/40D7pnukeikqvsYGDs6aqXx099ILxgZliEepCw1P5M7YDg==:"
+        },
+        "path": "/gimme-ice-cream",
+        "query": "flavor=vanilla"
+      },
+      "requestNonce": "7f3a9c1e5b284d06a1f4e8c2b6d50937",
+      "signResponseRequested": true,
+      "expect": "accept"
+    },
+    {
+      "id": "P-03",
+      "kind": "request",
+      "message": {
+        "method": "POST",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJraWQiOiJ2ZWMtYy1rZXkiLCJrdHkiOiJFQyIsIngiOiJqWmpmVUJRZ0QxbDlSX2xtNG56bzFyUDgycEdWREJ4SEQ2WW1Pb194b0NvIiwieSI6IkNCR3Y5YjhoQi1sMG1vdjlybHUyMjNnLXZORV9TcXVDQzJJaFBpMkl3ZUUifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1jLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0MifQ.8-bmHNavOVSxyr2hAtnKfrC-kdm5L4XMP4n1cGGMLh5DjSPmdjTWkpKtTO9tPZfKMIfLVC7xGaDvoJXUdizGCg",
+          "signature-input": "sig1=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\" \"content-type\" \"content-digest\");created=1795000000;expires=1795000300;nonce=\"c51d7a2e8f093b46a5c1d2e3f4a5b6c7\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/inventory/cones\"",
+          "signature": "sig1=:n7QUfcBz5ruH3anRYFpW7drn1CInZfV4TZPxlqBIlHg1g78FnRhk7CQudkHN8kNGAHfsBTgIvfHGJMZ8f2QTbQ==:",
+          "content-type": "application/json",
+          "content-digest": "sha-256=:TzKXT0tUEfiTFkjRzwE8nCFnQljMuX5xwJaJgJCp+1g=:"
+        },
+        "path": "/inventory/cones",
+        "body": "{\"flavor\":\"vanilla\",\"amount\":1}"
+      },
+      "expect": "accept"
+    },
+    {
+      "id": "P-04",
+      "kind": "request",
+      "message": {
+        "method": "CONNECT",
+        "headers": {
+          "host": "svcb.example.com:443",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@authority\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"9a0b1c2d3e4f5061728394a5b6c7d8e9\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com\"",
+          "signature": "sig1=:oQvU3xBjXSOTm2zDvjGMWa/lsOGPyB8+AYxoA9aNd1Dgx2ulyMynph+/lR6d6Vkdl1rXR62kHuaG0sG4q3m2AQ==:"
+        },
+        "authority": "svcb.example.com:443",
+        "scheme": "https"
+      },
+      "expect": "accept"
+    },
+    {
+      "id": "P-05",
+      "kind": "request",
+      "message": {
+        "method": "GET",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"13579bdf2468ace013579bdf2468ace0\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/status\"",
+          "signature": "sig1=:62NICDRikwhl4IlI2ls8cGIACVyuFNtmSZdYOZKiO88AqsKZLQuybOkQx5SQYkREcB0OiU4xT+qn9/hoAj1LAg==:"
+        },
+        "path": "/status"
+      },
+      "expect": "accept"
+    },
+    {
+      "id": "P-06",
+      "kind": "request",
+      "message": {
+        "method": "GET",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@path\");created=1795000000;keyid=\"other-key\";tag=\"example-other\", sig2=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"f0e1d2c3b4a5968778695a4b3c2d1e0f\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/gimme-ice-cream\"",
+          "signature": "sig1=:C9vDZlqwPqD3dPtkwhQDz0cmpsy0Z2tSE/ewIHjMCdgmdNN7nqrZTLLZqGobMOjswZF43HMaJXGGjFVuRYB5BQ==:, sig2=:Dyr5ErLhw5LmeYIztg6QZmfARn96ucIGuMXUgsyGj9MMc4Y9cQmQ6345/c8/n584kmlk1TfL7xmNVDQKkG7EAw==:"
+        },
+        "path": "/gimme-ice-cream",
+        "query": "flavor=vanilla"
+      },
+      "expect": "accept",
+      "expectLabel": "sig2"
+    }
+  ],
+  "negative": [
+    {
+      "id": "N-01",
+      "baseline": "P-01",
+      "mutation": {
+        "removeComponent": "@query"
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-02",
+      "baseline": "P-04",
+      "mutation": {
+        "addComponent": "@path"
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-03",
+      "baseline": "P-03",
+      "mutation": {
+        "removeComponent": "content-digest",
+        "removeHeader": "content-digest"
+      },
+      "resign": "vec-c-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-04",
+      "baseline": "P-03",
+      "mutation": {
+        "body": "{\"flavor\":\"chocolate\",\"amount\":1}"
+      },
+      "expect": "reject"
+    },
+    {
+      "id": "N-05",
+      "baseline": "P-01",
+      "mutation": {
+        "removeParam": "expires"
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-06",
+      "baseline": "P-01",
+      "mutation": {
+        "addParam": [
+          "keyid",
+          "vec-a-key"
+        ]
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-07",
+      "baseline": "P-01",
+      "mutation": {
+        "addParam": [
+          "alg",
+          "ed25519"
+        ]
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-08",
+      "baseline": "P-06",
+      "mutation": {
+        "decoyTag": "wimse-workload-to-workload"
+      },
+      "resign": "other-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-09",
+      "baseline": "P-01",
+      "mutation": {},
+      "verifyAt": 1795003600,
+      "expect": "reject"
+    },
+    {
+      "id": "N-10",
+      "baseline": "P-01",
+      "mutation": {
+        "setParam": [
+          "wimse-aud",
+          "https://svcb.example.com/gimme-ice-cream/"
+        ]
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-11",
+      "baseline": "P-01",
+      "mutation": {
+        "removeParam": "wimse-aud"
+      },
+      "resign": "vec-a-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-12",
+      "baseline": "P-02",
+      "mutation": {
+        "removeParam": "wimse-req-nonce"
+      },
+      "resign": "vec-b-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-13",
+      "baseline": "P-02",
+      "mutation": {
+        "setParam": [
+          "wimse-req-nonce",
+          "00000000000000000000000000000000"
+        ]
+      },
+      "resign": "vec-b-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-14",
+      "baseline": "P-02",
+      "mutation": {
+        "removeHeader": [
+          "signature",
+          "signature-input"
+        ]
+      },
+      "expect": "reject"
+    },
+    {
+      "id": "N-15",
+      "message": {
+        "method": "GET",
+        "headers": {
+          "host": "svcb.example.com",
+          "workload-identity-token": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaXNzdWVyLWtleSIsInR5cCI6IndpdCtqd3QifQ.eyJjbmYiOnsiandrIjp7ImFsZyI6IkVkMjU1MTkiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoidmVjLWEta2V5Iiwia3R5IjoiT0tQIiwieCI6Ik8zT2ZWbVBKM3BlWWhkRHJNd2VOSWlCT1FVNkpaQ05jWU1LMmtqVjBpM1kifX0sImV4cCI6MTc5NTAwMzYwMCwiaWF0IjoxNzk0OTk5OTQwLCJpc3MiOiJodHRwczovL2V4YW1wbGUuY29tL2lzc3VlciIsImp0aSI6IndpdC1hLTE3OTUwMDAwMDAiLCJzdWIiOiJ3aW1zZTovL2V4YW1wbGUuY29tL3N2Y0EifQ.JCh9sN__1Al9xVB-K7CFafw1tDV8PCeZvyKdFyMmb9vvN4mK2ZGNbC6VLFpNzpVsgGBV0FwmzerDAFuikSJBCw",
+          "signature-input": "sig1=(\"@method\" \"@path\" \"@query\" \"workload-identity-token\");created=1795000000;expires=1795000300;nonce=\"abcdef0123456789abcdef0123456789\";tag=\"wimse-workload-to-workload\";wimse-aud=\"https://svcb.example.com/gimme-ice-cream\"",
+          "signature": "sig1=:28GmtKZAQJ1w6QtPGGrrrXMhdSgWXCmMbTVIuFNUh+PvOWS1oySwSUAPGhhvoad18zrTZXYh/Dh0ixcHcfB77g==:"
+        },
+        "path": "/gimme-ice-cream",
+        "query": "flavor=vanilla"
+      },
+      "kind": "request",
+      "expect": "reject"
+    },
+    {
+      "id": "N-16",
+      "behaviour": "sender-nonce-entropy",
+      "expect": "reject"
+    },
+    {
+      "id": "N-17",
+      "behaviour": "server-error-surface",
+      "expect": "reject"
+    },
+    {
+      "id": "N-18",
+      "behaviour": "server-signed-response-required",
+      "expect": "reject"
+    },
+    {
+      "id": "N-19",
+      "behaviour": "server-accept-signature-weaker",
+      "expect": "reject"
+    },
+    {
+      "id": "N-20",
+      "behaviour": "server-no-processing-before-validation",
+      "expect": "reject"
+    },
+    {
+      "id": "N-21",
+      "baseline": "P-02",
+      "mutation": {
+        "connect": true,
+        "addComponent": "@path;req"
+      },
+      "resign": "vec-b-key",
+      "expect": "reject"
+    },
+    {
+      "id": "N-22",
+      "behaviour": "verifier-select-by-tag",
+      "expect": "reject"
+    }
+  ]
+}

@@ -9,8 +9,10 @@ import path from 'path';
 import type { BuiltinAdapterSlug } from '@credninja/oauth';
 import type { CredGuard } from '@credninja/guard';
 import type { Request } from 'express';
+import type { KeyObject } from 'node:crypto';
 import type { JwsSigner, JwsVerificationKey } from '@credninja/attenuation';
 import type { ExternalIdentitySource, ExternalIdentityMapping } from './identity/types.js';
+import type { TxnTokenTrust } from './identity/txn-token.js';
 
 export interface ProviderConfig {
   slug: BuiltinAdapterSlug;
@@ -43,6 +45,29 @@ export type AgentRequestVerifier =
 export interface ExternalIdentityConfig {
   sources: readonly ExternalIdentitySource[];
   mappings: readonly ExternalIdentityMapping[];
+  /**
+   * Transaction Tokens (draft-ietf-oauth-transaction-tokens-11), keyed by the
+   * WIMSE trust domain of the workload presenting them. Absent: a Txn-Token
+   * header is ignored (and never forwarded). Present: a Txn-Token must be
+   * bound to the request's WPT (`tth`) or HTTP signature (covered), verify
+   * against that domain's configuration, and it narrows the authority of
+   * brokered calls. A trust domain with `required` (the default) must send one.
+   */
+  txnTokens?: Readonly<Record<string, TxnTokenTrust>>;
+  /**
+   * Cred's own workload identity, for signed responses
+   * (draft-ietf-wimse-http-signature-08 §3.5). When set, a verified request
+   * whose signature carries `wimse-sign-response` gets a response signed with
+   * this WIT's key. When absent, such a request gets 501
+   * `wimse-signed-response-unsupported`.
+   */
+  responseSigning?: {
+    /** Cred's WIT, or a function returning the current one (rotation). */
+    wit: string | (() => string);
+    /** The private key the WIT's cnf.jwk names. */
+    privateKey: KeyObject;
+    alg: 'ES256' | 'EdDSA';
+  };
 }
 
 export interface ServerConfig {

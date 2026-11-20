@@ -1,0 +1,34 @@
+--- $GOMODCACHE/github.com/cofide/minispire@v0.2.2/pkg/spire-devserver/grpc-authinfo.go	2026-11-13 15:07:13
++++ pkg/spire-devserver/grpc-authinfo.go	2026-11-13 15:08:00
+@@ -8,7 +8,7 @@
+ 	"net"
+ 	"os"
+ 	"path/filepath"
+-	"syscall"
++	"golang.org/x/sys/unix"
+ 
+ 	"google.golang.org/grpc/credentials"
+ )
+@@ -54,14 +54,19 @@
+ 
+ 	auth := AuthInfo{}
+ 	sys.Control(func(fd uintptr) {
+-		cred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
++		// macOS shim (local interop run only): LOCAL_PEERCRED/LOCAL_PEERPID
++		// instead of Linux SO_PEERCRED.
++		cred, err := unix.GetsockoptXucred(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
+ 		if err != nil {
+ 			log.Printf("unable to get peer credentials: %v", err)
+ 			return
+ 		}
+-		auth.Caller.PID = int32(cred.Pid)
++		pid, _ := unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
++		auth.Caller.PID = int32(pid)
+ 		auth.Caller.UID = uint32(cred.Uid)
+-		auth.Caller.GID = uint32(cred.Gid)
++		if cred.Ngroups > 0 {
++			auth.Caller.GID = uint32(cred.Groups[0])
++		}
+ 	})
+ 
+ 	// get binary path of the caller

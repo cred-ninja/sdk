@@ -26,6 +26,21 @@ if TYPE_CHECKING:
     from cred import DpopSigningIdentity
 
 
+def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
+    """Use the caller's client when given (for example one built with
+    ``sign_request`` for WIMSE workload signing); otherwise build one from the
+    agent token, as before. The token cache keys on the client's server URL."""
+    if cred is None:
+        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
+    if not isinstance(cred, Cred):
+        raise TypeError("cred must be a synchronous cred.Cred client")
+    if agent_token:
+        raise ValueError("Pass agent_token or cred, not both")
+    if base_url and base_url.rstrip("/") != cred.base_url:
+        raise ValueError("base_url does not match the passed client's base_url")
+    return cred, cred.base_url
+
+
 def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
     """``agent_identity=`` for the SDK call, only when one is configured."""
     return {"agent_identity": agent_identity} if agent_identity is not None else {}
@@ -122,12 +137,13 @@ _PARAMS_SCHEMA: dict[str, Any] = {
 
 
 def cred_delegate_tool(
-    agent_token: str,
+    agent_token: Optional[str],
     user_id: str,
     app_client_id: str,
-    base_url: str,
+    base_url: Optional[str],
     token_format: str = "raw",
     *,
+    cred: Optional[Cred] = None,
     agent_identity: Optional[DpopSigningIdentity] = None,
 ) -> FunctionTool:
     """Create an OpenAI Agents SDK FunctionTool for credential delegation.
@@ -173,7 +189,7 @@ def cred_delegate_tool(
     if token_format not in {"raw", "handle"}:
         raise ValueError("token_format must be 'raw' or 'handle'")
 
-    cred = Cred(agent_token=agent_token, base_url=base_url)
+    cred, base_url = _resolve_client(agent_token, base_url, cred)
 
     async def on_invoke_tool(
         ctx: RunContextWrapper[Any],
@@ -263,9 +279,10 @@ _USE_PARAMS_SCHEMA: dict[str, Any] = {
 
 
 def cred_use_tool(
-    agent_token: str,
-    base_url: str,
+    agent_token: Optional[str],
+    base_url: Optional[str],
     *,
+    cred: Optional[Cred] = None,
     agent_identity: Optional[DpopSigningIdentity] = None,
     user_id: Optional[str] = None,
 ) -> FunctionTool:
@@ -274,7 +291,7 @@ def cred_use_tool(
     user_id: when set, only delegations issued for this user can be used. Pass it
     in any process that serves more than one user.
     """
-    cred = Cred(agent_token=agent_token, base_url=base_url)
+    cred, base_url = _resolve_client(agent_token, base_url, cred)
 
     async def on_invoke_tool(
         ctx: RunContextWrapper[Any],

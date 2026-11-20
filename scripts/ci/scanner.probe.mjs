@@ -31,6 +31,55 @@ for (const [path, lineNumber] of [['packages/sdk-python/tests/test_dpop.py', 23]
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+test('public conformance exceptions are exact in value, path and rule', () => {
+  const config = readFileSync(join(configRoot, '.gitleaks.toml'), 'utf8');
+  const vectors = JSON.parse(readFileSync(join(root, 'conformance/wimse-419/vectors.json'), 'utf8'));
+  const fixtures = Object.values(vectors.wits).map((value) => ['conformance/wimse-419/vectors.json', 'jwt', value]);
+  for (const name of ['cofide', 'go-spiffe', 'spire', 'wimsey']) {
+    const path = `conformance/interop/${name}-run-2026-11-13.txt`;
+    const text = readFileSync(join(root, path), 'utf8');
+    const values = new Set([...text.matchAll(/did:key:(z[1-9A-HJ-NP-Za-km-z]+)/g)].map((m) => m[1]));
+    assert.ok(values.size > 0, 'Public identity fixture must be present');
+    fixtures.push(...[...values].map((value) => [path, 'generic-api-key', value]));
+  }
+  const txnPath = 'conformance/interop/authgent-txn-run-2026-11-13.txt';
+  const txn = readFileSync(join(root, txnPath), 'utf8').split('\n')[8].match(/\btxn=(\S+)/)?.[1];
+  assert.ok(txn, 'The audited transaction correlation fixture must be present');
+  fixtures.push([txnPath, 'generic-api-key', txn]);
+  for (const [path, rule, value] of fixtures) {
+    const dir = mkdtempSync(join(tmpdir(), 'cred-conformance-scanner-'));
+    try {
+      const report = join(dir, 'scan.json');
+      const scan = (target, payload, policy = config) => {
+        mkdirSync(dirname(join(dir, target)), { recursive: true });
+        writeFileSync(join(dir, '.gitleaks.toml'), policy);
+        writeFileSync(join(dir, target), payload);
+        const result = run(binary, ['dir', '.', '--redact=100', '--no-banner', '--report-format', 'json', '--report-path', report], dir);
+        rmSync(join(dir, target));
+        const rules = JSON.parse(readFileSync(report, 'utf8')).map((finding) => finding.RuleID);
+        rmSync(report);
+        return { status: result.status, rules };
+      };
+      const payload = (text) => rule === 'jwt' ? `Workload-Identity-Token: ${text}\n` : `token = "${text}"\n`;
+      assert.equal(scan(path, payload(value)).status, 0, `Known public data must pass at ${path}`);
+      const changed = value.slice(0, -1) + (value.endsWith('A') ? 'B' : 'A');
+      assert.equal(scan(path, payload(changed)).status, 1, `Changed value must remain reportable at ${path}`);
+      assert.equal(scan(`elsewhere/${path}`, payload(value)).status, 1, `Changed path must remain reportable at ${path}`);
+      const otherRule = config + '\n[[rules]]\nid = "conformance-wrong-rule-probe"\ndescription = "Exact exceptions must not cover another rule"\nregex = \'\'\'conformance_probe = ([^\\r\\n]+)\'\'\'\nsecretGroup = 1\n';
+      const wrong = scan(path, `conformance_probe = ${value}\n`, otherRule);
+      assert.equal(wrong.status, 1);
+      assert.ok(wrong.rules.includes('conformance-wrong-rule-probe'), 'Another rule must not inherit the exception');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'cred-runtime-wit-scanner-'));
+  try {
+    copyFileSync(join(configRoot, '.gitleaks.toml'), join(dir, '.gitleaks.toml'));
+    const path = join(dir, 'conformance/interop/cofide-run-2026-11-13.txt');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `Workload-Identity-Token: ${Object.values(vectors.wits)[0]}\n`);
+    assert.equal(run(binary, ['dir', '.', '--redact=100', '--no-banner'], dir).status, 1, 'Cofide JWTs must remain reportable');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 test('actual tracked snapshot shell includes ordinary and export-ignore files', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cred-export-'));
   try {

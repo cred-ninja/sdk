@@ -1,6 +1,6 @@
 {
   "name": "@cred-ninja/sdk",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "OAuth2 credential delegation for AI agents",
   "license": "Apache-2.0",
   "private": true,
@@ -34,6 +34,10 @@
     "smoke:npm": "node scripts/smoke-npm-packages.mjs",
     "smoke:python": "bash scripts/smoke-python-wheels.sh",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "hackathon:demo": "node scripts/hackathon/demo.mjs",
+    "hackathon:serve": "node scripts/hackathon/serve.mjs",
+    "hackathon:python": "node scripts/hackathon/python-sdk/run.mjs",
+    "conformance:wimse-419": "node scripts/conformance/run-wimse-419.mjs",
     "test:ci": "node --test scripts/ci/*.test.mjs"
   },
   "devDependencies": {
@@ -63,10 +67,9 @@
     }
   },
   "engines": {
-    "node": ">=22"
+    "node": "^22.0.0 || ^24.0.0 || >=26.0.0"
   },
   "allowScripts": {
-    "better-sqlite3@12.11.1": true,
     "esbuild@0.28.2": true
   }
 }

@@ -1,0 +1,34 @@
+{
+  "scenario": "P8",
+  "format": "ietf127-wimse-scenario/1",
+  "impl": "cred",
+  "repository": "https://github.com/cred-ninja/sdk",
+  "branch": "hackathon/ietf127",
+  "commit": "83e9cecfebebff653b35e1aa9fef83749e603a01",
+  "packages_src_modified": false,
+  "packages_note": "packages_src_modified checks git status of packages/ only; the runner builds dist only when it is missing, so run npm run build first to be sure dist matches the source.",
+  "node": "v22.23.4",
+  "run_at_utc": "2026-11-15T18:40:42.087Z",
+  "clock": "wall",
+  "reproduce": "git clone -b hackathon/ietf127 https://github.com/cred-ninja/sdk.git cred && cd cred && git checkout 83e9cecfebebff653b35e1aa9fef83749e603a01 && npm ci && npm run build && node scripts/hackathon/interop/p8.mjs",
+  "provider_note": "The provider is a local mock of the Google Calendar API that accepts any bearer token (scripts/hackathon/lib/mock-provider.mjs). It cannot introspect or revoke, which is the bearer-only property P8 is about.",
+  "configurations": {
+    "A": "hackathon configuration: WIMSE (WIT + WPT / HTTP signature) with required Txn-Tokens for domain-b.example; brokered handles only (default)",
+    "B": "deprecated opt-out allowRawTokens: true, WIMSE without Txn-Tokens, read-only connection (Cred refuses a raw token wider than the grant); the only Cred path that releases the provider bearer token to the agent"
+  },
+  "txn_id_note": "In A, txn_id is the txn claim of the Txn-Tokens Cred verified for that case. In B there is no Txn-Token; txn_id is a label from this runner only.",
+  "reason_mapping": {
+    "invalid_token": "no-delegation",
+    "permission_required": "no-delegation",
+    "scope_insufficient": "scope-exceeded",
+    "delegation_revoked": "status-revoked"
+  },
+  "reason_mapping_note": "Partial: covers the Cred codes this run produced. Cred returns invalid_token also for a forged, expired or mismatched Delegation Token, and scope_insufficient also when the Permission behind a delegation was narrowed, revoked or expired. token-not-released is this runner's name for Cred's 403 raw_token_disabled; it is not a scenario reason.",
+  "checker_note": "Not verified by observes_p1_p8.py. Cred answers with its own HTTP statuses and {error, message} bodies: 401 for no-delegation (use) and status-revoked, 403 for scope-exceeded and for no-delegation (ask), 403 raw_token_disabled for case 4 under configuration A.",
+  "files": {
+    "cred-P8.jsonl": {
+      "lines": 11,
+      "sha256": "b52794003e98d9e9bf6f9779080ad3af4d870d9a651a56872e1222523d7af7fc"
+    }
+  }
+}
