@@ -86,6 +86,46 @@ async function recorder(respond: (req: IncomingMessage, res: ServerResponse) => 
 }
 
 describe('create-cred-app', () => {
+  it.each(['.env', 'agent.env', 'package.json', 'README.md', '.gitignore', 'grant-agent.mjs', 'unrelated.txt'])('leaves a current directory containing %s untouched', async (file) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-scaffold-existing-'));
+    tmpDirs.push(dir);
+    fs.writeFileSync(path.join(dir, file), 'synthetic-existing-content');
+    await expect(run('node', [CREATE, '.'], { cwd: dir, env: { ...process.env, CREATE_CRED_APP_SKIP_INSTALL: '1' } }))
+      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('not empty') });
+    expect(fs.readdirSync(dir)).toEqual([file]);
+    expect(fs.readFileSync(path.join(dir, file), 'utf8') === 'synthetic-existing-content').toBe(true);
+  });
+
+  it('scaffolds an empty current directory and refuses an existing named directory', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-scaffold-empty-'));
+    tmpDirs.push(dir);
+    await run('node', [CREATE, '.'], { cwd: dir, env: { ...process.env, CREATE_CRED_APP_SKIP_INSTALL: '1' } });
+    expect(fs.existsSync(path.join(dir, '.gitignore'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'gitignore'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'grant-agent.mjs'))).toBe(true);
+    await expect(run('node', [CREATE, dir], { env: { ...process.env, CREATE_CRED_APP_SKIP_INSTALL: '1' } }))
+      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('already exists') });
+  });
+
+  it('refuses to scaffold over a generated app without changing its files or vault access', async () => {
+    const { dir, env } = await generate();
+    const { vault } = await serve(env, dir);
+    await vault.store({ provider: 'github', userId: 'alice', accessToken: 'synthetic-scaffold-token', scopes: ['repo'] });
+    const files = fs.readdirSync(dir).filter((file) => fs.statSync(path.join(dir, file)).isFile());
+    const before = files.map((file) => fs.readFileSync(path.join(dir, file)));
+
+    const result = await run('node', [CREATE, '.'], { cwd: dir, env: { ...process.env, CREATE_CRED_APP_SKIP_INSTALL: '1' } })
+      .then(() => ({ code: 0, stderr: '' }), (error: { code: number; stderr: string }) => error);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('not empty');
+    expect(fs.readdirSync(dir).filter((file) => fs.statSync(path.join(dir, file)).isFile())).toEqual(files);
+    for (const [index, file] of files.entries()) {
+      expect(fs.readFileSync(path.join(dir, file)).equals(before[index]!)).toBe(true);
+    }
+    const reopened = await serve(parseEnv(path.join(dir, '.env')), dir);
+    expect((await reopened.vault.get({ provider: 'github', userId: 'alice' }))?.accessToken === 'synthetic-scaffold-token').toBe(true);
+  });
+
   it('generates a multi-user app and an agent identity, keeping the key out of the server config and the output', async () => {
     const { dir, stdout, env, agentEnv } = await generate();
     expect(env.SINGLE_USER_MODE).toBe('false');

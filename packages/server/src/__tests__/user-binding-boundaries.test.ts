@@ -84,7 +84,12 @@ describe('a caller bound to one user', () => {
     const viaQuery = await request(app).post('/api/v1/delegate?user_id=bob').set(as('alice'))
       .set('DPoP', createDpopProof(agent, 'POST', `${BASE}/api/v1/delegate?user_id=bob`))
       .send({ token_format: 'handle', agent_did: agent.did, service: 'google' });
-    expect(JSON.stringify(viaQuery.body)).not.toContain('bob');
+    expect(viaQuery.status).toBe(200);
+    const claims = JSON.parse(Buffer.from(viaQuery.body.access_token.split('.')[1], 'base64url').toString('utf8'));
+    expect(claims.sub).toBe('alice');
+    expect(claims.client_id).toBe(agent.did);
+    expect(JSON.stringify(claims)).not.toContain('ya29.bob-secret');
+    expect(JSON.stringify(viaQuery.body)).not.toContain('ya29.bob-secret');
   });
 
   it("exercises its own token on its own user's connection, never the other's", async () => {

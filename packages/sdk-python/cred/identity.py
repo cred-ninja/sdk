@@ -33,89 +33,13 @@ _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 def _encode_base58(data: bytes) -> str:
     """Encode bytes to base58btc string."""
-    if len(data) == 0:
-        return ""
-
-    # Count leading zeros
-    zeros = 0
-    for byte in data:
-        if byte != 0:
-            break
-        zeros += 1
-
-    # Convert to big integer and repeatedly divide by 58
-    size = (len(data) * 138 // 100) + 1
-    b58 = [0] * size
-    length = 0
-
-    for byte in data:
-        carry = byte
-        i = 0
-        for j in range(size - 1, -1, -1):
-            if carry == 0 and i >= length:
-                break
-            carry += 256 * b58[j]
-            b58[j] = carry % 58
-            carry //= 58
-            i += 1
-        length = i
-
-    # Skip leading zeros in base58 result
-    start = size - length
-    while start < size and b58[start] == 0:
-        start += 1
-
-    # Build result string
-    result = "1" * zeros
-    for i in range(start, size):
-        result += _BASE58_ALPHABET[b58[i]]
-
-    return result
-
-
-def _decode_base58(s: str) -> bytes:
-    """Decode base58btc string to bytes."""
-    if len(s) == 0:
-        return b""
-
-    # Build alphabet lookup
-    lookup = {char: i for i, char in enumerate(_BASE58_ALPHABET)}
-
-    # Count leading '1's (zeros)
-    zeros = 0
-    for char in s:
-        if char != "1":
-            break
-        zeros += 1
-
-    # Decode to bytes
-    size = (len(s) * 733 // 1000) + 1
-    result = [0] * size
-    length = 0
-
-    for char in s:
-        value = lookup.get(char)
-        if value is None:
-            raise ValueError(f"Invalid base58 character: {char}")
-
-        carry = value
-        i = 0
-        for j in range(size - 1, -1, -1):
-            if carry == 0 and i >= length:
-                break
-            carry += 58 * result[j]
-            result[j] = carry % 256
-            carry //= 256
-            i += 1
-        length = i
-
-    # Skip leading zeros in byte array
-    start = size - length
-    while start < size and result[start] == 0:
-        start += 1
-
-    # Prepend zeros and return
-    return bytes([0] * zeros + result[start:])
+    value = int.from_bytes(data, "big")
+    digits = []
+    while value:
+        value, remainder = divmod(value, 58)
+        digits.append(_BASE58_ALPHABET[remainder])
+    zeros = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * zeros + "".join(reversed(digits))
 
 
 # ── Ed25519 multicodec prefix ────────────────────────────────────────────────
@@ -356,8 +280,6 @@ def create_dpop_proof(
 
 def _base64url_decode(s: str) -> bytes:
     """Decode base64url string to bytes."""
-    import base64
-
     # Replace URL-safe characters and add padding
     s = s.replace("-", "+").replace("_", "/")
     # Add padding

@@ -33,10 +33,28 @@ test('Python CI runs for every main PR, including docs-only changes', () => {
 test('CI has an explicit typecheck after build and includes policy tests', () => {
   const steps = load('ci').jobs.build.steps;
   const index = steps.findIndex((step) => step.run === 'npm run typecheck');
-  const build = steps.findIndex((step) => step.run?.includes('--workspace=packages/server'));
-  assert.ok(build >= 0, 'server build must exist');
+  const build = steps.findIndex((step) => step.run === 'npm run build');
+  assert.ok(build >= 0, 'the complete workspace build must exist');
   assert.ok(index > build);
   assert.ok(load('ci').jobs.lint.steps.some((step) => step.run === 'npm run test:ci'));
+});
+
+test('the test matrix reuses the complete root build and test commands', () => {
+  const steps = load('ci').jobs.test.steps;
+  const build = steps.findIndex((step) => step.run === 'npm run build');
+  assert.ok(build >= 0);
+  assert.ok(steps.findIndex((step) => step.run === 'npm test') > build);
+  const manifest = JSON.parse(readFileSync(`${root}package.json`, 'utf8'));
+  for (const workspace of manifest.workspaces) {
+    let pkg;
+    try { pkg = JSON.parse(readFileSync(`${root}${workspace}/package.json`, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    for (const script of ['build', 'test']) {
+      if (pkg.scripts?.[script]) {
+        assert.ok(manifest.scripts[script].split(' && ').includes(`npm run ${script} --workspace=${workspace}`), `${workspace} must remain in the root ${script} command`);
+      }
+    }
+  }
 });
 
 test('every external action is commit-pinned and checkout credentials are not persisted', () => {

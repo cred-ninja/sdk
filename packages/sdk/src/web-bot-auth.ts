@@ -1,4 +1,5 @@
-import { createHash, createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto';
+import { createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto';
+import { jwkThumbprint } from '@credninja/attenuation';
 
 const ED25519_PRIVATE_KEY_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const ED25519_PUBLIC_KEY_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -29,13 +30,7 @@ export function createWebBotAuthSigner(config: WebBotAuthSignerConfig): WebBotAu
     type: 'pkcs8',
   });
   const publicKey = createPublicKey(privateKey);
-  const spki = publicKey.export({ type: 'spki', format: 'der' });
-  const rawPublicKey = new Uint8Array(spki.slice(-32));
-  const keyId = jwkThumbprint({
-    kty: 'OKP',
-    crv: 'Ed25519',
-    x: Buffer.from(rawPublicKey).toString('base64url'),
-  });
+  const keyId = jwkThumbprint(publicKey);
 
   return {
     keyId,
@@ -64,15 +59,6 @@ export function createWebBotAuthSigner(config: WebBotAuthSignerConfig): WebBotAu
       };
     },
   };
-}
-
-function jwkThumbprint(jwk: { kty: 'OKP'; crv: 'Ed25519'; x: string }): string {
-  const canonical = JSON.stringify({
-    crv: jwk.crv,
-    kty: jwk.kty,
-    x: jwk.x,
-  });
-  return createHash('sha256').update(canonical).digest('base64url');
 }
 
 export function rawPrivateKeyToPublicKeyHex(privateKeyHex: string): string {

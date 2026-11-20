@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify as verifySignature } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createWebBotAuthSigner, rawPrivateKeyToPublicKeyHex } from '../web-bot-auth';
 
@@ -21,6 +21,10 @@ describe('createWebBotAuthSigner()', () => {
       nonce: 'fixed-nonce',
     });
 
+    const jwk = createPublicKey(privateKey).export({ format: 'jwk' });
+    const expectedKeyId = createHash('sha256').update(JSON.stringify({ crv: 'Ed25519', kty: 'OKP', x: jwk.x })).digest('base64url');
+    expect(signer.keyId).toBe(expectedKeyId);
+    expect(headers['Signature-Input']).toContain(`keyid="${expectedKeyId}"`);
     expect(headers['Signature-Agent']).toBe('"https://cred.example.com/.well-known/http-message-signatures-directory"');
     expect(headers['Signature-Input']).toContain('tag="web-bot-auth"');
     expect(headers['Signature-Input']).toContain('nonce="fixed-nonce"');

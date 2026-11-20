@@ -96,3 +96,17 @@ def _b64url_json(payload: dict[str, object]) -> str:
 
 def _b64url_bytes(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+@pytest.mark.parametrize("data,encoded", [
+    (b"", ""),
+    (b"\x00", "1"),
+    (b"\x00\x00", "11"),
+    (b"\x00\x01", "12"),
+    (b"\xff", "5Q"),
+    (b"hello world", "StV1DL6CwTryKyV"),
+])
+def test_base58_encoding_vectors(data, encoded):
+    from cred.identity import _encode_base58
+
+    assert _encode_base58(data) == encoded
