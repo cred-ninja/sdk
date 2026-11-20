@@ -136,8 +136,13 @@ describe('response-side ceilings', () => {
     const upstream = upstreamReturning(5);
     const res = await exerciseAs(app, agent, minted.body.access_token, { url: FILES, method: 'GET' }, { base: BASE });
     expect(res.status).toBe(403);
-    expect(res.body).toMatchObject({ error: 'ceiling_exceeded', constraint: 'max_rows', withheld: true });
-    expect(JSON.stringify(res.body)).not.toContain('f4');
+    expect(res.body).toEqual({
+      error: 'ceiling_exceeded',
+      message: 'The call ran upstream, but its response exceeds a ceiling of this delegation and was withheld',
+      constraint: 'max_rows',
+      withheld: true,
+      upstream_status: 200,
+    });
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 

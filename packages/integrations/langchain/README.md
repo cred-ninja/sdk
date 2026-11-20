@@ -13,7 +13,6 @@ pip install cred-langchain
 ```python
 import os
 from cred_langchain import CredToolkit
-from cred import ConsentRequiredError
 from cred import AgentIdentity
 
 # The agent's own did:key identity, created once with cred.generate_agent_identity()

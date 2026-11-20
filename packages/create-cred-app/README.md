@@ -12,6 +12,8 @@ npm start
 
 Open `http://localhost:3456/admin/login` and sign in with `ADMIN_TOKEN` from `.env` to manage OAuth providers, then grant your agent what it may do with `npm run grant -- github github.read`.
 
+Use a new directory, or run `npx @credninja/create-app .` in an empty directory. Existing directories and nonempty current directories are refused before scaffolding; existing project files are not merged or replaced.
+
 ## What You Get
 
 - **Express server** powered by `@credninja/server`

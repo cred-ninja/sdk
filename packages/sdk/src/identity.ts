@@ -262,7 +262,7 @@ export async function verifyDelegationReceipt(
     const [headerB64, payloadB64, signatureB64] = parts;
 
     // Decode and validate header
-    const header = JSON.parse(base64UrlDecode(headerB64).toString('utf8'));
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8'));
     if (header.alg !== 'EdDSA' || header.typ !== 'JWT') {
       return false;
     }
@@ -273,7 +273,7 @@ export async function verifyDelegationReceipt(
     // payload once the signature is confirmed to have come from
     // `credPublicKeyHex`.
     const signatureInput = Buffer.from(`${headerB64}.${payloadB64}`, 'utf8');
-    const signature = base64UrlDecode(signatureB64);
+    const signature = Buffer.from(signatureB64, 'base64url');
 
     // Build Ed25519 public key object from raw bytes
     const credPublicKeyBytes = hexToBytes(credPublicKeyHex);
@@ -298,7 +298,7 @@ export async function verifyDelegationReceipt(
 
     // Only now decode and trust claims from the payload.
     const payload: DelegationReceiptPayload = JSON.parse(
-      base64UrlDecode(payloadB64).toString('utf8'),
+      Buffer.from(payloadB64, 'base64url').toString('utf8'),
     );
     // The acting agent: `act.sub` (which must equal `client_id`) on a
     // receipt in the draft-02 claim layout, where `sub` names the principal;
@@ -475,13 +475,4 @@ function hexToBytes(hex: string): Uint8Array {
     throw new Error('Invalid hex string: odd length');
   }
   return new Uint8Array(Buffer.from(hex, 'hex'));
-}
-
-function base64UrlDecode(str: string): Buffer {
-  // Replace URL-safe characters and add padding
-  const base64 = str
-    .replace(/-/g, '+')
-    .replace(/_/g, '/')
-    .padEnd(str.length + ((4 - (str.length % 4)) % 4), '=');
-  return Buffer.from(base64, 'base64');
 }

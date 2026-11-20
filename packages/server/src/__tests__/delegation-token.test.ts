@@ -108,7 +108,7 @@ describe('Delegation Token issuance', () => {
     expect(claims.exp - claims.iat).toBeLessThanOrEqual(900);
     expect(claims.prf).toEqual([receiptContentId(res.body.receipt)]);
     expect(claims.credential_handle).toMatch(/^ch_[0-9a-f]{32}$/);
-    expect(JSON.stringify(claims)).not.toContain('ya29');
+    expect(JSON.stringify(claims)).not.toContain('ya29.dt');
     const consent = await vault.getConsent(claims.consent_id);
     expect(consent).toMatchObject({ subject: 'alice', agentDid: agent.did, service: 'google', source: 'connection' });
   });

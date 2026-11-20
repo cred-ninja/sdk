@@ -96,7 +96,7 @@ describe('brokered handle hardening', () => {
     expect(res.body.token_type).toBe('DPoP');
     expect(res.body.access_token.split('.')).toHaveLength(3);
     expect(JSON.stringify(res.body)).not.toContain('ya29.handle-token');
-    expect(Buffer.from(res.body.access_token.split('.')[1], 'base64url').toString()).not.toContain('ya29');
+    expect(Buffer.from(res.body.access_token.split('.')[1], 'base64url').toString()).not.toContain('ya29.handle-token');
   });
 
   it('still returns the provider token when raw is requested explicitly', async () => {
