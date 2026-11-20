@@ -46,7 +46,7 @@
     "@credninja/protocol": "^2.2.0"
   },
   "devDependencies": {
-    "jsdom": "^26.1.0",
+    "jsdom": "^31.0.1",
     "typescript": "^5.3.3",
     "vitest": "^4.1.12"
   },

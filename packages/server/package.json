@@ -57,7 +57,7 @@
     "vitest": "^4.1.12",
     "supertest": "^7.0.0",
     "@types/supertest": "^6.0.2",
-    "jsdom": "^26.1.0"
+    "jsdom": "^31.0.1"
   },
   "repository": {
     "type": "git",
