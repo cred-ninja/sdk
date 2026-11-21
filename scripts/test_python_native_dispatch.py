@@ -4,12 +4,15 @@ Run against source or independently installed wheels. Select packages with
 CRED_NATIVE_ADAPTERS=langchain,crewai,... (no missing-adapter skips).
 """
 import asyncio
+import base64
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cred import Cred, generate_agent_identity
 
 ADAPTERS = os.environ.get(
@@ -18,6 +21,30 @@ ADAPTERS = os.environ.get(
 BASE = "https://cred.example.test"
 URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 TOKEN = "synthetic-delegation-secret"
+
+
+def b64url(value):
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def verify_proof(request, identity):
+    header, payload, signature = request.headers["DPoP"].split(".")
+    def decode(value):
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    Ed25519PublicKey.from_public_bytes(identity.public_key).verify(
+        decode(signature), f"{header}.{payload}".encode("ascii"),
+    )
+    jwk = {"kty": "OKP", "crv": "Ed25519", "x": b64url(identity.public_key)}
+    assert json.loads(decode(header)) == {"alg": "EdDSA", "typ": "dpop+jwt", "jwk": jwk}
+    claims = json.loads(decode(payload))
+    assert claims["htm"] == request.method
+    assert claims["htu"] == str(request.url)
+    if request.url.path == "/api/v1/use":
+        assert claims["ath"] == b64url(hashlib.sha256(TOKEN.encode()).digest())
+        body = json.dumps(json.loads(request.content), sort_keys=True, separators=(",", ":"))
+        assert claims["cred_req"] == b64url(hashlib.sha256(body.encode()).digest())
+    canonical_jwk = json.dumps(jwk, sort_keys=True, separators=(",", ":"))
+    return b64url(hashlib.sha256(canonical_jwk.encode()).digest())
 
 
 def tools(adapter, client, identity, user="alice", token_format="handle"):
@@ -112,8 +139,9 @@ def wire(monkeypatch):
             assert body["appClientId"] == "app"
             assert body["scopes"] == ["calendar.readonly"]
             if body.get("token_format") == "handle":
-                assert request.headers.get("DPoP")
-                data = dict(access_token=TOKEN, token_type="DPoP", cnf={"jkt": "fixture"},
+                assert body["agent_did"] == state["identity"].did
+                state["jkt"] = verify_proof(request, state["identity"])
+                data = dict(access_token=TOKEN, token_type="DPoP", cnf={"jkt": state["jkt"]},
                             expires_in=state["expires_in"], service="google", user_id="alice",
                             scopes=["calendar.readonly"], delegation_id="native-handle")
             else:
@@ -122,7 +150,7 @@ def wire(monkeypatch):
             data["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=state["expires_in"])).isoformat()
         elif request.url.path == "/api/v1/use":
             assert request.headers["Authorization"] == "DPoP " + TOKEN
-            assert request.headers.get("DPoP")
+            assert verify_proof(request, state["identity"]) == state["jkt"]
             assert json.loads(request.content) == {"url": URL, "method": "GET"}
             data = dict(status=200, ok=True, body={"items": []}, contentType="application/json")
         elif request.method == "GET":
@@ -142,6 +170,7 @@ def wire(monkeypatch):
 def test_native_delegate_use_and_refusals(adapter, authentication, wire):
     async def flow():
         identity = generate_agent_identity()
+        wire["identity"] = identity
         signed = []
         def signer(method, url, headers, body):
             signed.append((method, url, body))
