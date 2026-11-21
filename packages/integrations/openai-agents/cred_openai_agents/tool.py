@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from agents import FunctionTool, RunContextWrapper
 
 from cred import Cred
-from cred.exceptions import ConsentRequiredError
+# Retain the existing exception re-export for direct Python callers.
+from cred.exceptions import ConsentRequiredError as ConsentRequiredError
 
 from cred.integration_support import (
     resolve_client as _resolve_client,

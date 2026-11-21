@@ -164,8 +164,7 @@ def test_native_delegate_use_and_refusals(adapter, authentication, wire):
                 assert len(signed) == 2
                 assert all(r.headers.get("X-Test-Signature") == "synthetic-signature" for r in wire["calls"])
             for wrong in ("missing", "server", "agent", "user"):
-                other_client = Cred(agent_token="synthetic-agent", base_url=BASE + ("/other" if wrong == "server" else ""))
-                try:
+                with Cred(agent_token="synthetic-agent", base_url=BASE + ("/other" if wrong == "server" else "")) as other_client:
                     other = tools(adapter, other_client,
                                   generate_agent_identity() if wrong == "agent" else identity,
                                   user="bob" if wrong == "user" else "alice")
@@ -186,8 +185,6 @@ def test_native_delegate_use_and_refusals(adapter, authentication, wire):
                         assert reason in refused
                         assert TOKEN not in refused
                     assert len(wire["calls"]) == count
-                finally:
-                    other_client.close()
             wire["expires_in"] = -1
             fresh = tools(adapter, client, identity)
             await invoke(adapter, fresh["delegate"], delegate_args(adapter))

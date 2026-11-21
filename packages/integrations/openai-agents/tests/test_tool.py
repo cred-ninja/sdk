@@ -319,6 +319,8 @@ class TestInvoke:
         assert call_kwargs["scopes"] is None
 
     def test_propagates_consent_required_error(self, tool, mock_cred):
+        from cred_openai_agents.tool import ConsentRequiredError as exported_error
+        assert exported_error is ConsentRequiredError
         mock_cred.delegate.side_effect = ConsentRequiredError(
             "User has not consented",
             "https://cred.example.com/connect/google?user_id=user_123&app_client_id=app_1",
