@@ -78,7 +78,7 @@ def mock_cred():
 
 @pytest.fixture
 def tool(mock_cred):
-    with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+    with patch("cred.integration_support.Cred", return_value=mock_cred):
         return cred_delegate_tool(
             agent_token=TOKEN,
             user_id=USER_ID,
@@ -96,7 +96,7 @@ def run(coro):
 
 class TestFactory:
     def test_returns_function_tool(self):
-        with patch("cred_autogen.tool.Cred"):
+        with patch("cred.integration_support.Cred"):
             t = cred_delegate_tool(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -113,7 +113,7 @@ class TestFactory:
         assert "service" in tool.description.lower()
 
     def test_creates_cred_client_with_token_and_base_url(self):
-        with patch("cred_autogen.tool.Cred") as mock_cred_class:
+        with patch("cred.integration_support.Cred") as mock_cred_class:
             cred_delegate_tool(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -129,7 +129,7 @@ class TestFactory:
         assert CredTool is cred_delegate_tool
 
     def test_returns_cred_use_tool(self):
-        with patch("cred_autogen.tool.Cred"):
+        with patch("cred.integration_support.Cred"):
             t = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL)
         assert isinstance(t, FunctionTool)
         assert t.name == "cred_use"
@@ -166,7 +166,7 @@ class TestInvoke:
             scopes=["calendar.readonly"],
             delegation_id="del_brokered",
         )
-        with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             handle_tool = cred_delegate_tool(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -207,7 +207,7 @@ class TestInvoke:
             content_type="application/json",
             body={"items": []},
         )
-        with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity)
 
         result_str = run(use_tool.run_json(
@@ -236,7 +236,7 @@ class TestInvoke:
             "del_noid", HANDLE_TOKEN, time.time() + 600,
             base_url=BASE_URL, agent_did="", user_id=USER_ID,
         )
-        with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL)
 
         with pytest.raises(ValueError, match="agent_identity"):
@@ -255,7 +255,7 @@ class TestInvoke:
         mock_cred.use.return_value = BrokeredUseResult(
             status=200, ok=True, content_type="application/json", body={},
         )
-        with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             alice = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="alice")
             bob = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="bob")
         args = {"delegation_id": "del_bob", "url": "https://www.googleapis.com/x", "method": "GET"}
@@ -269,7 +269,7 @@ class TestInvoke:
             "del_old", HANDLE_TOKEN, time.time() - 1,
             base_url=BASE_URL, agent_did="", user_id=USER_ID,
         )
-        with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = cred_use_tool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=generate_agent_identity())
 
         for delegation_id in ("del_never_seen", "del_old"):
@@ -290,7 +290,7 @@ class TestInvoke:
             ("https://other.example.com", identity),
             (BASE_URL, generate_agent_identity()),
         ):
-            with patch("cred_autogen.tool.Cred", return_value=mock_cred):
+            with patch("cred.integration_support.Cred", return_value=mock_cred):
                 use_tool = cred_use_tool(agent_token=TOKEN, base_url=base_url, agent_identity=agent)
             with pytest.raises(ValueError, match="different server, agent or user"):
                 run(use_tool.run_json(

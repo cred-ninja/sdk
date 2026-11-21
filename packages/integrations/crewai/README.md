@@ -36,15 +36,23 @@ use_tool = CredUseTool(
     agent_token=os.environ["CRED_AGENT_TOKEN"],
     base_url=os.environ["CRED_BASE_URL"],
     agent_identity=identity,
+    user_id="user_123",
 )
 
 # Use with CrewAI agent
 agent = Agent(
     role="Calendar Manager",
     goal="Manage user's calendar",
+    backstory="A calendar assistant using the user's delegated Google access.",
     tools=[google_tool, use_tool],
 )
 ```
+
+Configure CrewAI's model/provider credentials separately from Cred's agent token.
+Cred uses the installed CrewAI native tool base. CrewAI 0.11 uses LangChain's
+tool base; newer releases use `crewai.tools.BaseTool`. No independent LangChain
+dependency is needed for current CrewAI. The exact 0.11 test environment also
+installs `setuptools<81` because that upstream release imports `pkg_resources`.
 
 Set `token_format="handle"` to return a brokered delegation id instead of a provider access token. Pair it with `CredUseTool` when the agent needs to call service APIs through Cred.
 

@@ -56,6 +56,30 @@ events = cred.use(
 
 ## API
 
+### Integration support (since 2.2.0)
+
+`cred.integration_support` is a supported public module for independently
+installed adapter wheels. Its exported names and signatures follow the SDK's
+major-version compatibility contract; adapters must require `cred-auth>=2.2.0`.
+The 2.2.0 SDK wheel contains these helpers; an older SDK does not. Build/install
+the matching SDK wheel when testing an unreleased adapter, rather than assuming
+the registry already provides it.
+
+Exports: `resolve_client`, `identity_kwargs`, `agent_did`, `expiry_epoch`, and
+`DelegationTokenStore`. There are no framework dependencies or global token
+stores in this module. `resolve_client` preserves a caller-built synchronous
+client, including request-signing callbacks, and refuses conflicting token/URL
+configuration. It does not transfer ownership or close the client.
+
+Each integration creates its own `DelegationTokenStore`. `remember` records a
+handle's token, expiry, server URL, agent DID and optional user ID. `lookup`
+returns only a live matching token and otherwise raises `ValueError`; expiry is
+exclusive. URLs ignore trailing slashes. A lookup with `user_id=None` retains
+the single-user compatibility path, skipping the user check; multi-user callers
+must supply the user. Tokens remain in process memory, not model-facing output.
+Framework registration, tool schemas and exception translation remain adapter
+responsibilities. The module is not a persistent cache or a cross-worker store.
+
 ### `Cred(agent_token, base_url)`
 
 ### `Cred(base_url=..., sign_request=create_wimse_http_signer(wit, private_key, alg, audience=None, txn_token=None, lifetime_sec=60))`

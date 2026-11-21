@@ -81,6 +81,14 @@ jobs:
       - name: Test integration package
         run: python -m pytest '${{ matrix.package }}/tests'
 
+      - name: Exercise native registration and dispatch
+        env:
+          INTEGRATION_PACKAGE: ${{ matrix.package }}
+          OTEL_SDK_DISABLED: 'true'
+        run: |
+          export CRED_NATIVE_ADAPTERS="${INTEGRATION_PACKAGE##*/}"
+          python -m pytest scripts/test_python_native_dispatch.py scripts/test_python_integration_support.py
+
   # Every package in one environment: proves they install together, which the
   # per-package jobs above cannot. Pinned by scripts/python-test-constraints.txt.
   combined:
@@ -127,4 +135,41 @@ jobs:
             packages/integrations/**/pyproject.toml
 
       - name: Smoke fresh Python wheel installs
+        run: bash scripts/smoke-python-wheels.sh
+
+  framework-minimum:
+    name: Python Framework Minimum (${{ matrix.adapter }})
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - adapter: langchain
+            framework: langchain-core==0.2.0
+            python: '3.9'
+          - adapter: crewai
+            framework: crewai==0.11.0
+            python: '3.10'
+          - adapter: openai-agents
+            framework: openai-agents==0.1.0
+            python: '3.10'
+          - adapter: autogen
+            # Test the declared floor, even though upstream yanked this release.
+            framework: autogen-core==0.4.0
+            python: '3.10'
+          - adapter: semantic-kernel
+            framework: semantic-kernel==1.0.0
+            python: '3.10'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Native dispatch from independent minimum-framework wheels
+        env:
+          CRED_WHEEL_ADAPTERS: ${{ matrix.adapter }}
+          CRED_WHEEL_FRAMEWORK_PIN: ${{ matrix.framework }}
         run: bash scripts/smoke-python-wheels.sh

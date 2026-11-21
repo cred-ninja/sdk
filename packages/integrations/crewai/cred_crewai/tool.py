@@ -1,113 +1,46 @@
-"""Cred CrewAI Tool — pre-configured delegation tool for a single service.
-
-CrewAI's BaseTool is langchain_core.tools.BaseTool under the hood
-(verified in crewai 0.11.x source). We import from langchain_core so this
-package works in environments where crewai is installed alongside langchain,
-without requiring crewai as a hard build dependency at import time.
-
-When crewai is installed, pass CredTool instances directly to Agent(tools=[...]).
-"""
+"""Cred tools using CrewAI's native tool contract for the installed framework."""
 
 from __future__ import annotations
 
 import time
 import json
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Type
 
-from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
+from crewai import tools as crewai_tools
+
+if hasattr(crewai_tools, "BaseTool"):
+    from crewai.tools import BaseTool
+else:
+    # CrewAI 0.11 uses LangChain tools; newer releases own their tool base.
+    from langchain_core.tools import BaseTool
+
+if hasattr(BaseTool, "model_fields"):
+    from pydantic import BaseModel, Field, PrivateAttr
+else:
+    try:
+        from pydantic.v1 import BaseModel, Field, PrivateAttr
+    except ImportError:  # Pydantic 1 releases before the v1 compatibility namespace
+        from pydantic import BaseModel, Field, PrivateAttr
 
 from cred import Cred
 from cred.exceptions import ConsentRequiredError  # re-export for convenience
+
+from cred.integration_support import (
+    resolve_client as _resolve_client,
+    identity_kwargs as _identity_kwargs,
+    agent_did as _agent_did,
+    expiry_epoch as _expiry_epoch,
+    DelegationTokenStore,
+)
 
 if TYPE_CHECKING:
     from cred import DpopSigningIdentity
 
 
-def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
-    """Use the caller's client when given (for example one built with
-    ``sign_request`` for WIMSE workload signing); otherwise build one from the
-    agent token, as before. The token cache keys on the client's server URL."""
-    if cred is None:
-        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
-    if not isinstance(cred, Cred):
-        raise TypeError("cred must be a synchronous cred.Cred client")
-    if agent_token:
-        raise ValueError("Pass agent_token or cred, not both")
-    if base_url and base_url.rstrip("/") != cred.base_url:
-        raise ValueError("base_url does not match the passed client's base_url")
-    return cred, cred.base_url
-
-
-def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
-    """``agent_identity=`` for the SDK call, only when one is configured."""
-    return {"agent_identity": agent_identity} if agent_identity is not None else {}
-
-
-# ── Delegation token store ────────────────────────────────────────────────────
-#
-# The model only ever sees ``delegation_id``. The Delegation Token that
-# ``cred_use`` needs stays in this in-process mapping (delegation_id ->
-# (token, expiry)), populated by the delegate tool and read by the use tool.
-
-_DELEGATION_TOKENS: dict[str, tuple[str, float, str, str, Optional[str]]] = {}
-
-
-def _agent_did(agent_identity: Any) -> str:
-    return getattr(agent_identity, "did", "") or ""
-
-
-def _remember_delegation_token(
-    delegation_id: str,
-    token: str,
-    expires_at: float,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> None:
-    """Store a token with the server, agent and user it was issued for."""
-    now = time.time()
-    for key in [k for k, entry in _DELEGATION_TOKENS.items() if entry[1] <= now]:
-        del _DELEGATION_TOKENS[key]
-    _DELEGATION_TOKENS[delegation_id] = (token, expires_at, base_url.rstrip("/"), agent_did, user_id)
-
-
-def _lookup_delegation_token(
-    delegation_id: str,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> str:
-    """Return the token only to a tool configured for the same server, agent and user.
-
-    User rule (fail closed when both are set): if the use tool was configured with a
-    ``user_id`` it must equal the user the delegation was remembered for, otherwise
-    ``ValueError``. A use tool with no ``user_id`` skips the user check so single-user
-    setups keep working; processes serving several users must pass ``user_id``.
-    """
-    entry = _DELEGATION_TOKENS.get(delegation_id)
-    if entry is None or entry[1] <= time.time():
-        _DELEGATION_TOKENS.pop(delegation_id, None)
-        raise ValueError("Unknown or expired delegation: call the delegate tool first")
-    _, _, entry_base_url, entry_agent_did, entry_user_id = entry
-    if (
-        entry_base_url != base_url.rstrip("/")
-        or entry_agent_did != agent_did
-        or (user_id is not None and entry_user_id != user_id)
-    ):
-        raise ValueError("This delegation was issued for a different server, agent or user")
-    return entry[0]
-
-
-def _expiry_epoch(result: Any) -> float:
-    expires_at = getattr(result, "expires_at", None)
-    if isinstance(expires_at, datetime):
-        return expires_at.timestamp()
-    expires_in = getattr(result, "expires_in", 0)
-    return time.time() + (expires_in if isinstance(expires_in, (int, float)) else 0)
+# Intentionally separate from every other integration, even in one process.
+_token_store = DelegationTokenStore()
+_remember_delegation_token = _token_store.remember
+_lookup_delegation_token = _token_store.lookup
 
 
 class _CredToolInput(BaseModel):
@@ -147,26 +80,27 @@ class CredTool(BaseTool):
 
         # Use with CrewAI
         from crewai import Agent
-        agent = Agent(role="Calendar Manager", tools=[google_tool])
+        agent = Agent(role="Calendar Manager", goal="Manage the user's calendar",
+                      backstory="An assistant using delegated access", tools=[google_tool])
     """
 
-    # langchain_core requires these as class-level annotations
+    # Framework-facing tool metadata; private configuration is not an input.
     name: str = "cred_delegate"
     description: str = "Get a delegated OAuth access token for a service"
     args_schema: Type[BaseModel] = _CredToolInput
 
     # Tool state — set in __init__
-    _cred: Any = None
-    _user_id: str = ""
-    _base_url: str = ""
-    _service: str = ""
-    _app_client_id: str = ""
-    _scopes: list[str] = []
-    _token_format: str = "raw"
+    _cred: Any = PrivateAttr(default=None)
+    _user_id: str = PrivateAttr(default="")
+    _base_url: str = PrivateAttr(default="")
+    _service: str = PrivateAttr(default="")
+    _app_client_id: str = PrivateAttr(default="")
+    _scopes: list[str] = PrivateAttr(default_factory=list)
+    _token_format: str = PrivateAttr(default="raw")
     # The agent's DPoP signing identity; never part of the tool's input or output.
-    _agent_identity: Any = None
-    _cached_token: str | None = None
-    _cache_expires_at: float = 0.0
+    _agent_identity: Any = PrivateAttr(default=None)
+    _cached_token: str | None = PrivateAttr(default=None)
+    _cache_expires_at: float = PrivateAttr(default=0.0)
 
     def __init__(
         self,
@@ -266,11 +200,11 @@ class CredUseTool(BaseTool):
     )
     args_schema: Type[BaseModel] = _CredUseInput
 
-    _cred: Any = None
-    _base_url: str = ""
+    _cred: Any = PrivateAttr(default=None)
+    _base_url: str = PrivateAttr(default="")
     # The agent's DPoP signing identity; never part of the tool's input or output.
-    _agent_identity: Any = None
-    _use_user_id: Optional[str] = None
+    _agent_identity: Any = PrivateAttr(default=None)
+    _use_user_id: Optional[str] = PrivateAttr(default=None)
 
     def __init__(
         self,

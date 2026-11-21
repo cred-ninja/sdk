@@ -4,78 +4,34 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Type
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
+
+# Use the native tool's model family, including core 0.2 with Pydantic v2.
+if hasattr(BaseTool, "model_fields"):
+    from pydantic import BaseModel, Field, PrivateAttr
+else:
+    try:
+        from pydantic.v1 import BaseModel, Field, PrivateAttr
+    except ImportError:  # Pydantic 1 releases before the v1 compatibility namespace
+        from pydantic import BaseModel, Field, PrivateAttr
+
+from cred.integration_support import (
+    identity_kwargs as _identity_kwargs,
+    agent_did as _agent_did,
+    expiry_epoch as _expiry_epoch,
+    DelegationTokenStore,
+)
 
 if TYPE_CHECKING:
     from cred import Cred
 
 
-def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
-    """``agent_identity=`` for the SDK call, only when one is configured."""
-    return {"agent_identity": agent_identity} if agent_identity is not None else {}
-
-
-# ── Delegation token store ────────────────────────────────────────────────────
-#
-# The model only ever sees ``delegation_id``. The Delegation Token that
-# ``cred_use`` needs stays in this in-process mapping (delegation_id ->
-# (token, expiry)), populated by ``cred_delegate`` and read by ``cred_use``.
-
-_DELEGATION_TOKENS: dict[str, tuple[str, float, str, str, Optional[str]]] = {}
-
-
-def _agent_did(agent_identity: Any) -> str:
-    return getattr(agent_identity, "did", "") or ""
-
-
-def _remember_delegation_token(
-    delegation_id: str,
-    token: str,
-    expires_at: float,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> None:
-    """Store a token with the server, agent and user it was issued for."""
-    now = time.time()
-    for key in [k for k, entry in _DELEGATION_TOKENS.items() if entry[1] <= now]:
-        del _DELEGATION_TOKENS[key]
-    _DELEGATION_TOKENS[delegation_id] = (token, expires_at, base_url.rstrip("/"), agent_did, user_id)
-
-
-def _lookup_delegation_token(
-    delegation_id: str,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> str:
-    """Return the token only to a tool configured for the same server, agent and user."""
-    entry = _DELEGATION_TOKENS.get(delegation_id)
-    if entry is None or entry[1] <= time.time():
-        _DELEGATION_TOKENS.pop(delegation_id, None)
-        raise ValueError("Unknown or expired delegation: call cred_delegate first")
-    _, _, entry_base_url, entry_agent_did, entry_user_id = entry
-    if (
-        entry_base_url != base_url.rstrip("/")
-        or entry_agent_did != agent_did
-        or (user_id is not None and entry_user_id != user_id)
-    ):
-        raise ValueError("This delegation was issued for a different server, agent or user")
-    return entry[0]
-
-
-def _expiry_epoch(result: Any) -> float:
-    expires_at = getattr(result, "expires_at", None)
-    if isinstance(expires_at, datetime):
-        return expires_at.timestamp()
-    expires_in = getattr(result, "expires_in", 0)
-    return time.time() + (expires_in if isinstance(expires_in, (int, float)) else 0)
+# Intentionally separate from every other integration, even in one process.
+_token_store = DelegationTokenStore(unknown_message="Unknown or expired delegation: call cred_delegate first")
+_remember_delegation_token = _token_store.remember
+_lookup_delegation_token = _token_store.lookup
 
 
 # ── Input schemas ─────────────────────────────────────────────────────────────
@@ -129,13 +85,13 @@ class CredDelegateTool(BaseTool):
     args_schema: Type[BaseModel] = DelegateInput
 
     # Injected by CredToolkit
-    _cred: Any = None
-    _user_id: str = ""
-    _token_format: str = "raw"
-    _base_url: str = ""
+    _cred: Any = PrivateAttr(default=None)
+    _user_id: str = PrivateAttr(default="")
+    _token_format: str = PrivateAttr(default="raw")
+    _base_url: str = PrivateAttr(default="")
     # The agent's DPoP signing identity; never part of the tool's input or output.
-    _agent_identity: Any = None
-    _cache: dict[tuple[str, str, str, str, tuple[str, ...]], tuple[Any, float]] = {}
+    _agent_identity: Any = PrivateAttr(default=None)
+    _cache: dict[tuple[str, str, str, str, tuple[str, ...]], tuple[Any, float]] = PrivateAttr(default_factory=dict)
 
     def _get_delegation_result(
         self,
@@ -217,11 +173,11 @@ class CredUseTool(BaseTool):
     )
     args_schema: Type[BaseModel] = UseInput
 
-    _cred: Any = None
-    _base_url: str = ""
-    _user_id: str = ""
+    _cred: Any = PrivateAttr(default=None)
+    _base_url: str = PrivateAttr(default="")
+    _user_id: str = PrivateAttr(default="")
     # The agent's DPoP signing identity; never part of the tool's input or output.
-    _agent_identity: Any = None
+    _agent_identity: Any = PrivateAttr(default=None)
 
     def _run(
         self,
@@ -268,8 +224,8 @@ class CredStatusTool(BaseTool):
     )
 
     # Injected by CredToolkit
-    _cred: Any = None
-    _user_id: str = ""
+    _cred: Any = PrivateAttr(default=None)
+    _user_id: str = PrivateAttr(default="")
 
     def _run(self, **kwargs: Any) -> str:
         connections = self._cred.get_user_connections(self._user_id)
@@ -295,8 +251,8 @@ class CredRevokeTool(BaseTool):
     args_schema: Type[BaseModel] = RevokeInput
 
     # Injected by CredToolkit
-    _cred: Any = None
-    _user_id: str = ""
+    _cred: Any = PrivateAttr(default=None)
+    _user_id: str = PrivateAttr(default="")
 
     def _run(
         self,
