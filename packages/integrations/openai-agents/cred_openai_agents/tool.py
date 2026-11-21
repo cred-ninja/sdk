@@ -14,102 +14,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from agents import FunctionTool, RunContextWrapper
 
 from cred import Cred
+from cred.exceptions import ConsentRequiredError
+
+from cred.integration_support import (
+    resolve_client as _resolve_client,
+    identity_kwargs as _identity_kwargs,
+    agent_did as _agent_did,
+    expiry_epoch as _expiry_epoch,
+    DelegationTokenStore,
+)
 
 if TYPE_CHECKING:
     from cred import DpopSigningIdentity
 
 
-def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
-    """Use the caller's client when given (for example one built with
-    ``sign_request`` for WIMSE workload signing); otherwise build one from the
-    agent token, as before. The token cache keys on the client's server URL."""
-    if cred is None:
-        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
-    if not isinstance(cred, Cred):
-        raise TypeError("cred must be a synchronous cred.Cred client")
-    if agent_token:
-        raise ValueError("Pass agent_token or cred, not both")
-    if base_url and base_url.rstrip("/") != cred.base_url:
-        raise ValueError("base_url does not match the passed client's base_url")
-    return cred, cred.base_url
-
-
-def _identity_kwargs(agent_identity: Any) -> dict[str, Any]:
-    """``agent_identity=`` for the SDK call, only when one is configured."""
-    return {"agent_identity": agent_identity} if agent_identity is not None else {}
-
-
-# ── Delegation token store ────────────────────────────────────────────────────
-#
-# The model only ever sees ``delegation_id``. The Delegation Token that
-# ``cred_use`` needs stays in this in-process mapping (delegation_id ->
-# (token, expiry)), populated by the delegate tool and read by the use tool.
-
-_DELEGATION_TOKENS: dict[str, tuple[str, float, str, str, Optional[str]]] = {}
-
-
-def _agent_did(agent_identity: Any) -> str:
-    return getattr(agent_identity, "did", "") or ""
-
-
-def _remember_delegation_token(
-    delegation_id: str,
-    token: str,
-    expires_at: float,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> None:
-    """Store a token with the server, agent and user it was issued for."""
-    now = time.time()
-    for key in [k for k, entry in _DELEGATION_TOKENS.items() if entry[1] <= now]:
-        del _DELEGATION_TOKENS[key]
-    _DELEGATION_TOKENS[delegation_id] = (token, expires_at, base_url.rstrip("/"), agent_did, user_id)
-
-
-def _lookup_delegation_token(
-    delegation_id: str,
-    *,
-    base_url: str,
-    agent_did: str,
-    user_id: Optional[str] = None,
-) -> str:
-    """Return the token only to a tool configured for the same server, agent and user.
-
-    User rule (fail closed when both are set): if the use tool was configured with a
-    ``user_id`` it must equal the user the delegation was remembered for, otherwise
-    ``ValueError``. A use tool with no ``user_id`` skips the user check so single-user
-    setups keep working; processes serving several users must pass ``user_id``.
-    """
-    entry = _DELEGATION_TOKENS.get(delegation_id)
-    if entry is None or entry[1] <= time.time():
-        _DELEGATION_TOKENS.pop(delegation_id, None)
-        raise ValueError("Unknown or expired delegation: call the delegate tool first")
-    _, _, entry_base_url, entry_agent_did, entry_user_id = entry
-    if (
-        entry_base_url != base_url.rstrip("/")
-        or entry_agent_did != agent_did
-        or (user_id is not None and entry_user_id != user_id)
-    ):
-        raise ValueError("This delegation was issued for a different server, agent or user")
-    return entry[0]
-
-
-def _expiry_epoch(result: Any) -> float:
-    expires_at = getattr(result, "expires_at", None)
-    if isinstance(expires_at, datetime):
-        return expires_at.timestamp()
-    expires_in = getattr(result, "expires_in", 0)
-    return time.time() + (expires_in if isinstance(expires_in, (int, float)) else 0)
-from cred.exceptions import ConsentRequiredError
+# Intentionally separate from every other integration, even in one process.
+_token_store = DelegationTokenStore()
+_remember_delegation_token = _token_store.remember
+_lookup_delegation_token = _token_store.lookup
 
 # JSON schema for the tool's input parameters
 _PARAMS_SCHEMA: dict[str, Any] = {

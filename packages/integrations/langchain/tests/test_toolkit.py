@@ -306,9 +306,8 @@ class TestCredDelegateTool:
     def test_has_args_schema(self, toolkit):
         tools = toolkit.get_tools()
         delegate = next(t for t in tools if t.name == "cred_delegate")
-        schema = delegate.args_schema.model_json_schema()
-        assert "service" in schema["properties"]
-        assert "scopes" in schema["properties"]
+        assert "service" in delegate.args
+        assert "scopes" in delegate.args
 
     def test_real_cred_client_delegates_against_mock_server(self):
         toolkit = CredToolkit(
@@ -407,8 +406,7 @@ class TestCredRevokeTool:
     def test_has_args_schema(self, toolkit):
         tools = toolkit.get_tools()
         revoke = next(t for t in tools if t.name == "cred_revoke")
-        schema = revoke.args_schema.model_json_schema()
-        assert "service" in schema["properties"]
+        assert "service" in revoke.args
 
 
 class TestSecretFromCred:
@@ -510,7 +508,7 @@ class TestAgentIdentity:
         )
         tools = {t.name: t for t in toolkit.get_tools()}
         for name in ("cred_delegate", "cred_use"):
-            assert "agent_identity" not in tools[name].args_schema.model_json_schema()["properties"]
+            assert "agent_identity" not in tools[name].args
         calls: list = []
         with patch("httpx.Client.request", _fake_cred_server(calls)):
             delegated = tools["cred_delegate"]._run(service="google", app_client_id="app_1", scopes=["calendar.readonly"])

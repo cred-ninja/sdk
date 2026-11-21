@@ -74,7 +74,7 @@ def mock_cred():
 
 @pytest.fixture
 def plugin(mock_cred):
-    with patch("cred_semantic_kernel.plugin.Cred", return_value=mock_cred):
+    with patch("cred.integration_support.Cred", return_value=mock_cred):
         return CredPlugin(
             agent_token=TOKEN,
             user_id=USER_ID,
@@ -87,7 +87,7 @@ def plugin(mock_cred):
 
 class TestConstructor:
     def test_creates_cred_client(self):
-        with patch("cred_semantic_kernel.plugin.Cred") as mock_cls:
+        with patch("cred.integration_support.Cred") as mock_cls:
             CredPlugin(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -106,7 +106,7 @@ class TestConstructor:
         assert plugin._app_client_id == APP_CLIENT_ID
 
     def test_stores_token_format(self, mock_cred):
-        with patch("cred_semantic_kernel.plugin.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             plugin = CredPlugin(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -121,8 +121,12 @@ class TestConstructor:
 
 class TestKernelFunction:
     def test_delegate_has_kernel_function_metadata(self, plugin):
-        # kernel_function decorator adds __kernel_function_metadata__
-        assert hasattr(plugin.delegate, "__kernel_function__")
+        from semantic_kernel import Kernel
+        kernel = Kernel()
+        registered = kernel.add_plugin(plugin, plugin_name="cred")
+        assert set(registered.functions) == {"delegate", "use"}
+        assert [p.name for p in registered["delegate"].parameters] == ["service_slug", "scopes"]
+        assert not hasattr(plugin.delegate, "__kernel_function__")
 
     def test_delegate_is_callable(self, plugin):
         assert callable(plugin.delegate)
@@ -159,7 +163,7 @@ class TestDelegate:
             scopes=["calendar.readonly"],
             delegation_id="del_brokered",
         )
-        with patch("cred_semantic_kernel.plugin.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             plugin = CredPlugin(
                 agent_token=TOKEN,
                 user_id=USER_ID,
