@@ -127,9 +127,14 @@ codex -s read-only -a never -c forced_login_method='"chatgpt"' review \
   'Review git diff origin/main...HEAD. Apply applicable AGENTS.md rules. Inspect callers and tests. Focus on OAuth scope escalation, token/refresh-token leakage, cross-tenant vault access, AES-256-GCM nonces and authentication, revocation/expiry, SSRF, policy bypasses, races, retries, and Python/TypeScript divergence. Report actionable defects with severity, file/line, failure path and remediation. Distinguish verified defects from hypotheses. Do not modify files, execute repository code, read credentials or unrelated paths, or post/approve/merge anything.'
 ```
 
-For unattended local execution, `codex exec review --base origin/main` is also
-supported. This is local subscription authentication, not permission to export
-OAuth sessions to public runners. No wrapper is needed for these built-in paths.
+For unattended local execution, use the same subscription-only constraint:
+
+```sh
+codex -s read-only -a never -c forced_login_method='"chatgpt"' exec review --base origin/main
+```
+
+This is local subscription authentication, not permission to export OAuth
+sessions to public runners. No wrapper is needed for these built-in paths.
 
 ## Audit baseline (2026-11-23)
 
