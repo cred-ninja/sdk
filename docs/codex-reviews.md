@@ -107,16 +107,20 @@ Review a PR in a separate worktree without changing another developer's checkout
 (replace `123` with the real PR number, and choose a new directory):
 
 ```sh
-git fetch origin main pull/123/head
+git fetch origin main
+git fetch origin pull/123/head
 git worktree add --detach ../sdk-pr-123-review FETCH_HEAD
 cd ../sdk-pr-123-review
-codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
+test "$(gh pr view 123 -R cred-ninja/sdk --json baseRefName --jq .baseRefName)" = main &&
+  test "$(git rev-parse HEAD)" = "$(gh pr view 123 -R cred-ninja/sdk --json headRefOid --jq .headRefOid)" &&
+  codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
 ```
 
-Check the PR's actual base with `gh pr view 123 -R cred-ninja/sdk --json
-baseRefName,headRefOid`. The example assumes a main-target PR; for a stacked PR,
-fetch and review against its actual base instead. Confirm the checkout matches
-`headRefOid` and do not approve or merge as part of the review.
+The identity/base checks must succeed before starting review; otherwise stop and
+refetch the correct head/base. Fetch the PR head separately: fetching multiple
+refs together makes `FETCH_HEAD` ambiguous and can check out main instead of the
+PR. The example assumes a main-target PR; for a stacked PR, fetch and review
+against its actual base instead. Do not approve or merge as part of the review.
 
 For a deeper security-focused branch review, use a custom review prompt with an
 explicit comparison. The installed CLI does not allow combining a custom prompt
@@ -225,18 +229,21 @@ All six workflow files remain intact:
    existing required/security checks execute. Keep this migration PR open for
    maintainer merge authorization.
 2. Preserve all existing `.coderabbit.yaml` security guidance in the approved
-   `AGENTS.md` review section before retiring that file. Disable automatic
-   CodeRabbit reviews explicitly using its supported repository configuration;
-   deleting the file alone can restore the App's defaults. Keep a minimal disabled
-   configuration if the shared App remains installed and no repository-level
-   exclusion is available.
+   `AGENTS.md` review section before retiring that file. Prepare the bot-disable
+   configuration, but keep its producer operational until the required-context
+   removal below is applied and verified.
 3. Only then remove the exact required `CodeRabbit` context with producer
    `347564` from ruleset `27505472`, preserving every other writable field,
    check/producer, restriction and approval setting. Reread the live rule before
    applying the narrow delta and verify the effective branch rules afterward.
    Codex remains advisory; no synthetic replacement check.
-4. Update current README/security/CI policy references and the CODEOWNERS path if
-   obsolete configuration is removed. Preserve historical changelog entries.
+4. After verifying the context is no longer required, land the configuration
+   that explicitly disables automatic CodeRabbit reviews using its supported
+   repository controls. Deleting the file alone can restore the App's defaults;
+   keep a minimal disabled configuration if the shared App remains installed and
+   no repository-level exclusion is available. Update current README/security/CI
+   policy references and the CODEOWNERS path if obsolete configuration is removed.
+   Preserve historical changelog entries.
    Remove the generated-body exemption only when its workflow change is tested;
    tightening the scan must not break existing PR metadata unexpectedly.
 5. Do not uninstall the organization App: it is shared and uninstall is not
