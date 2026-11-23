@@ -93,8 +93,8 @@ For local work using the installed CLI's built-in review command:
 codex -s read-only -a never -c forced_login_method='"chatgpt"' review --uncommitted
 
 # Current branch relative to current main (fetch before reviewing).
-git fetch origin main
-codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
+git fetch origin main &&
+  codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
 ```
 
 Do not expose `.env`, credentials, private mail or unrelated sensitive untracked
@@ -107,18 +107,19 @@ Review a PR in a separate worktree without changing another developer's checkout
 (replace `123` with the real PR number, and choose a new directory):
 
 ```sh
-git fetch origin main
-git fetch origin pull/123/head
-git worktree add --detach ../sdk-pr-123-review FETCH_HEAD
-cd ../sdk-pr-123-review
-test "$(gh pr view 123 -R cred-ninja/sdk --json baseRefName --jq .baseRefName)" = main &&
+git fetch origin main &&
+  git fetch origin pull/123/head &&
+  git worktree add --detach ../sdk-pr-123-review FETCH_HEAD &&
+  cd ../sdk-pr-123-review &&
+  test "$(gh pr view 123 -R cred-ninja/sdk --json baseRefName --jq .baseRefName)" = main &&
   test "$(git rev-parse HEAD)" = "$(gh pr view 123 -R cred-ninja/sdk --json headRefOid --jq .headRefOid)" &&
   codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
 ```
 
 The identity/base checks must succeed before starting review; otherwise stop and
-refetch the correct head/base. Fetch the PR head separately: fetching multiple
-refs together makes `FETCH_HEAD` ambiguous and can check out main instead of the
+refetch the correct head/base. Each step is chained so failed fetches or worktree
+creation cannot start a stale or wrong-checkout review. Fetch the PR head
+separately: fetching multiple refs together makes `FETCH_HEAD` ambiguous and can check out main instead of the
 PR. The example assumes a main-target PR; for a stacked PR, fetch and review
 against its actual base instead. Do not approve or merge as part of the review.
 
