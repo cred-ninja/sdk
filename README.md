@@ -254,7 +254,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md). SDK, integration, and documentation co
 
 The [CI and change-review runbook](./docs/ci-review.md) describes deterministic
 checks, independent review and manual squash-merging. Python CI runs on every
-main-target PR. CodeRabbit findings and current-head review evidence are inspected
+main-target PR. Codex findings and current-head review evidence are inspected
 before merging; there is no custom review-gate service or automated Claude runner.
 Package releases remain a separate manual action.
 

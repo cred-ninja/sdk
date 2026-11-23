@@ -22,6 +22,77 @@ this on every PR and push to `main`.
 When docs or marketing describe behavior the code doesn't have, fix the code in
 the same change, or file an issue for it. Don't add a caveat to the docs instead.
 
+## Code Review Rules
+
+Apply these rules repository-wide, including native Codex and local reviews.
+Inspect relevant callers, storage backends and tests beyond the diff; retain
+applicable nested guidance if it is added later.
+
+### Security and credential boundaries
+
+- Prioritize OAuth scope escalation, authorization or privilege bypasses, unsafe
+  default permissions, policy-engine bypasses and cross-tenant credential access.
+  Trace user/agent identity and consent through issuance, refresh and use.
+  Never trust identity, scopes or receipt contents before verifying their proof.
+- Child delegations must not widen parent scopes, lifetime or constraints. In
+  vault delegation code, preserve validation through `validateSubDelegation` and
+  verification of every signed chain hop. Use `scopeCovers` / `scopeCoveredBy`:
+  a granted wildcard covers concrete descendants, never the reverse; `crm.*`
+  covers `crm.contacts.read`, not `crm`, `crm.` or `crmx.read`. Invalid legacy
+  literal scopes still cover themselves exactly so default-request renewal works.
+  Keep the scope-subsumption checklist in
+  `docs/solutions/conformance/scope-subsumption-review-checklist.md` authoritative.
+  Scope changes need malformed/self-match, direction, dot-boundary, multi-level,
+  legacy-renewal and affected error-precedence tests. Changes to draft-asor
+  conformance behavior must identify whether the protocol vectors were run.
+- In server code, all `scopeCeiling` paths (request, stored consent and
+  sub-delegation) must use shared helpers. `resolveGrantedScopes` intentionally
+  matches provider scopes exactly; do not silently make wildcard provider grants
+  storable. Require HTTP-level regressions at every affected enforcement path,
+  not only helper tests.
+- Flag access/refresh tokens or vault keys exposed in responses, logs, exceptions
+  or audit data. Preserve vault isolation, AES-256-GCM, fresh random nonces,
+  authenticated decryption and key-derivation strength; never skip authentication
+  tags, swallow tag failures or loosen strict parsing of signed payloads. Rotation
+  must return to idle through promotion or failed-to-rollback recovery.
+- Revocation, expiration, consent narrowing and policy ceilings must reach live
+  credentials and derived delegations. Preserve verification before trust,
+  replay rejection, DPoP/body/key binding and parent expiry. Audit backends fail
+  closed: flag removed or conditional grant/delegation/sub-delegation/action/
+  revocation audit writes. The explicit unsupported-backend exception in
+  `writeAuditEventIfSupported` is not permission to swallow other audit failures.
+- Treat provider endpoints, redirects and broker URLs as untrusted: check SSRF,
+  address validation and credential forwarding. Review dependency and workflow
+  changes for supply-chain risk, untrusted execution and excessive permissions.
+  Never execute PR-controlled code with model credentials or write tokens.
+
+### Correctness and compatibility
+
+- Trace authorization/state/PKCE, refresh-token replacement and expiry, provider
+  errors, concurrency, retries and idempotency through real call paths. Flag lost
+  refresh updates, races, swallowed failures or duplicate side effects with a
+  concrete failure scenario and regression-test expectation.
+- Compare affected Python and TypeScript SDK behavior and framework adapters.
+  Flag unexpected public API/wire changes, broken provider integrations and
+  backward-compatibility regressions, including supported runtimes and package
+  installation. Fixture tests are not evidence of a live provider integration.
+
+### Findings and review quality
+
+- Prefer actionable security/correctness bugs over style. Give severity
+  (P0 critical, P1 high, P2 medium, P3 low), a useful file/line range, the reachable
+  exploit or failure path and required remediation. Distinguish reproduced
+  defects from unverified hypotheses; omit speculation without a plausible path.
+  Do not claim tests ran unless they did.
+- Do not duplicate lint/formatting or failures already explained by CI. Inspect
+  whether tests exercise the real boundary. Bind findings to the current head;
+  a reaction, summary, skipped check or older review is not completed review.
+- Review is advisory and never replaces deterministic checks, required approvals
+  or maintainer disposition. Do not approve, merge, publish, change protection
+  or expose credentials as part of a review. Cite the applicable rule in a
+  finding when it helps explain the defect; do not invent findings to prove
+  that instructions were loaded.
+
 ## What this repo does
 
 Cred is OAuth2 credential delegation middleware for AI agents. An agent

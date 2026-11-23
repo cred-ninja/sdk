@@ -40,7 +40,7 @@ We'll acknowledge within 48 hours and aim to resolve critical issues within 14 d
 ## CI and automated review boundaries
 
 The [CI and change-review runbook](./docs/ci-review.md) describes deterministic
-CI, CodeRabbit and independent review. Changes to security-sensitive code or CI
+CI, native Codex and independent review. Changes to security-sensitive code or CI
 need focused security review. Inspect findings and current-head evidence rather
 than treating a green review process as approval. Merge manually and never while
 a review is running; no asynchronous review aggregate claims to enforce that
