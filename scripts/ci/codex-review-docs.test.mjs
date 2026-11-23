@@ -29,7 +29,7 @@ test('CodeRabbit stays opted out while Codex guidance is present', () => {
 const mocks = `
 git() {
   case "$*" in
-    'fetch origin main') [ "$SCENARIO" != base_fail ] ;;
+    'fetch origin refs/heads/main:refs/remotes/origin/main') [ "$SCENARIO" != base_fail ] ;;
     'fetch origin pull/123/head') [ "$SCENARIO" != head_fail ] ;;
     'worktree add --detach ../sdk-pr-123-review FETCH_HEAD') [ "$SCENARIO" != worktree_fail ] ;;
     'rev-parse HEAD')
@@ -64,7 +64,7 @@ for (const [name, shell, scenarios] of [
   }
 }
 
-test('documented PR checkout reviews the actual Git PR ref, not main', () => {
+test('documented PR checkout refreshes main in a restricted-fetch clone and reviews the PR ref', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cred-review-docs-'));
   const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   const run = (cwd, binary, args) => {
@@ -91,6 +91,11 @@ test('documented PR checkout reviews the actual Git PR ref, not main', () => {
     run(remote, 'git', ['update-ref', 'refs/pull/123/head', head]);
     run(remote, 'git', ['checkout', '-q', 'main']);
     run(dir, 'git', ['clone', '-q', '--no-local', remote, 'checkout']);
+    run(join(dir, 'checkout'), 'git', ['config', '--replace-all', 'remote.origin.fetch', '+refs/heads/fixture-pr:refs/remotes/origin/fixture-pr']);
+    writeFileSync(join(remote, 'base.txt'), 'new main\n');
+    run(remote, 'git', ['add', 'base.txt']);
+    commit(remote, 'advance main');
+    env.EXPECTED_BASE = run(remote, 'git', ['rev-parse', 'HEAD']);
     env.EXPECTED_HEAD = head;
     const output = run(join(dir, 'checkout'), 'bash', ['-c', `
       gh() {
@@ -101,6 +106,7 @@ test('documented PR checkout reviews the actual Git PR ref, not main', () => {
         esac
       }
       codex() {
+        test "$(git rev-parse origin/main)" = "$EXPECTED_BASE" &&
         test "$(git diff --name-only origin/main...HEAD)" = pr.txt && printf 'REVIEW_STARTED\n'
       }
       ${pr}

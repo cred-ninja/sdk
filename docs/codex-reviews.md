@@ -16,11 +16,17 @@ every rule was applied. Codex's summary reports the exact head, completion state
 and trigger. Opening a PR for review or marking a draft ready can trigger an
 automatic review; do not assume every push triggers one. The owner reported
 updating Codex settings; use the actual summary's trigger as execution evidence.
+An automatic code review subsequently completed after the PR was marked ready;
+the [native summary](https://github.com/cred-ninja/sdk/pull/157#issuecomment-7112221938)
+identified the trigger as **Draft marked ready** and reported no code findings.
 
 The minimal `.coderabbit.yaml` on this branch explicitly disables routine reviews
 and automatic verdicts/replies. Its former security guidance is in `AGENTS.md`.
-Trusted same-repository PRs can use their changed configuration before merge;
-other PRs retain their configuration until this change is merged by an authorized
+Configuration-branch selection controls when the file takes effect. On this PR,
+CodeRabbit still reported using `main` at `6b6a81c` while the new file was unmerged;
+do not claim a repository-wide shutdown from a branch diff. PR #157 is separately
+paused, with an explicit [CodeRabbit acknowledgment](https://github.com/cred-ninja/sdk/pull/157#issuecomment-7112527963).
+Other PRs retain their configuration until this change is merged by an authorized
 maintainer. The shared CodeRabbit App is preserved. This PR must remain unmerged
 until separately authorized; neither a settings change nor a green review merges
 the default-branch configuration. The public leak guard's legacy generated-body
@@ -112,7 +118,7 @@ For local work using the installed CLI's built-in review command:
 codex -s read-only -a never -c forced_login_method='"chatgpt"' review --uncommitted
 
 # Current branch relative to current main (fetch before reviewing).
-git fetch origin main &&
+git fetch origin refs/heads/main:refs/remotes/origin/main &&
   codex -s read-only -a never -c forced_login_method='"chatgpt"' review --base origin/main
 ```
 
@@ -126,7 +132,7 @@ Review a PR in a separate worktree without changing another developer's checkout
 (replace `123` with the real PR number, and choose a new directory):
 
 ```sh
-git fetch origin main &&
+git fetch origin refs/heads/main:refs/remotes/origin/main &&
   git fetch origin pull/123/head &&
   git worktree add --detach ../sdk-pr-123-review FETCH_HEAD &&
   cd ../sdk-pr-123-review &&
@@ -136,10 +142,12 @@ git fetch origin main &&
 ```
 
 The identity/base checks must succeed before starting review; otherwise stop and
-refetch the correct head/base. Each step is chained so failed fetches or worktree
-creation cannot start a stale or wrong-checkout review. Fetch the PR head
-separately: fetching multiple refs together makes `FETCH_HEAD` ambiguous and can check out main instead of the
-PR. The example assumes a main-target PR; for a stacked PR, fetch and review
+refetch the correct head/base. The explicit fetch destination refreshes
+`origin/main` even in a clone with a restricted `remote.origin.fetch`. Each step
+is chained so failed fetches or worktree creation cannot start a stale or
+wrong-checkout review. Fetch the PR head separately: fetching multiple refs
+together makes `FETCH_HEAD` ambiguous and can check out main instead of the PR.
+The example assumes a main-target PR; for a stacked PR, fetch and review
 against its actual base instead. Do not approve or merge as part of the review.
 
 For a deeper security-focused branch review, use a custom review prompt with an

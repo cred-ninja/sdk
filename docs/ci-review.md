@@ -71,10 +71,11 @@ Do not emit a dummy green replacement or require an undocumented Codex context.
 
 The minimal `.coderabbit.yaml` explicitly disables automatic/incremental reviews,
 label/description opt-in triggers, automatic verdicts and unsolicited replies.
-Keep it: deleting it can restore the shared App's defaults. Trusted PRs can use
-their own changed configuration before merge; other PRs keep their configuration
-until an authorized maintainer merges this change. The shared organization App
-is not removed. See the migration runbook for the precise rollout boundary.
+Keep it: deleting it can restore the shared App's defaults. Its effective revision
+depends on the configuration source. CodeRabbit still selected `main` on this
+unmerged PR, so PR #157 was explicitly paused as well. Repository-wide config
+rollout awaits an authorized maintainer merge. The shared organization App is not
+removed. See the migration runbook for the precise rollout boundary.
 
 Native approval needs an eligible reviewer other than the author; CODEOWNERS does
 not create that person or grant access. For a single-maintainer repository, the
