@@ -24,6 +24,12 @@ process alone establishes that a PR is ready to merge.
 
 ## Review changes, not review machinery
 
+The [Codex migration and local fallback runbook](./codex-reviews.md) records the
+current dependency audit, account setup, subscription-only local commands and
+retirement order. The migration is not complete until native Codex returns a
+real current-head review; keep CodeRabbit and its required context operational
+until that validation succeeds. No API-backed review Action is being added.
+
 Use CodeRabbit and one fresh independent correctness review of the final diff.
 For changes to authentication, authorization, cryptography, credential handling,
 CI permissions or release tooling, include a focused security review. That can
