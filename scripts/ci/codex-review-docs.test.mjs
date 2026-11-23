@@ -4,12 +4,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import * as yaml from 'js-yaml';
 
 const doc = readFileSync(new URL('../../docs/codex-reviews.md', import.meta.url), 'utf8');
 const blocks = [...doc.matchAll(/```sh\n([\s\S]*?)```/g)].map((match) => match[1]);
 const pr = blocks.find((block) => block.includes('pull/123/head'));
 const branch = blocks.find((block) => block.includes('# Current branch'))
   .split('# Current branch relative to current main (fetch before reviewing).\n')[1];
+
+test('CodeRabbit stays opted out while Codex guidance is present', () => {
+  const config = yaml.load(readFileSync(new URL('../../.coderabbit.yaml', import.meta.url), 'utf8'));
+  assert.equal(config.reviews.auto_review.enabled, false);
+  assert.equal(config.reviews.auto_review.auto_incremental_review, false);
+  assert.equal(config.reviews.auto_review.description_keyword, '');
+  assert.deepEqual(config.reviews.auto_review.labels, []);
+  assert.equal(config.reviews.auto_approvals.enabled, false);
+  assert.equal(config.chat.auto_reply, false);
+  assert.equal(config.reviews.path_instructions, undefined);
+  const instructions = readFileSync(new URL('../../AGENTS.md', import.meta.url), 'utf8');
+  assert.match(instructions, /^## Code Review Rules$/m);
+});
 
 // Exercise the published shell itself, not a second implementation of it.
 const mocks = `

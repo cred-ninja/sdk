@@ -2,10 +2,29 @@
 
 ## Rollout status
 
-This change prepares a migration; it does not claim native Codex review is enabled.
-Keep CodeRabbit operational until Codex completes a review on a real PR at its
-current head, the deterministic checks run, and the maintainer verifies findings.
-Never merge this migration automatically.
+Native Codex is connected. On 2026-11-23 it completed a manual review of PR #157
+at `58524a2a4b2e82f35f98b948adb617e0f8d8a0b1`, after the owner explicitly approved
+the root `AGENTS.md` Code Review Rules. Its [completed review receipt](https://github.com/cred-ninja/sdk/pull/157#issuecomment-7112276379)
+reports no major issues and identifies that commit. All 26 deterministic required
+checks passed on the same revision. The live Protect main ruleset now omits only
+the former `CodeRabbit` context and retains every deterministic check/producer
+and all other restrictions. No API-backed review job or billing was introduced.
+
+The root instruction section is present in the reviewed revision; a clean native
+receipt does not expose a per-rule execution trace, so do not claim that it proves
+every rule was applied. Codex's summary reports the exact head, completion state
+and trigger. Opening a PR for review or marking a draft ready can trigger an
+automatic review; do not assume every push triggers one. The owner reported
+updating Codex settings; use the actual summary's trigger as execution evidence.
+
+The minimal `.coderabbit.yaml` on this branch explicitly disables routine reviews
+and automatic verdicts/replies. Its former security guidance is in `AGENTS.md`.
+Trusted same-repository PRs can use their changed configuration before merge;
+other PRs retain their configuration until this change is merged by an authorized
+maintainer. The shared CodeRabbit App is preserved. This PR must remain unmerged
+until separately authorized; neither a settings change nor a green review merges
+the default-branch configuration. The public leak guard's legacy generated-body
+exemption is retained for existing PR metadata; no workflow or scan is weakened.
 
 ## Architecture and billing
 
@@ -143,6 +162,7 @@ sessions to public runners. No wrapper is needed for these built-in paths.
 
 ## Audit baseline (2026-11-23)
 
+This is the original pre-migration inventory, not the current rollout state above.
 Base: `6b6a81c`, repository `cred-ninja/sdk`. The existing local main checkout was
 behind the remote; migration work uses its own feature branch and worktree.
 
@@ -261,6 +281,8 @@ Verified against official documentation on 2026-11-23:
 - [Codex pricing and usage](https://developers.openai.com/codex/pricing/)
 - [AGENTS.md discovery and review rules](https://developers.openai.com/codex/guides/agents-md/)
 - [Official Codex Action and API-key requirement](https://github.com/openai/codex-action)
+- [CodeRabbit automatic-review controls](https://docs.coderabbit.ai/reference/configuration)
+- [CodeRabbit configuration branch and pre-merge scope](https://docs.coderabbit.ai/configuration/branch)
 
 Consult live settings and documentation for eligibility, triggers and limits;
 this repository does not promise unlimited reviews or an automatic merge gate.

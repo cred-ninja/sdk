@@ -26,25 +26,27 @@ process alone establishes that a PR is ready to merge.
 
 The [Codex migration and local fallback runbook](./codex-reviews.md) records the
 current dependency audit, account setup, subscription-only local commands and
-retirement order. The migration is not complete until native Codex returns a
-real current-head review; keep CodeRabbit and its required context operational
-until that validation succeeds. No API-backed review Action is being added.
+retirement order. Native Codex completed a real review on PR #157 after the root
+`AGENTS.md` review rules were added. Its review remains advisory; deterministic
+checks enforce merge protection. No API-backed review Action is installed.
 
-Use CodeRabbit and one fresh independent correctness review of the final diff.
+Use native Codex and one fresh independent correctness review of the final diff.
 For changes to authentication, authorization, cryptography, credential handling,
 CI permissions or release tooling, include a focused security review. That can
 be part of the independent review; three AI sessions are not mandatory on every
 PR. Reviewers should inspect relevant source and tests, not only a bot summary.
 
-CodeRabbit is configured to submit formal approvals or change requests. Read
-its findings and disposition them; a successful, neutral or skipped process check
-is not evidence of a completed substantive review. Re-review changed code as
-needed and tie the final review to the current head commit.
+Request native review with `@codex review`, or use the configured automatic
+opening/ready-for-review trigger. Read findings and disposition them; a reaction,
+successful process check or old review is not completed current-head review.
+For clean diffs, inspect Codex's completed receipt and exact reviewed commit.
+Neither that receipt nor a GitHub review event is a required CI status check.
+Re-review material changes without repeatedly requesting unchanged diffs.
 
 There is no custom review aggregate, check publisher, evidence expiry timer,
-recovery workflow or credential-bearing Claude workflow. Interactive agent
-mentions are removed too. Independent agent review can be performed outside
-Actions; no model credential is needed by this CI configuration.
+recovery workflow or credential-bearing model workflow. Native Codex mentions
+are handled by its GitHub App, not an Actions job. Independent review and the
+ChatGPT-authenticated local fallback run outside Actions; CI needs no model key.
 
 ## Manual merge
 
@@ -60,11 +62,19 @@ clear the queue. Package releases remain a separate manual action.
 
 ## Rollout
 
-Workflow files do not change live protection or repository settings. Retiring the
-obsolete required `claude-review` context needs an authorized settings change,
-because its producer is removed. Do not emit a dummy green replacement. Preserve
-the other required checks, conversation resolution, stale-review dismissal, the
-extra approval for unattributed changes and the separate CodeQL security result.
+Workflow files do not change live protection or repository settings. After native
+review of PR #157 succeeded, the authorized settings migration removed only
+`CodeRabbit` (producer `347564`) from Protect main. All 26 deterministic required
+checks and their producers remain, as do conversation resolution, stale-review
+dismissal, extra approval for unattributed changes and the separate CodeQL result.
+Do not emit a dummy green replacement or require an undocumented Codex context.
+
+The minimal `.coderabbit.yaml` explicitly disables automatic/incremental reviews,
+label/description opt-in triggers, automatic verdicts and unsolicited replies.
+Keep it: deleting it can restore the shared App's defaults. Trusted PRs can use
+their own changed configuration before merge; other PRs keep their configuration
+until an authorized maintainer merges this change. The shared organization App
+is not removed. See the migration runbook for the precise rollout boundary.
 
 Native approval needs an eligible reviewer other than the author; CODEOWNERS does
 not create that person or grant access. For a single-maintainer repository, the
