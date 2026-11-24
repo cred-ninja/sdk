@@ -52,3 +52,12 @@ do
     "$VENV_PY" -m pytest tests
   )
 done
+
+# Keep native-dispatch coverage distinct from direct-method unit coverage.
+ADAPTERS="langchain,openai-agents,autogen,semantic-kernel"
+if [ "${#CREWAI_DIRS[@]}" -gt 0 ]; then
+  ADAPTERS="$ADAPTERS,crewai"
+fi
+CRED_NATIVE_ADAPTERS="$ADAPTERS" OTEL_SDK_DISABLED=true "$VENV_PY" -m pytest \
+  "$REPO_ROOT/scripts/test_python_native_dispatch.py" \
+  "$REPO_ROOT/scripts/test_python_integration_support.py"

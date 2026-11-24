@@ -33,6 +33,13 @@ plugin = CredPlugin(
 )
 
 kernel.add_plugin(plugin, plugin_name="cred")
+
+# Invoke the registered native function without an AI service:
+async def delegated_access():
+    return await kernel.invoke(
+        plugin_name="cred", function_name="delegate",
+        service_slug="google", scopes="calendar.readonly",
+    )
 ```
 
 ## Plugin Functions
@@ -43,10 +50,15 @@ The `cred` plugin exposes two kernel functions:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `service` | `string` | Service slug (e.g. `google`, `github`) |
+| `service_slug` | `string` | Service slug (e.g. `google`, `github`) |
 | `scopes` | `string` | Comma-separated OAuth scopes to request |
 
 `user_id` and `app_client_id` are pre-configured at construction time, not agent-controlled.
+
+Kernel callers use `service_slug`: Semantic Kernel reserves `service` for AI
+service injection. The registered function name remains `delegate`. Direct
+Python callers retain `plugin.delegate(service="google", scopes="...")`.
+Both paths send the unchanged HTTP JSON field `service` to Cred.
 
 By default, `delegate` returns a legacy access token for backwards compatibility. Set `token_format="handle"` to return a brokered delegation id instead, then call `use` to make allowed service API calls without exposing provider access tokens.
 

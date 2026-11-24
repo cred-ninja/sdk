@@ -27,7 +27,15 @@ test('Python CI runs for every main PR, including docs-only changes', () => {
   assert.deepEqual(trigger.branches, ['main']);
   if (trigger.types) for (const event of ['opened', 'synchronize', 'reopened']) assert.ok(trigger.types.includes(event));
   const jobs = Object.values(load('python-ci').jobs);
-  assert.equal(jobs.reduce((count, job) => count + Object.values(job.strategy.matrix)[0].length, 0), 15);
+  assert.equal(jobs.reduce((count, job) => count + Object.values(job.strategy.matrix)[0].length, 0), 20);
+  const minimums = load('python-ci').jobs['framework-minimum'].strategy.matrix.include;
+  assert.deepEqual(minimums.map(({ adapter, framework, python }) => [adapter, framework, python]), [
+    ['langchain', 'langchain-core==0.2.0', '3.9'],
+    ['crewai', 'crewai==0.11.0', '3.10'],
+    ['openai-agents', 'openai-agents==0.1.0', '3.10'],
+    ['autogen', 'autogen-core==0.4.0', '3.10'],
+    ['semantic-kernel', 'semantic-kernel==1.0.0', '3.10'],
+  ]);
 });
 
 test('CI has an explicit typecheck after build and includes policy tests', () => {

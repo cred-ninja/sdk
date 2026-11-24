@@ -9,23 +9,10 @@ from langchain_core.tools import BaseTool
 from cred import Cred
 from .tools import CredDelegateTool, CredStatusTool, CredRevokeTool, CredUseTool
 
+from cred.integration_support import resolve_client as _resolve_client
+
 if TYPE_CHECKING:
     from cred import DpopSigningIdentity
-
-
-def _resolve_client(agent_token: Optional[str], base_url: Optional[str], cred: Optional[Cred]) -> tuple[Cred, str]:
-    """Use the caller's client when given (for example one built with
-    ``sign_request`` for WIMSE workload signing); otherwise build one from the
-    agent token, as before. The token cache keys on the client's server URL."""
-    if cred is None:
-        return Cred(agent_token=agent_token, base_url=base_url), base_url  # type: ignore[arg-type,return-value]
-    if not isinstance(cred, Cred):
-        raise TypeError("cred must be a synchronous cred.Cred client")
-    if agent_token:
-        raise ValueError("Pass agent_token or cred, not both")
-    if base_url and base_url.rstrip("/") != cred.base_url:
-        raise ValueError("base_url does not match the passed client's base_url")
-    return cred, cred.base_url
 
 
 class CredToolkit:

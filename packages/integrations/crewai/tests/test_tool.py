@@ -169,7 +169,7 @@ class TestConstructor:
         assert t._scopes == []
 
     def test_custom_base_url(self):
-        with patch("cred_crewai.tool.Cred") as mock_cred_class:
+        with patch("cred.integration_support.Cred") as mock_cred_class:
             CredTool(
                 agent_token=TOKEN,
                 user_id=USER_ID,
@@ -288,7 +288,7 @@ class TestRun:
 
     def test_cred_use_tool_brokers_request(self, mock_cred):
         identity = generate_agent_identity()
-        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity)
         _remember_delegation_token(
             "del_brokered", HANDLE_TOKEN, time.time() + 600,
@@ -320,7 +320,7 @@ class TestRun:
         )
 
     def test_cred_use_tool_requires_agent_identity(self, mock_cred):
-        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL)
         _remember_delegation_token(
             "del_noid", HANDLE_TOKEN, time.time() + 600,
@@ -340,7 +340,7 @@ class TestRun:
         mock_cred.use.return_value = BrokeredUseResult(
             status=200, ok=True, content_type="application/json", body={},
         )
-        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             alice = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="alice")
             bob = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity, user_id="bob")
         with pytest.raises(ValueError, match="different server, agent or user"):
@@ -349,7 +349,7 @@ class TestRun:
         assert json.loads(bob._run(delegation_id="del_bob", url="https://www.googleapis.com/x"))["ok"] is True
 
     def test_cred_use_tool_rejects_unknown_or_expired_delegation(self, mock_cred):
-        with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+        with patch("cred.integration_support.Cred", return_value=mock_cred):
             use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=generate_agent_identity())
         _remember_delegation_token(
             "del_old", HANDLE_TOKEN, time.time() - 1,
@@ -371,24 +371,28 @@ class TestRun:
             ("https://other.example.com", identity),
             (BASE_URL, generate_agent_identity()),
         ):
-            with patch("cred_crewai.tool.Cred", return_value=mock_cred):
+            with patch("cred.integration_support.Cred", return_value=mock_cred):
                 use_tool = CredUseTool(agent_token=TOKEN, base_url=base_url, agent_identity=agent)
             with pytest.raises(ValueError, match="different server, agent or user"):
                 use_tool._run(delegation_id="del_scoped", url="https://www.googleapis.com/x")
         mock_cred.use.assert_not_called()
 
 
-# ── langchain compatibility ───────────────────────────────────────────────────
+# ── native framework compatibility ────────────────────────────────────────────
 
-class TestLangChainCompatibility:
+class TestCrewAICompatibility:
     def test_has_args_schema(self, tool):
         assert hasattr(tool, "args_schema")
-        schema = tool.args_schema.model_json_schema()
+        schema = tool.args_schema.schema()
         # Placeholder schema should be minimal
         assert isinstance(schema, dict)
 
     def test_is_base_tool(self, tool):
-        from langchain_core.tools import BaseTool
+        from crewai import tools
+        if hasattr(tools, "BaseTool"):
+            from crewai.tools import BaseTool
+        else:
+            from langchain_core.tools import BaseTool
         assert isinstance(tool, BaseTool)
 
 
@@ -490,7 +494,7 @@ class TestAgentIdentity:
         )
         use_tool = CredUseTool(agent_token=TOKEN, base_url=BASE_URL, agent_identity=identity)
         for t in (tool, use_tool):
-            assert "agent_identity" not in t.args_schema.model_json_schema().get("properties", {})
+            assert "agent_identity" not in t.args_schema.schema().get("properties", {})
         calls: list = []
         with patch("httpx.Client.request", _fake_cred_server(calls)):
             delegated = tool._run()
