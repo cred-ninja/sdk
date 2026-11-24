@@ -72,7 +72,7 @@ jobs:
                 ;;
             esac
 
-            if [[ -f "$path" ]] && grep -qE -- "$marker" "$path"; then
+            if [[ -f "$path" ]] && grep -qE -- "$marker" "./$path"; then
               printf 'Flagged path: %q\n' "$path"
               echo "::error::Internal process marker found in public file."
               fail=1
@@ -106,7 +106,7 @@ jobs:
                 ;;
             esac
 
-            if [[ -f "$path" ]] && grep -qE -- "$private" "$path"; then
+            if [[ -f "$path" ]] && grep -qE -- "$private" "./$path"; then
               printf 'Flagged path: %q\n' "$path"
               echo "::error::Private correspondence marker found in public file. Registers belong in cred-ninja/standards-private."
               fail=1
