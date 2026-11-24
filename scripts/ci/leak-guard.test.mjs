@@ -61,7 +61,7 @@ for (const filename of ['docs/é-release-plan.md', 'docs/tab\t-release-plan.md',
     assert.notEqual(trackedStep(filename, 'ordinary fixture', 'Block denylisted paths').status, 0);
   });
 }
-for (const filename of ['docs/é-notes.md', 'docs/tab\t-notes.md', 'docs/line\n-notes.md', '--notes.md']) {
+for (const filename of ['docs/é-notes.md', 'docs/tab\t-notes.md', 'docs/line\n-notes.md', '--notes.md', '-']) {
   test(`real Git inventory handles every marker consumer for ${JSON.stringify(filename)}`, () => {
     assert.equal(trackedStep(filename, 'ordinary fixture', 'Block denylisted paths').status, 0);
     assert.equal(trackedStep(filename, 'ordinary fixture', 'Block internal markers in public files').status, 0);
