@@ -48,7 +48,7 @@
     "@types/express": "^5.0.5",
     "better-sqlite3": "^13.2.0",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.7.4"
+    "express-rate-limit": "^8.7.5"
   },
   "devDependencies": {
     "@types/node": "^20.10.6",
