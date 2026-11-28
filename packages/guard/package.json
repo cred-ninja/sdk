@@ -35,7 +35,7 @@
   },
   "devDependencies": {
     "@credninja/vault": "^2.2.0",
-    "@types/node": "^20.0.0",
+    "@types/node": "^26.6.7",
     "typescript": "^5.4.0",
     "vitest": "^5.1.1"
   },
